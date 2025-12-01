@@ -20,7 +20,7 @@ const FRONTEND_BASE_URL =
 // Slack webhook (env preferred, fallback to your URL)
 const SLACK_WEBHOOK_URL =
   process.env.SLACK_WEBHOOK_URL ||
-  "https://hooks.slack.com/services/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";
+  "";
 
 async function sendSlackNotification(text) {
   if (!SLACK_WEBHOOK_URL) return;
