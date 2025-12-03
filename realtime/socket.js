@@ -1,28 +1,48 @@
 // realtime/socket.js
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
+import {
+  getOrCreateChannelByKey,
+  ensureChannelMember,
+  createChatMessage,
+  getRecentMessages,
+  updateChatMessage,
+  softDeleteChatMessage,
+} from "../services/chat.service.js";
 
 let io;
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 
-// 🔹 In-memory chat history per channel (persists while server is running)
-const channelHistory = new Map(); // channelId -> [message, message, ...]
-
-const MAX_HISTORY_PER_CHANNEL = 200;
-
-function addMessageToHistory(channelId, message) {
-  if (!channelId) return;
-  const existing = channelHistory.get(channelId) || [];
-  existing.push(message);
-  // keep only last N
-  if (existing.length > MAX_HISTORY_PER_CHANNEL) {
-    existing.splice(0, existing.length - MAX_HISTORY_PER_CHANNEL);
+/**
+ * For DM channels we use key pattern:
+ *   dm:<uidSmall>:<uidBig>
+ */
+function getChannelMetaFromKey(channelKey, currentUserId) {
+  if (channelKey === "general") {
+    return {
+      type: "public",
+      name: "#general",
+    };
   }
-  channelHistory.set(channelId, existing);
-}
 
-function getHistory(channelId) {
-  return channelId ? channelHistory.get(channelId) || [] : [];
+  if (channelKey.startsWith("dm:")) {
+    return {
+      type: "dm",
+      name: "Direct message",
+    };
+  }
+
+  if (channelKey.startsWith("thread:")) {
+    return {
+      type: "thread",
+      name: "Thread",
+    };
+  }
+
+  return {
+    type: "public",
+    name: channelKey,
+  };
 }
 
 export function initSocket(server) {
@@ -41,7 +61,7 @@ export function initSocket(server) {
     }
     try {
       const payload = jwt.verify(token, JWT_SECRET);
-      // payload should be: { id, username, email, role }
+      // payload: { id, username, email, role }
       socket.user = payload;
       next();
     } catch (err) {
@@ -58,7 +78,7 @@ export function initSocket(server) {
     socket.join(userId);
     console.log("Socket connected for user:", userId);
 
-    // 🔔 Broadcast basic presence (you can later tie this to your attendance endpoints)
+    // Basic presence broadcast (connected = online)
     io.emit("presence:update", {
       userId,
       username,
@@ -67,39 +87,203 @@ export function initSocket(server) {
     });
 
     // ─────────────────────────────
-    // Chat channel helpers
+    // Chat: join a channel
     // ─────────────────────────────
+    socket.on("chat:join", async (channelKey) => {
+      if (!channelKey) return;
 
-    // Join a logical chat channel (e.g. "general")
-    socket.on("chat:join", (channelId) => {
-      if (!channelId) return;
-      const room = `channel:${channelId}`;
-      socket.join(room);
+      try {
+        const { type, name } = getChannelMetaFromKey(channelKey, userId);
 
-      // 1) Send existing history only to this socket
-      const history = getHistory(channelId);
-      socket.emit("chat:history", {
-        channelId,
-        messages: history,
-      });
+        // 1) Resolve or create the channel in DB
+        const channel = await getOrCreateChannelByKey({
+          key: channelKey,
+          type,
+          name,
+          createdBy: userId,
+        });
 
-      // 2) Tell others user joined (system message)
-      io.to(room).emit("chat:system", {
-        type: "join",
-        channelId,
-        userId,
-        username,
-        at: new Date().toISOString(),
-      });
+        // 2) Ensure this user is listed as a member
+        await ensureChannelMember(channel.id, userId);
+
+        // 3) Join Socket.IO room
+        const room = `channel:${channelKey}`;
+        socket.join(room);
+
+        // 4) Load last N messages
+        const recent = await getRecentMessages(channel.id, 100);
+        const history = recent.map((m) => ({
+          id: m.id,
+          channelId: channelKey,
+          userId: m.user_id,
+          username: m.username || username,
+          textHtml: m.text_html,
+          createdAt: m.created_at,
+          updatedAt: m.updated_at,
+          deletedAt: m.deleted_at,
+          reactions: m.reactions || {},
+          attachments: m.attachments || [],
+        }));
+
+        socket.emit("chat:history", {
+          channelId: channelKey,
+          messages: history,
+        });
+
+        // 5) System message to others only
+        socket.to(room).emit("chat:system", {
+          type: "join",
+          channelId: channelKey,
+          userId,
+          username,
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error("chat:join error:", err.message);
+      }
     });
 
-    // Leave a chat channel
-    socket.on("chat:leave", (channelId) => {
-      if (!channelId) return;
-      const room = `channel:${channelId}`;
+    // ─────────────────────────────
+    // Chat: leave a channel
+    // ─────────────────────────────
+    socket.on("chat:leave", (channelKey) => {
+      if (!channelKey) return;
+      const room = `channel:${channelKey}`;
       socket.leave(room);
       io.to(room).emit("chat:system", {
         type: "leave",
+        channelId: channelKey,
+        userId,
+        username,
+        at: new Date().toISOString(),
+      });
+    });
+
+    // ─────────────────────────────
+    // Chat: send a message
+    // ─────────────────────────────
+    // payload: { channelId, text, tempId?, parentId? }
+    socket.on("chat:message", async (payload = {}) => {
+      const { channelId: channelKey, text, tempId, parentId } = payload;
+      if (!channelKey || !text || !text.trim()) return;
+
+      try {
+        const { type, name } = getChannelMetaFromKey(channelKey, userId);
+
+        // Resolve channel (id) again by key
+        const channel = await getOrCreateChannelByKey({
+          key: channelKey,
+          type,
+          name,
+          createdBy: userId,
+        });
+
+        // Ensure membership
+        await ensureChannelMember(channel.id, userId);
+
+        const textHtml = text.trim();
+
+        // Save in DB
+        const saved = await createChatMessage({
+          channelId: channel.id,
+          userId,
+          textHtml,
+          parentId: parentId || null,
+        });
+
+        const message = {
+          id: saved.id,
+          tempId: tempId || null,
+          channelId: channelKey,
+          userId,
+          username,
+          textHtml: saved.text_html,
+          createdAt: saved.created_at,
+          updatedAt: saved.updated_at,
+          deletedAt: saved.deleted_at,
+          reactions: saved.reactions || {},
+          attachments: saved.attachments || [],
+        };
+
+        const room = `channel:${channelKey}`;
+        io.to(room).emit("chat:message", message);
+      } catch (err) {
+        console.error("chat:message error:", err.message);
+      }
+    });
+
+    // ─────────────────────────────
+    // Chat: edit a message (persistent)
+    // ─────────────────────────────
+    // payload: { channelId, messageId, text }
+    socket.on("chat:edit", async (payload = {}) => {
+      const { channelId: channelKey, messageId, text } = payload;
+      if (!channelKey || !messageId || !text || !text.trim()) return;
+
+      try {
+        const textHtml = text.trim();
+
+        const updated = await updateChatMessage({
+          messageId,
+          userId,
+          textHtml,
+        });
+
+        if (!updated) return;
+
+        const room = `channel:${channelKey}`;
+        io.to(room).emit("chat:messageEdited", {
+          id: updated.id,
+          channelId: channelKey,
+          userId: updated.user_id,
+          username,
+          textHtml: updated.text_html,
+          createdAt: updated.created_at,
+          updatedAt: updated.updated_at,
+        });
+      } catch (err) {
+        console.error("chat:edit error:", err.message);
+      }
+    });
+
+    // ─────────────────────────────
+    // Chat: delete a message (soft delete)
+    // ─────────────────────────────
+    // payload: { channelId, messageId }
+    socket.on("chat:delete", async (payload = {}) => {
+      const { channelId: channelKey, messageId } = payload;
+      if (!channelKey || !messageId) return;
+
+      try {
+        const deleted = await softDeleteChatMessage({
+          messageId,
+          userId,
+        });
+
+        if (!deleted) return;
+
+        const room = `channel:${channelKey}`;
+        io.to(room).emit("chat:messageDeleted", {
+          id: deleted.id,
+          channelId: channelKey,
+          userId: deleted.user_id,
+          username,
+          deletedAt: deleted.deleted_at,
+        });
+      } catch (err) {
+        console.error("chat:delete error:", err.message);
+      }
+    });
+
+    // ─────────────────────────────
+    // Typing indicator
+    // ─────────────────────────────
+    // payload: { channelId }
+    socket.on("chat:typing", (payload = {}) => {
+      const { channelId } = payload;
+      if (!channelId) return;
+      const room = `channel:${channelId}`;
+      socket.to(room).emit("chat:typing", {
         channelId,
         userId,
         username,
@@ -107,35 +291,93 @@ export function initSocket(server) {
       });
     });
 
-    // Incoming chat message (now also stored in history)
-    // payload: { channelId, text, tempId? }
-    socket.on("chat:message", (payload = {}) => {
-      const { channelId, text, tempId } = payload;
-      if (!channelId || !text || !text.trim()) return;
-
+    // ─────────────────────────────
+    // Read receipts
+    // ─────────────────────────────
+    // payload: { channelId, at? }
+    socket.on("chat:read", (payload = {}) => {
+      const { channelId, at } = payload;
+      if (!channelId) return;
       const room = `channel:${channelId}`;
-
-      const messageId =
-        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      const message = {
-        id: messageId,          // real server id
-        tempId: tempId || null, // for optimistic UI reconciliation
+      const ts = at || new Date().toISOString();
+      socket.to(room).emit("chat:read", {
         channelId,
-        text: text.trim(),
         userId,
         username,
-        createdAt: new Date().toISOString(),
-      };
-
-      // Store in in-memory history
-      addMessageToHistory(channelId, message);
-
-      // Broadcast to everyone in that channel
-      io.to(room).emit("chat:message", message);
+        at: ts,
+      });
     });
 
-    // Optional: presence update from client (e.g. online / aws / lunch / offline)
+    // ─────────────────────────────
+    // Reactions (ephemeral, broadcast only)
+    // ─────────────────────────────
+    // payload: { channelId, messageId, emoji, action: "add" | "remove" }
+    socket.on("chat:reaction", (payload = {}) => {
+      const { channelId, messageId, emoji, action } = payload;
+      if (!channelId || !messageId || !emoji || !action) return;
+      const room = `channel:${channelId}`;
+      io.to(room).emit("chat:reaction", {
+        channelId,
+        messageId,
+        emoji,
+        action,
+        userId,
+        username,
+        at: new Date().toISOString(),
+      });
+    });
+
+    // ─────────────────────────────
+    // Huddles (start/end events)
+    // ─────────────────────────────
+    // payload: { channelId, huddleId }
+    socket.on("huddle:start", (payload = {}) => {
+      const { channelId, huddleId } = payload;
+      if (!channelId || !huddleId) return;
+      const room = `channel:${channelId}`;
+      io.to(room).emit("huddle:started", {
+        channelId,
+        huddleId,
+        startedBy: { userId, username },
+        at: new Date().toISOString(),
+      });
+    });
+
+    socket.on("huddle:end", (payload = {}) => {
+      const { channelId, huddleId } = payload;
+      if (!channelId || !huddleId) return;
+      const room = `channel:${channelId}`;
+      io.to(room).emit("huddle:ended", {
+        channelId,
+        huddleId,
+        endedBy: { userId, username },
+        at: new Date().toISOString(),
+      });
+    });
+
+    // ─────────────────────────────
+    // Huddle WebRTC signaling relay
+    // ─────────────────────────────
+    // payload: { channelId, huddleId, data: { type, sdp?, candidate? } }
+    socket.on("huddle:signal", (payload = {}) => {
+      const { channelId, huddleId, data } = payload;
+      if (!channelId || !huddleId || !data) return;
+      const room = `channel:${channelId}`;
+
+      // Relay to everyone else in that channel
+      socket.to(room).emit("huddle:signal", {
+        channelId,
+        huddleId,
+        data,
+        fromUserId: userId,
+        fromUsername: username,
+        at: new Date().toISOString(),
+      });
+    });
+
+    // ─────────────────────────────
+    // Presence update from client
+    // ─────────────────────────────
     socket.on("presence:set", (status) => {
       if (!status) return;
       io.emit("presence:update", {
@@ -146,6 +388,9 @@ export function initSocket(server) {
       });
     });
 
+    // ─────────────────────────────
+    // Disconnect
+    // ─────────────────────────────
     socket.on("disconnect", () => {
       console.log("Socket disconnected:", userId);
       io.emit("presence:update", {
