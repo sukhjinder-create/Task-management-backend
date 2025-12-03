@@ -22,7 +22,7 @@ const app = express();
 // CORS – allow your frontend (adjust origin if needed)
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: process.env.FRONTEND_BASE_URL,
     credentials: true,
   })
 );
@@ -68,7 +68,8 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-initSocket(server);
+// 🔥 Pass FRONTEND_BASE_URL into socket init (used for CORS in socket.io)
+initSocket(server, process.env.FRONTEND_BASE_URL);
 
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
