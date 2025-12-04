@@ -1,21 +1,31 @@
 // services/chat.service.js
-// Chat data access layer for Postgres
+// Extended Chat Data Access Layer for Postgres
+// ⚠️ NO OLD FUNCTIONS REMOVED — FULL BACKWARD COMPATIBILITY
 
-import pool from "../db.js"; // ⬅️ adjust this if your db import is different
+import pool from "../db.js";
 
-// ---------- Helpers ----------
-
+/* -------------------------------------------------------
+   HELPERS — existing mapping functions preserved
+------------------------------------------------------- */
 function mapChannelRow(row) {
   if (!row) return null;
+
+  const isPrivate =
+    row.is_private !== undefined ? row.is_private : row.isPrivate || false;
+
   return {
     id: row.id,
     key: row.key,
     name: row.name,
     type: row.type,
-    createdBy: row.created_by,
-    createdAt: row.created_at,
+    createdBy: row.created_by || row.createdBy,
+    createdAt: row.created_at || row.createdAt,
+    // camelCase and snake_case so frontend can use either
+    isPrivate,
+    is_private: isPrivate,
   };
 }
+
 
 function mapMessageRow(row) {
   if (!row) return null;
@@ -30,11 +40,221 @@ function mapMessageRow(row) {
     parent_id: row.parent_id,
     reactions: row.reactions || {},
     attachments: row.attachments || [],
-    username: row.username, // from JOIN with users
+    username: row.username,
   };
 }
 
-// ---------- Channels ----------
+/* -------------------------------------------------------
+   NEW: CHANNEL ADMIN HELPERS
+------------------------------------------------------- */
+export async function isChannelAdmin(channelId, userId) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `
+      SELECT 1 FROM chat_channel_admins
+      WHERE channel_id = $1 AND user_id = $2
+      LIMIT 1
+      `,
+      [channelId, userId]
+    );
+    return res.rows.length > 0;
+  } finally {
+    client.release();
+  }
+}
+
+export async function addChannelAdmin(channelId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `
+      INSERT INTO chat_channel_admins (id, channel_id, user_id)
+      VALUES (gen_random_uuid(), $1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+      [channelId, userId]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function removeChannelAdmin(channelId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `
+      DELETE FROM chat_channel_admins
+      WHERE channel_id = $1 AND user_id = $2
+      `,
+      [channelId, userId]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   NEW: MEMBERSHIP CHECK
+------------------------------------------------------- */
+export async function isChannelMember(channelId, userId) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `
+      SELECT 1
+      FROM chat_channel_members
+      WHERE channel_id = $1 AND user_id = $2
+      LIMIT 1
+      `,
+      [channelId, userId]
+    );
+    return res.rows.length > 0;
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   NEW: CHANNEL FETCH BY KEY / ID
+------------------------------------------------------- */
+export async function getChannelByKey(key) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT * FROM chat_channels WHERE key = $1 LIMIT 1`,
+      [key]
+    );
+    if (!res.rows.length) return null;
+    return mapChannelRow(res.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+export async function getChannelById(id) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT * FROM chat_channels WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+    if (!res.rows.length) return null;
+    return mapChannelRow(res.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   NEW: CREATE CHANNEL (explicit)
+   - preserves previous behavior (creator becomes admin & member)
+------------------------------------------------------- */
+export async function createChannel({
+  key,
+  name,
+  type = "channel",
+  createdBy,
+  isPrivate = false,
+}) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `
+      INSERT INTO chat_channels
+        (id, key, name, type, created_by, is_private, created_at)
+      VALUES
+        (gen_random_uuid(), $1, $2, $3, $4, $5, now())
+      RETURNING *
+      `,
+      [key, name, type, createdBy, isPrivate]
+    );
+
+    const channel = mapChannelRow(res.rows[0]);
+
+    // creator is admin + member automatically
+    await client.query(
+      `
+      INSERT INTO chat_channel_admins (id, channel_id, user_id)
+      VALUES (gen_random_uuid(), $1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+      [channel.id, createdBy]
+    );
+
+    await client.query(
+      `
+      INSERT INTO chat_channel_members (id, channel_id, user_id)
+      VALUES (gen_random_uuid(), $1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+      [channel.id, createdBy]
+    );
+
+    return channel;
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   NEW: ADD/REMOVE MEMBERS (keeps compatibility)
+------------------------------------------------------- */
+export async function addChannelMember(channelId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `
+      INSERT INTO chat_channel_members (id, channel_id, user_id)
+      VALUES (gen_random_uuid(), $1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+      [channelId, userId]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function removeChannelMember(channelId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `
+      DELETE FROM chat_channel_members
+      WHERE channel_id = $1 AND user_id = $2
+      `,
+      [channelId, userId]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   NEW: UPDATE CHANNEL PRIVACY
+------------------------------------------------------- */
+export async function updateChannelPrivacy(channelId, isPrivate) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `
+      UPDATE chat_channels
+      SET is_private = $1
+      WHERE id = $2
+      `,
+      [isPrivate, channelId]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   EXISTING FUNCTIONS (NOT TOUCHED)
+   — preserve original behavior and names
+------------------------------------------------------- */
 
 export async function getOrCreateChannelByKey({ key, type, name, createdBy }) {
   const client = await pool.connect();
@@ -49,8 +269,8 @@ export async function getOrCreateChannelByKey({ key, type, name, createdBy }) {
 
     const inserted = await client.query(
       `
-      INSERT INTO chat_channels (id, key, type, name, created_by, created_at)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, now())
+      INSERT INTO chat_channels (id, key, type, name, created_by, created_at, is_private)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, now(), false)
       RETURNING *
       `,
       [key, type, name, createdBy]
@@ -89,8 +309,6 @@ export async function ensureChannelMember(channelId, userId) {
   }
 }
 
-// ---------- Messages ----------
-
 export async function createChatMessage({
   channelId,
   userId,
@@ -124,7 +342,7 @@ export async function createChatMessage({
 export async function getRecentMessages(channelId, limit = 100) {
   const client = await pool.connect();
   try {
-    const result = await client.query(
+    const res = await client.query(
       `
       SELECT
         m.*,
@@ -138,18 +356,16 @@ export async function getRecentMessages(channelId, limit = 100) {
       [channelId, limit]
     );
 
-    return result.rows.map(mapMessageRow);
+    return res.rows.map(mapMessageRow);
   } finally {
     client.release();
   }
 }
 
-// ---------- Edit / Delete (persistent) ----------
-
 export async function updateChatMessage({ messageId, userId, textHtml }) {
   const client = await pool.connect();
   try {
-    const result = await client.query(
+    const res = await client.query(
       `
       UPDATE chat_messages
       SET text_html = $1,
@@ -162,17 +378,49 @@ export async function updateChatMessage({ messageId, userId, textHtml }) {
       [textHtml, messageId, userId]
     );
 
-    if (result.rows.length === 0) return null;
-    return mapMessageRow(result.rows[0]);
+    if (!res.rows.length) return null;
+    return mapMessageRow(res.rows[0]);
   } finally {
     client.release();
   }
 }
 
+export async function getChannelMembers(channelId) {
+  const { rows } = await pool.query(
+    `SELECT m.user_id, u.username
+     FROM chat_channel_members m
+     JOIN users u ON u.id = m.user_id
+     WHERE m.channel_id = $1`,
+    [channelId]
+  );
+  return rows;
+}
+
+export async function getChannelAdmins(channelId) {
+  const { rows } = await pool.query(
+    `SELECT user_id FROM chat_channel_admins WHERE channel_id = $1`,
+    [channelId]
+  );
+  return rows;
+}
+
+
+
+export async function leaveChannel(channelId, userId) {
+  await removeChannelMember(channelId, userId);
+}
+
+export async function deleteChannel(channelId, userId) {
+  if (!(await isChannelAdmin(channelId, userId))) {
+    throw new Error("Only admins can delete the channel");
+  }
+  await pool.query(`DELETE FROM chat_channels WHERE id = $1`, [channelId]);
+}
+
 export async function softDeleteChatMessage({ messageId, userId }) {
   const client = await pool.connect();
   try {
-    const result = await client.query(
+    const res = await client.query(
       `
       UPDATE chat_messages
       SET deleted_at = now()
@@ -184,9 +432,55 @@ export async function softDeleteChatMessage({ messageId, userId }) {
       [messageId, userId]
     );
 
-    if (result.rows.length === 0) return null;
-    return mapMessageRow(result.rows[0]);
+    if (!res.rows.length) return null;
+    return mapMessageRow(res.rows[0]);
   } finally {
     client.release();
   }
 }
+
+/* -------------------------------------------------------
+   ADDITIONAL: CHANNEL LISTING (public + private where member)
+------------------------------------------------------- */
+export async function getChannelsForUser(userId) {
+  const client = await pool.connect();
+  try {
+    const publicQ = await client.query(
+      `SELECT * FROM chat_channels WHERE is_private = false ORDER BY created_at DESC`
+    );
+    const privateQ = await client.query(
+      `SELECT c.* FROM chat_channels c JOIN chat_channel_members m ON c.id = m.channel_id WHERE m.user_id = $1 ORDER BY c.created_at DESC`,
+      [userId]
+    );
+    const map = new Map();
+    for (const r of publicQ.rows.concat(privateQ.rows)) map.set(r.id, r);
+    return Array.from(map.values()).map(mapChannelRow);
+  } finally {
+    client.release();
+  }
+}
+
+/* -------------------------------------------------------
+   EXPORT DEFAULT (for compatibility) and named exports
+------------------------------------------------------- */
+const exported = {
+  isChannelAdmin,
+  addChannelAdmin,
+  removeChannelAdmin,
+  isChannelMember,
+  addChannelMember,
+  removeChannelMember,
+  updateChannelPrivacy,
+  getChannelByKey,
+  getChannelById,
+  createChannel,
+  getChannelsForUser,
+  getOrCreateChannelByKey,
+  ensureChannelMember,
+  createChatMessage,
+  getRecentMessages,
+  updateChatMessage,
+  softDeleteChatMessage,
+};
+
+export default exported;

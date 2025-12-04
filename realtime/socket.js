@@ -1,6 +1,7 @@
 // realtime/socket.js
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
+
 import {
   getOrCreateChannelByKey,
   ensureChannelMember,
@@ -8,6 +9,10 @@ import {
   getRecentMessages,
   updateChatMessage,
   softDeleteChatMessage,
+
+  // NEW IMPORTS for private channels & channel admin checks
+  getChannelByKey,
+  isChannelMember,
 } from "../services/chat.service.js";
 
 import {
@@ -23,25 +28,16 @@ const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
  * For DM channels we use key pattern:
  *   dm:<uidSmall>:<uidBig>
  */
-function getChannelMetaFromKey(channelKey, currentUserId) {
-  if (channelKey === "general") {
-    return { type: "public", name: "#general" };
-  }
-
-  if (channelKey.startsWith("dm:")) {
-    return { type: "dm", name: "Direct message" };
-  }
-
-  if (channelKey.startsWith("thread:")) {
-    return { type: "thread", name: "Thread" };
-  }
-
+function getChannelMetaFromKey(channelKey) {
+  if (channelKey === "general") return { type: "public", name: "#general" };
+  if (channelKey.startsWith("dm:")) return { type: "dm", name: "Direct message" };
+  if (channelKey.startsWith("thread:")) return { type: "thread", name: "Thread" };
   return { type: "public", name: channelKey };
 }
 
-// -------------------------------------------------------
-// INIT SOCKET WITH FRONTEND URL
-// -------------------------------------------------------
+/* -------------------------------------------------------
+   INIT SOCKET WITH FRONTEND URL
+------------------------------------------------------- */
 export function initSocket(server, frontendUrl) {
   io = new Server(server, {
     cors: {
@@ -50,12 +46,13 @@ export function initSocket(server, frontendUrl) {
     },
   });
 
-  // -----------------------------------------------------
-  // AUTH MIDDLEWARE
-  // -----------------------------------------------------
+  /* -----------------------------------------------------
+     AUTH MIDDLEWARE
+  ----------------------------------------------------- */
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error("Unauthorized: no token"));
+
     try {
       socket.user = jwt.verify(token, JWT_SECRET);
       next();
@@ -65,9 +62,9 @@ export function initSocket(server, frontendUrl) {
     }
   });
 
-  // -----------------------------------------------------
-  // CONNECTION
-  // -----------------------------------------------------
+  /* -----------------------------------------------------
+     CONNECTION
+  ----------------------------------------------------- */
   io.on("connection", (socket) => {
     const userId = socket.user.id;
     const username = socket.user.username;
@@ -82,22 +79,36 @@ export function initSocket(server, frontendUrl) {
       at: new Date().toISOString(),
     });
 
-    // -----------------------------------------------------
-    // CHAT: JOIN CHANNEL
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       CHAT: JOIN CHANNEL (UPDATED FOR PRIVATE CHANNELS)
+    ----------------------------------------------------- */
     socket.on("chat:join", async (channelKey) => {
       if (!channelKey) return;
 
       try {
-        const { type, name } = getChannelMetaFromKey(channelKey, userId);
+        const meta = getChannelMetaFromKey(channelKey);
 
+        // Get or create channel
         const channel = await getOrCreateChannelByKey({
           key: channelKey,
-          type,
-          name,
+          type: meta.type,
+          name: meta.name,
           createdBy: userId,
         });
 
+        // 🔒 PRIVATE CHANNEL CHECK (added safely)
+        if (channel.isPrivate || channel.is_private) {
+          const isMember = await isChannelMember(channel.id, userId);
+
+          if (!isMember) {
+            console.log("Access denied to private channel:", channelKey);
+            return socket.emit("chat:join:denied", {
+              error: "You are not a member of this private channel.",
+            });
+          }
+        }
+
+        // Default: ensure membership for public channels
         await ensureChannelMember(channel.id, userId);
 
         const room = `channel:${channelKey}`;
@@ -121,7 +132,7 @@ export function initSocket(server, frontendUrl) {
           })),
         });
 
-        // 🔥🔥 Check ACTIVE HUDDLE (FULL FIX)
+        // Active huddle state sync
         const active = await getActiveHuddle(channelKey);
         if (active) {
           socket.emit("huddle:started", {
@@ -143,16 +154,18 @@ export function initSocket(server, frontendUrl) {
           username,
           at: new Date().toISOString(),
         });
+
       } catch (err) {
         console.error("chat:join error:", err.message);
       }
     });
 
-    // -----------------------------------------------------
-    // CHAT: LEAVE
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       CHAT: LEAVE
+    ----------------------------------------------------- */
     socket.on("chat:leave", (channelKey) => {
       if (!channelKey) return;
+
       const room = `channel:${channelKey}`;
       socket.leave(room);
 
@@ -165,21 +178,30 @@ export function initSocket(server, frontendUrl) {
       });
     });
 
-    // -----------------------------------------------------
-    // CHAT: MESSAGE
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       CHAT: MESSAGE
+    ----------------------------------------------------- */
     socket.on("chat:message", async ({ channelId, text, tempId, parentId }) => {
       if (!channelId || !text?.trim()) return;
-
+const isMember = await isChannelMember(channelId, userId);
+if (!isMember) {
+  return socket.emit("chat:error", { error: "Read-only. You are not a channel member." });
+}
       try {
-        const { type, name } = getChannelMetaFromKey(channelId, userId);
+        const meta = getChannelMetaFromKey(channelId);
 
         const channel = await getOrCreateChannelByKey({
           key: channelId,
-          type,
-          name,
+          type: meta.type,
+          name: meta.name,
           createdBy: userId,
         });
+
+        // Private channel check
+        if (channel.isPrivate || channel.is_private) {
+          const isMember = await isChannelMember(channel.id, userId);
+          if (!isMember) return;
+        }
 
         await ensureChannelMember(channel.id, userId);
 
@@ -208,9 +230,9 @@ export function initSocket(server, frontendUrl) {
       }
     });
 
-    // -----------------------------------------------------
-    // CHAT: EDIT / DELETE
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       CHAT: EDIT / DELETE
+    ----------------------------------------------------- */
     socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       if (!channelId || !messageId || !text?.trim()) return;
 
@@ -260,9 +282,9 @@ export function initSocket(server, frontendUrl) {
       }
     });
 
-    // -----------------------------------------------------
-    // REACTIONS, TYPING, READ
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       REACTIONS / TYPING / READ
+    ----------------------------------------------------- */
     socket.on("chat:reaction", (payload) =>
       io.to(`channel:${payload.channelId}`).emit("chat:reaction", {
         ...payload,
@@ -290,17 +312,15 @@ export function initSocket(server, frontendUrl) {
       })
     );
 
-    // -----------------------------------------------------
-    // HUDDLES — PERSISTENT DB-BACKED
-    // -----------------------------------------------------
-
+    /* -----------------------------------------------------
+       HUDDLES — PERSISTENT DB-BACKED
+    ----------------------------------------------------- */
     socket.on("huddle:start", async ({ channelId, huddleId }) => {
       if (!channelId || !huddleId) return;
 
       const existing = await getActiveHuddle(channelId);
       if (existing) return;
 
-      // FIXED: correct DB parameters
       await createHuddle({
         channelKey: channelId,
         huddleId,
@@ -329,9 +349,6 @@ export function initSocket(server, frontendUrl) {
       });
     });
 
-    // -----------------------------------------------------
-    // HUDDLE JOIN/LEAVE
-    // -----------------------------------------------------
     socket.on("huddle:join", ({ channelId, huddleId }) =>
       socket.to(`channel:${channelId}`).emit("huddle:user-joined", {
         channelId,
@@ -352,28 +369,24 @@ export function initSocket(server, frontendUrl) {
       })
     );
 
-    // -----------------------------------------------------
-    // HUDDLE SIGNALING
-    // -----------------------------------------------------
-   // -----------------------------------------------------
-// HUDDLE SIGNALING (FIXED FOR WEBRTC)
-// -----------------------------------------------------
-socket.on("huddle:signal", ({ channelId, targetUserId, huddleId, data }) => {
-  if (!channelId || !targetUserId || !huddleId || !data) return;
+    /* -----------------------------------------------------
+       HUDDLE SIGNALING
+    ----------------------------------------------------- */
+    socket.on("huddle:signal", ({ channelId, targetUserId, huddleId, data }) => {
+      if (!channelId || !targetUserId || !huddleId || !data) return;
 
-  io.to(targetUserId).emit("huddle:signal", {
-    channelId,
-    huddleId,
-    fromUserId: userId,
-    toUserId: targetUserId,
-    data,
-  });
-});
+      io.to(targetUserId).emit("huddle:signal", {
+        channelId,
+        huddleId,
+        fromUserId: userId,
+        toUserId: targetUserId,
+        data,
+      });
+    });
 
-
-    // -----------------------------------------------------
-    // PRESENCE
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       PRESENCE
+    ----------------------------------------------------- */
     socket.on("presence:set", (status) => {
       if (!status) return;
       io.emit("presence:update", {
@@ -384,9 +397,9 @@ socket.on("huddle:signal", ({ channelId, targetUserId, huddleId, data }) => {
       });
     });
 
-    // -----------------------------------------------------
-    // DISCONNECT
-    // -----------------------------------------------------
+    /* -----------------------------------------------------
+       DISCONNECT
+    ----------------------------------------------------- */
     socket.on("disconnect", () => {
       console.log("Socket disconnected:", userId);
       io.emit("presence:update", {
@@ -399,8 +412,25 @@ socket.on("huddle:signal", ({ channelId, targetUserId, huddleId, data }) => {
   });
 }
 
-// -----------------------------------------------------
+/* -----------------------------------------------------
+   EXPORT IO + helper emits
+----------------------------------------------------- */
 export function getIO() {
   if (!io) throw new Error("Socket.io not initialized");
   return io;
+}
+
+// convenience emit helpers other modules can use:
+export function emitChannelCreated(channel) {
+  if (!io) return;
+  io.emit("chat:channel_created", channel);
+}
+export function emitMemberAdded(channelId, userId) {
+  if (!io) return;
+  io.to(userId).emit("chat:added_to_channel", { channelId });
+  io.to(`channel:${channelId}`).emit("chat:member_added", { channelId, userId });
+}
+export function emitMessage(channelKey, message) {
+  if (!io) return;
+  io.to(`channel:${channelKey}`).emit("chat:message", message);
 }

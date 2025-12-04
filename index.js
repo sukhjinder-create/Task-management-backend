@@ -2,6 +2,8 @@
 import express from "express";
 import http from "http";
 import cors from "cors";
+import dotenv from "dotenv";
+
 import projectRoutes from "./routes/project.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import taskRoutes from "./routes/task.routes.js";
@@ -10,8 +12,11 @@ import authRoutes from "./routes/auth.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import attendanceRoutes from "./routes/attendance.routes.js";
+
+// 🔵 NEW: chat channels (Slack-like channels)
+import chatChannelRoutes from "./routes/chatChannels.routes.js";
+
 import { initSocket } from "./realtime/socket.js";
-import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -50,6 +55,12 @@ app.use("/tasks", taskRoutes);
 app.use("/comments", commentRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/attendance", attendanceRoutes);
+
+// 🔵 NEW: Slack-like chat channels API
+//   GET    /chat/channels
+//   POST   /chat/channels
+//   etc.   (from chatChannels.routes.js)
+app.use("/chat", chatChannelRoutes);
 
 // Optional: global error handler so PayloadTooLargeError comes back as JSON
 app.use((err, req, res, next) => {
