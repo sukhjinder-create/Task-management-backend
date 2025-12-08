@@ -15,6 +15,7 @@ import attendanceRoutes from "./routes/attendance.routes.js";
 
 // 🔵 NEW: chat channels (Slack-like channels)
 import chatChannelRoutes from "./routes/chatChannels.routes.js";
+import cryptoRoutes from "./routes/crypto.routes.js";
 
 import { initSocket } from "./realtime/socket.js";
 
@@ -61,6 +62,7 @@ app.use("/attendance", attendanceRoutes);
 //   POST   /chat/channels
 //   etc.   (from chatChannels.routes.js)
 app.use("/chat", chatChannelRoutes);
+app.use("/crypto", cryptoRoutes);
 
 // Optional: global error handler so PayloadTooLargeError comes back as JSON
 app.use((err, req, res, next) => {

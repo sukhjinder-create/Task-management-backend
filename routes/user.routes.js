@@ -11,7 +11,9 @@ import { getUserById } from "../repositories/user.repository.js";
 
 const router = express.Router();
 
-// 🔹 NEW: GET /users/me – current logged-in user (any role)
+/**
+ * 🔹 GET /users/me – current logged-in user (any role)
+ */
 router.get("/me", authMiddleware, async (req, res) => {
   try {
     const me = await getUserById(req.user.id);
@@ -25,23 +27,33 @@ router.get("/me", authMiddleware, async (req, res) => {
   }
 });
 
-// GET /users (admin & manager)
+/**
+ * 🔹 GET /users – NOW: any authenticated user can see list
+ *    (used by chat for the "add members" dropdown)
+ *    We still only return safe fields.
+ */
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    if (req.user.role === "user") {
-      return res
-        .status(403)
-        .json({ error: "Only admin/manager can view all users" });
-    }
     const users = await getAllUsersService();
-    res.json(users);
+
+    // Only send safe fields for frontend
+    const safeUsers = (users || []).map((u) => ({
+      id: u.id,
+      username: u.username,
+      email: u.email,
+      role: u.role,
+    }));
+
+    res.json(safeUsers);
   } catch (err) {
     console.error("Error fetching users:", err);
     res.status(500).json({ error: "Failed to fetch users" });
   }
 });
 
-// POST /users  (ADMIN ONLY)
+/**
+ * 🔹 POST /users – ADMIN ONLY
+ */
 router.post("/", authMiddleware, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -64,7 +76,9 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 });
 
-// PUT /users/:id  (ADMIN ONLY)
+/**
+ * 🔹 PUT /users/:id – ADMIN ONLY
+ */
 router.put("/:id", authMiddleware, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -85,7 +99,9 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// DELETE /users/:id  (ADMIN ONLY)
+/**
+ * 🔹 DELETE /users/:id – ADMIN ONLY
+ */
 router.delete("/:id", authMiddleware, async (req, res) => {
   try {
     if (req.user.role !== "admin") {

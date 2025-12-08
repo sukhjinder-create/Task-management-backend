@@ -182,53 +182,61 @@ export function initSocket(server, frontendUrl) {
        CHAT: MESSAGE
     ----------------------------------------------------- */
     socket.on("chat:message", async ({ channelId, text, tempId, parentId }) => {
-      if (!channelId || !text?.trim()) return;
-const isMember = await isChannelMember(channelId, userId);
-if (!isMember) {
-  return socket.emit("chat:error", { error: "Read-only. You are not a channel member." });
-}
-      try {
-        const meta = getChannelMetaFromKey(channelId);
+  if (!channelId || !text?.trim()) return;
 
-        const channel = await getOrCreateChannelByKey({
-          key: channelId,
-          type: meta.type,
-          name: meta.name,
-          createdBy: userId,
-        });
+  try {
+    const meta = getChannelMetaFromKey(channelId);
 
-        // Private channel check
-        if (channel.isPrivate || channel.is_private) {
-          const isMember = await isChannelMember(channel.id, userId);
-          if (!isMember) return;
-        }
-
-        await ensureChannelMember(channel.id, userId);
-
-        const saved = await createChatMessage({
-          channelId: channel.id,
-          userId,
-          textHtml: text.trim(),
-          parentId: parentId || null,
-        });
-
-        io.to(`channel:${channelId}`).emit("chat:message", {
-          id: saved.id,
-          tempId: tempId || null,
-          channelId,
-          userId,
-          username,
-          textHtml: saved.text_html,
-          createdAt: saved.created_at,
-          updatedAt: saved.updated_at,
-          deletedAt: saved.deleted_at,
-          reactions: saved.reactions || {},
-          attachments: saved.attachments || [],
-        });
-      } catch (err) {
-        console.error("chat:message error:", err.message);
-      }
+    // Get or create the channel by its *key* ("general", "dm:...", "thread:...")
+    const channel = await getOrCreateChannelByKey({
+      key: channelId,
+      type: meta.type,
+      name: meta.name,
+      createdBy: userId,
     });
+
+    // For private channels, check membership using the real UUID (channel.id)
+    if (channel.isPrivate || channel.is_private) {
+      const isMember = await isChannelMember(channel.id, userId).catch(
+        () => false
+      );
+      if (!isMember) {
+        return socket.emit("chat:error", {
+          error: "You are not a member of this private channel.",
+        });
+      }
+    }
+
+    // For public / DM / thread channels, ensure membership record exists
+    await ensureChannelMember(channel.id, userId);
+
+    // Save the message
+    const saved = await createChatMessage({
+      channelId: channel.id,       // ✅ UUID, not the key
+      userId,
+      textHtml: text.trim(),
+      parentId: parentId || null,  // ✅ thread replies carry parentId
+    });
+
+    // Broadcast to everyone in this channel room
+    io.to(`channel:${channelId}`).emit("chat:message", {
+      id: saved.id,
+      tempId: tempId || null,
+      channelId,                   // keep the key for the frontend
+      userId,
+      username,
+      textHtml: saved.text_html,
+      createdAt: saved.created_at,
+      updatedAt: saved.updated_at,
+      deletedAt: saved.deleted_at,
+      reactions: saved.reactions || {},
+      attachments: saved.attachments || [],
+    });
+  } catch (err) {
+    console.error("chat:message error:", err.message);
+  }
+});
+
 
     /* -----------------------------------------------------
        CHAT: EDIT / DELETE

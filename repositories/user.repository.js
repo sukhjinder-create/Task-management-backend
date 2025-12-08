@@ -58,9 +58,17 @@ export async function getUserByUsername(username) {
 // GET ALL USERS (for admin UI)
 export async function getAllUsersRepo() {
   const q = `
-    SELECT id, username, email, role, projects, created_at
-    FROM users
-    ORDER BY created_at DESC
+    SELECT 
+      u.id,
+      u.username,
+      u.email,
+      u.role,
+      u.projects,
+      u.created_at,
+      k.public_key  -- 🔐 include E2E public key (may be null)
+    FROM users u
+    LEFT JOIN user_keys k ON k.user_id = u.id
+    ORDER BY u.created_at DESC
   `;
   const { rows } = await pool.query(q);
   return rows;
@@ -93,4 +101,65 @@ export async function deleteUserRepo(id) {
   const q = `DELETE FROM users WHERE id = $1`;
   const { rowCount } = await pool.query(q, [id]);
   return rowCount > 0;
+}
+
+// 🔹 OPTIONAL: get a single user plus their public key (if any)
+export async function getUserWithPublicKeyById(id) {
+  const q = `
+    SELECT 
+      u.id,
+      u.username,
+      u.email,
+      u.role,
+      u.projects,
+      u.created_at,
+      u.updated_at,
+      k.public_key
+    FROM users u
+    LEFT JOIN user_keys k ON k.user_id = u.id
+    WHERE u.id = $1
+  `;
+  const { rows } = await pool.query(q, [id]);
+  if (!rows[0]) return null;
+
+  const row = rows[0];
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    role: row.role,
+    projects: row.projects,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    public_key: row.public_key || null,
+  };
+}
+
+// 🔹 OPTIONAL: get all users plus their public keys
+export async function getAllUsersWithPublicKeysRepo() {
+  const q = `
+    SELECT 
+      u.id,
+      u.username,
+      u.email,
+      u.role,
+      u.projects,
+      u.created_at,
+      u.updated_at,
+      k.public_key
+    FROM users u
+    LEFT JOIN user_keys k ON k.user_id = u.id
+    ORDER BY u.created_at DESC
+  `;
+  const { rows } = await pool.query(q);
+  return rows.map((row) => ({
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    role: row.role,
+    projects: row.projects,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    public_key: row.public_key || null,
+  }));
 }

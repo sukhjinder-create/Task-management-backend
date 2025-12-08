@@ -481,6 +481,10 @@ const exported = {
   getRecentMessages,
   updateChatMessage,
   softDeleteChatMessage,
+  getChannelMembers,
+  getChannelAdmins,
+  leaveChannel,
+  deleteChannel,
 };
 
 export default exported;
