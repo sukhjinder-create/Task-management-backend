@@ -93,3 +93,109 @@ class TaskRepository {
 
 const taskRepository = new TaskRepository();
 export default taskRepository;
+
+// ───────────────────────────────────────────
+// SUBTASKS REPOSITORY FUNCTIONS
+// ───────────────────────────────────────────
+
+export async function createSubtaskRepo({
+  task_id,
+  title,
+  status = "pending",
+  assigned_to = null,
+  priority = "medium",
+  added_by = null,
+}) {
+  const query = `
+    INSERT INTO subtasks (
+      task_id,
+      title,
+      status,
+      assigned_to,
+      priority,
+      added_by,
+      created_at,
+      updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+    RETURNING *;
+  `;
+
+  const values = [
+    task_id,
+    title,
+    status,
+    assigned_to,
+    priority,
+    added_by,
+  ];
+
+  const { rows } = await pool.query(query, values);
+  return rows[0];
+}
+
+export async function getSubtasksRepo(taskId) {
+  const { rows } = await pool.query(
+    `
+      SELECT s.*
+      FROM subtasks s
+      WHERE s.task_id = $1
+      ORDER BY s.created_at ASC
+    `,
+    [taskId]
+  );
+  return rows;
+}
+
+export async function updateSubtaskRepo(id, data) {
+  // load existing
+  const { rows: existingRows } = await pool.query(
+    `SELECT * FROM subtasks WHERE id = $1`,
+    [id]
+  );
+  if (existingRows.length === 0) {
+    throw new Error("Subtask not found");
+  }
+  const existing = existingRows[0];
+
+  const newTitle =
+    data.title ?? data.subtask ?? existing.title; // support old 'subtask' field
+  const newStatus = data.status ?? existing.status;
+  const newAssignedTo =
+    data.assigned_to !== undefined ? data.assigned_to : existing.assigned_to;
+  const newPriority = data.priority ?? existing.priority ?? "medium";
+
+  const query = `
+    UPDATE subtasks
+    SET
+      title       = $1,
+      status      = $2,
+      assigned_to = $3,
+      priority    = $4,
+      updated_at  = NOW()
+    WHERE id = $5
+    RETURNING *;
+  `;
+
+  const values = [
+    newTitle,
+    newStatus,
+    newAssignedTo,
+    newPriority,
+    id,
+  ];
+
+  const { rows } = await pool.query(query, values);
+  return rows[0];
+}
+
+export async function deleteSubtaskRepo(id) {
+  const { rows } = await pool.query(
+    `DELETE FROM subtasks WHERE id = $1 RETURNING *;`,
+    [id]
+  );
+  if (rows.length === 0) {
+    throw new Error("Subtask not found");
+  }
+  return rows[0];
+}

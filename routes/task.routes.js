@@ -219,3 +219,70 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+/**
+ * ===========================
+ *       SUBTASK ROUTES
+ * ===========================
+ */
+
+/**
+ * POST /tasks/:taskId/subtasks
+ * Create subtask under a task
+ */
+router.post("/:taskId/subtasks", authMiddleware, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { subtask, assigned_to, due_date, priority } = req.body;
+
+    const created = await createSubtask({
+      task_id: taskId,
+      subtask,
+      assigned_to,
+      due_date,
+      priority,
+      added_by: req.user.id,
+    });
+
+    res.status(201).json(created);
+  } catch (err) {
+    console.error("Error creating subtask:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /tasks/:taskId/subtasks
+ */
+router.get("/:taskId/subtasks", authMiddleware, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const list = await getSubtasks(taskId);
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load subtasks" });
+  }
+});
+
+/**
+ * PUT /subtasks/:id
+ */
+router.put("/subtasks/:id", authMiddleware, async (req, res) => {
+  try {
+    const updated = await updateSubtask(req.params.id, req.body);
+    res.json(updated);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /subtasks/:id
+ */
+router.delete("/subtasks/:id", authMiddleware, async (req, res) => {
+  try {
+    await deleteSubtask(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});

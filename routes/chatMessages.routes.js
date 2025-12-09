@@ -33,10 +33,12 @@ function requireAuth(req, res, next) {
  */
 router.post("/", requireAuth, async (req, res) => {
   try {
-    const { channelId, text, tempId = null, parentId = null } = req.body;
+    const { channelId, encrypted, senderPublicKeyJwk, tempId = null, parentId = null, fallbackText = null } = req.body;
+
     const userId = req.user.id;
 
-    if (!channelId || !text) {
+    if (!channelId || !encrypted) {
+
       return res.status(400).json({ message: "channelId and text are required" });
     }
 
@@ -68,11 +70,14 @@ router.post("/", requireAuth, async (req, res) => {
     await ensureChannelMember(channel.id, userId);
 
     const saved = await createChatMessage({
-      channelId: channel.id,
-      userId,
-      textHtml: text,
-      parentId: parentId || null,
-    });
+  channelId: channel.id,
+  userId,
+  encryptedJson: JSON.stringify(encrypted),
+  senderPublicKeyJwk,
+  fallbackText,
+  parentId
+});
+
 
     // emit via socket
     try {
@@ -83,7 +88,10 @@ router.post("/", requireAuth, async (req, res) => {
         channelId: channel.key || channelId,
         userId,
         username: saved.username || null,
-        textHtml: saved.text_html,
+        encrypted: encrypted,
+senderPublicKeyJwk,
+fallbackText,
+
         createdAt: saved.created_at,
         updatedAt: saved.updated_at,
         deletedAt: saved.deleted_at,

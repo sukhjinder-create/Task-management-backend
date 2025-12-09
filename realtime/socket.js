@@ -123,7 +123,10 @@ export function initSocket(server, frontendUrl) {
             channelId: channelKey,
             userId: m.user_id,
             username: m.username || username,
-            textHtml: m.text_html,
+            encrypted: m.encrypted_json,
+senderPublicKeyJwk: m.sender_public_key,
+fallbackText: m.fallback_text,
+
             createdAt: m.created_at,
             updatedAt: m.updated_at,
             deletedAt: m.deleted_at,
@@ -220,12 +223,15 @@ export function initSocket(server, frontendUrl) {
 
     // Broadcast to everyone in this channel room
     io.to(`channel:${channelId}`).emit("chat:message", {
-      id: saved.id,
-      tempId: tempId || null,
-      channelId,                   // keep the key for the frontend
-      userId,
-      username,
-      textHtml: saved.text_html,
+  id: saved.id,
+  tempId,
+  channelId,
+  userId,
+  username,
+  encrypted,
+  senderPublicKeyJwk,
+  fallbackText,
+
       createdAt: saved.created_at,
       updatedAt: saved.updated_at,
       deletedAt: saved.deleted_at,

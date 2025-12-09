@@ -320,17 +320,21 @@ export async function createChatMessage({
     const result = await client.query(
       `
       INSERT INTO chat_messages (
-        id,
-        channel_id,
-        user_id,
-        text_html,
-        created_at,
-        parent_id
-      )
-      VALUES (gen_random_uuid(), $1, $2, $3, now(), $4)
-      RETURNING *
+  id,
+  channel_id,
+  user_id,
+  encrypted_json,
+  sender_public_key,
+  fallback_text,
+  created_at,
+  parent_id
+)
+VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now(), $6)
+RETURNING *
+
       `,
-      [channelId, userId, textHtml, parentId]
+      [channelId, userId, encryptedJson, senderPublicKeyJwk, fallbackText, parentId]
+
     );
 
     return mapMessageRow(result.rows[0]);

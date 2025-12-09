@@ -12,6 +12,9 @@ import authRoutes from "./routes/auth.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import attendanceRoutes from "./routes/attendance.routes.js";
+import subtaskRoutes from "./routes/subtask.routes.js";
+import projectStatusRoutes from "./routes/projectStatus.routes.js";
+import reportRoutes from "./routes/report.routes.js";
 
 // 🔵 NEW: chat channels (Slack-like channels)
 import chatChannelRoutes from "./routes/chatChannels.routes.js";
@@ -54,6 +57,9 @@ app.use("/projects", projectRoutes);
 app.use("/users", userRoutes);
 app.use("/tasks", taskRoutes);
 app.use("/comments", commentRoutes);
+app.use("/subtasks", subtaskRoutes);
+app.use("/project-statuses", projectStatusRoutes);
+app.use("/reports", reportRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/attendance", attendanceRoutes);
 
