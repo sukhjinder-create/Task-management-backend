@@ -8,6 +8,7 @@ import {
   ensureChannelMember,
   createChatMessage,
   getRecentMessages,
+  getRecentMessagesByChannelKey,
 } from "../services/chat.service.js";
 import { getIO } from "../realtime/socket.js";
 
@@ -28,18 +29,26 @@ function requireAuth(req, res, next) {
 
 /**
  * POST /chat
- * body: { channelId, text, tempId?, parentId? }
+ * body: { channelId, encrypted, senderPublicKeyJwk, tempId?, parentId?, fallbackText? }
  * - channelId is treated as "key" (same as socket channels: "general", "dm:", etc.)
  */
 router.post("/", requireAuth, async (req, res) => {
   try {
-    const { channelId, encrypted, senderPublicKeyJwk, tempId = null, parentId = null, fallbackText = null } = req.body;
+    const {
+      channelId,
+      encrypted,
+      senderPublicKeyJwk,
+      tempId = null,
+      parentId = null,
+      fallbackText = null,
+    } = req.body;
 
     const userId = req.user.id;
 
     if (!channelId || !encrypted) {
-
-      return res.status(400).json({ message: "channelId and text are required" });
+      return res
+        .status(400)
+        .json({ message: "channelId and encrypted are required" });
     }
 
     // Try resolve channel by key, then by id, then create by key if needed
@@ -59,25 +68,31 @@ router.post("/", requireAuth, async (req, res) => {
     // Private channel: only members or creator can post
     if (channel.isPrivate) {
       const member = await isChannelMember(channel.id, userId);
-      if (!member && channel.createdBy !== userId && channel.created_by !== userId) {
-        return res
-          .status(403)
-          .json({ message: "You are not allowed to post in this private channel" });
+      if (
+        !member &&
+        channel.createdBy !== userId &&
+        channel.created_by !== userId
+      ) {
+        return res.status(403).json({
+          message: "You are not allowed to post in this private channel",
+        });
       }
     }
 
     // ensure membership
     await ensureChannelMember(channel.id, userId);
 
-    const saved = await createChatMessage({
-  channelId: channel.id,
-  userId,
-  encryptedJson: JSON.stringify(encrypted),
-  senderPublicKeyJwk,
-  fallbackText,
-  parentId
-});
+    // encrypted JSON envelope we persist
+    const encryptedJson = encrypted;
 
+    const saved = await createChatMessage({
+      channelId: channel.id,
+      userId,
+      textHtml: encryptedJson,
+      encryptedJson,
+      fallbackText: fallbackText || null,
+      parentId: parentId || null,
+    });
 
     // emit via socket
     try {
@@ -88,10 +103,9 @@ router.post("/", requireAuth, async (req, res) => {
         channelId: channel.key || channelId,
         userId,
         username: saved.username || null,
-        encrypted: encrypted,
-senderPublicKeyJwk,
-fallbackText,
-
+        encrypted,
+        senderPublicKeyJwk,
+        fallbackText,
         createdAt: saved.created_at,
         updatedAt: saved.updated_at,
         deletedAt: saved.deleted_at,
@@ -112,7 +126,10 @@ fallbackText,
 
 /**
  * GET /chat/for-channel/:channelId
- * channelId is treated as key first, then as id if not found
+ *
+ * channelId is treated as key first, then as id if not found.
+ * We prefer history by canonical key, with a safe fallback to the
+ * generic getRecentMessages (supports legacy rows).
  */
 router.get("/for-channel/:channelId", requireAuth, async (req, res) => {
   try {
@@ -131,14 +148,35 @@ router.get("/for-channel/:channelId", requireAuth, async (req, res) => {
     // Private channel: only members or creator can view
     if (channel.isPrivate) {
       const member = await isChannelMember(channel.id, userId);
-      if (!member && channel.createdBy !== userId && channel.created_by !== userId) {
-        return res
-          .status(403)
-          .json({ message: "You are not allowed to view this private channel" });
+      if (
+        !member &&
+        channel.createdBy !== userId &&
+        channel.created_by !== userId
+      ) {
+        return res.status(403).json({
+          message: "You are not allowed to view this private channel",
+        });
       }
     }
 
-    const messages = await getRecentMessages(channel.id, limit);
+    const keyForHistory = channel.key || channelId;
+
+    let messages;
+    try {
+      // Preferred: by channel key
+      messages = await getRecentMessagesByChannelKey(keyForHistory, limit);
+    } catch (e) {
+      console.warn(
+        "getRecentMessagesByChannelKey failed, falling back to getRecentMessages:",
+        e.message
+      );
+      messages = await getRecentMessages(
+        channel.id,
+        limit,
+        keyForHistory
+      );
+    }
+
     return res.json(messages);
   } catch (err) {
     console.error("GET /chat/for-channel error:", err);

@@ -6,13 +6,11 @@ import {
   getOrCreateChannelByKey,
   ensureChannelMember,
   createChatMessage,
-  getRecentMessages,
   updateChatMessage,
   softDeleteChatMessage,
-
-  // NEW IMPORTS for private channels & channel admin checks
-  getChannelByKey,
+  // we keep only what is actually used in this file
   isChannelMember,
+  getRecentMessagesByChannelKey,
 } from "../services/chat.service.js";
 
 import {
@@ -96,25 +94,10 @@ export function initSocket(server, frontendUrl) {
           createdBy: userId,
         });
 
-        // 🔒 PRIVATE CHANNEL CHECK (added safely)
-        if (channel.isPrivate || channel.is_private) {
-          const isMember = await isChannelMember(channel.id, userId);
-
-          if (!isMember) {
-            console.log("Access denied to private channel:", channelKey);
-            return socket.emit("chat:join:denied", {
-              error: "You are not a member of this private channel.",
-            });
-          }
-        }
-
-        // Default: ensure membership for public channels
-        await ensureChannelMember(channel.id, userId);
-
         const room = `channel:${channelKey}`;
         socket.join(room);
 
-        const recent = await getRecentMessages(channel.id, 100);
+        const recent = await getRecentMessagesByChannelKey(channelKey, 100);
 
         socket.emit("chat:history", {
           channelId: channelKey,
@@ -124,9 +107,9 @@ export function initSocket(server, frontendUrl) {
             userId: m.user_id,
             username: m.username || username,
             encrypted: m.encrypted_json,
-senderPublicKeyJwk: m.sender_public_key,
-fallbackText: m.fallback_text,
-
+            senderPublicKeyJwk: m.sender_public_key,
+            fallbackText: m.fallback_text,
+            textHtml: m.text_html,
             createdAt: m.created_at,
             updatedAt: m.updated_at,
             deletedAt: m.deleted_at,
@@ -157,7 +140,6 @@ fallbackText: m.fallback_text,
           username,
           at: new Date().toISOString(),
         });
-
       } catch (err) {
         console.error("chat:join error:", err.message);
       }
@@ -185,64 +167,59 @@ fallbackText: m.fallback_text,
        CHAT: MESSAGE
     ----------------------------------------------------- */
     socket.on("chat:message", async ({ channelId, text, tempId, parentId }) => {
-  if (!channelId || !text?.trim()) return;
+      if (!channelId || !text?.trim()) return;
 
-  try {
-    const meta = getChannelMetaFromKey(channelId);
+      try {
+        const meta = getChannelMetaFromKey(channelId);
 
-    // Get or create the channel by its *key* ("general", "dm:...", "thread:...")
-    const channel = await getOrCreateChannelByKey({
-      key: channelId,
-      type: meta.type,
-      name: meta.name,
-      createdBy: userId,
-    });
-
-    // For private channels, check membership using the real UUID (channel.id)
-    if (channel.isPrivate || channel.is_private) {
-      const isMember = await isChannelMember(channel.id, userId).catch(
-        () => false
-      );
-      if (!isMember) {
-        return socket.emit("chat:error", {
-          error: "You are not a member of this private channel.",
+        const channel = await getOrCreateChannelByKey({
+          key: channelId,
+          type: meta.type,
+          name: meta.name,
+          createdBy: userId,
         });
+
+        if (channel.isPrivate || channel.is_private) {
+          const member = await isChannelMember(channel.id, userId).catch(
+            () => false
+          );
+          if (!member) {
+            return socket.emit("chat:error", {
+              error: "You are not a member of this private channel.",
+            });
+          }
+        }
+
+        await ensureChannelMember(channel.id, userId);
+
+        const encryptedJson = text.trim();
+
+        const saved = await createChatMessage({
+          channelId: channel.id,
+          userId,
+          textHtml: encryptedJson,
+          encryptedJson,
+          fallbackText: null,
+          parentId: parentId || null,
+        });
+
+        io.to(`channel:${channelId}`).emit("chat:message", {
+          id: saved.id,
+          tempId: tempId || null,
+          channelId,
+          userId,
+          username,
+          textHtml: saved.text_html,
+          createdAt: saved.created_at,
+          updatedAt: saved.updated_at,
+          deletedAt: saved.deleted_at,
+          reactions: saved.reactions || {},
+          attachments: saved.attachments || [],
+        });
+      } catch (err) {
+        console.error("chat:message error:", err.message);
       }
-    }
-
-    // For public / DM / thread channels, ensure membership record exists
-    await ensureChannelMember(channel.id, userId);
-
-    // Save the message
-    const saved = await createChatMessage({
-      channelId: channel.id,       // ✅ UUID, not the key
-      userId,
-      textHtml: text.trim(),
-      parentId: parentId || null,  // ✅ thread replies carry parentId
     });
-
-    // Broadcast to everyone in this channel room
-    io.to(`channel:${channelId}`).emit("chat:message", {
-  id: saved.id,
-  tempId,
-  channelId,
-  userId,
-  username,
-  encrypted,
-  senderPublicKeyJwk,
-  fallbackText,
-
-      createdAt: saved.created_at,
-      updatedAt: saved.updated_at,
-      deletedAt: saved.deleted_at,
-      reactions: saved.reactions || {},
-      attachments: saved.attachments || [],
-    });
-  } catch (err) {
-    console.error("chat:message error:", err.message);
-  }
-});
-
 
     /* -----------------------------------------------------
        CHAT: EDIT / DELETE
@@ -445,6 +422,45 @@ export function emitMemberAdded(channelId, userId) {
   io.to(`channel:${channelId}`).emit("chat:member_added", { channelId, userId });
 }
 export function emitMessage(channelKey, message) {
-  if (!io) return;
-  io.to(`channel:${channelKey}`).emit("chat:message", message);
+  if (!io || !message) return;
+
+  // IMPORTANT:
+  // Frontend Chat.jsx uses "channelId" as the CHANNEL KEY
+  // (e.g. "general", "availability-updates", "project-manager")
+  // in messagesByChannel[...] and activeChannelKey.
+  // So we ALWAYS send channelId = channelKey here,
+  // even if the DB row has a numeric UUID in channel_id.
+  const payload = {
+    id: message.id || message.tempId || message.message_id || null,
+    tempId: message.tempId || null,
+
+    // 👇 this must match activeChannelKey on the frontend
+    channelId: channelKey,
+
+    userId: message.userId || message.user_id,
+    username: message.username,
+
+    textHtml:
+      message.textHtml ||
+      message.text_html ||
+      message.text ||
+      message.fallback_text ||
+      "",
+
+    createdAt: message.createdAt || message.created_at || new Date().toISOString(),
+    updatedAt: message.updatedAt || message.updated_at || null,
+    deletedAt: message.deletedAt || message.deleted_at || null,
+
+    reactions: message.reactions || {},
+    attachments: message.attachments || [],
+
+    // pass through encrypted fields if present (for decryptForDisplay)
+    encrypted: message.encrypted || message.encrypted_json,
+    senderPublicKeyJwk:
+      message.senderPublicKeyJwk || message.sender_public_key || null,
+    fallbackText: message.fallbackText || message.fallback_text || "",
+    parentId: message.parentId || message.parent_id || null,
+  };
+
+  io.to(`channel:${channelKey}`).emit("chat:message", payload);
 }

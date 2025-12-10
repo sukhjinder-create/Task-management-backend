@@ -88,6 +88,9 @@ router.get("/public-key", authMiddleware, async (req, res) => {
  * POST /crypto/public-key
  * body: { publicKey }
  * -> upsert current user's public key
+ *
+ * IMPORTANT:
+ * - We store a REAL JSONB object, not a double-encoded JSON string.
  */
 router.post("/public-key", authMiddleware, async (req, res) => {
   try {
@@ -96,31 +99,31 @@ router.post("/public-key", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "publicKey required" });
     }
 
-    // 🧹 Normalize value to valid JSON text for JSONB
-    let publicKeyJson;
-
+    // If frontend ever sends it as a JSON string, try to parse once.
     if (typeof publicKey === "string") {
-      // If it's already JSON text, keep it; otherwise wrap it as JSON
       try {
-        JSON.parse(publicKey); // just to validate
-        publicKeyJson = publicKey;
-      } catch {
-        publicKeyJson = JSON.stringify(publicKey);
+        publicKey = JSON.parse(publicKey);
+      } catch (e) {
+        console.warn(
+          "[crypto] /public-key: received string publicKey that is not valid JSON"
+        );
+        // You can either reject or store as-is; better to reject:
+        return res
+          .status(400)
+          .json({ error: "publicKey must be a valid JWK JSON object" });
       }
-    } else {
-      // Object -> JSON string
-      publicKeyJson = JSON.stringify(publicKey);
     }
 
+    // At this point, publicKey should be a plain JS object.
     await pool.query(
       `
         INSERT INTO user_keys (user_id, public_key)
-        VALUES ($1, $2::jsonb)
+        VALUES ($1, $2)
         ON CONFLICT (user_id)
         DO UPDATE SET public_key = EXCLUDED.public_key,
                       updated_at = now()
       `,
-      [req.user.id, publicKeyJson]
+      [req.user.id, publicKey] // 👈 pass object directly → JSONB column
     );
 
     return res.json({ ok: true });

@@ -1,6 +1,5 @@
 // services/chat.service.js
 // Extended Chat Data Access Layer for Postgres
-// ⚠️ NO OLD FUNCTIONS REMOVED — FULL BACKWARD COMPATIBILITY
 
 import pool from "../db.js";
 
@@ -26,14 +25,22 @@ function mapChannelRow(row) {
   };
 }
 
-
 function mapMessageRow(row) {
   if (!row) return null;
+
+  // Prefer text_html; fall back to legacy "text" column; finally empty string
+  const textHtml =
+    row.text_html != null && row.text_html !== ""
+      ? row.text_html
+      : row.text != null
+      ? row.text
+      : "";
+
   return {
     id: row.id,
     channel_id: row.channel_id,
     user_id: row.user_id,
-    text_html: row.text_html,
+    text_html: textHtml,
     created_at: row.created_at,
     updated_at: row.updated_at,
     deleted_at: row.deleted_at,
@@ -41,6 +48,11 @@ function mapMessageRow(row) {
     reactions: row.reactions || {},
     attachments: row.attachments || [],
     username: row.username,
+
+    // 🔐 keep encrypted fields for E2EE-aware clients
+    encrypted_json: row.encrypted_json,
+    fallback_text: row.fallback_text,
+    sender_public_key: row.sender_public_key,
   };
 }
 
@@ -314,36 +326,124 @@ export async function createChatMessage({
   userId,
   textHtml,
   parentId = null,
+  encryptedJson = null,
+  fallbackText = null,
 }) {
   const client = await pool.connect();
+
+  // what we’ll store in text_html (always non-empty string)
+  const baseText = textHtml || fallbackText || "";
+
   try {
-    const result = await client.query(
-      `
-      INSERT INTO chat_messages (
-  id,
-  channel_id,
-  user_id,
-  encrypted_json,
-  sender_public_key,
-  fallback_text,
-  created_at,
-  parent_id
-)
-VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now(), $6)
-RETURNING *
+    // 🔐 First try: extended insert for schemas that have encrypted_json / fallback_text
+    try {
+      const res = await client.query(
+        `
+        INSERT INTO chat_messages (
+          id,
+          channel_id,
+          user_id,
+          text_html,
+          encrypted_json,
+          fallback_text,
+          created_at,
+          parent_id
+        )
+        VALUES (
+          gen_random_uuid(),
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          now(),
+          $6
+        )
+        RETURNING *
+        `,
+        [channelId, userId, baseText, encryptedJson, fallbackText, parentId]
+      );
 
-      `,
-      [channelId, userId, encryptedJson, senderPublicKeyJwk, fallbackText, parentId]
+      return mapMessageRow(res.rows[0]);
+    } catch (err) {
+      // 🧯 fallback if those extra columns don’t exist
+      console.error(
+        "[chat] extended message insert failed, falling back to legacy columns:",
+        err.message
+      );
 
-    );
+      const res = await client.query(
+        `
+        INSERT INTO chat_messages (
+          id,
+          channel_id,
+          user_id,
+          text_html,
+          created_at,
+          parent_id
+        )
+        VALUES (
+          gen_random_uuid(),
+          $1,
+          $2,
+          $3,
+          now(),
+          $4
+        )
+        RETURNING *
+        `,
+        [channelId, userId, baseText, parentId]
+      );
 
-    return mapMessageRow(result.rows[0]);
+      return mapMessageRow(res.rows[0]);
+    }
   } finally {
     client.release();
   }
 }
 
-export async function getRecentMessages(channelId, limit = 100) {
+// channelId: UUID from chat_channels.id
+// channelKey: string like "general", "dm:..."; used for backward-compat rows
+export async function getRecentMessages(
+  channelId,
+  limit = 100,
+  channelKey = null
+) {
+  const client = await pool.connect();
+  try {
+    const id = String(channelId);
+    const key = channelKey ? String(channelKey) : null;
+
+    const params = [id, limit];
+    let whereClause = "m.channel_id = $1";
+
+    if (key && key !== id) {
+      // support old rows that used the channel key as channel_id
+      whereClause = "(m.channel_id = $1 OR m.channel_id = $3)";
+      params.push(key); // becomes $3
+    }
+
+    const res = await client.query(
+      `
+      SELECT
+        m.*,
+        u.username AS username
+      FROM chat_messages m
+      JOIN users u ON u.id = m.user_id
+      WHERE ${whereClause}
+      ORDER BY m.created_at ASC
+      LIMIT $2
+      `,
+      params
+    );
+
+    return res.rows.map(mapMessageRow);
+  } finally {
+    client.release();
+  }
+}
+
+export async function getRecentMessagesByChannelKey(channelKey, limit = 100) {
   const client = await pool.connect();
   try {
     const res = await client.query(
@@ -352,12 +452,13 @@ export async function getRecentMessages(channelId, limit = 100) {
         m.*,
         u.username AS username
       FROM chat_messages m
+      JOIN chat_channels c ON c.id = m.channel_id
       JOIN users u ON u.id = m.user_id
-      WHERE m.channel_id = $1
+      WHERE c.key = $1
       ORDER BY m.created_at ASC
       LIMIT $2
       `,
-      [channelId, limit]
+      [channelKey, limit]
     );
 
     return res.rows.map(mapMessageRow);
@@ -407,8 +508,6 @@ export async function getChannelAdmins(channelId) {
   );
   return rows;
 }
-
-
 
 export async function leaveChannel(channelId, userId) {
   await removeChannelMember(channelId, userId);
@@ -483,6 +582,7 @@ const exported = {
   ensureChannelMember,
   createChatMessage,
   getRecentMessages,
+  getRecentMessagesByChannelKey,
   updateChatMessage,
   softDeleteChatMessage,
   getChannelMembers,

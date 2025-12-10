@@ -1,5 +1,6 @@
 // services/slack.service.js
 import dotenv from "dotenv";
+import { mirrorProjectNotificationToChat } from "./systemChatBot.service.js";
 
 dotenv.config();
 
@@ -9,7 +10,7 @@ const FRONTEND_BASE_URL =
 
 /**
  * Safely send a message to Slack via incoming webhook.
- * If SLACK_WEBHOOK_URL is not set, this becomes a no-op.
+ * If SLACK_WEBHOOK_URL is not set, this still mirrors into internal chat.
  */
 export async function sendSlackNotification({
   user_id,
@@ -18,11 +19,6 @@ export async function sendSlackNotification({
   task_id = null,
   project_id = null,
 }) {
-  if (!SLACK_WEBHOOK_URL) {
-    // Slack not configured → silently skip
-    return;
-  }
-
   try {
     // Build a simple link back into the app
     let appLink = FRONTEND_BASE_URL;
@@ -50,12 +46,28 @@ export async function sendSlackNotification({
       appLink ? `\n<${appLink}|Open in TaskManager>` : ""
     }`;
 
-    // Node 22 has global fetch
-    await fetch(SLACK_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
+    // Mirror this notification into internal "Project Manager" chat group
+    try {
+      await mirrorProjectNotificationToChat({
+        text,
+        userId: user_id,
+      });
+    } catch (err) {
+      console.error(
+        "Internal chat mirror (projects) failed:",
+        err.message
+      );
+    }
+
+    // If Slack is configured, also send to Slack
+    if (SLACK_WEBHOOK_URL) {
+      // Node 22 has global fetch
+      await fetch(SLACK_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+    }
   } catch (err) {
     console.error("Slack notification error:", err.message);
   }
