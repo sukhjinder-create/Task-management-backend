@@ -22,6 +22,12 @@ import cryptoRoutes from "./routes/crypto.routes.js";
 
 import { initSocket } from "./realtime/socket.js";
 
+import { authMiddleware } from "./middleware/auth.middleware.js";
+import { requireWorkspaceForUser } from "./middleware/workspace.middleware.js";
+import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
+import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
+import superadminRoutes from "./routes/superadmin.routes.js";
+
 dotenv.config();
 
 const app = express();
@@ -52,25 +58,55 @@ app.get("/", (req, res) => {
   res.send("Task Management API is running 🚀");
 });
 
+/**
+ * Public / unauthenticated routes
+ * - Authentication must not be workspace-scoped
+ */
 app.use("/auth", authRoutes);
-app.use("/projects", projectRoutes);
-app.use("/users", userRoutes);
-app.use("/tasks", taskRoutes);
-app.use("/comments", commentRoutes);
-app.use("/subtasks", subtaskRoutes);
-app.use("/project-statuses", projectStatusRoutes);
-app.use("/reports", reportRoutes);
-app.use("/notifications", notificationRoutes);
-app.use("/attendance", attendanceRoutes);
-
-// 🔵 NEW: Slack-like chat channels API
-//   GET    /chat/channels
-//   POST   /chat/channels
-//   etc.   (from chatChannels.routes.js)
-app.use("/chat", chatChannelRoutes);
 app.use("/crypto", cryptoRoutes);
 
-// Optional: global error handler so PayloadTooLargeError comes back as JSON
+/**
+ * Superadmin routes (only superadmins)
+ * - These routes are allowed to operate across workspaces
+ * - They expect the handlers to be protected by requireSuperadmin
+ *
+ * Example: you should mount a superadmin router at /superadmin that uses
+ * requireSuperadmin internally; if not, you can mount here like:
+ *   app.use("/superadmin", authMiddleware, requireSuperadmin, superadminRoutes);
+ *
+ * (I chose to import superadmin routes only if/when you add them)
+ */
+
+/**
+ * Tenant-scoped routes (apply auth + workspace middleware centrally)
+ *
+ * Any request to these endpoints will:
+ *  1) run authMiddleware (attach req.user from JWT)
+ *  2) run requireWorkspaceForUser (attach req.workspaceId and enforce non-superadmin users have a workspace)
+ *
+ * This means you DON'T need to add requireWorkspaceForUser inside each route file.
+ * If a route file already calls authMiddleware, double-auth will still work safely.
+ */
+app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
+app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
+app.use("/comments", authMiddleware, requireWorkspaceForUser, commentRoutes);
+app.use("/subtasks", authMiddleware, requireWorkspaceForUser, subtaskRoutes);
+app.use("/project-statuses", authMiddleware, requireWorkspaceForUser, projectStatusRoutes);
+app.use("/reports", authMiddleware, requireWorkspaceForUser, reportRoutes);
+app.use("/notifications", authMiddleware, requireWorkspaceForUser, notificationRoutes);
+app.use("/attendance", authMiddleware, requireWorkspaceForUser, attendanceRoutes);
+app.use("/users", authMiddleware, requireWorkspaceForUser, userRoutes);
+app.use("/superadmin", superadminAuthRoutes);
+
+app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
+app.use("/superadmin", superadminRoutes);
+
+// 🔵 Chat channels API: tenant-scoped chat channels
+app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
+
+// Optional: any other tenant routes you add, mount them here with the same pattern.
+
+// Optional: global error handler (keeps PayloadTooLarge JSON response)
 app.use((err, req, res, next) => {
   if (err && (err.type === "entity.too.large" || err.status === 413)) {
     console.error("Payload too large:", err.message);

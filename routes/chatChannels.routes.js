@@ -5,12 +5,24 @@ import * as chatSvc from "../services/chat.service.js";
 import { getIO } from "../realtime/socket.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 
+/* ✅ ADD: workspace context (does NOT affect existing behavior) */
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+
+/* ✅ ADD: plan / feature gating */
+import { requirePlanFeature } from "../middleware/plan.middleware.js";
+
 const router = express.Router();
 
 /* -------------------------------------------------------
    ✅ ALL ROUTES BELOW REQUIRE REAL JWT AUTH
 ------------------------------------------------------- */
 router.use(authMiddleware);
+
+/* ✅ ADD: attach req.workspaceId (no logic changed) */
+router.use(requireWorkspaceForUser);
+
+/* ✅ ADD: HARD GATE CHAT BY PLAN (Phase 2.3) */
+router.use(requirePlanFeature("chat"));
 
 /* -------------------------------------------------------
    helper: normalize isPrivate / is_private
@@ -37,12 +49,7 @@ function generateChannelKey(name = "") {
 
 /* -------------------------------------------------------
    CREATE CHANNEL
-   Frontend:
-   - CreateChannelModal → POST /chat
-   (also supports POST /chat/channels for flexibility)
-   Body: { name, is_private? or isPrivate?, members?: [userId] }
 ------------------------------------------------------- */
-
 async function handleCreateChannel(req, res) {
   try {
     const { name = "", key, type = "channel", members = [] } = req.body;
@@ -61,9 +68,10 @@ async function handleCreateChannel(req, res) {
       type,
       createdBy,
       isPrivate,
+      /* ✅ already present */
+      workspaceId: req.workspaceId,
     });
 
-    // Optionally add initial members (if provided)
     if (Array.isArray(members) && members.length) {
       for (const m of members) {
         if (!m) continue;
@@ -71,7 +79,6 @@ async function handleCreateChannel(req, res) {
       }
     }
 
-    // Emit event to all sockets
     try {
       const io = getIO();
       if (io) io.emit("chat:channel_created", channel);
@@ -88,21 +95,12 @@ async function handleCreateChannel(req, res) {
 
 // Main endpoint used by our modal: POST /chat
 router.post("/", handleCreateChannel);
-
-// Also allow POST /chat/channels (for compatibility / future use)
 router.post("/channels", handleCreateChannel);
 
 /* -------------------------------------------------------
    MEMBERSHIP: ADD / REMOVE / LIST
-   Frontend (ChannelSettingsModal) expects:
-   - GET    /chat/channels/:id/members
-   - POST   /chat/channels/:id/members   { user_id }
-   - DELETE /chat/channels/:id/members/:userId
 ------------------------------------------------------- */
 
-/**
- * GET /chat/channels/:channelId/members
- */
 router.get("/channels/:channelId/members", async (req, res) => {
   try {
     const { channelId } = req.params;
@@ -114,10 +112,6 @@ router.get("/channels/:channelId/members", async (req, res) => {
   }
 });
 
-/**
- * POST /chat/channels/:channelId/members
- * body: { user_id } or { userIdToAdd }
- */
 router.post("/channels/:channelId/members", async (req, res) => {
   try {
     const { channelId } = req.params;
@@ -134,7 +128,6 @@ router.post("/channels/:channelId/members", async (req, res) => {
       return res.status(404).json({ error: "Channel not found" });
     }
 
-    // Only admins OR channel creator can add members
     const isAdmin = await chatSvc
       .isChannelAdmin(channelId, currentUserId)
       .catch(() => false);
@@ -160,9 +153,7 @@ router.post("/channels/:channelId/members", async (req, res) => {
           userId: userIdToAdd,
         });
       }
-    } catch (e) {
-      // ignore socket errors
-    }
+    } catch {}
 
     return res.json({ channelId, userId: userIdToAdd });
   } catch (err) {
@@ -171,9 +162,6 @@ router.post("/channels/:channelId/members", async (req, res) => {
   }
 });
 
-/**
- * DELETE /chat/channels/:channelId/members/:userId
- */
 router.delete("/channels/:channelId/members/:userId", async (req, res) => {
   try {
     const { channelId, userId } = req.params;
@@ -213,10 +201,6 @@ router.delete("/channels/:channelId/members/:userId", async (req, res) => {
 
 /* -------------------------------------------------------
    ADMINS: LIST / PROMOTE / DEMOTE
-   Frontend expects:
-   - GET    /chat/channels/:id/admins
-   - POST   /chat/channels/:id/admins        { user_id }
-   - DELETE /chat/channels/:id/admins/:userId
 ------------------------------------------------------- */
 
 router.get("/channels/:channelId/admins", async (req, res) => {
@@ -240,7 +224,6 @@ router.post("/channels/:channelId/admins", async (req, res) => {
     }
 
     const currentUserId = req.user.id;
-
     const channel = await chatSvc.getChannelById(channelId);
     if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
@@ -305,9 +288,6 @@ router.delete("/channels/:channelId/admins/:userId", async (req, res) => {
 
 /* -------------------------------------------------------
    LEAVE & DELETE CHANNEL
-   Frontend expects:
-   - POST   /chat/channels/:id/leave
-   - DELETE /chat/channels/:id
 ------------------------------------------------------- */
 
 router.post("/channels/:channelId/leave", async (req, res) => {
@@ -340,14 +320,15 @@ router.delete("/channels/:channelId", async (req, res) => {
 });
 
 /* -------------------------------------------------------
-   CHANNEL LISTING (used by Chat.jsx)
-   GET /chat/channels  -> channels visible to current user
+   CHANNEL LISTING
 ------------------------------------------------------- */
 
 router.get("/channels", async (req, res) => {
   try {
     const userId = req.user.id;
-    const channels = await chatSvc.getChannelsForUser(userId);
+    const workspaceId = req.workspaceId || req.user?.workspaceId || null;
+    const channels = await chatSvc.getChannelsForUserInWorkspace(userId, workspaceId)
+;
     return res.json(channels);
   } catch (err) {
     console.error("GET /chat/channels error:", err);
@@ -355,11 +336,11 @@ router.get("/channels", async (req, res) => {
   }
 });
 
-/* kept for compatibility: /chat/for-user */
 router.get("/for-user", async (req, res) => {
   try {
     const userId = req.user.id;
-    const channels = await chatSvc.getChannelsForUser(userId);
+    const channels = await chatSvc.getChannelsForUserInWorkspace(userId, workspaceId)
+;
     return res.json(channels);
   } catch (err) {
     console.error("GET /chat/for-user error:", err);
@@ -368,8 +349,7 @@ router.get("/for-user", async (req, res) => {
 });
 
 /* -------------------------------------------------------
-   (Optional) Legacy: POST /chat/:channelKey/members by key
-   — If you don't use this anywhere, you can delete it later.
+   LEGACY: POST /chat/:channelKey/members
 ------------------------------------------------------- */
 
 router.post("/:channelKey/members", async (req, res) => {
@@ -390,6 +370,7 @@ router.post("/:channelKey/members", async (req, res) => {
         type: "channel",
         name: channelKey,
         createdBy: req.user.id,
+        workspaceId: req.workspaceId,
       }));
 
     if (!channel) {

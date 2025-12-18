@@ -1,6 +1,6 @@
-// routes/task.routes.js
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   createTask,
   getTasksByProjectForUser,
@@ -12,22 +12,22 @@ import {
 
 const router = express.Router();
 
+/**
+ * 🔐 AUTH + WORKSPACE REQUIRED
+ */
+router.use(authMiddleware);
+router.use(requireWorkspaceForUser);
+
 function isValidUuid(value) {
   return typeof value === "string" && /^[0-9a-fA-F-]{36}$/.test(value);
 }
 
 /**
  * GET /tasks/:projectId
- * - For admin/manager: all tasks in the project (optionally filtered)
- * - For user: only tasks assigned to that user in that project
- *
- * Optional query params:
- *   ?status=pending|in-progress|completed
- *   ?priority=low|medium|high
- *   ?assigned_to=<userId>   (ignored for normal user, they always see only themselves)
- *   ?overdue=true           (due_date < today AND status != 'completed')
+ * - Admin/manager: all tasks in project
+ * - User: only assigned tasks
  */
-router.get("/:projectId", authMiddleware, async (req, res) => {
+router.get("/:projectId", async (req, res) => {
   try {
     const projectId = req.params.projectId;
 
@@ -42,7 +42,13 @@ router.get("/:projectId", authMiddleware, async (req, res) => {
       overdue: req.query.overdue === "true",
     };
 
-    const tasks = await getTasksByProjectForUser(projectId, req.user, filters);
+    const tasks = await getTasksByProjectForUser(
+      projectId,
+      req.user,
+      filters,
+      req.workspaceId // 🔐 workspace enforced
+    );
+
     res.json(tasks);
   } catch (err) {
     console.error("Error getting tasks:", err);
@@ -52,11 +58,9 @@ router.get("/:projectId", authMiddleware, async (req, res) => {
 
 /**
  * POST /tasks/:projectId
- * Used by frontend: api.post(`/tasks/${projectId}`, payload)
- * Creates a task for that project. Status defaults to "pending".
- * Optional fields: description, priority
+ * Create task (admin / manager)
  */
-router.post("/:projectId", authMiddleware, async (req, res) => {
+router.post("/:projectId", async (req, res) => {
   try {
     if (req.user.role === "user") {
       return res
@@ -75,18 +79,19 @@ router.post("/:projectId", authMiddleware, async (req, res) => {
       assigned_to,
       due_date,
       description,
-      priority, // optional
+      priority,
     } = req.body;
 
     const created = await createTask({
       task,
       project_id,
-      status, // can be undefined; service will default to "pending"
+      status,
       assigned_to,
       due_date,
       description,
       priority,
       added_by: req.user.id,
+      workspaceId: req.workspaceId, // 🔐 enforced
     });
 
     res.status(201).json(created);
@@ -97,10 +102,10 @@ router.post("/:projectId", authMiddleware, async (req, res) => {
 });
 
 /**
- * (Optional extra) POST /tasks
- * Supports alternative style: body contains { project_id, ... }
+ * POST /tasks
+ * Alternate create (legacy support)
  */
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     if (req.user.role === "user") {
       return res
@@ -131,21 +136,22 @@ router.post("/", authMiddleware, async (req, res) => {
       description,
       priority,
       added_by: req.user.id,
+      workspaceId: req.workspaceId, // 🔐 enforced
     });
 
     res.status(201).json(created);
   } catch (err) {
-    console.error("Error creating task (POST /tasks):", err);
+    console.error("Error creating task:", err);
     res.status(400).json({ error: err.message });
   }
 });
 
 /**
  * PUT /tasks/:id
- * - user: only change his own task status
- * - admin/manager: full task update (title, status, dates, assignee, description, priority)
+ * - user: status only
+ * - admin/manager: full update
  */
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", async (req, res) => {
   try {
     const id = req.params.id;
 
@@ -153,7 +159,6 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Invalid task id" });
     }
 
-    // Normal user → only status via updateTaskStatusAsUser
     if (req.user.role === "user") {
       const { status } = req.body;
       if (!status) {
@@ -162,12 +167,21 @@ router.put("/:id", authMiddleware, async (req, res) => {
           .json({ error: "Status is required for user update" });
       }
 
-      const updated = await updateTaskStatusAsUser(id, req.user.id, status);
+      const updated = await updateTaskStatusAsUser(
+        id,
+        req.user.id,
+        status,
+        req.workspaceId // 🔐 enforced
+      );
+
       return res.json(updated);
     }
 
-    // Admin / manager → full update
-    const updated = await updateTaskAsAdminOrManager(id, req.body);
+    const updated = await updateTaskAsAdminOrManager(
+      id,
+      { ...req.body, workspaceId: req.workspaceId } // 🔐 enforced
+    );
+
     res.json(updated);
   } catch (err) {
     console.error("Error updating task:", err);
@@ -177,15 +191,16 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
 /**
  * GET /tasks/detail/:id
- * Get a single task (used for details panel if needed)
  */
-router.get("/detail/:id", authMiddleware, async (req, res) => {
+router.get("/detail/:id", async (req, res) => {
   try {
     const id = req.params.id;
+
     if (!isValidUuid(id)) {
       return res.status(400).json({ error: "Invalid task id" });
     }
-    const task = await getTaskById(id);
+
+    const task = await getTaskById(id, req.workspaceId); // 🔐 enforced
     res.json(task);
   } catch (err) {
     console.error("Error fetching task:", err);
@@ -195,11 +210,11 @@ router.get("/detail/:id", authMiddleware, async (req, res) => {
 
 /**
  * DELETE /tasks/:id
- * Only admin / manager can delete
  */
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
     const id = req.params.id;
+
     if (!isValidUuid(id)) {
       return res.status(400).json({ error: "Invalid task id" });
     }
@@ -210,7 +225,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
         .json({ error: "Only admin/manager can delete tasks" });
     }
 
-    await deleteTask(id);
+    await deleteTask(id, req.workspaceId); // 🔐 enforced
     res.json({ success: true });
   } catch (err) {
     console.error("Error deleting task:", err);
@@ -219,17 +234,14 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
 /**
  * ===========================
  *       SUBTASK ROUTES
  * ===========================
  */
 
-/**
- * POST /tasks/:taskId/subtasks
- * Create subtask under a task
- */
-router.post("/:taskId/subtasks", authMiddleware, async (req, res) => {
+router.post("/:taskId/subtasks", async (req, res) => {
   try {
     const { taskId } = req.params;
     const { subtask, assigned_to, due_date, priority } = req.body;
@@ -241,6 +253,7 @@ router.post("/:taskId/subtasks", authMiddleware, async (req, res) => {
       due_date,
       priority,
       added_by: req.user.id,
+      workspaceId: req.workspaceId, // 🔐 enforced
     });
 
     res.status(201).json(created);
@@ -250,37 +263,33 @@ router.post("/:taskId/subtasks", authMiddleware, async (req, res) => {
   }
 });
 
-/**
- * GET /tasks/:taskId/subtasks
- */
-router.get("/:taskId/subtasks", authMiddleware, async (req, res) => {
+router.get("/:taskId/subtasks", async (req, res) => {
   try {
-    const { taskId } = req.params;
-    const list = await getSubtasks(taskId);
+    const list = await getSubtasks(
+      req.params.taskId,
+      req.workspaceId // 🔐 enforced
+    );
     res.json(list);
   } catch (err) {
     res.status(500).json({ error: "Failed to load subtasks" });
   }
 });
 
-/**
- * PUT /subtasks/:id
- */
-router.put("/subtasks/:id", authMiddleware, async (req, res) => {
+router.put("/subtasks/:id", async (req, res) => {
   try {
-    const updated = await updateSubtask(req.params.id, req.body);
+    const updated = await updateSubtask(
+      req.params.id,
+      { ...req.body, workspaceId: req.workspaceId } // 🔐 enforced
+    );
     res.json(updated);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-/**
- * DELETE /subtasks/:id
- */
-router.delete("/subtasks/:id", authMiddleware, async (req, res) => {
+router.delete("/subtasks/:id", async (req, res) => {
   try {
-    await deleteSubtask(req.params.id);
+    await deleteSubtask(req.params.id, req.workspaceId); // 🔐 enforced
     res.json({ success: true });
   } catch (err) {
     res.status(400).json({ error: err.message });

@@ -13,15 +13,13 @@ import { mirrorProjectNotificationToChat } from "./systemChatBot.service.js";
 // ─────────────────────────────
 // Config
 // ─────────────────────────────
+const WORKSPACE_GLOBAL = "GLOBAL";
 
-// Frontend base URL for deep-links (set in .env for prod)
 const FRONTEND_BASE_URL =
   process.env.FRONTEND_BASE_URL || "http://localhost:5173";
 
-// Slack webhook (env preferred)
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || null;
 
-// Email config
 const EMAIL_NOTIFICATIONS_ENABLED =
   process.env.EMAIL_NOTIFICATIONS_ENABLED === "true";
 
@@ -72,25 +70,17 @@ async function buildSlackText({
   project_id,
   comment_id,
 }) {
-  // Target user (receiver of the notification)
   let targetName = "user";
+
   try {
     const user = await getUserById(user_id);
     if (user?.username) targetName = user.username;
     else if (user?.email) targetName = user.email;
-  } catch {
-    // ignore
-  }
+  } catch {}
 
   let body = message || "";
 
-  // Make text a bit more group-friendly
-  if (type === "task_assigned") {
-    body = body.replace(
-      "You have been assigned",
-      `${targetName} has been assigned`
-    );
-  } else if (type === "project_assigned") {
+  if (type === "task_assigned" || type === "project_assigned") {
     body = body.replace(
       "You have been assigned",
       `${targetName} has been assigned`
@@ -99,11 +89,9 @@ async function buildSlackText({
     body = body.replace(/\byou\b/gi, targetName);
   }
 
-  // Build frontend URL similar to in-app navigation
   let linkUrl = null;
 
   if (project_id) {
-    // task + optional comment deep-link
     if (task_id) {
       const params = new URLSearchParams();
       params.set("task", task_id);
@@ -113,11 +101,10 @@ async function buildSlackText({
       linkUrl = `${FRONTEND_BASE_URL}/projects/${project_id}`;
     }
   } else if (task_id) {
-    // Fallback: My Tasks view
     linkUrl = `${FRONTEND_BASE_URL}/my-tasks`;
   }
 
-  const prefix = "🔔"; // real emoji for all places
+  const prefix = "🔔";
   const linkPart = linkUrl ? ` – <${linkUrl}|Open in TaskManager>` : "";
 
   return `${prefix} ${body}${linkPart}`;
@@ -141,9 +128,9 @@ async function sendEmailNotification(
     const bodyLines = [
       message,
       "",
-      task_id ? `Task ID: ${task_id}` : "",
-      project_id ? `Project ID: ${project_id}` : "",
-      comment_id ? `Comment ID: ${comment_id}` : "",
+      task_id && `Task ID: ${task_id}`,
+      project_id && `Project ID: ${project_id}`,
+      comment_id && `Comment ID: ${comment_id}`,
     ].filter(Boolean);
 
     await mailTransporter.sendMail({
@@ -161,10 +148,6 @@ async function sendEmailNotification(
 // Main public API
 // ─────────────────────────────
 
-/**
- * Create a notification in DB + emit via Socket.IO + push to Slack
- * and mirror to the "Project Manager" internal chat channel.
- */
 export async function notifyUser({
   user_id,
   type,
@@ -172,10 +155,18 @@ export async function notifyUser({
   task_id = null,
   project_id = null,
   comment_id = null,
+  workspaceId = null,
 }) {
   if (!user_id) return null;
 
-  // 1) Save in DB
+  // 🔐 NORMALIZE WORKSPACE (DB-safe)
+ const resolvedWorkspaceId =
+  workspaceId && workspaceId !== WORKSPACE_GLOBAL
+    ? workspaceId
+    : null;
+
+
+  // 1️⃣ Save notification (DB never sees "GLOBAL")
   const notification = await repoCreateNotification({
     user_id,
     type,
@@ -183,17 +174,21 @@ export async function notifyUser({
     task_id,
     project_id,
     comment_id,
+    workspace_id: resolvedWorkspaceId,
   });
 
-  // 2) Realtime via Socket.IO to that user
+  // 2️⃣ Socket emit (frontend CAN see "GLOBAL")
   try {
     const io = getIO();
-    io.to(String(user_id)).emit("notification", notification);
+    io.to(String(user_id)).emit("notification", {
+      ...notification,
+      workspaceId: workspaceId || "GLOBAL",
+    });
   } catch (err) {
     console.error("Socket emit error:", err.message);
   }
 
-  // 3) Slack + internal "Project Manager" chat mirror
+  // 3️⃣ Slack + chat mirror
   try {
     const slackText = await buildSlackText({
       user_id,
@@ -204,23 +199,22 @@ export async function notifyUser({
       comment_id,
     });
 
-    // Mirror into internal chat group
     try {
       await mirrorProjectNotificationToChat({
         text: slackText,
         userId: user_id,
+        workspace_id: resolvedWorkspaceId, // 🔐 SAFE
       });
     } catch (err) {
       console.error("Project Manager chat mirror failed:", err.message);
     }
 
-    // Send to Slack
     await sendSlackWebhook(slackText);
   } catch (err) {
-    console.error("Slack / chat mirror build error:", err.message);
+    console.error("Slack / chat mirror error:", err.message);
   }
 
-  // 4) Optional email
+  // 4️⃣ Optional email
   sendEmailNotification(user_id, {
     type,
     message,
@@ -232,13 +226,24 @@ export async function notifyUser({
   return notification;
 }
 
-// List + read helpers
+// ─────────────────────────────
+// Read helpers
+// ─────────────────────────────
 
 export async function getUserNotifications(
   userId,
-  { unreadOnly = false } = {}
+  { unreadOnly = false, workspaceId = null } = {}
 ) {
-  return getNotificationsByUser(userId, { unreadOnly });
+ const resolvedWorkspaceId =
+  workspaceId && workspaceId !== WORKSPACE_GLOBAL
+    ? workspaceId
+    : null;
+
+
+  return getNotificationsByUser(userId, {
+    unreadOnly,
+    workspaceId: resolvedWorkspaceId,
+  });
 }
 
 export async function markOneRead(id, userId) {
@@ -248,3 +253,10 @@ export async function markOneRead(id, userId) {
 export async function markAllRead(userId) {
   await markAllNotificationsRead(userId);
 }
+
+export default {
+  notifyUser,
+  getUserNotifications,
+  markOneRead,
+  markAllRead,
+};

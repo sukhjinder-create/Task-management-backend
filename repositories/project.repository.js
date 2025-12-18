@@ -1,29 +1,45 @@
-import pool from "../db.js";      // ✅ new correct path
-
+import pool from "../db.js"; // ✅ correct path
 
 class ProjectRepository {
   async createProject(data) {
     const query = `
-      INSERT INTO projects (name, added_by)
-      VALUES ($1, $2)
+      INSERT INTO projects (name, added_by, workspace_id)
+      VALUES ($1, $2, $3)
       RETURNING *;
     `;
-    const values = [data.name, data.added_by];
+
+    const values = [
+      data.name,
+      data.added_by,
+      data.workspaceId || "GLOBAL",
+    ];
+
     const result = await pool.query(query, values);
     return result.rows[0];
   }
 
-  async getProjects() {
+  async getProjects(workspaceId = "GLOBAL") {
     const result = await pool.query(
-      "SELECT * FROM projects ORDER BY created_at DESC"
+      `
+      SELECT *
+      FROM projects
+      WHERE workspace_id = $1
+      ORDER BY created_at DESC
+      `,
+      [workspaceId]
     );
     return result.rows;
   }
 
-  async getProjectById(id) {
-    const result = await pool.query("SELECT * FROM projects WHERE id = $1", [
-      id
-    ]);
+  async getProjectById(id, workspaceId = "GLOBAL") {
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM projects
+      WHERE id = $1 AND workspace_id = $2
+      `,
+      [id, workspaceId]
+    );
     return result.rows[0];
   }
 
@@ -33,14 +49,28 @@ class ProjectRepository {
       SET name = $1,
           updated_at = NOW()
       WHERE id = $2
+        AND workspace_id = $3
       RETURNING *;
     `;
-    const result = await pool.query(query, [data.name, id]);
+
+    const values = [
+      data.name,
+      id,
+      data.workspaceId || "GLOBAL",
+    ];
+
+    const result = await pool.query(query, values);
     return result.rows[0];
   }
 
-  async deleteProject(id) {
-    await pool.query("DELETE FROM projects WHERE id = $1", [id]);
+  async deleteProject(id, workspaceId = "GLOBAL") {
+    await pool.query(
+      `
+      DELETE FROM projects
+      WHERE id = $1 AND workspace_id = $2
+      `,
+      [id, workspaceId]
+    );
     return true;
   }
 }

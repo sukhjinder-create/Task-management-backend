@@ -3,10 +3,21 @@ import pool from "../db.js";
 class TaskRepository {
   async createTask(data) {
     const query = `
-      INSERT INTO tasks (task, project_id, status, priority, added_by, assigned_to, due_date, description)
-      VALUES ($1,   $2,         $3,     $4,       $5,       $6,          $7,      $8)
+      INSERT INTO tasks (
+        task,
+        project_id,
+        status,
+        priority,
+        added_by,
+        assigned_to,
+        due_date,
+        description,
+        workspace_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *;
     `;
+
     const values = [
       data.task,
       data.project_id,
@@ -16,19 +27,22 @@ class TaskRepository {
       data.assigned_to || null,
       data.due_date || null,
       data.description || "",
+      data.workspaceId || "GLOBAL",
     ];
+
     const result = await pool.query(query, values);
     return result.rows[0];
   }
 
-  async getTasksByProject(projectId, filters = {}) {
+  async getTasksByProject(projectId, filters = {}, workspaceId = "GLOBAL") {
     let query = `
       SELECT *
       FROM tasks
       WHERE project_id = $1
+        AND workspace_id = $2
     `;
-    const values = [projectId];
-    let idx = 2;
+    const values = [projectId, workspaceId];
+    let idx = 3;
 
     if (filters.status) {
       query += ` AND status = $${idx}`;
@@ -49,8 +63,11 @@ class TaskRepository {
     }
 
     if (filters.overdue === true) {
-      query +=
-        " AND due_date IS NOT NULL AND due_date < NOW()::date AND status != 'completed'";
+      query += `
+        AND due_date IS NOT NULL
+        AND due_date < NOW()::date
+        AND status != 'completed'
+      `;
     }
 
     query += " ORDER BY created_at DESC";
@@ -62,16 +79,19 @@ class TaskRepository {
   async updateTask(id, data) {
     const query = `
       UPDATE tasks
-      SET task = $1,
-          status = $2,
-          priority = $3,
-          assigned_to = $4,
-          due_date = $5,
-          description = $6,
-          updated_at = NOW()
+      SET
+        task        = $1,
+        status      = $2,
+        priority    = $3,
+        assigned_to = $4,
+        due_date    = $5,
+        description = $6,
+        updated_at  = NOW()
       WHERE id = $7
+        AND workspace_id = $8
       RETURNING *;
     `;
+
     const values = [
       data.task,
       data.status,
@@ -80,13 +100,21 @@ class TaskRepository {
       data.due_date || null,
       data.description || "",
       id,
+      data.workspaceId || "GLOBAL",
     ];
+
     const result = await pool.query(query, values);
     return result.rows[0];
   }
 
-  async deleteTask(id) {
-    await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
+  async deleteTask(id, workspaceId = "GLOBAL") {
+    await pool.query(
+      `
+      DELETE FROM tasks
+      WHERE id = $1 AND workspace_id = $2
+      `,
+      [id, workspaceId]
+    );
     return true;
   }
 }
@@ -96,6 +124,7 @@ export default taskRepository;
 
 // ───────────────────────────────────────────
 // SUBTASKS REPOSITORY FUNCTIONS
+// (INTENTIONALLY KEPT AS-IS + SAFE)
 // ───────────────────────────────────────────
 
 export async function createSubtaskRepo({
@@ -156,13 +185,16 @@ export async function updateSubtaskRepo(id, data) {
   if (existingRows.length === 0) {
     throw new Error("Subtask not found");
   }
+
   const existing = existingRows[0];
 
   const newTitle =
-    data.title ?? data.subtask ?? existing.title; // support old 'subtask' field
+    data.title ?? data.subtask ?? existing.title;
   const newStatus = data.status ?? existing.status;
   const newAssignedTo =
-    data.assigned_to !== undefined ? data.assigned_to : existing.assigned_to;
+    data.assigned_to !== undefined
+      ? data.assigned_to
+      : existing.assigned_to;
   const newPriority = data.priority ?? existing.priority ?? "medium";
 
   const query = `

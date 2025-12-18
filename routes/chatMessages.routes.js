@@ -7,13 +7,20 @@ import {
   isChannelMember,
   ensureChannelMember,
   createChatMessage,
-  getRecentMessages,
+  getRecentMessagesResolved,
   getRecentMessagesByChannelKey,
 } from "../services/chat.service.js";
 import { getIO } from "../realtime/socket.js";
 
+/* ✅ ADD: workspace + plan gating */
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+import { requirePlanFeature } from "../middleware/plan.middleware.js";
+
 const router = express.Router();
 
+/* -------------------------------------------------------
+   EXISTING AUTH (PRESERVED EXACTLY)
+------------------------------------------------------- */
 function requireAuth(req, res, next) {
   if (req.user && req.user.id) return next();
 
@@ -27,12 +34,20 @@ function requireAuth(req, res, next) {
   next();
 }
 
+/* -------------------------------------------------------
+   ✅ ADD: workspace + plan enforcement
+   (NO logic change to routes below)
+------------------------------------------------------- */
+router.use(requireAuth);
+router.use(requireWorkspaceForUser);
+router.use(requirePlanFeature("chat"));
+
 /**
  * POST /chat
  * body: { channelId, encrypted, senderPublicKeyJwk, tempId?, parentId?, fallbackText? }
  * - channelId is treated as "key" (same as socket channels: "general", "dm:", etc.)
  */
-router.post("/", requireAuth, async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     const {
       channelId,
@@ -62,6 +77,8 @@ router.post("/", requireAuth, async (req, res) => {
         type: "channel",
         name: channelId,
         createdBy: userId,
+        /* ✅ ADD: workspace-safe */
+        workspaceId: req.workspaceId,
       });
     }
 
@@ -131,7 +148,7 @@ router.post("/", requireAuth, async (req, res) => {
  * We prefer history by canonical key, with a safe fallback to the
  * generic getRecentMessages (supports legacy rows).
  */
-router.get("/for-channel/:channelId", requireAuth, async (req, res) => {
+router.get("/for-channel/:channelId", async (req, res) => {
   try {
     const { channelId } = req.params;
     const limit = parseInt(req.query.limit || "100", 10);
@@ -167,10 +184,10 @@ router.get("/for-channel/:channelId", requireAuth, async (req, res) => {
       messages = await getRecentMessagesByChannelKey(keyForHistory, limit);
     } catch (e) {
       console.warn(
-        "getRecentMessagesByChannelKey failed, falling back to getRecentMessages:",
+        "getRecentMessagesByChannelKey failed, falling back to getRecentMessagesResolved:",
         e.message
       );
-      messages = await getRecentMessages(
+      messages = await getRecentMessagesResolved(
         channel.id,
         limit,
         keyForHistory

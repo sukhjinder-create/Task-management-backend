@@ -11,6 +11,8 @@ const FRONTEND_BASE_URL =
 /**
  * Safely send a message to Slack via incoming webhook.
  * If SLACK_WEBHOOK_URL is not set, this still mirrors into internal chat.
+ *
+ * Accepts optional workspaceId so the mirroring goes into the right workspace.
  */
 export async function sendSlackNotification({
   user_id,
@@ -18,6 +20,7 @@ export async function sendSlackNotification({
   message,
   task_id = null,
   project_id = null,
+  workspaceId = null,
 }) {
   try {
     // Build a simple link back into the app
@@ -46,12 +49,12 @@ export async function sendSlackNotification({
       appLink ? `\n<${appLink}|Open in TaskManager>` : ""
     }`;
 
-    // Mirror this notification into internal "Project Manager" chat group
+    // Mirror this notification into internal "Project Manager" chat group (workspace-aware)
     try {
-      await mirrorProjectNotificationToChat({
-        text,
-        userId: user_id,
-      });
+      await mirrorProjectNotificationToChat({ text: slackText,
+  userId: user_id,
+});
+
     } catch (err) {
       console.error(
         "Internal chat mirror (projects) failed:",

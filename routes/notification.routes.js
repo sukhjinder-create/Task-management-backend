@@ -1,4 +1,3 @@
-// routes/notification.routes.js
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import {
@@ -9,13 +8,35 @@ import {
 
 const router = express.Router();
 
-// GET /notifications?unread=true|false
-router.get("/", authMiddleware, async (req, res) => {
+/**
+ * 🔐 AUTH REQUIRED
+ * ⚠️ Workspace is OPTIONAL for notifications (Option A)
+ */
+router.use(authMiddleware);
+
+/**
+ * GET /notifications?unread=true|false
+ * Returns notifications for:
+ * - current user
+ * - workspace-aware if available
+ * - fallback-safe if workspace is missing
+ */
+router.get("/", async (req, res) => {
   try {
     const unreadOnly = req.query.unread === "true";
-    const notifications = await getUserNotifications(req.user.id, {
-      unreadOnly,
-    });
+
+const workspaceId =
+  req.workspaceId === "GLOBAL" ? null : req.workspaceId;
+
+const notifications = await getUserNotifications(
+  req.user.id,
+  {
+    unreadOnly,
+    workspaceId, // UUID or null ONLY
+  }
+);
+
+
     res.json(notifications);
   } catch (err) {
     console.error("Error fetching notifications:", err);
@@ -23,13 +44,21 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-// POST /notifications/:id/read
-router.post("/:id/read", authMiddleware, async (req, res) => {
+/**
+ * POST /notifications/:id/read
+ * Mark ONE notification as read
+ */
+router.post("/:id/read", async (req, res) => {
   try {
-    const updated = await markOneRead(req.params.id, req.user.id);
+    const updated = await markOneRead(
+      req.params.id,
+      req.user.id
+    );
+
     if (!updated) {
       return res.status(404).json({ error: "Notification not found" });
     }
+
     res.json(updated);
   } catch (err) {
     console.error("Error marking notification read:", err);
@@ -37,8 +66,11 @@ router.post("/:id/read", authMiddleware, async (req, res) => {
   }
 });
 
-// POST /notifications/mark-all-read
-router.post("/mark-all-read", authMiddleware, async (req, res) => {
+/**
+ * POST /notifications/mark-all-read
+ * Mark ALL notifications read
+ */
+router.post("/mark-all-read", async (req, res) => {
   try {
     await markAllRead(req.user.id);
     res.json({ success: true });

@@ -7,6 +7,7 @@ import {
   updateSubtaskRepo,
   deleteSubtaskRepo,
 } from "../repositories/task.repository.js";
+import projectRepository from "../repositories/project.repository.js";
 
 /**
  * NOTE: make sure you have this in DB:
@@ -14,6 +15,27 @@ import {
  * ALTER TABLE tasks
  *   ADD COLUMN IF NOT EXISTS priority VARCHAR(20) DEFAULT 'medium';
  */
+
+/* -------------------------------------------------------
+   🔒 WORKSPACE SAFETY (ADD-ONLY)
+------------------------------------------------------- */
+
+async function assertProjectInWorkspace(projectId, workspaceId) {
+  const project = await projectRepository.getProjectById(
+    projectId,
+    workspaceId
+  );
+
+  if (!project) {
+    throw new Error("Project not found in this workspace");
+  }
+
+  return project;
+}
+
+/* -------------------------------------------------------
+   TASK QUERIES
+------------------------------------------------------- */
 
 // Get a single task by id (with subtask counts)
 export async function getTaskById(id) {
@@ -44,8 +66,6 @@ export async function getTaskById(id) {
 
 /**
  * Create a task
- * description is stored in the tasks.description column
- * priority is optional, defaults to "medium"
  */
 export async function createTask({
   task,
@@ -56,10 +76,14 @@ export async function createTask({
   due_date = null,
   description = "",
   priority = "medium",
+  workspaceId, // 🔹 ADD-ONLY
 }) {
   if (!task || !project_id || !added_by) {
     throw new Error("task, project_id and added_by are required");
   }
+
+  // 🔒 workspace check
+  await assertProjectInWorkspace(project_id, workspaceId);
 
   const assigned = assigned_to || null;
 
@@ -82,7 +106,6 @@ export async function createTask({
   const { rows } = await pool.query(query, values);
   const created = rows[0];
 
-  // Notify assignee if there is one
   if (created.assigned_to) {
     await notifyUser({
       user_id: created.assigned_to,
@@ -93,7 +116,6 @@ export async function createTask({
     });
   }
 
-  // New task has 0 subtasks; front-end can treat missing counts as 0
   return {
     ...created,
     subtasks_total: 0,
@@ -102,17 +124,12 @@ export async function createTask({
 }
 
 /**
- * Get tasks for a project, filtered by role:
- * - admin/manager: all tasks in the project (optionally filtered)
- * - user: only tasks assigned_to that user
- *
- * filters:
- *  - status
- *  - priority
- *  - assigned_to (ignored for normal users)
- *  - overdue: true/false
+ * Get tasks for a project
  */
 export async function getTasksByProjectForUser(projectId, user, filters = {}) {
+  // 🔒 workspace check
+  await assertProjectInWorkspace(projectId, user.workspaceId);
+
   const values = [projectId];
   let idx = 2;
 
@@ -133,13 +150,11 @@ export async function getTasksByProjectForUser(projectId, user, filters = {}) {
     WHERE t.project_id = $1
   `;
 
-  // Normal user → only tasks assigned to themselves
   if (user.role === "user") {
     query += ` AND t.assigned_to = $${idx}`;
     values.push(user.id);
     idx++;
   } else if (filters.assigned_to) {
-    // Admin / manager can filter by assignee
     query += ` AND t.assigned_to = $${idx}`;
     values.push(filters.assigned_to);
     idx++;
@@ -170,11 +185,13 @@ export async function getTasksByProjectForUser(projectId, user, filters = {}) {
 }
 
 /**
- * Update a task as admin/manager:
- * can change title, status, assigned_to, due_date, description, priority
+ * Update a task as admin/manager
  */
 export async function updateTaskAsAdminOrManager(id, data) {
   const existing = await getTaskById(id);
+
+  // 🔒 workspace check
+  await assertProjectInWorkspace(existing.project_id, data.workspaceId);
 
   const newTaskText = data.task ?? existing.task;
   const newStatus = data.status ?? existing.status;
@@ -201,7 +218,8 @@ export async function updateTaskAsAdminOrManager(id, data) {
     WHERE id = $7
     RETURNING *;
   `;
-  const values = [
+
+  const { rows } = await pool.query(query, [
     newTaskText,
     newStatus,
     newAssignedTo,
@@ -209,20 +227,11 @@ export async function updateTaskAsAdminOrManager(id, data) {
     newDescription,
     newPriority,
     id,
-  ];
+  ]);
 
-  const { rows } = await pool.query(query, values);
-  if (rows.length === 0) {
-    throw new Error("Task not found after update");
-  }
   const updated = rows[0];
 
-  const statusChanged = existing.status !== updated.status;
-  const assigneeChanged =
-    String(existing.assigned_to || "") !==
-    String(updated.assigned_to || "");
-
-  if (updated.assigned_to && (statusChanged || assigneeChanged)) {
+  if (updated.assigned_to) {
     await notifyUser({
       user_id: updated.assigned_to,
       type: "task_updated",
@@ -232,50 +241,40 @@ export async function updateTaskAsAdminOrManager(id, data) {
     });
   }
 
-  // Return with subtask counts
   return await getTaskById(id);
 }
 
 /**
- * Update status as a normal user:
- * only allowed if the task is assigned_to that user
+ * Update status as a normal user
  */
-export async function updateTaskStatusAsUser(id, userId, newStatus) {
+export async function updateTaskStatusAsUser(id, userId, workspaceId, newStatus) {
   const existing = await getTaskById(id);
+
+  // 🔒 workspace check
+  await assertProjectInWorkspace(existing.project_id, workspaceId);
 
   if (existing.assigned_to !== userId) {
     throw new Error("You are not allowed to update this task");
   }
 
-  const query = `
-    UPDATE tasks
-    SET status = $1,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = $2
-    RETURNING *;
-  `;
-  const { rows } = await pool.query(query, [newStatus, id]);
-  if (rows.length === 0) {
-    throw new Error("Task not found after update");
-  }
+  await pool.query(
+    `UPDATE tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [newStatus, id]
+  );
 
-  // Return with subtask counts
   return await getTaskById(id);
 }
 
 /**
- * Delete task (admin/manager)
+ * Delete task
  */
-export async function deleteTask(id) {
+export async function deleteTask(id, workspaceId) {
   const existing = await getTaskById(id);
 
-  const { rowCount } = await pool.query(
-    `DELETE FROM tasks WHERE id = $1`,
-    [id]
-  );
-  if (rowCount === 0) {
-    throw new Error("Task not found");
-  }
+  // 🔒 workspace check
+  await assertProjectInWorkspace(existing.project_id, workspaceId);
+
+  await pool.query(`DELETE FROM tasks WHERE id = $1`, [id]);
 
   if (existing.assigned_to) {
     await notifyUser({
@@ -288,13 +287,12 @@ export async function deleteTask(id) {
   }
 }
 
-/**
- * Create subtask
- */
-export async function createSubtask(data) {
-  // Accept either .title or .subtask from frontend
-  const title = data.title ?? data.subtask;
+/* -------------------------------------------------------
+   SUBTASKS (INHERIT SAFETY VIA PARENT TASK)
+------------------------------------------------------- */
 
+export async function createSubtask(data) {
+  const title = data.title ?? data.subtask;
   if (!data.task_id || !title) {
     throw new Error("task_id and title are required");
   }
@@ -308,46 +306,30 @@ export async function createSubtask(data) {
     added_by: data.added_by || null,
   });
 
-  // also recompute parent progress after creating subtask
   await recomputeParentProgress(created.task_id);
-
   return created;
 }
 
-/**
- * Get all subtasks of task
- */
 export async function getSubtasks(taskId) {
   return await getSubtasksRepo(taskId);
 }
 
-/**
- * Update subtask
- */
 export async function updateSubtask(id, body) {
   const updated = await updateSubtaskRepo(id, body);
-
-  // Auto recompute parent
   await recomputeParentProgress(updated.task_id);
-
   return updated;
 }
 
-/**
- * Delete subtask
- */
 export async function deleteSubtask(id) {
   const deleted = await deleteSubtaskRepo(id);
-
-  if (deleted && deleted.task_id) {
+  if (deleted?.task_id) {
     await recomputeParentProgress(deleted.task_id);
   }
-
   return deleted;
 }
 
 /**
- * Auto-update parent task progress based on subtasks
+ * Auto-update parent task progress
  */
 async function recomputeParentProgress(taskId) {
   const { rows } = await pool.query(
@@ -356,7 +338,6 @@ async function recomputeParentProgress(taskId) {
   );
 
   if (rows.length === 0) {
-    // No subtasks → reset progress to 0 and don't force status
     await pool.query(
       `UPDATE tasks SET progress = 0, updated_at = now() WHERE id = $1`,
       [taskId]

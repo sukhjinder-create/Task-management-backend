@@ -1,6 +1,6 @@
-// routes/comment.routes.js
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   createComment,
   getCommentsByTask,
@@ -8,10 +8,22 @@ import {
 
 const router = express.Router();
 
-// GET /comments/:taskId  -> comments for a task
-router.get("/:taskId", authMiddleware, async (req, res) => {
+/**
+ * 🔐 AUTH + WORKSPACE REQUIRED
+ */
+router.use(authMiddleware);
+router.use(requireWorkspaceForUser);
+
+/**
+ * GET /comments/:taskId
+ * Get comments for a task (workspace isolated)
+ */
+router.get("/:taskId", async (req, res) => {
   try {
-    const comments = await getCommentsByTask(req.params.taskId);
+    const comments = await getCommentsByTask(
+      req.params.taskId,
+      req.workspaceId // 🔐 enforced
+    );
     res.json(comments);
   } catch (err) {
     console.error("Error fetching comments:", err);
@@ -21,9 +33,10 @@ router.get("/:taskId", authMiddleware, async (req, res) => {
 
 /**
  * POST /comments/:taskId
- * This matches the frontend: api.post(`/comments/${taskId}`, { comment_text })
+ * Frontend usage:
+ * api.post(`/comments/${taskId}`, { comment_text })
  */
-router.post("/:taskId", authMiddleware, async (req, res) => {
+router.post("/:taskId", async (req, res) => {
   try {
     const { taskId } = req.params;
     const { comment_text } = req.body;
@@ -35,33 +48,42 @@ router.post("/:taskId", authMiddleware, async (req, res) => {
     const comment = await createComment({
       task_id: taskId,
       comment_text,
-      // we store the username as added_by if not explicitly provided
       added_by: req.user.username,
+      workspaceId: req.workspaceId, // 🔐 enforced
     });
 
     res.status(201).json(comment);
   } catch (err) {
-    console.error("Error creating comment (POST /comments/:taskId):", err);
+    console.error("Error creating comment:", err);
     res.status(400).json({ error: err.message });
   }
 });
 
 /**
- * Existing route: POST /comments
- * Kept for compatibility with any existing tools / Postman usage.
- * Body must include: { task_id, comment_text, added_by? }
+ * POST /comments
+ * Legacy / compatibility route
+ * Body: { task_id, comment_text, added_by? }
  */
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     const { task_id, comment_text, added_by } = req.body;
+
+    if (!task_id || !comment_text) {
+      return res.status(400).json({
+        error: "task_id and comment_text are required",
+      });
+    }
+
     const comment = await createComment({
       task_id,
       comment_text,
       added_by: added_by || req.user.username,
+      workspaceId: req.workspaceId, // 🔐 enforced
     });
+
     res.status(201).json(comment);
   } catch (err) {
-    console.error("Error creating comment (POST /comments):", err);
+    console.error("Error creating comment (legacy):", err);
     res.status(400).json({ error: err.message });
   }
 });
