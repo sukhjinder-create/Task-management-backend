@@ -1,43 +1,170 @@
-// src/services/attendance.service.js
+import pool from "../db.js";
+import { randomUUID } from "crypto";
 import { getUserById } from "../repositories/user.repository.js";
 import { mirrorAvailabilityToChat } from "./systemChatBot.service.js";
 
 const WORKSPACE_GLOBAL = "GLOBAL";
 
+/* ------------------------------------------------------------
+   EVENT TYPES — MUST MATCH DB CHECK CONSTRAINT
+------------------------------------------------------------ */
+const EVENT = {
+  SIGN_IN: "SIGN_IN",
+  SIGN_OFF: "SIGN_OFF",
+  AWS_START: "AWS_START",
+  AWS_END: "AWS_END",
+  LUNCH_START: "LUNCH_START",
+  LUNCH_END: "LUNCH_END",
+  AVAILABLE: "AVAILABLE",
+  SCREEN_ON: "SCREEN_ON",
+  SCREEN_OFF: "SCREEN_OFF",
+};
+
 // Separate attendance webhook if you want a different Slack group.
-// Falls back to the main SLACK_WEBHOOK_URL if ATTENDANCE_SLACK_WEBHOOK_URL is not set.
 const ATTENDANCE_SLACK_WEBHOOK_URL =
   process.env.ATTENDANCE_SLACK_WEBHOOK_URL ||
   process.env.SLACK_WEBHOOK_URL ||
   null;
 
-/**
- * Workspace-aware sendAttendanceSlack.
- * Keep workspaceId optional and default to WORKSPACE_GLOBAL.
- */
+/* ------------------------------------------------------------
+   🧠 SESSION TRACKING (IN-MEMORY, SAFE)
+------------------------------------------------------------ */
+// userId -> sessionId
+const attendanceSessionByUser = new Map();
 
-async function sendAttendanceSlack(
-  text,
+/* ------------------------------------------------------------
+   🧠 AWS STATE TRACKING (UNCHANGED)
+------------------------------------------------------------ */
+// userId -> { startedAt, plannedMinutes }
+const awsStateByUser = new Map();
+
+/* ------------------------------------------------------------
+   🧠 ATTENDANCE SESSION DB HELPERS (ADD-ONLY)
+------------------------------------------------------------ */
+async function createSession({ sessionId, userId, workspaceId }) {
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) return;
+
+  await pool.query(
+    `
+    INSERT INTO attendance_sessions (
+      id,
+      user_id,
+      workspace_id,
+      sign_in_at
+    )
+    VALUES ($1, $2, $3, now())
+    `,
+    [sessionId, userId, workspaceId]
+  );
+}
+
+async function closeSession(sessionId) {
+  if (!sessionId) return;
+
+  await pool.query(
+    `
+    UPDATE attendance_sessions
+    SET sign_off_at = now()
+    WHERE id = $1
+    `,
+    [sessionId]
+  );
+}
+
+/* ------------------------------------------------------------
+   🔍 OPEN SESSION LOOKUP (ADD-ONLY)
+------------------------------------------------------------ */
+async function getOpenSessionId(userId, workspaceId) {
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) return null;
+
+  const { rows } = await pool.query(
+    `
+    SELECT id
+    FROM attendance_sessions
+    WHERE user_id = $1
+      AND workspace_id = $2
+      AND sign_off_at IS NULL
+    LIMIT 1
+    `,
+    [userId, workspaceId]
+  );
+
+  return rows[0]?.id || null;
+}
+
+/* ------------------------------------------------------------
+   🔥 HARD SESSION RESET (ADD-ONLY)
+------------------------------------------------------------ */
+async function forceCloseOpenSessions(userId, workspaceId) {
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) return;
+
+  await pool.query(
+    `
+    UPDATE attendance_sessions
+    SET sign_off_at = now()
+    WHERE user_id = $1
+      AND workspace_id = $2
+      AND sign_off_at IS NULL
+    `,
+    [userId, workspaceId]
+  );
+}
+
+/* ------------------------------------------------------------
+   🧠 SAFE DB INSERT (UNCHANGED)
+------------------------------------------------------------ */
+async function recordAttendanceEvent({
   userId,
-  workspaceId
-) {
-  // 🔐 MUST have workspace for chat
-  if (workspaceId) {
+  workspaceId,
+  sessionId,
+  eventType,
+  startedAt = new Date(),
+  endedAt = null,
+}) {
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) {
+    return;
+  }
+
+  if (!sessionId) {
+    console.warn(
+      "[attendance] Missing sessionId, skipping DB insert",
+      { userId, eventType }
+    );
+    return;
+  }
+
+  await pool.query(
+    `
+    INSERT INTO attendance_events (
+      session_id,
+      user_id,
+      workspace_id,
+      event_type,
+      started_at,
+      ended_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6)
+    `,
+    [sessionId, userId, workspaceId, eventType, startedAt, endedAt]
+  );
+}
+
+/* ------------------------------------------------------------
+   CHAT + SLACK (UNCHANGED)
+------------------------------------------------------------ */
+async function sendAttendanceSlack(text, userId, workspaceId) {
+  if (workspaceId && workspaceId !== WORKSPACE_GLOBAL) {
     try {
       await mirrorAvailabilityToChat({
-  text,
-  userId,
-  workspaceId:
-    workspaceId && workspaceId !== "GLOBAL"
-      ? workspaceId
-      : null,
-});
+        text,
+        userId,
+        workspaceId,
+      });
     } catch (err) {
       console.error("Attendance chat mirror failed:", err.message);
     }
   }
 
-  // 📣 Slack is independent
   if (!ATTENDANCE_SLACK_WEBHOOK_URL) return;
 
   try {
@@ -51,181 +178,232 @@ async function sendAttendanceSlack(
   }
 }
 
-
-// In-memory AWS state per user: { startedAt: Date, plannedMinutes: number }
-const awsStateByUser = new Map();
-
 /* ------------------------------------------------------------
-   Workspace-aware attendance functions (original canonical)
-   These accept an optional workspaceId (default WORKSPACE_GLOBAL).
+   ATTENDANCE ACTIONS
 ------------------------------------------------------------ */
 
 /**
- * Mark user as signed in (available).
- * Accepts optional workspaceId so route can pass req.workspaceId.
+ * SIGN IN
  */
-export async function markSignIn(userId, workspaceId = WORKSPACE_GLOBAL) {
+export async function markSignIn(userId, workspaceId) {
   const user = await getUserById(userId);
   const name = user?.username || "Unknown user";
 
-  // ✅ Use real emoji instead of :white_check_mark:
-  const text = `✅ *${name}* has *signed in* and is now available.`;
-  await sendAttendanceSlack(text, userId, workspaceId);
+  // 🛑 HARD GUARD — prevent duplicate chat / sign-in spam
+  const existingSessionId = await getOpenSessionId(userId, workspaceId);
+  if (existingSessionId) {
+    attendanceSessionByUser.set(String(userId), existingSessionId);
+    return; // 🚫 do NOTHING else
+  }
 
-  // Signing in should clear AWS state, if any
-  awsStateByUser.delete(String(userId));
-}
+  // 🔥 HARD RESET — close any orphaned session (safety net)
+  await forceCloseOpenSessions(userId, workspaceId);
 
-/**
- * Mark user as signed off.
- */
-export async function markSignOff(userId, workspaceId = WORKSPACE_GLOBAL) {
-  const user = await getUserById(userId);
-  const name = user?.username || "Unknown user";
+  const sessionId = randomUUID();
+  attendanceSessionByUser.set(String(userId), sessionId);
 
-  // 👋 instead of :wave:
-  const text = `👋 *${name}* has *signed off* and is no longer available.`;
-  await sendAttendanceSlack(text, userId, workspaceId);
+  await createSession({ sessionId, userId, workspaceId });
 
-  // Signing off also clears AWS state
-  awsStateByUser.delete(String(userId));
-}
-
-/**
- * Mark user as AWS (away from system) for a certain number of minutes.
- */
-export async function markAws(userId, minutes, workspaceId = WORKSPACE_GLOBAL) {
-  const user = await getUserById(userId);
-  const name = user?.username || "Unknown user";
-  const mins = Number(minutes) || 0;
-
-  const now = new Date();
-  const until = new Date(now.getTime() + mins * 60 * 1000);
-
-  awsStateByUser.set(String(userId), {
-    startedAt: now,
-    plannedMinutes: mins,
+  await recordAttendanceEvent({
+    userId,
+    workspaceId,
+    sessionId,
+    eventType: EVENT.SIGN_IN,
   });
 
-  const untilTime = until.toTimeString().slice(0, 5); // HH:MM
-
-  // ⏸️ instead of :pause_button:
-  const text = `⏸️ *${name}* is *AWS* (away from system) for approximately *${mins} minute(s)* (until around *${untilTime}*).`;
-  await sendAttendanceSlack(text, userId, workspaceId);
-}
-
-/**
- * Mark user as on lunch.
- * No time tracking; just a one-shot event.
- */
-export async function markLunch(userId, workspaceId = WORKSPACE_GLOBAL) {
-  const user = await getUserById(userId);
-  const name = user?.username || "Unknown user";
-
-  // Starting lunch also clears any AWS state if it existed.
   awsStateByUser.delete(String(userId));
 
-  // 🍽️ instead of :fork_and_knife:
-  const text = `🍽️ *${name}* has started a *lunch break* and is temporarily unavailable.`;
-  await sendAttendanceSlack(text, userId, workspaceId);
+  await sendAttendanceSlack(
+    `✅ *${name}* has *signed in* and is now available.`,
+    userId,
+    workspaceId
+  );
 }
 
 /**
- * Mark the user as available again after AWS or lunch.
- * If AWS state is known, include how early/late they are.
- * If not, send a generic "available again" message.
+ * SIGN OFF
  */
-export async function markAvailableAfterAws(userId, workspaceId = WORKSPACE_GLOBAL) {
+export async function markSignOff(userId, workspaceId) {
   const user = await getUserById(userId);
   const name = user?.username || "Unknown user";
 
   const key = String(userId);
-  const state = awsStateByUser.get(key);
-  awsStateByUser.delete(key);
+  let sessionId = attendanceSessionByUser.get(key);
 
-  if (!state) {
-    // No AWS record → generic message (also used when returning from lunch)
-    // ▶️ instead of :arrow_forward:
-    const text = `▶️ *${name}* is *available* again.`;
-    await sendAttendanceSlack(text, userId, workspaceId);
+  if (!sessionId) {
+    sessionId = await getOpenSessionId(userId, workspaceId);
+  }
+
+  if (!sessionId) {
+    console.warn("[attendance] No open session found for sign-off", {
+      userId,
+      workspaceId,
+    });
     return;
   }
 
+  await recordAttendanceEvent({
+    userId,
+    workspaceId,
+    sessionId,
+    eventType: EVENT.SIGN_OFF,
+    endedAt: new Date(),
+  });
+
+  await closeSession(sessionId);
+
+  awsStateByUser.delete(key);
+  attendanceSessionByUser.delete(key);
+
+  await sendAttendanceSlack(
+    `👋 *${name}* has *signed off* and is no longer available.`,
+    userId,
+    workspaceId
+  );
+}
+
+/**
+ * AWS START
+ */
+export async function markAws(userId, minutes, workspaceId) {
+  const user = await getUserById(userId);
+  const name = user?.username || "Unknown user";
+  const mins = Number(minutes) || 0;
+
+  const key = String(userId);
+  const sessionId = attendanceSessionByUser.get(key);
+  if (!sessionId) return;
+
   const now = new Date();
-  const diffMs = now.getTime() - state.startedAt.getTime();
-  let elapsed = Math.round(diffMs / 60000);
-  if (elapsed <= 0) elapsed = 1;
+
+  awsStateByUser.set(key, {
+    startedAt: now,
+    plannedMinutes: mins,
+  });
+
+  await recordAttendanceEvent({
+    userId,
+    workspaceId,
+    sessionId,
+    eventType: EVENT.AWS_START,
+    startedAt: now,
+  });
+
+  await sendAttendanceSlack(
+    `⏸️ *${name}* is *AWS* for approximately *${mins} minute(s)*.`,
+    userId,
+    workspaceId
+  );
+}
+
+/**
+ * LUNCH START
+ */
+export async function markLunch(userId, workspaceId) {
+  const user = await getUserById(userId);
+  const name = user?.username || "Unknown user";
+
+  const key = String(userId);
+  const sessionId = attendanceSessionByUser.get(key);
+  if (!sessionId) return;
+
+  awsStateByUser.delete(key);
+
+  await recordAttendanceEvent({
+    userId,
+    workspaceId,
+    sessionId,
+    eventType: EVENT.LUNCH_START,
+  });
+
+  await sendAttendanceSlack(
+    `🍽️ *${name}* has started a *lunch break*.`,
+    userId,
+    workspaceId
+  );
+}
+
+/**
+ * AVAILABLE AGAIN
+ */
+export async function markAvailableAfterAws(userId, workspaceId) {
+  const user = await getUserById(userId);
+  const name = user?.username || "Unknown user";
+
+  const key = String(userId);
+  const sessionId = attendanceSessionByUser.get(key);
+  if (!sessionId) return;
+
+  const state = awsStateByUser.get(key);
+  awsStateByUser.delete(key);
+
+  await recordAttendanceEvent({
+    userId,
+    workspaceId,
+    sessionId,
+    eventType: EVENT.AVAILABLE,
+  });
+
+  if (!state) {
+    await sendAttendanceSlack(
+      `▶️ *${name}* is *available* again.`,
+      userId,
+      workspaceId
+    );
+    return;
+  }
+
+  const elapsed = Math.max(
+    1,
+    Math.round((Date.now() - state.startedAt) / 60000)
+  );
 
   const planned = state.plannedMinutes;
 
-  let extraNote = "";
-  if (elapsed < planned) {
-    extraNote = ` (back *earlier* than planned: AWS was ${planned} min, returned after ~${elapsed} min)`;
-  } else if (elapsed > planned) {
-    extraNote = ` (back *later* than planned: AWS was ${planned} min, returned after ~${elapsed} min)`;
-  } else {
-    extraNote = ` (back as planned after ~${elapsed} min)`;
-  }
+  let note = "";
+  if (elapsed < planned) note = ` (returned earlier than planned)`;
+  else if (elapsed > planned) note = ` (returned later than planned)`;
+  else note = ` (returned as planned)`;
 
-  const text = `▶️ *${name}* is *available* again${extraNote}.`;
-  await sendAttendanceSlack(text, userId, workspaceId);
+  await sendAttendanceSlack(
+    `▶️ *${name}* is *available* again${note}.`,
+    userId,
+    workspaceId
+  );
 }
 
 /* ------------------------------------------------------------
-   Legacy (non-workspace) wrappers
-   These preserve the exact no-workspace signatures from the second file.
-   They simply call the workspace-aware functions with WORKSPACE_GLOBAL.
-   This keeps existing callers (that expect the shorter signature) working
-   while also preserving the workspace-capable API.
+   LEGACY WRAPPERS (UNCHANGED)
 ------------------------------------------------------------ */
-
-/**
- * Legacy wrapper: markSignIn(userId)
- * Calls markSignIn(userId, WORKSPACE_GLOBAL)
- */
 export async function markSignInLegacy(userId) {
   return markSignIn(userId, WORKSPACE_GLOBAL);
 }
 
-/**
- * Legacy wrapper: markSignOff(userId)
- */
 export async function markSignOffLegacy(userId) {
   return markSignOff(userId, WORKSPACE_GLOBAL);
 }
 
-/**
- * Legacy wrapper: markAws(userId, minutes)
- */
 export async function markAwsLegacy(userId, minutes) {
   return markAws(userId, minutes, WORKSPACE_GLOBAL);
 }
 
-/**
- * Legacy wrapper: markLunch(userId)
- */
 export async function markLunchLegacy(userId) {
   return markLunch(userId, WORKSPACE_GLOBAL);
 }
 
-/**
- * Legacy wrapper: markAvailableAfterAws(userId)
- */
 export async function markAvailableAfterAwsLegacy(userId) {
   return markAvailableAfterAws(userId, WORKSPACE_GLOBAL);
 }
 
 /* ------------------------------------------------------------
-   Default export (includes both workspace-aware + legacy wrappers)
+   DEFAULT EXPORT (UNCHANGED)
 ------------------------------------------------------------ */
 export default {
-  // workspace-aware
   markSignIn,
   markSignOff,
   markAws,
   markLunch,
   markAvailableAfterAws,
-  // legacy wrappers (no workspace param)
   markSignInLegacy,
   markSignOffLegacy,
   markAwsLegacy,

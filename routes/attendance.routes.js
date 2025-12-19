@@ -17,7 +17,7 @@ const router = express.Router();
  */
 router.post("/sign-in", authMiddleware, async (req, res) => {
   try {
-    await markSignIn(req.user.id);
+    await markSignIn(req.user.id, req.workspaceId);
     res.json({ success: true });
   } catch (err) {
     console.error("Error sign-in attendance:", err);
@@ -31,7 +31,7 @@ router.post("/sign-in", authMiddleware, async (req, res) => {
  */
 router.post("/sign-off", authMiddleware, async (req, res) => {
   try {
-    await markSignOff(req.user.id);
+    await markSignOff(req.user.id, req.workspaceId);
     res.json({ success: true });
   } catch (err) {
     console.error("Error sign-off attendance:", err);
@@ -58,7 +58,7 @@ router.post("/aws", authMiddleware, async (req, res) => {
     // Clamp to avoid crazy values (max 8 hours)
     const safeMinutes = Math.min(mins, 8 * 60);
 
-    await markAws(req.user.id, safeMinutes);
+    await markAws(req.user.id, safeMinutes, req.workspaceId);
     res.json({ success: true, minutes: safeMinutes });
   } catch (err) {
     console.error("Error AWS attendance:", err);
@@ -72,7 +72,7 @@ router.post("/aws", authMiddleware, async (req, res) => {
  */
 router.post("/lunch", authMiddleware, async (req, res) => {
   try {
-    await markLunch(req.user.id);
+    await markLunch(req.user.id, req.workspaceId);
     res.json({ success: true });
   } catch (err) {
     console.error("Error lunch attendance:", err);
@@ -88,7 +88,7 @@ router.post("/lunch", authMiddleware, async (req, res) => {
  */
 router.post("/available", authMiddleware, async (req, res) => {
   try {
-    await markAvailableAfterAws(req.user.id);
+    await markAvailableAfterAws(req.user.id, req.workspaceId);
     res.json({ success: true });
   } catch (err) {
     console.error("Error available attendance:", err);

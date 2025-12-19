@@ -15,6 +15,8 @@ import attendanceRoutes from "./routes/attendance.routes.js";
 import subtaskRoutes from "./routes/subtask.routes.js";
 import projectStatusRoutes from "./routes/projectStatus.routes.js";
 import reportRoutes from "./routes/report.routes.js";
+import { startAttendanceCron } from "./cron/attendance.cron.js";
+
 
 // 🔵 NEW: chat channels (Slack-like channels)
 import chatChannelRoutes from "./routes/chatChannels.routes.js";
@@ -27,6 +29,14 @@ import { requireWorkspaceForUser } from "./middleware/workspace.middleware.js";
 import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
 import superadminRoutes from "./routes/superadmin.routes.js";
+import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
+import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
+import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
+
+
+
+
+
 
 dotenv.config();
 
@@ -103,6 +113,9 @@ app.use("/superadmin", superadminRoutes);
 
 // 🔵 Chat channels API: tenant-scoped chat channels
 app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
+app.use("/admin/attendance", adminAttendanceRoutes);
+app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
+app.use("/admin/attendance", adminAttendanceExportRoutes);
 
 // Optional: any other tenant routes you add, mount them here with the same pattern.
 
@@ -129,3 +142,6 @@ initSocket(server, process.env.FRONTEND_BASE_URL);
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
+startAttendanceCron();
+
