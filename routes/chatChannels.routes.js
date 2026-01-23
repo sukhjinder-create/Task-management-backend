@@ -10,6 +10,11 @@ import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 
 /* ✅ ADD: plan / feature gating */
 import { requirePlanFeature } from "../middleware/plan.middleware.js";
+import {
+  getAllChannelsForWorkspace,
+  getAllDMsForWorkspace,
+} from "../services/chat.service.js";
+
 
 const router = express.Router();
 
@@ -385,5 +390,37 @@ router.post("/:channelKey/members", async (req, res) => {
     return res.status(500).json({ error: "Failed to add member" });
   }
 });
+
+/**
+ * GET /chat/conversations
+ * List ALL conversations (channels + DMs) for AI & future features
+ */
+router.get("/conversations", async (req, res) => {
+  try {
+    const workspaceId = req.workspaceId;
+
+    const channels = await getAllChannelsForWorkspace(workspaceId);
+    const dms = await getAllDMsForWorkspace(workspaceId);
+
+    res.json([
+      ...channels.map(c => ({
+        id: c.id,
+        type: "channel",
+        key: c.key,
+        name: c.name,
+      })),
+      ...dms.map(d => ({
+        id: d.id,
+        type: "dm",
+        key: d.key,
+        name: "DM",
+      })),
+    ]);
+  } catch (err) {
+    console.error("Failed to list conversations:", err);
+    res.status(500).json({ message: "Failed to list conversations" });
+  }
+});
+
 
 export default router;

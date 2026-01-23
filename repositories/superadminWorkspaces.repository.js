@@ -1,19 +1,17 @@
 // repositories/superadminWorkspaces.repository.js
-import pool from "../db.js"; // your existing DB pool
+import pool from "../db.js";
 import crypto from "crypto";
+import { ensureDefaultChannelsForWorkspace } from "../services/workspace.service.js";
+import { ensureSystemUser } from "../services/ai.system.service.js";
 
-/**
- * Helper to generate UUID string if needed (db can generate too)
- * We will use gen_random_uuid() in SQL where convenient, but keep JS fallback.
- */
 function genUuid() {
-  return crypto.randomUUID ? crypto.randomUUID() : crypto.createHash("sha1").update(String(Date.now()) + Math.random()).digest("hex");
+  return crypto.randomUUID
+    ? crypto.randomUUID()
+    : crypto.createHash("sha1").update(String(Date.now()) + Math.random()).digest("hex");
 }
 
-/**
- * Create workspace + owner user (transactional)
- * ownerPasswordHash must be a bcrypt hash string.
- */
+// repositories/superadminWorkspaces.repository.js
+
 export async function createWorkspace({
   name,
   plan = "basic",
@@ -23,10 +21,11 @@ export async function createWorkspace({
   ownerName = null,
 }) {
   const client = await pool.connect();
+
   try {
     await client.query("BEGIN");
 
-    // Insert workspace (use gen_random_uuid() in PG if available)
+    // 1️⃣ Creating Workspace
     const insWs = await client.query(
       `INSERT INTO workspaces (id, name, plan, member_limit, is_active, created_at, updated_at)
        VALUES (gen_random_uuid(), $1, $2, $3, true, now(), now())
@@ -36,23 +35,39 @@ export async function createWorkspace({
 
     const workspace = insWs.rows[0];
 
-    // Create owner user (role = admin)
-    // If your users table has columns: id, username, email, password_hash, role, workspace_id
-    // adjust below columns to match your schema.
+    // 2️⃣ Creating Owner
     const ownerInsert = await client.query(
       `INSERT INTO users (id, username, email, password_hash, role, workspace_id, created_at)
        VALUES (gen_random_uuid(), $1, $2, $3, 'admin', $4, now())
        RETURNING id, username, email, role, workspace_id`,
-      [ownerName || ownerEmail.split("@")[0], ownerEmail, ownerPasswordHash, workspace.id]
+      [
+        ownerName || ownerEmail.split("@")[0],
+        ownerEmail,
+        ownerPasswordHash,
+        workspace.id,
+      ]
     );
 
-    await client.query("COMMIT");
+    const owner = ownerInsert.rows[0];
 
-    // return workspace and created owner summary
-    return {
-      workspace,
-      owner: ownerInsert.rows[0],
-    };
+    // 3️⃣ Ensuring System User (AI)
+    const systemUserInsert = await client.query(
+      `INSERT INTO system_users (id, email, workspace_id, created_at)
+       VALUES (gen_random_uuid(), 'ai@${workspace.id}.com', $1, now())
+       RETURNING id, email, workspace_id, created_at`,
+      [workspace.id]
+    );
+
+    const systemUser = systemUserInsert.rows[0];
+
+    await client.query("COMMIT");
+    await ensureSystemUser(workspace.id);
+
+    // ✅ ENSURE DEFAULT CHANNELS (OUTSIDE TX, SAFE)
+    await ensureDefaultChannelsForWorkspace(workspace.id, owner.id);
+
+    // Return workspace, owner, and AI system user
+    return { workspace, owner, systemUser };
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("createWorkspace TX error:", err);
@@ -63,12 +78,17 @@ export async function createWorkspace({
 }
 
 export async function listWorkspaces() {
-  const res = await pool.query(`SELECT * FROM workspaces ORDER BY created_at DESC`);
+  const res = await pool.query(
+    `SELECT * FROM workspaces ORDER BY created_at DESC`
+  );
   return res.rows;
 }
 
 export async function getWorkspace(id) {
-  const res = await pool.query(`SELECT * FROM workspaces WHERE id = $1 LIMIT 1`, [id]);
+  const res = await pool.query(
+    `SELECT * FROM workspaces WHERE id = $1 LIMIT 1`,
+    [id]
+  );
   return res.rows[0] || null;
 }
 
@@ -85,17 +105,16 @@ export async function updateWorkspace(id, data = {}) {
     }
   }
 
-  if (sets.length === 0) {
-    throw new Error("Nothing to update");
-  }
+  if (!sets.length) throw new Error("Nothing to update");
 
-  // always update updated_at
   sets.push(`updated_at = now()`);
-
   values.push(id);
 
-  const q = `UPDATE workspaces SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
-  const res = await pool.query(q, values);
+  const res = await pool.query(
+    `UPDATE workspaces SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`,
+    values
+  );
+
   return res.rows[0];
 }
 
@@ -107,15 +126,9 @@ export async function updateWorkspaceStatus(id, is_active) {
   return res.rows[0];
 }
 
-/**
- * Soft delete workspace: mark inactive & set deleted_at.
- * You can change this to actually cascade delete if you prefer (be careful).
- */
 export async function deleteWorkspace(id) {
   await pool.query(
     `UPDATE workspaces SET is_active = false, updated_at = now() WHERE id = $1`,
     [id]
   );
-  // optional: leave deleted_at column if you created it earlier.
-  return;
 }

@@ -3,7 +3,7 @@ import express from "express";
 import http from "http";
 import cors from "cors";
 import dotenv from "dotenv";
-
+import axios from "axios";  // Add axios to your imports
 import projectRoutes from "./routes/project.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import taskRoutes from "./routes/task.routes.js";
@@ -19,6 +19,7 @@ import { startAttendanceCron } from "./cron/attendance.cron.js";
 
 
 // 🔵 NEW: chat channels (Slack-like channels)
+import chatMessagesRoutes from "./routes/chatMessages.routes.js";
 import chatChannelRoutes from "./routes/chatChannels.routes.js";
 import cryptoRoutes from "./routes/crypto.routes.js";
 
@@ -32,7 +33,7 @@ import superadminRoutes from "./routes/superadmin.routes.js";
 import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
 import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
-
+import aiRoutes from "./ai/ai.routes.js";
 
 
 
@@ -74,7 +75,7 @@ app.get("/", (req, res) => {
  */
 app.use("/auth", authRoutes);
 app.use("/crypto", cryptoRoutes);
-
+app.use("/ai", aiRoutes);
 /**
  * Superadmin routes (only superadmins)
  * - These routes are allowed to operate across workspaces
@@ -112,6 +113,13 @@ app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin", superadminRoutes);
 
 // 🔵 Chat channels API: tenant-scoped chat channels
+app.use(
+  "/chat/messages",
+  authMiddleware,
+  requireWorkspaceForUser,
+  chatMessagesRoutes
+);
+
 app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
 app.use("/admin/attendance", adminAttendanceRoutes);
 app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
@@ -141,6 +149,19 @@ initSocket(server, process.env.FRONTEND_BASE_URL);
 
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+});
+
+// Send events to AI after saving a message
+app.post("/save-message", async (req, res) => {
+  const savedMessage = req.body.message; // Assuming the saved message is in req.body.message
+
+  // Emit the event to the AI service
+  await emitToAI({
+    type: 'chat:new-message',
+    payload: savedMessage,
+  });
+
+  res.status(200).send("Message saved and event sent to AI");
 });
 
 startAttendanceCron();

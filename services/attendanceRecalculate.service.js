@@ -33,12 +33,12 @@ export async function recalculateDailyAttendance({
   }
 
   if (from) {
-    conditions.push(`DATE(occurred_at) >= $${idx++}`);
+    conditions.push(`DATE(created_at) >= $${idx++}`);
     values.push(from);
   }
 
   if (to) {
-    conditions.push(`DATE(occurred_at) <= $${idx++}`);
+    conditions.push(`DATE(created_at) <= $${idx++}`);
     values.push(to);
   }
 
@@ -51,11 +51,11 @@ export async function recalculateDailyAttendance({
       user_id,
       workspace_id,
       event_type,
-      occurred_at::timestamp AS occurred_at,
-      DATE(occurred_at) AS event_date
+      created_at AS occurred_at,
+      DATE(created_at) AS event_date
     FROM attendance_events
     WHERE ${conditions.join(" AND ")}
-    ORDER BY user_id, occurred_at ASC
+    ORDER BY user_id, created_at ASC
     `,
     values
   );

@@ -14,4 +14,11 @@ const pool = new Pool({
   port: process.env.DB_PORT,
 });
 
+// 🔐 PRODUCTION SAFETY: Prevent hard crashes
+pool.on("error", (err) => {
+  console.error("🔥 PostgreSQL Pool Error (connection lost):", err);
+  // DO NOT exit process — pool will recover
+});
+
+
 export default pool;

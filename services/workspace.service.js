@@ -2,6 +2,9 @@
 import * as repo from "../repositories/workspace.repository.js";
 import { getUserById } from "../repositories/user.repository.js";
 
+// ✅ ADD: chat helpers for default channels
+import { createChannel, getChannelByKey } from "./chat.service.js";
+
 /**
  * Business logic for workspaces.
  * - create workspace (superadmin only typically)
@@ -48,8 +51,40 @@ const PLAN_RULES = {
   },
 };
 
+/* ==================================================
+   ✅ ENSURE DEFAULT CHANNELS PER WORKSPACE
+   ================================================== */
+export async function ensureDefaultChannelsForWorkspace(workspaceId, createdBy) {
+  const defaults = [
+    { key: "team-general", name: "Team General" },
+    { key: "availability-updates", name: "Availability Updates" },
+    { key: "project-manager", name: "Project Manager" },
+  ];
+
+  for (const ch of defaults) {
+    const existing = await getChannelByKey(ch.key, workspaceId);
+    if (existing) continue;
+
+    await createChannel({
+      key: ch.key,
+      name: ch.name,
+      type: "channel",
+      createdBy,
+      isPrivate: false,
+      workspaceId,
+    });
+  }
+}
+
 class WorkspaceService {
-  async create({ name, slug = null, createdBy = null, billing_plan = null, max_members = 10, metadata = null }) {
+  async create({
+    name,
+    slug = null,
+    createdBy = null,
+    billing_plan = null,
+    max_members = 10,
+    metadata = null,
+  }) {
     if (!name) throw new Error("Workspace name required");
 
     const ws = await repo.createWorkspace({
@@ -60,13 +95,28 @@ class WorkspaceService {
       max_members,
       metadata,
     });
+// ✅ ENSURE DEFAULT CHAT CHANNELS
+await ensureDefaultChannelsForWorkspace(ws.id, createdBy);
 
     if (createdBy) {
       try {
         await repo.addWorkspaceUser(ws.id, createdBy, "admin");
       } catch (err) {
-        console.warn("Failed to add creator as workspace admin:", err.message);
+        console.warn(
+          "Failed to add creator as workspace admin:",
+          err.message
+        );
       }
+    }
+
+    // ✅ ENSURE 3 DEFAULT CHAT CHANNELS (WORKSPACE-SAFE)
+    try {
+      await ensureDefaultChannelsForWorkspace(ws.id, createdBy);
+    } catch (err) {
+      console.error(
+        "Failed to ensure default chat channels:",
+        err.message
+      );
     }
 
     return ws;
@@ -91,10 +141,7 @@ class WorkspaceService {
   getEffectiveMaxMembers(workspace) {
     const planRules = this.getPlanRules(workspace.billing_plan);
 
-    // plan limit
     const planLimit = planRules.max_members;
-
-    // manual override (if set)
     const manualLimit = workspace.max_members;
 
     if (planLimit == null && manualLimit == null) {
@@ -121,11 +168,13 @@ class WorkspaceService {
     if (!ws) throw new Error("Workspace not found");
 
     const current = await repo.countWorkspaceMembers(workspaceId);
-
     const effectiveLimit = this.getEffectiveMaxMembers(ws);
+
     if (effectiveLimit != null && current >= effectiveLimit) {
       throw new Error(
-        `Workspace member limit reached (${effectiveLimit}) for plan '${ws.billing_plan || "basic"}'`
+        `Workspace member limit reached (${effectiveLimit}) for plan '${
+          ws.billing_plan || "basic"
+        }'`
       );
     }
 

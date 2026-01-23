@@ -3,7 +3,6 @@ import express from "express";
 import {
   getChannelByKey,
   getChannelById,
-  getOrCreateChannelByKey,
   isChannelMember,
   ensureChannelMember,
   createChatMessage,
@@ -202,3 +201,4 @@ router.get("/for-channel/:channelId", async (req, res) => {
 });
 
 export default router;
+
