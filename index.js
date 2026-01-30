@@ -1,4 +1,8 @@
-// index.js
+console.log("ENV CHECK", {
+  AI_SERVICE_URL: process.env.AI_SERVICE_URL,
+  AI_SERVICE_SECRET: process.env.AI_SERVICE_SECRET,
+});
+import "dotenv/config";
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -6,6 +10,7 @@ import dotenv from "dotenv";
 import axios from "axios";  // Add axios to your imports
 import projectRoutes from "./routes/project.routes.js";
 import userRoutes from "./routes/user.routes.js";
+import workspaceRoutes from "./routes/workspace.routes.js";
 import taskRoutes from "./routes/task.routes.js";
 import commentRoutes from "./routes/comment.routes.js";
 import authRoutes from "./routes/auth.routes.js";
@@ -34,6 +39,9 @@ import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
 import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
 import aiRoutes from "./ai/ai.routes.js";
+import internalRoutes from "./routes/internal.js";
+
+
 
 
 
@@ -76,6 +84,7 @@ app.get("/", (req, res) => {
 app.use("/auth", authRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
+app.use("/internal", internalRoutes);
 /**
  * Superadmin routes (only superadmins)
  * - These routes are allowed to operate across workspaces
@@ -107,6 +116,12 @@ app.use("/reports", authMiddleware, requireWorkspaceForUser, reportRoutes);
 app.use("/notifications", authMiddleware, requireWorkspaceForUser, notificationRoutes);
 app.use("/attendance", authMiddleware, requireWorkspaceForUser, attendanceRoutes);
 app.use("/users", authMiddleware, requireWorkspaceForUser, userRoutes);
+app.use(
+  "/workspaces",
+  authMiddleware,
+  requireWorkspaceForUser,
+  workspaceRoutes
+);
 app.use("/superadmin", superadminAuthRoutes);
 
 app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
@@ -139,6 +154,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
+
 // ----- SERVER + SOCKET.IO -----
 
 const server = http.createServer(app);
@@ -147,14 +163,14 @@ const PORT = process.env.PORT || 3000;
 // 🔥 Pass FRONTEND_BASE_URL into socket init (used for CORS in socket.io)
 initSocket(server, process.env.FRONTEND_BASE_URL);
 
+console.log("✅ Workspace routes mounted");
+
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
-
 // Send events to AI after saving a message
 app.post("/save-message", async (req, res) => {
   const savedMessage = req.body.message; // Assuming the saved message is in req.body.message
-
   // Emit the event to the AI service
   await emitToAI({
     type: 'chat:new-message',

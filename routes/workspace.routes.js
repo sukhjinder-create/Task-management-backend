@@ -1,10 +1,12 @@
 // src/routes/workspace.routes.js
+console.log("🔥 workspace.routes.js LOADED");
+
 import express from "express";
 import workspaceService from "../services/workspace.service.js";
 import * as workspaceRepo from "../repositories/workspace.repository.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { allowRoles } from "../middleware/role.middleware.js";
-import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import { ensureWorkspaceMember } from "../middleware/ensureWorkspaceMember.middleware.js";
 import pool from "../db.js";
 
@@ -51,10 +53,84 @@ router.get("/", allowRoles("superadmin"), async (req, res) => {
 });
 
 /**
+ * 🔹 GET /workspace/ai-settings
+ */
+router.get(
+  "/ai-settings",
+  requireWorkspaceForUser,
+  async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `
+        SELECT ai_enabled, ai_auto_reply
+        FROM workspace_ai_settings
+        WHERE workspace_id = $1
+        `,
+        [req.workspaceId]
+      );
+
+      const settings = rows[0] || {
+        ai_enabled: true,
+        ai_auto_reply: true,
+      };
+
+      res.json(settings);
+    } catch (err) {
+      console.error("[workspace.ai-settings.get]", err);
+      res.status(500).json({ error: "Failed to fetch AI settings" });
+    }
+  }
+);
+
+/**
+ * 🔹 PUT /workspace/ai-settings
+ */
+router.put(
+  "/ai-settings",
+  requireWorkspaceForUser,
+  async (req, res) => {
+    try {
+      const caller = req.user;
+if (!["admin"].includes(caller.role)) {
+  const membership = await workspaceService.getMembership(
+    req.workspaceId,
+    String(caller.id)
+  );
+
+  if (!membership || membership.role !== "admin") {
+    return res.status(403).json({ error: "Only admins allowed" });
+  }
+}
+
+
+      const { ai_enabled = true, ai_auto_reply = true } = req.body;
+
+      await pool.query(
+        `
+        INSERT INTO workspace_ai_settings (workspace_id, ai_enabled, ai_auto_reply)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (workspace_id)
+        DO UPDATE SET
+          ai_enabled = EXCLUDED.ai_enabled,
+          ai_auto_reply = EXCLUDED.ai_auto_reply,
+          updated_at = now()
+        `,
+        [req.workspaceId, ai_enabled, ai_auto_reply]
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[workspace.ai-settings.put]", err);
+      res.status(500).json({ error: "Failed to update AI settings" });
+    }
+  }
+);
+
+/**
  * Get single workspace
  * - superadmin OR a member of the workspace may read it
  */
-router.get("/:id", workspaceMiddleware, async (req, res) => {
+router.get("/:id", requireWorkspaceForUser, async (req, res) => {
   try {
     const id = req.params.id;
 
@@ -84,7 +160,7 @@ router.get("/:id", workspaceMiddleware, async (req, res) => {
  * Update workspace metadata (superadmin or workspace admin)
  * body: { name, slug, billing_plan, max_members, metadata }
  */
-router.put("/:id", workspaceMiddleware, async (req, res) => {
+router.put("/:id", requireWorkspaceForUser, async (req, res) => {
   try {
     const id = req.params.id;
     const caller = req.user;
@@ -148,7 +224,7 @@ router.put("/:id", workspaceMiddleware, async (req, res) => {
  *
  * NOTE: addMember in service will throw a friendly error when user already belongs to another workspace.
  */
-router.post("/:id/members", workspaceMiddleware, async (req, res) => {
+router.post("/:id/members", requireWorkspaceForUser, async (req, res) => {
   try {
     const workspaceId = req.params.id;
     const caller = req.user;
@@ -199,7 +275,7 @@ router.post("/:id/members", workspaceMiddleware, async (req, res) => {
  * Remove member from workspace
  * - allowed for workspace admin or superadmin
  */
-router.delete("/:id/members/:userId", workspaceMiddleware, async (req, res) => {
+router.delete("/:id/members/:userId", requireWorkspaceForUser, async (req, res) => {
   try {
     const workspaceId = req.params.id;
     const caller = req.user;
@@ -223,7 +299,7 @@ router.delete("/:id/members/:userId", workspaceMiddleware, async (req, res) => {
 /**
  * Get workspace members (workspace admin or any member)
  */
-router.get("/:id/members", workspaceMiddleware, ensureWorkspaceMember(), async (req, res) => {
+router.get("/:id/members", requireWorkspaceForUser, ensureWorkspaceMember(), async (req, res) => {
   try {
     const workspaceId = req.params.id;
 

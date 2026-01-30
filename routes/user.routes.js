@@ -1,4 +1,5 @@
 import express from "express";
+import pool from "../db.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
@@ -42,6 +43,79 @@ router.get("/me", async (req, res) => {
   } catch (err) {
     console.error("Error fetching current user:", err);
     res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
+/**
+ * 🔹 GET /users/:id/ai-preference
+ * 🔐 User can read ONLY their own AI preference (workspace scoped)
+ */
+router.get("/:id/ai-preference", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 🔐 user can only access their own preference
+    if (String(req.user.id) !== String(id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // 🔐 ensure same workspace
+    const user = await getUserById(id);
+    if (!user || String(user.workspace_id) !== String(req.workspaceId)) {
+      return res.status(403).json({ error: "Workspace access denied" });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT ai_reply_enabled
+      FROM user_preferences
+      WHERE user_id = $1
+      `,
+      [id]
+    );
+
+    res.json({
+      aiReplyEnabled: rows[0]?.ai_reply_enabled ?? true, // default ON
+    });
+  } catch (err) {
+    console.error("Error fetching AI preference:", err);
+    res.status(500).json({ error: "Failed to fetch AI preference" });
+  }
+});
+
+/**
+ * 🔹 PUT /users/:id/ai-preference
+ * 🔐 User can update ONLY their own AI preference
+ */
+router.put("/:id/ai-preference", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { aiReplyEnabled } = req.body;
+
+    if (String(req.user.id) !== String(id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // 🔐 ensure same workspace
+    const user = await getUserById(id);
+    if (!user || String(user.workspace_id) !== String(req.workspaceId)) {
+      return res.status(403).json({ error: "Workspace access denied" });
+    }
+
+    await pool.query(
+      `
+      INSERT INTO user_preferences (user_id, ai_reply_enabled)
+      VALUES ($1, $2)
+      ON CONFLICT (user_id)
+      DO UPDATE SET ai_reply_enabled = EXCLUDED.ai_reply_enabled
+      `,
+      [id, aiReplyEnabled === true]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error updating AI preference:", err);
+    res.status(500).json({ error: "Failed to update AI preference" });
   }
 });
 

@@ -1,56 +1,58 @@
 import pool from "../db.js";
 
-export async function ensureSystemUser(workspaceId) {
-  const client = await pool.connect();
+/**
+ * Ensure exactly ONE system (AI) user per workspace.
+ * Safe to call multiple times.
+ * Safe inside or outside a transaction.
+ */
+export async function ensureSystemUser(workspaceId, client = null) {
+  const db = client || (await pool.connect());
+  const release = !client;
 
   try {
-    // 1️⃣ Check if system user already exists in users table
-    const existing = await client.query(
-      `
-      SELECT * FROM users WHERE email = $1 LIMIT 1
-      `,
-      [`ai+${workspaceId}@example.com`]
+    const email = `ai+${workspaceId}@example.com`;
+    const username = `AI_System_${workspaceId}`;
+
+    // 1️⃣ Find existing AI user
+    let { rows } = await db.query(
+      `SELECT * FROM users WHERE email = $1 LIMIT 1`,
+      [email]
     );
 
-    if (existing.rows.length > 0) {
-      return existing.rows[0]; // ✅ Return the existing user
+    let aiUser = rows[0];
+
+    // 2️⃣ Create if missing
+    if (!aiUser) {
+      const res = await db.query(
+        `
+        INSERT INTO users (
+          id,
+          username,
+          email,
+          role,
+          workspace_id,
+          is_system,
+          created_at
+        )
+        VALUES (
+          gen_random_uuid(),
+          $1,
+          $2,
+          'system',
+          $3,
+          true,
+          now()
+        )
+        RETURNING *
+        `,
+        [username, email, workspaceId]
+      );
+
+      aiUser = res.rows[0];
     }
 
-    // 2️⃣ Create AI user in the users table only if it doesn't exist
-    const uniqueUsername = `AI_System_${workspaceId}`;
-    const uniqueEmail = `ai+${workspaceId}@example.com`;
-
-    const userRes = await client.query(
-      `
-      INSERT INTO users (
-        id,
-        username,
-        email,
-        role,
-        workspace_id,
-        display_name,
-        is_system,
-        created_at
-      )
-      VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        'system',
-        $3,
-        'AI Assistant',
-        true,
-        now()
-      )
-      RETURNING *
-      `,
-      [uniqueUsername, uniqueEmail, workspaceId]
-    );
-
-    const aiUser = userRes.rows[0];
-
-    // 3️⃣ Insert mapping into system_users table
-    await client.query(
+    // 3️⃣ Ensure mapping ALWAYS exists
+    await db.query(
       `
       INSERT INTO system_users (
         id,
@@ -71,6 +73,6 @@ export async function ensureSystemUser(workspaceId) {
 
     return aiUser;
   } finally {
-    client.release();
+    if (release) db.release();
   }
 }

@@ -25,21 +25,31 @@ export async function createWorkspace({
   try {
     await client.query("BEGIN");
 
-    // 1️⃣ Creating Workspace
-    const insWs = await client.query(
-      `INSERT INTO workspaces (id, name, plan, member_limit, is_active, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, true, now(), now())
-       RETURNING *`,
+    // 1️⃣ Create workspace
+    const { rows: [workspace] } = await client.query(
+      `
+      INSERT INTO workspaces (
+        id, name, plan, member_limit, is_active, created_at, updated_at
+      )
+      VALUES (
+        gen_random_uuid(), $1, $2, $3, true, now(), now()
+      )
+      RETURNING *
+      `,
       [name, plan, Number(member_limit) || 10]
     );
 
-    const workspace = insWs.rows[0];
-
-    // 2️⃣ Creating Owner
-    const ownerInsert = await client.query(
-      `INSERT INTO users (id, username, email, password_hash, role, workspace_id, created_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, 'admin', $4, now())
-       RETURNING id, username, email, role, workspace_id`,
+    // 2️⃣ Create owner user
+    const { rows: [owner] } = await client.query(
+      `
+      INSERT INTO users (
+        id, username, email, password_hash, role, workspace_id, created_at
+      )
+      VALUES (
+        gen_random_uuid(), $1, $2, $3, 'admin', $4, now()
+      )
+      RETURNING id, username, email, role, workspace_id
+      `,
       [
         ownerName || ownerEmail.split("@")[0],
         ownerEmail,
@@ -48,26 +58,20 @@ export async function createWorkspace({
       ]
     );
 
-    const owner = ownerInsert.rows[0];
-
-    // 3️⃣ Ensuring System User (AI)
-    const systemUserInsert = await client.query(
-      `INSERT INTO system_users (id, email, workspace_id, created_at)
-       VALUES (gen_random_uuid(), 'ai@${workspace.id}.com', $1, now())
-       RETURNING id, email, workspace_id, created_at`,
-      [workspace.id]
-    );
-
-    const systemUser = systemUserInsert.rows[0];
+    // 3️⃣ ENSURE system (AI) user — ONLY via service
+    // ⚠️ DO NOT manually insert into system_users
+    const systemUser = await ensureSystemUser(workspace.id, client);
 
     await client.query("COMMIT");
-    await ensureSystemUser(workspace.id);
 
-    // ✅ ENSURE DEFAULT CHANNELS (OUTSIDE TX, SAFE)
+    // 4️⃣ Default channels (post-TX, safe)
     await ensureDefaultChannelsForWorkspace(workspace.id, owner.id);
 
-    // Return workspace, owner, and AI system user
-    return { workspace, owner, systemUser };
+    return {
+      workspace,
+      owner,
+      systemUser,
+    };
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("createWorkspace TX error:", err);

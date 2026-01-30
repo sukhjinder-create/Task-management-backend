@@ -56,6 +56,100 @@ function mapMessageRow(row) {
   };
 }
 
+function extractAIPlainText(savedMessage) {
+  if (!savedMessage) return null;
+
+  // 1️⃣ DB fallback_text (if explicitly stored)
+  if (typeof savedMessage.fallback_text === "string") {
+    return stripHtml(savedMessage.fallback_text);
+  }
+
+  // 2️⃣ encrypted_json.message (STRINGIFIED JSON)
+  try {
+    const enc =
+      typeof savedMessage.encrypted_json === "string"
+        ? JSON.parse(savedMessage.encrypted_json)
+        : savedMessage.encrypted_json;
+
+    if (enc?.message && typeof enc.message === "string") {
+      const inner = JSON.parse(enc.message);
+
+      if (typeof inner.fallbackText === "string") {
+        return stripHtml(inner.fallbackText);
+      }
+    }
+  } catch (err) {
+    console.error("❌ AI extract failed", err);
+  }
+
+  // 3️⃣ legacy plaintext
+  if (
+    typeof savedMessage.text_html === "string" &&
+    !savedMessage.text_html.includes("e2e-p256")
+  ) {
+    return stripHtml(savedMessage.text_html);
+  }
+
+  return null;
+}
+
+function stripHtml(html) {
+  return html.replace(/<[^>]*>/g, "").trim();
+}
+
+async function ensureWorkspaceAIUser(client, workspaceId) {
+  if (!workspaceId) {
+    throw new Error("workspaceId is required for AI user");
+  }
+
+  // 🔒 Force UUID typing (THIS FIXES 42P18)
+  const res = await client.query(
+    `
+    SELECT
+      su.user_id,
+      su.id AS system_user_id,
+      COALESCE(ws.ai_name, su.display_name, 'AI Assistant') AS ai_name
+    FROM system_users su
+    LEFT JOIN workspace_settings ws
+      ON ws.workspace_id = su.workspace_id
+    WHERE su.workspace_id = $1::uuid
+    LIMIT 1
+    `,
+    [workspaceId]
+  );
+
+  if (res.rows.length > 0) {
+    return {
+      userId: res.rows[0].user_id,
+      username: res.rows[0].ai_name,
+    };
+  }
+
+  // 🧠 Lazy-create AI user (once per workspace)
+  const userRes = await client.query(
+    `
+    INSERT INTO users (id, username, email, role)
+    VALUES (gen_random_uuid(), 'AI Assistant', NULL, 'system')
+    RETURNING id
+    `
+  );
+
+  const aiUserId = userRes.rows[0].id;
+
+  await client.query(
+    `
+    INSERT INTO system_users (id, user_id, workspace_id, display_name)
+    VALUES (gen_random_uuid(), $1, $2::uuid, 'AI Assistant')
+    `,
+    [aiUserId, workspaceId]
+  );
+
+  return {
+    userId: aiUserId,
+    username: "AI Assistant",
+  };
+}
+
 /* -------------------------------------------------------
    CHANNEL ADMIN HELPERS
 ------------------------------------------------------- */
@@ -264,8 +358,17 @@ export async function createChannel({
 
 // Helper to send events to AI service
 async function emitToAI(event) {
-  const aiServiceUrl = process.env.AI_SERVICE_URL || 'http://localhost:5005/internal/chat-event';  // Update if needed
+  const aiServiceUrl = process.env.AI_SERVICE_URL;
+
+if (!aiServiceUrl) {
+  throw new Error("AI_SERVICE_URL is not defined in backend environment");
+}
+
   const aiServiceSecret = process.env.AI_SERVICE_SECRET;
+
+if (!aiServiceSecret) {
+  throw new Error("AI_SERVICE_SECRET is not defined in backend environment");
+}
 
   console.log('🔥 Emitting event to AI:', event);  // Add log to confirm event is being emitted
 
@@ -341,86 +444,252 @@ export async function createChatMessage({
   if (!workspaceId) throw new Error("workspaceId required");
 
   const client = await pool.connect();
-  const baseText = textHtml || fallbackText || "";
+  let normalizedFallback = null;
+
+// 🔥 If encrypted JSON contains fallbackText, extract it ONCE
+if (encryptedJson && typeof encryptedJson === "object") {
+  if (typeof encryptedJson.fallbackText === "string") {
+    normalizedFallback = encryptedJson.fallbackText;
+  }
+}
+
+const baseText =
+  normalizedFallback?.trim() ||
+  fallbackText?.trim() ||
+  (typeof textHtml === "string" ? textHtml.trim() : "");
+
+  // ⛔ side-effects MUST NOT run inside DB transaction
+  let postCommit = null;
 
   try {
-    // Convert the text to valid JSON (encode the message if necessary)
-    const encryptedJsonObject = {
-      message: baseText,  // Wrap the baseText in a valid JSON object
-    };
+    const encryptedJsonObject = { message: baseText };
 
     const res = await client.query(
-      `
-      INSERT INTO chat_messages (
-        id,
-        channel_key,
-        user_id,
-        text_html,
-        fallback_text,
-        encrypted_json,
-        workspace_id,
-        created_at,
-        parent_id
-      )
-      VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        now(),
-        $7
-      )
-      RETURNING *
-      `,
-      [
-        channelKey,
-        userId,
-        baseText,
-        fallbackText,
-        JSON.stringify(encryptedJsonObject),  // Ensure the encrypted field is JSON stringified
-        workspaceId,
-        parentId,
-      ]
-    );
+  `
+  INSERT INTO chat_messages (
+    id,
+    channel_key,
+    user_id,
+    text_html,
+    fallback_text,
+    encrypted_json,
+    workspace_id,
+    created_at,
+    parent_id
+  )
+  VALUES (
+    gen_random_uuid(),
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6::uuid,
+    now(),
+    $7
+  )
+  RETURNING *
+  `,
+  [
+    channelKey,
+    userId,
+    baseText,
+    normalizedFallback,
+    encryptedJson
+    ? JSON.stringify(encryptedJson)   // ✅ KEEP REAL ENCRYPTED DATA
+    : JSON.stringify({ message: baseText }), // legacy fallback
+    workspaceId,     // 🔥 MUST ALWAYS BE NON-NULL
+    parentId,
+  ]
+);
 
     const savedMessage = mapMessageRow(res.rows[0]);
 
-    // 🔥 Normalize message for socket emit (CRITICAL)
-const socketMessage = {
-  id: savedMessage.id,
-  channelId: channelKey,          // MUST be string
-  userId: savedMessage.user_id,
-  username: savedMessage.username,
-  textHtml: savedMessage.text_html || savedMessage.fallback_text || "",
-  createdAt: savedMessage.created_at,
-  updatedAt: savedMessage.updated_at,
-  deletedAt: savedMessage.deleted_at,
-  parentId: savedMessage.parent_id,
-  reactions: savedMessage.reactions || {},
-  attachments: savedMessage.attachments || [],
-  workspaceId,
-};
+    console.log("🧪 AI TEXT CHECK", {
+  fallback: savedMessage.fallback_text,
+  encrypted: savedMessage.encrypted_json,
+  extracted: extractAIPlainText(savedMessage),
+});
 
-    // 🔥 Emit the event to AI after saving the message
-    // Do not notify AI if the sender is the AI itself (system user)
+    const socketMessage = {
+      id: savedMessage.id,
+      channelId: channelKey,
+      userId: savedMessage.user_id,
+      username: savedMessage.username,
+      textHtml: savedMessage.text_html || savedMessage.fallback_text || "",
+      createdAt: savedMessage.created_at,
+      updatedAt: savedMessage.updated_at,
+      deletedAt: savedMessage.deleted_at,
+      parentId: savedMessage.parent_id,
+      reactions: savedMessage.reactions || {},
+      attachments: savedMessage.attachments || [],
+      workspaceId,
+    };
+
+    // -----------------------------
+    // AI logic (unchanged, deferred)
+    // -----------------------------
     const isSystemUser = await client.query(
       `SELECT 1 FROM system_users WHERE user_id = $1 LIMIT 1`,
       [userId]
     );
 
     if (isSystemUser.rows.length === 0) {
-      // Notify AI only if the sender is not the system user
-      await emitToAI({
-        type: "chat:new-message",
-        payload: savedMessage,
-      });
+      const ws = await client.query(
+        `SELECT ai_enabled FROM workspace_settings WHERE workspace_id = $1 LIMIT 1`,
+        [workspaceId]
+      );
+
+      const workspaceAIEnabled =
+        ws.rows.length === 0 ? true : ws.rows[0].ai_enabled === true;
+
+      if (workspaceAIEnabled) {
+        const pref = await client.query(
+          `
+          SELECT ai_reply_enabled
+          FROM user_ai_preferences
+          WHERE user_id = $1 AND workspace_id = $2
+          LIMIT 1
+          `,
+          [userId, workspaceId]
+        );
+
+        const aiAllowed =
+          pref.rows.length > 0
+            ? pref.rows[0].ai_reply_enabled === true
+            : true;
+
+        if (aiAllowed) {
+          const aiUser = await ensureWorkspaceAIUser(client, workspaceId);
+          postCommit = async () => {
+  console.log("🚀 EMITTING TO AI (postCommit)", {
+    workspaceId,
+    channelKey,
+    messageId: savedMessage.id,
+  });
+
+  // 1️⃣ Always update UI
+  emitMessage(socketMessage, workspaceId);
+
+  // 2️⃣ ALWAYS notify AI (no filtering)
+  await emitToAI({
+    workspace_id: workspaceId,
+    type: "chat:new-message",
+    payload: {
+      workspace_id: workspaceId,
+      channel_key: channelKey,
+      message_id: savedMessage.id,
+      user_id: savedMessage.user_id,
+
+      // Send EVERYTHING – AI will decide
+      encrypted_json: savedMessage.encrypted_json,
+      fallback_text: savedMessage.fallback_text,
+      text_html: savedMessage.text_html,
+
+      created_at: savedMessage.created_at,
+    },
+  });
+};
+        }
+      }
     }
 
-    // Emit the message to any other channels or front-end systems (non-AI)
-    emitMessage(socketMessage, workspaceId);// Ensure the message is also emitted to other channels if necessary
+    // fallback: still emit socket if AI is skipped
+    if (!postCommit) {
+  postCommit = async () => {
+    emitMessage(socketMessage, workspaceId);
+  };
+}
+    return savedMessage;
+  } finally {
+    client.release();
+
+    // 🔥 side-effects AFTER DB is safe
+    postCommit().catch(err =>
+      console.error("Post-commit side effect failed:", err)
+    );
+  }
+}
+
+/**
+ * Create a chat message as AI system user
+ * This MUST behave exactly like a normal user message
+ */
+export async function createAIChatMessage({
+  channelKey,
+  workspaceId,
+  textHtml,
+  parentId = null,
+}) {
+  if (!channelKey) throw new Error("channelKey required");
+  if (!workspaceId) throw new Error("workspaceId required");
+
+  const client = await pool.connect();
+  try {
+    // 1️⃣ Resolve AI system user for workspace
+  const aiUser = await ensureWorkspaceAIUser(client, workspaceId);
+
+if (!aiUser?.userId) {
+  throw new Error("AI user resolution failed");
+}
+
+    // 2️⃣ Insert message as AI user
+    const res = await client.query(
+      `
+      INSERT INTO chat_messages (
+  id,
+  channel_key,
+  user_id,
+  text_html,
+  fallback_text,
+  encrypted_json,
+  workspace_id,
+  created_at,
+  parent_id
+)
+
+      VALUES (
+        gen_random_uuid(),
+        $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6::uuid,
+    now(),
+    $7
+      )
+      RETURNING *
+      `,
+      [
+  channelKey,
+  aiUser.userId,
+  textHtml,
+  textHtml, // ✅ fallback_text (plain)
+  JSON.stringify({ message: textHtml,
+      __from_ai: true }), // ✅ encrypted_json placeholder
+  workspaceId,
+  parentId,
+]);
+
+    const savedMessage = mapMessageRow(res.rows[0]);
+
+    // 3️⃣ Emit via socket (same as normal message)
+    emitMessage(
+      {
+        id: savedMessage.id,
+        channelId: channelKey,
+        userId: aiUser.userId,
+        username: aiUser.username,
+        textHtml: savedMessage.text_html,
+        createdAt: savedMessage.created_at,
+        parentId: savedMessage.parent_id,
+        reactions: {},
+        attachments: [],
+        workspaceId,
+      },
+      workspaceId
+    );
 
     return savedMessage;
   } finally {
@@ -481,7 +750,7 @@ export async function getRecentMessagesByChannelKey(
     m.*,
     u.username AS username
   FROM chat_messages m
-  JOIN users u ON u.id = m.user_id
+LEFT JOIN users u ON u.id = m.user_id
   WHERE m.channel_key = $1
     AND m.workspace_id = $2
   ORDER BY m.created_at ASC
@@ -503,24 +772,64 @@ export async function getRecentMessagesByChannelKey(
 /* -------------------------------------------------------
    UPDATE / DELETE / LIST HELPERS (unchanged logic)
 ------------------------------------------------------- */
-export async function updateChatMessage({ messageId, userId, textHtml }) {
+export async function updateChatMessage({
+  messageId,
+  workspaceId,
+  textHtml,
+  fallbackText,
+  encryptedJson,
+}) {
   const client = await pool.connect();
+
   try {
+    const safeText = textHtml?.trim();
+    if (!safeText) return null;
+
     const res = await client.query(
       `
       UPDATE chat_messages
-      SET text_html = $1,
-          updated_at = now()
-      WHERE id = $2
-        AND user_id = $3
+      SET
+        text_html      = $1,
+        fallback_text  = $2,
+        encrypted_json = $3,
+        updated_at     = now()
+      WHERE id = $4
+        AND workspace_id = $5
         AND deleted_at IS NULL
       RETURNING *
       `,
-      [textHtml, messageId, userId]
+      [
+        safeText,
+        fallbackText ?? safeText,
+        encryptedJson
+          ? JSON.stringify(encryptedJson)
+          : JSON.stringify({ message: safeText }),
+        messageId,
+        workspaceId,
+      ]
     );
 
     if (!res.rows.length) return null;
-    return mapMessageRow(res.rows[0]);
+    return res.rows[0];
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateMessageReactions({
+  messageId,
+  reactions,
+}) {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `
+      UPDATE chat_messages
+      SET reactions = $1
+      WHERE id = $2
+      `,
+      [reactions, messageId]
+    );
   } finally {
     client.release();
   }

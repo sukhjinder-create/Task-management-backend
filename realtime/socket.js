@@ -53,6 +53,67 @@ function workspaceRoomName(channelKey, workspaceId = WORKSPACE_GLOBAL) {
   return `workspace:${ws}:channel:${channelKey}`;
 }
 
+function extractPlainText(input) {
+  if (!input) return "";
+
+  // If encrypted JSON string, try extracting fallbackText
+  if (typeof input === "string" && input.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(input);
+      if (typeof parsed?.fallbackText === "string") {
+        return parsed.fallbackText.trim();
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  // Otherwise assume normal HTML/text
+  return input
+    .replace(/<[^>]*>/g, "")
+    .trim();
+}
+
+function resolveRenderableText(m) {
+  if (m.updated_at && m.text_html) {
+    return m.text_html;
+  }
+  // 1️⃣ Plain text (legacy)
+  if (m.text_html && typeof m.text_html === "string" && !m.text_html.startsWith("{")) {
+    return m.text_html;
+  }
+
+  // 2️⃣ Explicit fallback_text column
+  if (m.fallback_text) {
+    return m.fallback_text;
+  }
+
+  // 3️⃣ Encrypted JSON → extract fallbackText
+  if (m.encrypted_json?.message) {
+    try {
+      const parsed =
+        typeof m.encrypted_json.message === "string"
+          ? JSON.parse(m.encrypted_json.message)
+          : m.encrypted_json.message;
+
+      if (typeof parsed?.fallbackText === "string") {
+        return parsed.fallbackText;
+      }
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
+}
+
+// utils / local helper
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
+
 /* -------------------------------------------------------
    INIT SOCKET WITH FRONTEND URL
 ------------------------------------------------------- */
@@ -110,6 +171,8 @@ export function initSocket(server, frontendUrl) {
   io.on("connection", async (socket) => {
   const userId = socket.user.id;
   const username = socket.user.username;
+  // 🔐 Prevent duplicate sends from same socket
+socket._recentMessageHashes = new Set();
 
   // 🔐 Always keep real workspaceId from JWT
   socket.workspaceId = socket.user.workspaceId || null;
@@ -170,90 +233,53 @@ socket.on("chat:open", async (channelKey) => {
   if (socket.disconnected || socket._isCleanedUp) return;
 
   const workspaceId = socket.workspaceId;
+  // ✅ Ensure DM sockets join rooms (CRITICAL)
+if (channelKey.startsWith("dm:")) {
+  const legacyRoom = legacyRoomName(channelKey);
+  const wsRoom = workspaceRoomName(channelKey, workspaceId);
 
-  try {
-    let rows = [];
-
-    /* =================================================
-       ✅ CASE 1: DIRECT MESSAGES (dm:*)
-       - No chat_channels row
-       - channel_id IS the dm key
-    ================================================= */
-    if (channelKey.startsWith("dm:")) {
-  const res = await pool.query(
-    `
-    SELECT
-      m.*,
-      u.username
-    FROM chat_messages m
-    JOIN users u ON u.id = m.user_id
-    WHERE m.channel_key = $1
-      AND (m.workspace_id = $2)
-      AND m.deleted_at IS NULL
-    ORDER BY m.created_at ASC
-    LIMIT 100
-    `,
-    [channelKey, workspaceId]
-  );
-
-  rows = res.rows;
+  socket.join(legacyRoom);
+  socket.join(wsRoom);
 }
 
-    /* =================================================
-       ✅ CASE 2: WORKSPACE CHANNELS (team-general, etc.)
-    ================================================= */
-    else {
-      const channel = await getChannelByKey(channelKey, workspaceId);
-      if (!channel) {
-        console.warn(
-          "[chat:open] channel not found",
-          channelKey,
-          workspaceId
-        );
-        return;
-      }
-
-      const res = await pool.query(
+  try {
+    const res = await pool.query(
   `
   SELECT
     m.*,
     u.username
   FROM chat_messages m
-  JOIN users u ON u.id = m.user_id
+  LEFT JOIN users u ON u.id = m.user_id
   WHERE m.channel_key = $1
-    AND (m.workspace_id = $2)
+    AND m.workspace_id = $2
     AND m.deleted_at IS NULL
-  ORDER BY m.created_at ASC
+  ORDER BY m.created_at DESC
   LIMIT 100
   `,
-  [channel.key, workspaceId]
+  [channelKey, workspaceId]
 );
-
-      rows = res.rows;
-    }
-
-    /* =================================================
-       ✅ EMIT HISTORY (COMMON FORMAT)
-    ================================================= */
-    socket.emit("chat:history", {
-      channelId: channelKey, // 🔑 frontend ALWAYS uses key
-      workspaceId,
-      messages: rows.map((m) => ({
-        id: m.id,
-        channelId: channelKey,
-        userId: m.user_id,
-        username: m.username,
-        textHtml: m.text_html,
-        createdAt: m.created_at,
-        updatedAt: m.updated_at,
-        deletedAt: m.deleted_at,
-        reactions: m.reactions || {},
-        attachments: m.attachments || [],
-        encrypted: m.encrypted_json,
-        fallbackText: m.fallback_text,
-        senderPublicKeyJwk: m.sender_public_key,
-      })),
-    });
+const rows = res.rows;
+const orderedRows = rows.reverse();
+socket.emit("chat:history", {
+  channelId: channelKey,
+  workspaceId,
+  messages: orderedRows.map((m) => ({
+    id: m.id,
+    channelId: channelKey,
+    userId: m.user_id,
+    username: m.username,
+    textHtml: resolveRenderableText(m),
+    createdAt: m.created_at,
+    updatedAt: m.updated_at,
+    deletedAt: m.deleted_at,
+    reactions: m.reactions || {},
+    attachments: m.attachments || [],
+    encrypted: m.encrypted_json,
+    fallbackText: m.fallback_text,
+    senderPublicKeyJwk: m.sender_public_key,
+    parentId: m.parent_id,
+  })),
+});
   } catch (err) {
     console.error("🔥 chat:open history error:", err);
   }
@@ -377,23 +403,37 @@ socket.on("chat:open", async (channelKey) => {
   if (socket.disconnected || socket._isCleanedUp) return;
   if (!channelId || !text?.trim()) return;
 
+  const workspaceId = socket.workspaceId;
+  const cleanText = text.trim();
+
+  // 🔐 HARD DEDUPLICATION (same socket, same message)
+  const dedupeKey = `${channelId}::${cleanText}::${parentId || "root"}`;
+
+  if (socket._recentMessageHashes.has(dedupeKey)) {
+    console.warn("⚠️ Duplicate chat:message ignored", dedupeKey);
+    return;
+  }
+
+  socket._recentMessageHashes.add(dedupeKey);
+
+  // auto-expire after 3s (covers double enter / resend / reconnect)
+  setTimeout(() => {
+    socket._recentMessageHashes.delete(dedupeKey);
+  }, 3000);
+
   try {
-    const workspaceId = socket.workspaceId;
     const isDM = channelId.startsWith("dm:");
 
-    let channel = null;
-
-    // 1️⃣ Resolve channel ONLY if NOT a DM
+    // ✅ ONLY validate channel for non-DM
     if (!isDM) {
-      channel = await getChannelByKey(channelId, workspaceId);
+      const channel = await getChannelByKey(channelId, workspaceId);
       if (!channel) {
         socket.emit("chat:error", { error: "Channel does not exist" });
         return;
       }
 
-      // Private channel membership check
       if (channel.isPrivate || channel.is_private) {
-        const member = await isChannelMember(channel.id, userId).catch(() => false);
+        const member = await isChannelMember(channel.id, userId);
         if (!member) {
           socket.emit("chat:error", {
             error: "You are not a member of this private channel.",
@@ -402,52 +442,21 @@ socket.on("chat:open", async (channelKey) => {
         }
       }
 
-      // Ensure membership for normal channels
       await ensureChannelMember(channel.id, userId);
     }
 
-    // 2️⃣ Persist message (SINGLE authoritative insert)
-    const encryptedJson = text.trim();
+    console.log("🔥 SAVING MESSAGE", { channelId, workspaceId, isDM });
 
-    console.log("🔥 SAVING MESSAGE", {
-      channelId,
-      workspaceId,
-      isDM,
-    });
-
-    const saved = await createChatMessage({
+    // 🔥 SINGLE SOURCE OF TRUTH (DB → socket emit happens elsewhere)
+    await createChatMessage({
       channelKey: channelId,
       userId,
-      textHtml: encryptedJson,
-      encryptedJson,
-      fallbackText: null,
+      textHtml: cleanText,
       parentId: parentId || null,
       workspaceId,
     });
 
-    if (socket.disconnected || socket._isCleanedUp) return;
-
-    // 3️⃣ Emit (non-authoritative)
-    const payload = {
-      id: saved.id,
-      tempId: tempId || null,
-      channelId,
-      workspaceId: saved.workspace_id,
-      userId,
-      username,
-      textHtml: saved.text_html,
-      createdAt: saved.created_at,
-      updatedAt: saved.updated_at,
-      deletedAt: saved.deleted_at,
-      reactions: saved.reactions || {},
-      attachments: saved.attachments || [],
-    };
-
-    // Ensure payload includes 'to' property, which could be the user or room
-    payload.to = channelId;  // or target user in case of DM, if required
-
-    io.to(legacyRoomName(channelId)).emit("chat:message", payload);
-    io.to(workspaceRoomName(channelId, saved.workspace_id)).emit("chat:message", payload);
+    // ❌ DO NOT EMIT HERE (correct as-is)
   } catch (err) {
     console.error("chat:message error:", err);
   }
@@ -456,43 +465,55 @@ socket.on("chat:open", async (channelKey) => {
   /* -----------------------------------------------------
      CHAT: EDIT / DELETE
   ----------------------------------------------------- */
-  socket.on("chat:edit", async ({ channelId, messageId, text }) => {
-    if (!channelId || !messageId || !text?.trim()) return;
+socket.on("chat:edit", async ({ channelId, messageId, text }) => {
+  // 🔒 HARD GUARD — never edit temp messages
+  if (!messageId || !isUuid(messageId)) {
+    console.warn("Ignoring edit for non-persisted message:", messageId);
+    return;
+  }
 
-    try {
-      const updated = await updateChatMessage({
-        messageId,
-        userId,
-        textHtml: text.trim(),
-      });
+  if (!channelId || !text?.trim()) return;
 
-      if (!updated) return;
+  try {
+    const plainText = extractPlainText(text);
 
-      const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const encryptedPayload =
+      typeof text === "string" && text.trim().startsWith("{")
+        ? JSON.parse(text)
+        : { message: plainText };
 
-      const payload = {
-        id: updated.id,
-        channelId,
-        workspaceId,
-        userId: updated.user_id,
-        username,
-        textHtml: updated.text_html,
-        createdAt: updated.created_at,
-        updatedAt: updated.updated_at,
-      };
+    const updated = await updateChatMessage({
+      messageId,
+      workspaceId: socket.workspaceId, // ✅ REQUIRED
+      textHtml: plainText,
+      fallbackText: plainText,
+      encryptedJson: encryptedPayload,
+    });
 
-      io.to(legacyRoomName(channelId)).emit(
-        "chat:messageEdited",
-        payload
-      );
-      io.to(workspaceRoomName(channelId, workspaceId)).emit(
-        "chat:messageEdited",
-        payload
-      );
-    } catch (err) {
-      console.error("chat:edit error:", err.message);
-    }
-  });
+    if (!updated) return;
+
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+
+    const payload = {
+      id: updated.id,
+      channelId,
+      workspaceId,
+      userId: updated.user_id,
+      username,
+      textHtml: updated.text_html,
+      createdAt: updated.created_at,
+      updatedAt: updated.updated_at,
+    };
+
+    io.to(legacyRoomName(channelId)).emit("chat:messageEdited", payload);
+    io.to(workspaceRoomName(channelId, workspaceId)).emit(
+      "chat:messageEdited",
+      payload
+    );
+  } catch (err) {
+    console.error("chat:edit error:", err);
+  }
+});
 
   socket.on("chat:delete", async ({ channelId, messageId }) => {
     if (!channelId || !messageId) return;
@@ -532,22 +553,60 @@ socket.on("chat:open", async (channelKey) => {
   /* -----------------------------------------------------
      REACTIONS / TYPING / READ
   ----------------------------------------------------- */
-  socket.on("chat:reaction", (payload) => {
+  socket.on("chat:reaction", async (payload) => {
+  const { channelId, messageId } = payload;
+  if (!channelId || !messageId) return;
+
+  try {
+    // 1️⃣ Load current reactions
+    const { rows } = await pool.query(
+      `SELECT reactions FROM chat_messages WHERE id = $1 LIMIT 1`,
+      [messageId]
+    );
+    if (!rows.length) return;
+
+    const current = rows[0].reactions || {};
+    const { emoji, action } = payload;
+
+    const r = current[emoji] || { userIds: [] };
+    const set = new Set(r.userIds || []);
+
+    if (action === "add") set.add(userId);
+    if (action === "remove") set.delete(userId);
+
+    if (set.size === 0) {
+      delete current[emoji];
+    } else {
+      current[emoji] = {
+        count: set.size,
+        userIds: Array.from(set),
+      };
+    }
+
+    // 2️⃣ Persist to DB
+    await pool.query(
+      `UPDATE chat_messages SET reactions = $1 WHERE id = $2`,
+      [current, messageId]
+    );
+
+    // 3️⃣ Emit (unchanged behavior)
     const out = {
       ...payload,
       userId,
       username,
+      reactions: current,
       at: new Date().toISOString(),
       workspaceId: socket.workspaceId || WORKSPACE_GLOBAL,
     };
-    io.to(legacyRoomName(payload.channelId)).emit(
-      "chat:reaction",
-      out
-    );
-    io.to(
-      workspaceRoomName(payload.channelId, out.workspaceId)
-    ).emit("chat:reaction", out);
-  });
+
+    io.to(legacyRoomName(channelId)).emit("chat:reaction", out);
+    io
+      .to(workspaceRoomName(channelId, out.workspaceId))
+      .emit("chat:reaction", out);
+  } catch (err) {
+    console.error("chat:reaction error:", err);
+  }
+});
 
   socket.on("chat:typing", ({ channelId }) => {
     const out = {
@@ -802,7 +861,7 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     "workspaceId:",
     workspaceId
   );
-  
+
   // 🔒 SAFETY: ensure channelKey is always a string
   const resolvedChannelKey =
     typeof channelKey === "string"
@@ -847,12 +906,6 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     parentId: message.parentId || message.parent_id || null,
   };
 
-  // 🔥 Emit unchanged behavior
-  io.emit("chat:message", payload);
-
-  if (resolvedWorkspaceId) {
-    io.to(
-      workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)
-    ).emit("chat:message", payload);
-  }
-}
+io.to(
+  workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)
+).except(payload.userId).emit("chat:message", payload);}

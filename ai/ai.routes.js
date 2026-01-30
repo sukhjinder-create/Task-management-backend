@@ -5,6 +5,35 @@ import { ensureSystemUser } from "../services/ai.system.service.js";
 
 const router = express.Router();
 
+/**
+ * 🔐 Resolve AI system user for a workspace
+ * Used by AI service (stateless)
+ */
+router.get("/system-user/:workspaceId", async (req, res) => {
+  try {
+    const { workspaceId } = req.params;
+
+    if (!workspaceId) {
+      return res.status(400).json({ error: "workspaceId required" });
+    }
+
+    // Reuse SINGLE source of truth
+    const aiUser = await ensureSystemUser(workspaceId);
+
+    if (!aiUser?.id) {
+      return res.status(500).json({ error: "AI system user resolution failed" });
+    }
+
+    return res.json({
+      userId: aiUser.id,
+      username: aiUser.username || "AI Assistant",
+    });
+  } catch (err) {
+    console.error("🔥 resolve AI system user failed:", err);
+    return res.status(500).json({ error: "Failed to resolve AI system user" });
+  }
+});
+
 router.post("/message", async (req, res) => {
   try {
     const { channelKey, text, workspaceId, channelType, senderUserId } = req.body;

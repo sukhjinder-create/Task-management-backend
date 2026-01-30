@@ -1,7 +1,9 @@
 import pool from "../db.js";
 import { randomUUID } from "crypto";
 import { getUserById } from "../repositories/user.repository.js";
+import { ensureSystemUser } from "./ai.system.service.js";
 import { mirrorAvailabilityToChat } from "./systemChatBot.service.js";
+import { createChatMessage } from "./chat.service.js";
 
 const WORKSPACE_GLOBAL = "GLOBAL";
 
@@ -155,11 +157,15 @@ async function recordAttendanceEvent({
 async function sendAttendanceSlack(text, userId, workspaceId) {
   if (workspaceId && workspaceId !== WORKSPACE_GLOBAL) {
     try {
-      await mirrorAvailabilityToChat({
-        text,
-        userId,
-        workspaceId,
-      });
+   const systemUser = await ensureSystemUser(workspaceId);
+
+await createChatMessage({
+  channelKey: "availability-updates",
+  userId: systemUser.id,   // 🔥 THIS IS THE KEY
+  textHtml: text,
+  workspaceId,
+});
+
     } catch (err) {
       console.error("Attendance chat mirror failed:", err.message);
     }
