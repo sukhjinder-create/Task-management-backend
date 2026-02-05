@@ -534,6 +534,27 @@ const baseText =
       [userId]
     );
 
+    // 🔐 Resolve user role for AI (admin / manager / member)
+let userRole = "member";
+
+try {
+  const roleRes = await client.query(
+    `
+    SELECT role
+    FROM workspace_users
+    WHERE user_id = $1 AND workspace_id = $2
+    LIMIT 1
+    `,
+    [userId, workspaceId]
+  );
+
+  if (roleRes.rows.length > 0) {
+    userRole = roleRes.rows[0].role;
+  }
+} catch (err) {
+  console.warn("⚠️ Failed to resolve user role, defaulting to member");
+}
+
     if (isSystemUser.rows.length === 0) {
       const ws = await client.query(
         `SELECT ai_enabled FROM workspace_settings WHERE workspace_id = $1 LIMIT 1`,
@@ -580,6 +601,7 @@ const baseText =
       channel_key: channelKey,
       message_id: savedMessage.id,
       user_id: savedMessage.user_id,
+      user_role: userRole, // ✅ ADD THIS LINE
 
       // Send EVERYTHING – AI will decide
       encrypted_json: savedMessage.encrypted_json,

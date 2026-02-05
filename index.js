@@ -40,6 +40,8 @@ import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculat
 import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
 import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
+import internalTasks from "./routes/internalTasks.js";
+
 
 
 
@@ -85,6 +87,7 @@ app.use("/auth", authRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
 app.use("/internal", internalRoutes);
+app.use(internalTasks);
 /**
  * Superadmin routes (only superadmins)
  * - These routes are allowed to operate across workspaces
