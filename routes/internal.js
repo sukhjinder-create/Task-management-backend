@@ -1,8 +1,9 @@
+import pool from "../db.js";
 import express from "express";
 import { createAIChatMessage } from "../services/chat.service.js";
-import pool from "../db.js";
-console.log("🔥 INTERNAL ROUTES LOADED");
+import { getProjectReport } from "../services/reports.service.js";
 
+console.log("🔥 INTERNAL ROUTES LOADED");
 
 const router = express.Router();
 
@@ -292,6 +293,15 @@ router.post("/ai/provenance", async (req, res) => {
       context,
     } = req.body;
 
+    // 🔐 CRITICAL SAFETY FIX
+    // If messageId is missing, skip provenance write
+    if (!messageId) {
+      console.warn(
+        "[AI_PROVENANCE_SKIPPED] messageId missing, provenance not written"
+      );
+      return res.json({ ok: true, skipped: true });
+    }
+
     await pool.query(
       `
       INSERT INTO ai_decision_provenance (
@@ -322,6 +332,50 @@ router.post("/ai/provenance", async (req, res) => {
   } catch (err) {
     console.error("[AI_PROVENANCE_WRITE_ERROR]", err);
     res.status(500).json({ error: "failed_to_record_ai_provenance" });
+  }
+});
+
+/**
+ * 🔒 Internal: Fetch project reports (used by frontend)
+ */
+router.get("/reports/project", async (req, res) => {
+  try {
+    const { workspaceId, projectName, fromDate, toDate } = req.query;
+
+    if (!workspaceId || !projectName || !fromDate || !toDate) {
+      return res.status(400).json({
+        error: "workspaceId, projectName, fromDate, toDate are required",
+      });
+    }
+
+    const from = new Date(fromDate);
+const to = new Date(toDate);
+
+if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+  return res.status(400).json({
+    error: "invalid_dates",
+    message: "Invalid date format",
+  });
+}
+
+if (from > to) {
+  return res.status(400).json({
+    error: "invalid_date_range",
+    message: "From date cannot be after To date",
+  });
+}
+
+    const report = await getProjectReport({
+      workspaceId,
+      projectName,
+      fromDate,
+      toDate,
+    });
+
+    return res.json(report);
+  } catch (err) {
+    console.error("[REPORT_FETCH_ERROR]", err);
+    return res.status(500).json({ error: "Failed to fetch report" });
   }
 });
 

@@ -7,29 +7,26 @@ router.post("/internal/tasks/create-from-ai", async (req, res) => {
   const auth = req.headers.authorization?.replace("Bearer ", "");
 
   if (auth !== process.env.AI_SERVICE_SECRET) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return res.status(401).json({ error: "unauthorized" });
   }
 
-  const {
-    workspaceId,
-    userId,
-    channelKey,
-    task,
-  } = req.body;
+  const { workspaceId, userId, task } = req.body || {};
 
+  // 🛑 BASIC VALIDATION
   if (!workspaceId || !userId || !task) {
-    return res.status(400).json({ error: "Missing required fields" });
+    return res.status(400).json({
+      error: "missing_required_fields",
+      message: "workspaceId, userId and task are required",
+    });
   }
 
-  const {
-    title,
-    projectName,
-    description,
-    assignedTo, // ✅ FINAL assignee from AI
-  } = task;
+  const { title, projectName, description, assignedTo } = task;
 
-  if (!title) {
-    return res.status(400).json({ error: "Task title missing" });
+  if (!title || title.trim().length < 3) {
+    return res.status(400).json({
+      error: "invalid_title",
+      message: "Task title is missing or too short",
+    });
   }
 
   const client = await pool.connect();
@@ -38,27 +35,67 @@ router.post("/internal/tasks/create-from-ai", async (req, res) => {
     await client.query("BEGIN");
 
     /**
-     * 🔍 Resolve project (optional)
+     * 🔍 RESOLVE PROJECT (MANDATORY)
      */
     let projectId = null;
 
     if (projectName) {
       const projectRes = await client.query(
         `
-        SELECT id FROM projects
-        WHERE workspace_id = $1 AND name ILIKE $2
+        SELECT id
+        FROM projects
+        WHERE workspace_id = $1
+          AND LOWER(name) = LOWER($2)
         LIMIT 1
         `,
         [workspaceId, projectName]
       );
 
-      if (projectRes.rows.length) {
-        projectId = projectRes.rows[0].id;
+      if (!projectRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error: "invalid_project",
+          message: `Project "${projectName}" not found`,
+        });
       }
+
+      projectId = projectRes.rows[0].id;
+    } else {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: "missing_project",
+        message: "Project name is required",
+      });
     }
 
     /**
-     * 📝 Create task (ASSIGNEE COMES DIRECTLY FROM AI)
+     * 👤 VALIDATE ASSIGNEE (OPTIONAL)
+     */
+    let finalAssignee = null;
+
+    if (assignedTo) {
+      const userRes = await client.query(
+        `
+        SELECT id
+        FROM users
+        WHERE id = $1
+        `,
+        [assignedTo]
+      );
+
+      if (!userRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error: "invalid_assignee",
+          message: "Assignee not found in this workspace",
+        });
+      }
+
+      finalAssignee = assignedTo;
+    }
+
+    /**
+     * 📝 CREATE TASK
      */
     const insertRes = await client.query(
       `
@@ -74,32 +111,34 @@ router.post("/internal/tasks/create-from-ai", async (req, res) => {
       )
       VALUES (
         gen_random_uuid(),
-        $1, $2, $3, $4, $5, $6, now()
+        $1, $2, $3, $4, $5, $6, NOW()
       )
       RETURNING *
       `,
       [
         workspaceId,
         projectId,
-        title,                 // ✅ FIXED
+        title.trim(),
         description || null,
-        assignedTo || null,    // ✅ FIXED
+        finalAssignee,
         userId,
       ]
     );
 
     await client.query("COMMIT");
 
-    res.json({
+    return res.json({
       success: true,
       task: insertRes.rows[0],
     });
   } catch (err) {
     await client.query("ROLLBACK");
+
     console.error("❌ AI task creation failed:", err);
 
-    res.status(500).json({
-      error: "Task creation failed",
+    return res.status(500).json({
+      error: "task_creation_failed",
+      message: "Unexpected error while creating task",
     });
   } finally {
     client.release();
