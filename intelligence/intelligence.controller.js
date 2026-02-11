@@ -109,6 +109,30 @@ export async function getExecutiveSummary(req, res) {
 }
 
 /**
+ * ADMIN — Coaching effectiveness insights
+ */
+export async function getCoachingEffectiveness(req, res) {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    const { workspaceId } = req;
+    const { month } = req.query;
+
+    const data = await intelligenceService.getCoachingEffectiveness({
+      workspaceId,
+      month,
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error("getCoachingEffectiveness error:", err);
+    res.status(500).json({ error: "Failed to fetch coaching effectiveness" });
+  }
+}
+
+/**
  * ADMIN — Manual monthly scoring trigger
  */
 export async function runMonthlyScoring(req, res) {

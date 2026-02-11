@@ -92,7 +92,12 @@ app.use("/internal", internalRoutes);
 app.use(internalTasks);
 app.use(reportsRouter);
 // 🧠 Intelligence APIs (READ-ONLY, UI-facing)
-app.use("/intelligence", intelligenceRoutes);
+app.use(
+  "/intelligence",
+  authMiddleware,
+  requireWorkspaceForUser,
+  intelligenceRoutes
+);
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
@@ -138,8 +143,6 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
 initSocket(server, process.env.FRONTEND_BASE_URL);
-
-console.log("✅ Workspace routes mounted");
 
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);

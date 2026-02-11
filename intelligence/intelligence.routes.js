@@ -1,49 +1,45 @@
 import express from "express";
-import { authMiddleware } from "../middleware/auth.middleware.js";
-import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   getUserPerformance,
   getAdminInsights,
   getExecutiveSummary,
+  runMonthlyScoring,
+  getCoachingEffectiveness,
 } from "./intelligence.controller.js";
-import { runMonthlyScoring } from "./intelligence.controller.js";
+
+console.log("🧠 Intelligence routes loaded");
 
 const router = express.Router();
 
-/**
- * USER — Monthly performance
- */
+/* ======================================================
+   HEALTH CHECK (DEBUG / ROUTE CONFIRMATION)
+====================================================== */
+router.get("/__ping", (req, res) => {
+  res.json({ ok: true });
+});
+
+/* ======================================================
+   USER
+====================================================== */
+router.get("/user/performance", getUserPerformance);
+
+/* ======================================================
+   ADMIN — READ
+====================================================== */
+router.get("/admin/insights", getAdminInsights);
+
+router.get("/admin/executive-summary", getExecutiveSummary);
+
 router.get(
-  "/user/performance",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getUserPerformance
+  "/admin/coaching-effectiveness",
+  getCoachingEffectiveness
 );
 
-/**
- * ADMIN — Organization insights
- */
-router.get(
-  "/admin/insights",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getAdminInsights
-);
-
-/**
- * ADMIN — Executive summary
- */
-router.get(
-  "/admin/executive-summary",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getExecutiveSummary
-);
-
+/* ======================================================
+   ADMIN — WRITE / CONTROL
+====================================================== */
 router.post(
   "/admin/run-monthly-scoring",
-  authMiddleware,
-  requireWorkspaceForUser,
   runMonthlyScoring
 );
 
