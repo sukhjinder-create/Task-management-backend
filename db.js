@@ -12,6 +12,12 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT,
+
+  // ✅ CONNECTION REUSE SETTINGS
+  max: 10,                    // max open connections
+  idleTimeoutMillis: 30000,   // close idle clients after 30s
+  connectionTimeoutMillis: 5000, // fail fast if DB slow
+  keepAlive: true             // reuse TCP connection
 });
 
 // 🔐 PRODUCTION SAFETY: Prevent hard crashes

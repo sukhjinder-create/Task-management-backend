@@ -1,46 +1,82 @@
 import express from "express";
+import { authMiddleware } from "../middleware/auth.middleware.js";
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   getUserPerformance,
   getAdminInsights,
   getExecutiveSummary,
   runMonthlyScoring,
   getCoachingEffectiveness,
+  getUserTrend,
+  getUserProjectPerformance,
 } from "./intelligence.controller.js";
 
 console.log("🧠 Intelligence routes loaded");
 
 const router = express.Router();
 
-/* ======================================================
-   HEALTH CHECK (DEBUG / ROUTE CONFIRMATION)
-====================================================== */
-router.get("/__ping", (req, res) => {
-  res.json({ ok: true });
-});
+/* =====================================================
+   USER ROUTES
+===================================================== */
 
-/* ======================================================
-   USER
-====================================================== */
-router.get("/user/performance", getUserPerformance);
+router.get(
+  "/user/performance",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getUserPerformance
+);
 
-/* ======================================================
-   ADMIN — READ
-====================================================== */
-router.get("/admin/insights", getAdminInsights);
+/* =====================================================
+   ADMIN ROUTES
+===================================================== */
 
-router.get("/admin/executive-summary", getExecutiveSummary);
+router.post(
+  "/admin/run-monthly-scoring",
+  authMiddleware,
+  requireWorkspaceForUser,
+  runMonthlyScoring
+);
+
+router.get(
+  "/admin/insights",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getAdminInsights
+);
+
+ console.log("Executive summary hit");
+router.get(
+  "/admin/executive-summary",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getExecutiveSummary
+);
 
 router.get(
   "/admin/coaching-effectiveness",
+  authMiddleware,
+  requireWorkspaceForUser,
   getCoachingEffectiveness
 );
 
-/* ======================================================
-   ADMIN — WRITE / CONTROL
-====================================================== */
-router.post(
-  "/admin/run-monthly-scoring",
-  runMonthlyScoring
+/**
+ * USER — Monthly trend
+ */
+router.get(
+  "/user/trend",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getUserTrend
+);
+
+/**
+ * USER — Project performance
+ */
+router.get(
+  "/user/project-performance",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getUserProjectPerformance
 );
 
 export default router;

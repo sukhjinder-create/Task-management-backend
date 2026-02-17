@@ -5,6 +5,9 @@ import { buildMonthlyEvidence } from "../events/scoring/evidenceBuilder.service.
 import { saveMonthlyScore } from "../events/scoring/monthlyScore.store.js";
 import { evaluateCoachingEffectiveness } from "../events/coaching/coachingEffectiveness.service.js";
 import { runCoachingControlEngine } from "../events/coaching/control/coachingControl.engine.js";
+import { runProjectMonthlyScoring } from "../events/scoring/projectMonthlyScore.service.js";
+import { calculateProjectProductivity } from "../events/scoring/projectProductivity.engine.js";
+import { saveProjectMonthlyScore } from "../events/scoring/projectMonthlyScore.store.js";
 
 /**
  * Runs deterministic monthly scoring for a workspace
@@ -42,6 +45,50 @@ export async function runManualMonthlyScoring({
       userId: user.id,
       month,
     });
+
+    const { startDate, endDate } = getMonthBoundaries(month);
+
+const { rows: projectRows } = await pool.query(
+  `
+  SELECT DISTINCT t.project_id
+  FROM tasks t
+  WHERE t.assigned_to = $1
+    AND t.workspace_id = $2
+    AND t.created_at >= $3
+    AND t.created_at < $4
+  `,
+  [user.id, workspaceId, startDate, endDate]
+);
+
+for (const proj of projectRows) {
+  const projectId = proj.project_id;
+
+  const { rows: projectTasks } = await pool.query(
+    `
+    SELECT status, due_date
+    FROM tasks
+    WHERE assigned_to = $1
+      AND project_id = $2
+      AND workspace_id = $3
+      AND created_at >= $4
+      AND created_at < $5
+    `,
+    [user.id, projectId, workspaceId, startDate, endDate]
+  );
+
+  const productivityScore = calculateProjectProductivity(
+    projectTasks,
+    endDate // pass month end
+  );
+
+  await saveProjectMonthlyScore({
+    workspaceId,
+    userId: user.id,
+    projectId,
+    month,
+    score: productivityScore ?? 0, // HARD SAFETY
+  });
+}
 
     // 3️⃣ Calculate score (Step 2.1)
     const scoreResult = calculateScore(metrics);
@@ -106,6 +153,12 @@ try {
     workspaceId,
     month,
   });
+
+  await runProjectMonthlyScoring({
+  workspaceId,
+  month,
+});
+
 } catch (err) {
   console.error("[coaching-control] failed", {
     workspaceId,
@@ -137,4 +190,13 @@ function getPreviousMonth(month) {
   }
 
   return `${year}-${String(m - 1).padStart(2, "0")}`;
+}
+
+function getMonthBoundaries(month) {
+  const [year, m] = month.split("-").map(Number);
+
+  const startDate = new Date(year, m - 1, 1);
+  const endDate = new Date(year, m, 1); // first day next month
+
+  return { startDate, endDate };
 }

@@ -13,6 +13,10 @@ export async function saveExecutiveSummary({
       (id, workspace_id, period, summary, source_data)
     VALUES
       ($1, $2, $3, $4, $5)
+    ON CONFLICT (workspace_id, period)
+    DO UPDATE SET
+      summary = EXCLUDED.summary,
+      source_data = EXCLUDED.source_data
     `,
     [uuid(), workspaceId, period, summary, sourceData]
   );

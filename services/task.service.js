@@ -247,20 +247,55 @@ export async function updateTaskAsAdminOrManager(id, data) {
 /**
  * Update status as a normal user
  */
-export async function updateTaskStatusAsUser(id, userId, workspaceId, newStatus) {
+export async function updateTaskStatusAsUser(
+  id,
+  userId,
+  workspaceId,
+  newStatus
+) {
   const existing = await getTaskById(id);
 
-  // 🔒 workspace check
+  if (!existing) {
+    throw new Error("Task not found");
+  }
+
+  // 🔒 Workspace validation
   await assertProjectInWorkspace(existing.project_id, workspaceId);
 
+  // 🔒 Ownership validation
   if (existing.assigned_to !== userId) {
     throw new Error("You are not allowed to update this task");
   }
 
-  await pool.query(
-    `UPDATE tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-    [newStatus, id]
-  );
+  // 🛑 Prevent unnecessary update
+  if (existing.status === newStatus) {
+    return existing;
+  }
+
+  if (newStatus === "completed") {
+    // ✅ Set completed_at only if not already set
+    await pool.query(
+      `
+      UPDATE tasks
+      SET status = $1,
+          updated_at = CURRENT_TIMESTAMP,
+          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+      WHERE id = $2
+      `,
+      [newStatus, id]
+    );
+  } else {
+    // 🔁 Reopened or moved to other status
+    await pool.query(
+      `
+      UPDATE tasks
+      SET status = $1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      `,
+      [newStatus, id]
+    );
+  }
 
   return await getTaskById(id);
 }

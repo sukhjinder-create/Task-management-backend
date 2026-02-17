@@ -1,6 +1,9 @@
 import pool from "../db.js";
 import intelligenceService from "./intelligence.service.js";
 import { runManualMonthlyScoring } from "./manualScoring.service.js";
+import { advancedForecast } from "./forecast/forecast.engine.js";
+import { generateExecutiveSummary } from "./executiveSummary.generator.js";
+import { saveExecutiveSummary } from "../events/executive/executiveSummary.store.js";
 
 /**
  * USER — Monthly performance
@@ -61,27 +64,64 @@ export async function getAdminInsights(req, res) {
     );
 
     const stats = rows[0];
+    // 🔥 Fetch last 6 months org scores for forecasting
+const history = await pool.query(`
+  SELECT month, AVG(score) AS avg_score
+  FROM workspace_monthly_scores
+  WHERE workspace_id = $1
+  GROUP BY month
+  ORDER BY month ASC
+  LIMIT 6
+`, [workspaceId]);
 
+const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
+
+const forecast = advancedForecast(scoreHistory);
+
+// use deterministic reasoning from engine
+let forecastReasoning = forecast.reasoning || null;
+
+    // 🔥 Leaderboard (Top performers)
+const leaderboardResult = await pool.query(
+  `
+  SELECT 
+    u.id AS userId,
+    u.username,
+    wms.score
+  FROM workspace_monthly_scores wms
+  JOIN users u ON u.id = wms.user_id
+  WHERE wms.workspace_id = $1
+    AND wms.month = $2
+  ORDER BY wms.score DESC
+  LIMIT 5
+  `,
+  [workspaceId, month]
+);
     return res.json({
-      orgScore: {
-        averageScore: stats.average_score
-          ? Number(stats.average_score)
-          : null,
-        userCount: Number(stats.user_count),
-        highPerformers: Number(stats.high_performers),
-        atRiskUsers: Number(stats.at_risk_users),
-      },
-      coachingEffectiveness: {}, // next phase
-      riskDistribution: {
-        lowRisk: Number(stats.low_risk),
-        mediumRisk: Number(stats.medium_risk),
-        highRisk: Number(stats.high_risk),
-      },
-    });
-  } catch (err) {
-    console.error("getAdminInsights error:", err);
-    res.status(500).json({ error: "Failed to fetch admin insights" });
-  }
+  orgScore: {
+    averageScore: stats.average_score
+      ? Number(stats.average_score)
+      : null,
+    userCount: Number(stats.user_count),
+    highPerformers: Number(stats.high_performers),
+    atRiskUsers: Number(stats.at_risk_users),
+  },
+  coachingEffectiveness: {},
+  riskDistribution: {
+    lowRisk: Number(stats.low_risk),
+    mediumRisk: Number(stats.medium_risk),
+    highRisk: Number(stats.high_risk),
+  },
+  forecast: {
+  ...forecast,
+  reasoning: forecastReasoning
+},
+  leaderboard: leaderboardResult.rows
+});
+} catch (err) {
+  console.error("getAdminInsights error:", err);
+  res.status(500).json({ error: "Failed to fetch admin insights" });
+}
 }
 
 /**
@@ -89,22 +129,201 @@ export async function getAdminInsights(req, res) {
  */
 export async function getExecutiveSummary(req, res) {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin access required" });
+    const workspaceId = req.workspaceId;
+    const month = req.query.month;
+
+    if (!month) {
+      return res.status(400).json({ error: "month is required (YYYY-MM)" });
     }
 
-    const { workspaceId } = req;
-    const { month } = req.query;
+    // ===== Collect structured data =====
+    const { rows } = await pool.query(`
+      SELECT
+        COUNT(*) AS user_count,
+        AVG(score) AS avg_score,
+        COUNT(*) FILTER (WHERE score >= 75) AS high_performers,
+        COUNT(*) FILTER (WHERE score <= 40) AS at_risk
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND month = $2
+    `, [workspaceId, month]);
 
-    const summary = await intelligenceService.getExecutiveSummary({
-      workspaceId,
+    const risk = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE score > 70) AS low_risk,
+        COUNT(*) FILTER (WHERE score BETWEEN 41 AND 70) AS medium_risk,
+        COUNT(*) FILTER (WHERE score <= 40) AS high_risk
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND month = $2
+    `, [workspaceId, month]);
+
+    const leaderboard = await pool.query(`
+      SELECT user_id, score
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND month = $2
+      ORDER BY score DESC
+      LIMIT 5
+    `, [workspaceId, month]);
+
+    // ===== Forecast calculation =====
+const history = await pool.query(`
+  SELECT month, AVG(score) AS avg_score
+  FROM workspace_monthly_scores
+  WHERE workspace_id = $1
+  GROUP BY month
+  ORDER BY month ASC
+  LIMIT 6
+`, [workspaceId]);
+
+const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
+
+const forecast = advancedForecast(scoreHistory);
+
+    const stats = rows[0];
+
+    const data = {
       month,
+      orgScore: {
+        averageScore: Number(stats.avg_score) || 0,
+        userCount: Number(stats.user_count) || 0,
+        highPerformers: Number(stats.high_performers) || 0,
+        atRiskUsers: Number(stats.at_risk) || 0,
+      },
+      riskDistribution: {
+        low_risk: Number(risk.rows[0].low_risk) || 0,
+        medium_risk: Number(risk.rows[0].medium_risk) || 0,
+        high_risk: Number(risk.rows[0].high_risk) || 0,
+      },
+      leaderboard: leaderboard.rows,
+      forecast
+    };
+
+    // ===== Check existing summary =====
+    const existing = await pool.query(`
+  SELECT summary, source_data
+  FROM workspace_executive_summaries
+  WHERE workspace_id = $1
+    AND period = $2
+  LIMIT 1
+`, [workspaceId, month]);
+
+    if (existing.rows.length > 0) {
+  const row = existing.rows[0];
+
+  // ✅ Already generated
+  if (
+  row.summary &&
+  row.summary !== "GENERATING" &&
+  row.summary.length > 20
+) {
+    return res.json({
+      month,
+      status: "ready",
+      text: row.summary,
+      reasoning: row.source_data?.reasoning || null
+    });
+  }
+
+  // ✅ Generation already running
+  if (row.source_data?.processing === true) {
+    return res.json({
+      month,
+      status: "processing",
+      text: null
+    });
+  }
+
+  console.log("Starting AI generation (lock acquired)");
+
+  // 🔒 mark processing true
+  await pool.query(`
+    UPDATE workspace_executive_summaries
+    SET source_data = jsonb_set(source_data, '{processing}', 'true')
+    WHERE workspace_id = $1 AND period = $2
+  `, [workspaceId, month]);
+
+  res.json({
+    month,
+    status: "processing",
+    text: null
+  });
+
+  setImmediate(async () => {
+    try {
+      const result = await generateExecutiveSummary(data);
+
+      await saveExecutiveSummary({
+        workspaceId,
+        period: month,
+        summary: result.text,
+        sourceData: {
+          reasoning: result.reasoning,
+          outlook: result.outlook,
+          processing: false,
+          isFallback: result.isFallback
+        }
+      });
+
+      console.log("Executive summary stored for", month);
+
+    } catch (err) {
+      console.error("Executive summary failed:", err.message);
+    }
+  });
+
+  return;
+}
+
+// ✅ create processing lock so polling does NOT start new jobs
+await pool.query(`
+INSERT INTO workspace_executive_summaries
+(workspace_id, period, summary, source_data)
+VALUES (
+  $1,
+  $2,
+  'GENERATING',
+  '{"processing": true}'::jsonb
+)
+ON CONFLICT (workspace_id, period) DO NOTHING
+`, [workspaceId, month]);
+
+    // ===== Respond immediately =====
+    res.json({
+      month,
+      status: "processing",
+      text: null
     });
 
-    return res.json(summary);
+    setImmediate(async () => {
+  try {
+    console.log("Starting AI generation (new record)");
+
+    const result = await generateExecutiveSummary(data);
+
+    await saveExecutiveSummary({
+      workspaceId,
+      period: month,
+      summary: result.text,
+      sourceData: {
+        reasoning: result.reasoning,
+        outlook: result.outlook,
+        processing: false,
+        isFallback: result.isFallback
+      }
+    });
+
+    console.log("Executive summary stored for", month);
+
+  } catch (err) {
+    console.error("Executive summary generation failed:", err.message);
+  }
+});
+
   } catch (err) {
     console.error("getExecutiveSummary error:", err);
-    res.status(500).json({ error: "Failed to fetch executive summary" });
+    res.status(500).json({ error: "Failed to generate summary" });
   }
 }
 
@@ -161,5 +380,55 @@ export async function runMonthlyScoring(req, res) {
   } catch (err) {
     console.error("Manual scoring error:", err);
     res.status(500).json({ error: "Failed to run monthly scoring" });
+  }
+}
+
+export async function getUserTrend(req, res) {
+  try {
+    const workspaceId = req.workspaceId;
+    const userId = req.user.id;
+
+    const { rows } = await pool.query(`
+      SELECT month, score
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND user_id = $2
+      ORDER BY month ASC
+      LIMIT 6
+    `, [workspaceId, userId]);
+
+    const scores = rows.map(r => r.score);
+
+    const forecast = advancedForecast(scores);
+
+    res.json({
+      history: rows,
+      forecast
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to get trend" });
+  }
+}
+
+export async function getUserProjectPerformance(req, res) {
+  try {
+    const workspaceId = req.workspaceId;
+    const userId = req.user.id;
+
+    const { rows } = await pool.query(`
+      SELECT project_id, score
+      FROM workspace_project_monthly_scores
+      WHERE workspace_id = $1
+        AND user_id = $2
+      ORDER BY score DESC
+    `, [workspaceId, userId]);
+
+    res.json(rows);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to get project performance" });
   }
 }
