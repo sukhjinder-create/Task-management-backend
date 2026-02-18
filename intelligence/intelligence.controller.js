@@ -33,46 +33,92 @@ export async function getUserPerformance(req, res) {
  */
 export async function getAdminInsights(req, res) {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin access required" });
-    }
-
+    const role = req.user.role;
+    const userId = req.user.id;
     const { workspaceId } = req;
     const { month } = req.query;
 
     if (!month) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
     }
+    let projectFilter = "";
+    let projectParams = [];
 
-    const { rows } = await pool.query(
-      `
-      SELECT
-        COUNT(*) AS user_count,
-        AVG(score)::numeric(5,2) AS average_score,
+// ROLE-BASED DATA SCOPE
 
-        COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
-        COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
+if (role !== "admin") {
+  const { rows: projects } = await pool.query(
+    `
+    SELECT DISTINCT project_id
+    FROM tasks
+    WHERE workspace_id = $1
+      AND assigned_to = $2
+    `,
+    [workspaceId, userId]
+  );
 
-        COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
-        COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
-        COUNT(*) FILTER (WHERE score < 50) AS high_risk
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-        AND month = $2
-      `,
-      [workspaceId, month]
-    );
+  const projectIds = projects.map(p => p.project_id);
+
+  if (!projectIds.length) {
+    return res.json({
+      orgScore: null,
+      leaderboard: [],
+      forecast: null,
+      riskDistribution: null
+    });
+  }
+
+  projectFilter = ` AND project_id = ANY($3) `;
+  projectParams = [projectIds];
+}
+   const statsParams = [workspaceId, month, ...projectParams];
+
+const { rows } = await pool.query(
+`
+SELECT
+  COUNT(*) AS user_count,
+  AVG(score)::numeric(5,2) AS average_score,
+  COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
+  COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
+  COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
+  COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
+  COUNT(*) FILTER (WHERE score < 50) AS high_risk
+FROM workspace_monthly_scores
+WHERE workspace_id = $1
+  AND month = $2
+  ${projectFilter}
+`,
+statsParams
+);
 
     const stats = rows[0];
     // 🔥 Fetch last 6 months org scores for forecasting
-const history = await pool.query(`
-  SELECT month, AVG(score) AS avg_score
-  FROM workspace_monthly_scores
-  WHERE workspace_id = $1
-  GROUP BY month
-  ORDER BY month ASC
-  LIMIT 6
-`, [workspaceId]);
+    const historyParams =
+  role === "admin"
+    ? [workspaceId]
+    : [workspaceId, projectParams[0]];
+
+const historyQuery =
+  role === "admin"
+    ? `
+      SELECT month, AVG(score) AS avg_score
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+      GROUP BY month
+      ORDER BY month ASC
+      LIMIT 6
+    `
+    : `
+      SELECT month, AVG(score) AS avg_score
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND project_id = ANY($2)
+      GROUP BY month
+      ORDER BY month ASC
+      LIMIT 6
+    `;
+
+const history = await pool.query(historyQuery, historyParams);
 
 const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
 
@@ -82,21 +128,26 @@ const forecast = advancedForecast(scoreHistory);
 let forecastReasoning = forecast.reasoning || null;
 
     // 🔥 Leaderboard (Top performers)
+
+    const leaderboardParams = [workspaceId, month, ...projectParams];
+
 const leaderboardResult = await pool.query(
-  `
-  SELECT 
-    u.id AS userId,
-    u.username,
-    wms.score
-  FROM workspace_monthly_scores wms
-  JOIN users u ON u.id = wms.user_id
-  WHERE wms.workspace_id = $1
-    AND wms.month = $2
-  ORDER BY wms.score DESC
-  LIMIT 5
-  `,
-  [workspaceId, month]
+`
+SELECT 
+  u.id AS userId,
+  u.username,
+  wms.score
+FROM workspace_monthly_scores wms
+JOIN users u ON u.id = wms.user_id
+WHERE wms.workspace_id = $1
+  AND wms.month = $2
+  ${projectFilter}
+ORDER BY wms.score DESC
+LIMIT 5
+`,
+leaderboardParams
 );
+
     return res.json({
   orgScore: {
     averageScore: stats.average_score
@@ -416,14 +467,19 @@ export async function getUserProjectPerformance(req, res) {
   try {
     const workspaceId = req.workspaceId;
     const userId = req.user.id;
-
+    const month = new Date().toISOString().slice(0, 7);
     const { rows } = await pool.query(`
-      SELECT project_id, score
-      FROM workspace_project_monthly_scores
-      WHERE workspace_id = $1
-        AND user_id = $2
-      ORDER BY score DESC
-    `, [workspaceId, userId]);
+      SELECT
+  w.project_id,
+  p.name AS project_name,
+  w.score
+FROM workspace_project_monthly_scores w
+JOIN projects p ON p.id = w.project_id
+WHERE w.workspace_id = $1
+  AND w.user_id = $2
+  AND w.month = $3
+ORDER BY w.score DESC
+    `, [workspaceId, userId, month]);
 
     res.json(rows);
 

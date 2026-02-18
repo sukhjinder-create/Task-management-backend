@@ -147,24 +147,24 @@ for (const proj of projectRows) {
     });
   }
 
-  // 7️⃣ PHASE 4.2 — Coaching Control Engine (WORKSPACE LEVEL)
+// Coaching control
 try {
   await runCoachingControlEngine({
     workspaceId,
     month,
   });
-
-  await runProjectMonthlyScoring({
-  workspaceId,
-  month,
-});
-
 } catch (err) {
-  console.error("[coaching-control] failed", {
+  console.error("[coaching-control] failed", err.message);
+}
+
+// Project scoring
+try {
+  await runProjectMonthlyScoring({
     workspaceId,
     month,
-    error: err.message,
   });
+} catch (err) {
+  console.error("[project-monthly-scoring] failed", err.message);
 }
 
   return {

@@ -168,11 +168,11 @@ router.put("/:id", async (req, res) => {
       }
 
       const updated = await updateTaskStatusAsUser(
-        id,
-        req.user.id,
-        status,
-        req.workspaceId // 🔐 enforced
-      );
+  id,
+  req.user.id,
+  req.workspaceId,
+  status
+);
 
       return res.json(updated);
     }

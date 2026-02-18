@@ -1,80 +1,77 @@
 import pool from "../../db.js";
 import { randomUUID } from "crypto";
+import { calculateProjectProductivity } from "./projectProductivity.engine.js";
+
+function getMonthBoundaries(month) {
+  const [year, m] = month.split("-").map(Number);
+
+  return {
+    startDate: new Date(year, m - 1, 1),
+    endDate: new Date(year, m, 1), // first day next month
+  };
+}
 
 export async function runProjectMonthlyScoring({
   workspaceId,
   month,
 }) {
-  // 1️⃣ Get distinct project-user pairs from tasks
+  const { startDate, endDate } = getMonthBoundaries(month);
   const { rows } = await pool.query(
-    `
-    SELECT DISTINCT project_id, assigned_to AS user_id
-    FROM tasks
-    WHERE workspace_id = $1
-      AND assigned_to IS NOT NULL
-    `,
-    [workspaceId]
-  );
-
+  `
+  SELECT DISTINCT project_id, assigned_to AS user_id
+  FROM tasks
+  WHERE workspace_id = $1
+    AND assigned_to IS NOT NULL
+    AND created_at >= $2
+    AND created_at < $3
+  `,
+  [workspaceId, startDate, endDate]
+);
   for (const row of rows) {
     const { project_id, user_id } = row;
 
-    const { rows: taskStats } = await pool.query(
-      `
-      SELECT
-        COUNT(*) AS total,
-        COUNT(*) FILTER (WHERE status = 'done') AS completed,
-        AVG(progress) AS avg_progress
-      FROM tasks
-      WHERE workspace_id = $1
-        AND project_id = $2
-        AND assigned_to = $3
-      `,
-      [workspaceId, project_id, user_id]
-    );
+    const { rows: projectTasks } = await pool.query(
+  `
+  SELECT status, progress, due_date
+  FROM tasks
+  WHERE workspace_id = $1
+    AND project_id = $2
+    AND assigned_to = $3
+    AND created_at >= $4
+    AND created_at < $5
+  `,
+  [workspaceId, project_id, user_id, startDate, endDate]
+);
 
-    const stats = taskStats[0];
+    if (!projectTasks.length) continue;
 
-    const total = Number(stats.total) || 0;
-    const completed = Number(stats.completed) || 0;
-    const avgProgress = Number(stats.avg_progress) || 0;
-
-    if (total === 0) continue;
-
-    const completionRatio = completed / total;
-    const progressRatio = avgProgress / 100;
-
-    const productivityScore =
-      Math.round(completionRatio * 50) +
-      Math.round(progressRatio * 50);
+const productivityScore =
+  calculateProjectProductivity(projectTasks);
 
     await pool.query(
       `
       INSERT INTO workspace_project_monthly_scores
-        (id, workspace_id, project_id, user_id, month,
-         productivity_score, breakdown)
+      (id, workspace_id, project_id, user_id, month,
+      score, breakdown)
       VALUES
         ($1,$2,$3,$4,$5,$6,$7)
       ON CONFLICT (workspace_id, project_id, user_id, month)
       DO UPDATE SET
-        productivity_score = EXCLUDED.productivity_score,
-        breakdown = EXCLUDED.breakdown
+      score = EXCLUDED.score,
+      breakdown = EXCLUDED.breakdown
       `,
       [
-        randomUUID(),
-        workspaceId,
-        project_id,
-        user_id,
-        month,
-        productivityScore,
-        {
-          total,
-          completed,
-          avgProgress,
-          completionRatio,
-          progressRatio,
-        },
-      ]
+  randomUUID(),
+  workspaceId,
+  project_id,
+  user_id,
+  month,
+  productivityScore,
+  {
+    taskCount: projectTasks.length,
+    scoredBy: "projectProductivity.engine"
+  },
+]
     );
   }
 }

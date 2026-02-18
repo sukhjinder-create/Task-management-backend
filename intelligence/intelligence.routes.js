@@ -38,7 +38,7 @@ router.post(
 );
 
 router.get(
-  "/admin/insights",
+  "/insights",
   authMiddleware,
   requireWorkspaceForUser,
   getAdminInsights
