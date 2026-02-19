@@ -28,6 +28,7 @@ import {
 
 import workspaceService from "../services/workspace.service.js";
 import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
+import { recomputeWorkspaceHealth } from "../services/workspaceHealth.service.js";
 
 let io;
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
@@ -237,6 +238,18 @@ if (socket.workspaceId) {
     at: new Date().toISOString(),
     workspaceId: socket.workspaceId,
   });
+
+  /* -----------------------------------------------------
+   WORKSPACE: SUBSCRIBE (FOR DASHBOARD & INTELLIGENCE)
+----------------------------------------------------- */
+socket.on("workspace:subscribe", () => {
+  if (!socket.workspaceId) return;
+
+  const workspaceRoom = `workspace:${socket.workspaceId}`;
+  socket.join(workspaceRoom);
+
+  console.log("✅ Client subscribed to workspace room:", workspaceRoom);
+});
 
 /* -----------------------------------------------------
    🔥 FETCH HISTORY ON CHANNEL OPEN (CHANNELS + DMs)
@@ -819,67 +832,16 @@ export function getIO() {
    ===================================================== */
 
 export async function emitWorkspaceIntelligenceUpdate(workspaceId, payload) {
-  if (!io || !workspaceId) return;
-
   const room = `workspace:${workspaceId}`;
 
-  // ----------------------------
-  // HEALTH DELTA CALCULATION
-  // ----------------------------
-  let delta = 0;
+  const newHealth = await recomputeWorkspaceHealth(workspaceId);
 
-  switch (payload?.type) {
-    case "task-created":
-      delta = +0.3;
-      break;
-
-    case "task-status-changed":
-    case "task-updated":
-      delta = payload?.status === "completed" ? +1 : 0;
-      break;
-
-    case "task-deleted":
-      delta = -0.2;
-      break;
-  }
-
-  let newHealth = null;
-
-  if (delta !== 0) {
-    // ✅ Persist health score
-    const result = await pool.query(`
-      INSERT INTO workspace_health (workspace_id, health_score)
-      VALUES ($1, 70)
-      ON CONFLICT (workspace_id) DO UPDATE
-      SET health_score =
-        LEAST(100,
-          GREATEST(
-            0,
-            workspace_health.health_score + $2
-          )
-        ),
-        updated_at = NOW()
-      RETURNING health_score
-    `, [workspaceId, delta]);
-
-    newHealth = Number(result.rows[0].health_score);
-  }
-
-  // ----------------------------
-  // EXISTING EVENT
-  // ----------------------------
   io.to(room).emit("workspace:intelligence-updated", payload);
 
-  // ----------------------------
-  // HEALTH PULSE EVENT
-  // ----------------------------
-  if (newHealth !== null) {
-    io.to(room).emit("workspace:health-pulse", {
-      health: newHealth,
-      delta,
-      at: new Date().toISOString(),
-    });
-  }
+  io.to(room).emit("workspace:health-pulse", {
+    health: newHealth,
+    at: new Date().toISOString(),
+  });
 }
 
 export function emitChannelCreated(channel, workspaceId = WORKSPACE_GLOBAL) {
