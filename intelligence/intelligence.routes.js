@@ -10,6 +10,10 @@ import {
   getUserTrend,
   getUserProjectPerformance,
 } from "./intelligence.controller.js";
+import {
+  getWorkspaceHealth
+} from "./intelligence.controller.js";
+
 
 console.log("🧠 Intelligence routes loaded");
 
@@ -77,6 +81,11 @@ router.get(
   authMiddleware,
   requireWorkspaceForUser,
   getUserProjectPerformance
+);
+
+router.get(
+  "/workspace/health",
+  getWorkspaceHealth
 );
 
 export default router;

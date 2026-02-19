@@ -2,10 +2,9 @@
 // Workspace-aware Socket.IO server that preserves legacy behavior.
 // Backwards compatible: keeps legacy room names and emits, while also
 // adding optional workspace-scoped rooms for newer clients.
-
+import pool from "../db.js";
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
-import pool from "../db.js";
 
 import {
   ensureChannelMember,
@@ -207,14 +206,28 @@ socket._recentMessageHashes = new Set();
   }
 
   // 🔁 Personal room (for direct emits)
-  socket.join(userId);
+socket.join(userId);
+
+console.log(
+  "Socket connected for user:",
+  userId,
+  "workspace:",
+  socket.workspaceId
+);
+
+/* =====================================================
+   🧠 WORKSPACE CONTROL CENTER ROOM (ADD THIS BLOCK)
+   ===================================================== */
+if (socket.workspaceId) {
+  const workspaceRoom = `workspace:${socket.workspaceId}`;
+
+  socket.join(workspaceRoom);
 
   console.log(
-    "Socket connected for user:",
-    userId,
-    "workspace:",
-    socket.workspaceId
+    "🧠 Joined workspace intelligence room:",
+    workspaceRoom
   );
+}
 
   // 🔔 Presence update (workspace-scoped)
   io.emit("presence:update", {
@@ -799,6 +812,74 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 export function getIO() {
   if (!io) throw new Error("Socket.io not initialized");
   return io;
+}
+
+/* =====================================================
+   🧠 WORKSPACE INTELLIGENCE EMITTER
+   ===================================================== */
+
+export async function emitWorkspaceIntelligenceUpdate(workspaceId, payload) {
+  if (!io || !workspaceId) return;
+
+  const room = `workspace:${workspaceId}`;
+
+  // ----------------------------
+  // HEALTH DELTA CALCULATION
+  // ----------------------------
+  let delta = 0;
+
+  switch (payload?.type) {
+    case "task-created":
+      delta = +0.3;
+      break;
+
+    case "task-status-changed":
+    case "task-updated":
+      delta = payload?.status === "completed" ? +1 : 0;
+      break;
+
+    case "task-deleted":
+      delta = -0.2;
+      break;
+  }
+
+  let newHealth = null;
+
+  if (delta !== 0) {
+    // ✅ Persist health score
+    const result = await pool.query(`
+      INSERT INTO workspace_health (workspace_id, health_score)
+      VALUES ($1, 70)
+      ON CONFLICT (workspace_id) DO UPDATE
+      SET health_score =
+        LEAST(100,
+          GREATEST(
+            0,
+            workspace_health.health_score + $2
+          )
+        ),
+        updated_at = NOW()
+      RETURNING health_score
+    `, [workspaceId, delta]);
+
+    newHealth = Number(result.rows[0].health_score);
+  }
+
+  // ----------------------------
+  // EXISTING EVENT
+  // ----------------------------
+  io.to(room).emit("workspace:intelligence-updated", payload);
+
+  // ----------------------------
+  // HEALTH PULSE EVENT
+  // ----------------------------
+  if (newHealth !== null) {
+    io.to(room).emit("workspace:health-pulse", {
+      health: newHealth,
+      delta,
+      at: new Date().toISOString(),
+    });
+  }
 }
 
 export function emitChannelCreated(channel, workspaceId = WORKSPACE_GLOBAL) {

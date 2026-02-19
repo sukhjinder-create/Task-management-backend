@@ -4,6 +4,7 @@ import { runManualMonthlyScoring } from "./manualScoring.service.js";
 import { advancedForecast } from "./forecast/forecast.engine.js";
 import { generateExecutiveSummary } from "./executiveSummary.generator.js";
 import { saveExecutiveSummary } from "../events/executive/executiveSummary.store.js";
+import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
 
 /**
  * USER — Monthly performance
@@ -424,6 +425,11 @@ export async function runMonthlyScoring(req, res) {
       triggeredBy: req.user.id,
     });
 
+    emitWorkspaceIntelligenceUpdate(workspaceId, {
+  type: "monthly-scoring-updated",
+  month,
+});
+
     return res.json({
       message: "Monthly scoring executed",
       result,
@@ -486,5 +492,42 @@ ORDER BY w.score DESC
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to get project performance" });
+  }
+}
+
+/**
+ * WORKSPACE — Health Pulse
+ * Returns current workspace health score
+ */
+export async function getWorkspaceHealth(req, res) {
+  try {
+    const workspaceId = req.workspaceId;
+
+    const { rows } = await pool.query(
+      `
+      SELECT health_score
+      FROM workspace_health
+      WHERE workspace_id = $1
+      LIMIT 1
+      `,
+      [workspaceId]
+    );
+
+    // If not initialized yet → neutral baseline
+    if (!rows.length) {
+      return res.json({
+        healthScore: 70
+      });
+    }
+
+    return res.json({
+      healthScore: Number(rows[0].health_score)
+    });
+
+  } catch (err) {
+    console.error("getWorkspaceHealth error:", err);
+    res.status(500).json({
+      error: "Failed to fetch workspace health"
+    });
   }
 }

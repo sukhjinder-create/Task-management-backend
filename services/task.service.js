@@ -8,6 +8,7 @@ import {
   deleteSubtaskRepo,
 } from "../repositories/task.repository.js";
 import projectRepository from "../repositories/project.repository.js";
+import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
 
 /**
  * NOTE: make sure you have this in DB:
@@ -105,6 +106,12 @@ export async function createTask({
 
   const { rows } = await pool.query(query, values);
   const created = rows[0];
+  // 🧠 workspace intelligence update
+emitWorkspaceIntelligenceUpdate(workspaceId, {
+  type: "task-created",
+  projectId: created.project_id,
+  taskId: created.id,
+});
 
   if (created.assigned_to) {
     await notifyUser({
@@ -241,7 +248,28 @@ export async function updateTaskAsAdminOrManager(id, data) {
     });
   }
 
-  return await getTaskById(id);
+  const updatedTask = await getTaskById(id);
+  // 🧠 trigger intelligence recalculation (async, non-blocking)
+import("../intelligence/manualScoring.service.js")
+  .then(({ runManualMonthlyScoring }) => {
+    const month = new Date().toISOString().slice(0, 7);
+
+    runManualMonthlyScoring({
+      workspaceId,
+      month,
+      triggeredBy: userId || updatedTask.added_by,
+    }).catch(() => {});
+  })
+  .catch(() => {});
+
+emitWorkspaceIntelligenceUpdate(data.workspaceId, {
+  type: "task-updated",
+  status: updatedTask.status,
+  projectId: updatedTask.project_id,
+  taskId: updatedTask.id,
+});
+
+return updatedTask;
 }
 
 /**
@@ -297,7 +325,28 @@ export async function updateTaskStatusAsUser(
     );
   }
 
-  return await getTaskById(id);
+  const updatedTask = await getTaskById(id);
+  // 🧠 trigger intelligence recalculation (async, non-blocking)
+import("../intelligence/manualScoring.service.js")
+  .then(({ runManualMonthlyScoring }) => {
+    const month = new Date().toISOString().slice(0, 7);
+
+    runManualMonthlyScoring({
+      workspaceId,
+      month,
+      triggeredBy: userId || updatedTask.added_by,
+    }).catch(() => {});
+  })
+  .catch(() => {});
+
+emitWorkspaceIntelligenceUpdate(workspaceId, {
+  type: "task-status-changed",
+  status: updatedTask.status, // ⭐ REQUIRED
+  projectId: updatedTask.project_id,
+  taskId: updatedTask.id,
+});
+
+return updatedTask;
 }
 
 /**
@@ -319,6 +368,11 @@ export async function deleteTask(id, workspaceId) {
       task_id: existing.id,
       project_id: existing.project_id,
     });
+    emitWorkspaceIntelligenceUpdate(workspaceId, {
+  type: "task-deleted",
+  projectId: existing.project_id,
+  taskId: existing.id,
+});
   }
 }
 
