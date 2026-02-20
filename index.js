@@ -47,6 +47,7 @@ import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
 import internalTasks from "./routes/internalTasks.js";
 import reportsRouter from "./routes/reports.js";
+import "./integrations/integration.bootstrap.js";
 // 🧠 Intelligence (READ-ONLY)
 import intelligenceRoutes from "./intelligence/intelligence.routes.js";
 
@@ -60,11 +61,17 @@ import { observeService } from "./events/observers/serviceObserver.js";
 // 🔥 NEW: Import services ONLY to wrap them (no logic change)
 import projectService from "./services/project.service.js";
 import * as taskService from "./services/task.service.js";
+import integrationRoutes from "./routes/integration.routes.js";
+import integrationDebugRoutes from "./routes/integrationDebug.routes.js";
+import asanaOAuthRoutes from "./integrations/asana/asana.oauth.routes.js";
+
 
 // ---------------- CONFIG ----------------
 dotenv.config();
 
 const app = express();
+
+app.use("/integrations/asana", asanaOAuthRoutes);
 
 // ---------------- MIDDLEWARE ----------------
 app.use(
@@ -125,6 +132,12 @@ app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
 app.use("/admin/attendance", adminAttendanceRoutes);
 app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
 app.use("/admin/attendance", adminAttendanceExportRoutes);
+app.use(
+  "/integrations",
+  integrationRoutes
+);
+app.use("/integration-debug", integrationDebugRoutes);
+
 
 // ---------------- ERROR HANDLER ----------------
 app.use((err, req, res, next) => {
