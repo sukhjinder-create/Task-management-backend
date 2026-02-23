@@ -71,7 +71,8 @@ export async function fetchAsanaProjects(workspaceId) {
  */
 export async function fetchAsanaProjectTasks(
   workspaceId,
-  projectId
+  projectId,
+  { page = 1, limit = 25, search = "" }
 ) {
   const token = await getToken(workspaceId);
 
@@ -80,8 +81,9 @@ export async function fetchAsanaProjectTasks(
   };
 
   let offset = null;
-  const allTasks = [];
-  console.log("PROJECT ID RECEIVED:", projectId);
+  let allTasks = [];
+
+  // 🔥 walk ALL asana pages
   do {
     const res = await axios.get(
       `https://app.asana.com/api/1.0/projects/${projectId}/tasks`,
@@ -97,9 +99,57 @@ export async function fetchAsanaProjectTasks(
     );
 
     allTasks.push(...res.data.data);
+
     offset = res.data?.next_page?.offset || null;
 
   } while (offset);
 
-  return allTasks;
+  // ✅ GLOBAL SEARCH (after collecting all tasks)
+  if (search) {
+    const q = search.toLowerCase();
+
+    allTasks = allTasks.filter(t =>
+      t.name?.toLowerCase().includes(q)
+    );
+  }
+
+  // ✅ REAL PAGE CALCULATION
+  const start = (page - 1) * limit;
+  const paginated = allTasks.slice(start, start + limit);
+
+  return {
+    data: paginated,
+    total: allTasks.length,
+    hasMore: start + limit < allTasks.length,
+    totalPages: Math.ceil(allTasks.length / limit),
+    currentPage: page,
+  };
+}
+
+/**
+ * Update Asana task completion status
+ */
+export async function updateAsanaTaskStatus(
+  workspaceId,
+  taskId,
+  completed
+) {
+  const token = await getToken(workspaceId);
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+
+  await axios.put(
+    `https://app.asana.com/api/1.0/tasks/${taskId}`,
+    {
+      data: {
+        completed,
+      },
+    },
+    { headers }
+  );
+
+  return { success: true };
 }

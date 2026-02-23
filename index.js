@@ -1,9 +1,8 @@
+import "dotenv/config";
 console.log("ENV CHECK", {
   AI_SERVICE_URL: process.env.AI_SERVICE_URL,
   AI_SERVICE_SECRET: process.env.AI_SERVICE_SECRET,
 });
-
-import "dotenv/config";
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -66,35 +65,42 @@ import integrationDebugRoutes from "./routes/integrationDebug.routes.js";
 import asanaOAuthRoutes from "./integrations/asana/asana.oauth.routes.js";
 import asanaViewerRoutes from "./integrations/asana/asana.viewer.routes.js";
 
-// ---------------- CONFIG ----------------
-dotenv.config();
+
 
 const app = express();
+
+app.use((req, res, next) => {
+  console.log("🌍 GLOBAL REQUEST:", req.method, req.originalUrl);
+  next();
+});
 
 // ---------------- MIDDLEWARE ----------------
 app.use(
   cors({
-    origin: process.env.FRONTEND_BASE_URL,
+    origin: true, // ✅ allow requesting origin automatically
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
-      "x-workspace-id"
+      "x-workspace-id",
     ],
   })
 );
 
-// ✅ HANDLE CORS PREFLIGHT GLOBALLY (MUST BE FIRST)
-app.options("*", (req, res) => {
-  res.sendStatus(204);
-});
+// ✅ let cors handle OPTIONS automatically
+app.options("*", cors());
 
-app.use("/integrations/asana", asanaOAuthRoutes);
-app.use("/integrations/asana", asanaViewerRoutes);
+app.use(
+  "/integrations",
+  integrationRoutes
+);
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+app.use("/oauth/asana", asanaOAuthRoutes);
+app.use("/integrations/asana", asanaViewerRoutes);
 
 app.use("/uploads", express.static("uploads"));
 app.use("/upload", uploadRoutes);
@@ -144,10 +150,7 @@ app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
 app.use("/admin/attendance", adminAttendanceRoutes);
 app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
 app.use("/admin/attendance", adminAttendanceExportRoutes);
-app.use(
-  "/integrations",
-  integrationRoutes
-);
+
 app.use("/integration-debug", integrationDebugRoutes);
 
 
