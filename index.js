@@ -64,22 +64,34 @@ import * as taskService from "./services/task.service.js";
 import integrationRoutes from "./routes/integration.routes.js";
 import integrationDebugRoutes from "./routes/integrationDebug.routes.js";
 import asanaOAuthRoutes from "./integrations/asana/asana.oauth.routes.js";
-
+import asanaViewerRoutes from "./integrations/asana/asana.viewer.routes.js";
 
 // ---------------- CONFIG ----------------
 dotenv.config();
 
 const app = express();
 
-app.use("/integrations/asana", asanaOAuthRoutes);
-
 // ---------------- MIDDLEWARE ----------------
 app.use(
   cors({
     origin: process.env.FRONTEND_BASE_URL,
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "x-workspace-id"
+    ],
   })
 );
+
+// ✅ HANDLE CORS PREFLIGHT GLOBALLY (MUST BE FIRST)
+app.options("*", (req, res) => {
+  res.sendStatus(204);
+});
+
+app.use("/integrations/asana", asanaOAuthRoutes);
+app.use("/integrations/asana", asanaViewerRoutes);
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));

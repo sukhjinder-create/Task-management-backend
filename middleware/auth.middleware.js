@@ -4,6 +4,9 @@ const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const WORKSPACE_GLOBAL = "GLOBAL";
 
 export function authMiddleware(req, res, next) {
+  if (req.method === "OPTIONS") {
+    return next();
+  }
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {

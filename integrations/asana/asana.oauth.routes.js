@@ -53,6 +53,7 @@ router.get("/connect", async (req, res) => {
  * OAuth callback
  */
 router.get("/callback", async (req, res) => {
+  console.log("🔥 ASANA CALLBACK HIT", req.query);
   try {
     const { code, state: workspaceId } = req.query;
 
@@ -62,23 +63,6 @@ router.get("/callback", async (req, res) => {
 
     if (!workspaceId) {
       return res.status(400).send("Workspace missing");
-    }
-
-    // ✅ CRITICAL GUARD — RUN FIRST
-    const existing = await pool.query(`
-      SELECT 1
-      FROM workspace_integrations
-      WHERE workspace_id = $1
-        AND provider = 'asana'
-      LIMIT 1
-    `, [workspaceId]);
-
-    if (existing.rows.length) {
-      console.log("✅ Asana already connected — skipping OAuth exchange");
-
-      return res.redirect(
-        process.env.FRONTEND_BASE_URL + "/integrations"
-      );
     }
 
     // -----------------------------
@@ -102,19 +86,27 @@ router.get("/callback", async (req, res) => {
 );
 
     const tokens = tokenRes.data;
+    console.log("Saving Asana tokens for workspace:", workspaceId);
+    await pool.query(
+  `
+  INSERT INTO workspace_integrations
+    (workspace_id, provider, config)
+  VALUES ($1, 'asana', $2::jsonb)
 
-    await pool.query(`
-      INSERT INTO workspace_integrations
-        (workspace_id, provider, config)
-      VALUES ($1, 'asana', $2)
-    `, [
-      workspaceId,
-      {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at: Date.now() + tokens.expires_in * 1000
-      }
-    ]);
+  ON CONFLICT (workspace_id, provider)
+  DO UPDATE SET
+    config = EXCLUDED.config,
+    updated_at = NOW()
+  `,
+  [
+    workspaceId,
+    JSON.stringify({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: Date.now() + tokens.expires_in * 1000
+    })
+  ]
+);
 
     console.log("✅ Asana connected successfully");
 
