@@ -12,7 +12,16 @@ export function startIntegrationSyncWorker() {
   console.log("🔄 Integration sync worker started");
 
   // every 30 seconds (safe starting interval)
-  intervalHandle = setInterval(async () => {
+  setInterval(async () => {
+  try {
+    // ✅ Tell system this execution comes from SYNC WORKER
+    process.env.INTEGRATION_SYNC_CONTEXT = "worker";
+
     await runIntegrationSyncCycle();
-  }, 30000);
+
+  } finally {
+    // ✅ VERY IMPORTANT — reset context
+    delete process.env.INTEGRATION_SYNC_CONTEXT;
+  }
+}, 60000);
 }

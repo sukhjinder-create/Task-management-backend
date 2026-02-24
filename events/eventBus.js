@@ -8,6 +8,7 @@ export function registerObserver(observerFn) {
 }
 
 export async function publishEvent(event) {
+  console.log("📡 EventBus received:", event.eventType);
   for (const observer of observers) {
     try {
       await observer(event);

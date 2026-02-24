@@ -1,5 +1,9 @@
 import axios from "axios";
 import pool from "../../db.js";
+import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
+import { EVENT_TYPES } from "../../events/eventTypes.js";
+import { getSystemActorId } from "../../events/systemActor.service.js";
+import { hashIntegrationState } from "../../events/utils/hashState.js";
 
 /**
  * Get Asana access token for workspace
@@ -32,6 +36,78 @@ if (!accessToken) {
 }
 
 return accessToken;
+}
+
+async function observeAsanaTasks(workspaceId, tasks) {
+  if (!tasks?.length) return;
+
+  const systemActorId = await getSystemActorId(workspaceId);
+
+  for (const task of tasks) {
+
+    // ✅ define observable state
+    const state = {
+      completed: task.completed,
+      assignee: task.assignee?.gid || null,
+    };
+
+    const stateHash = hashIntegrationState(state);
+
+    // ✅ check previous state
+    const existing = await pool.query(
+      `
+      SELECT state_hash
+      FROM integration_entity_state
+      WHERE workspace_id = $1
+        AND provider = 'asana'
+        AND external_entity_id = $2
+      `,
+      [workspaceId, task.gid]
+    );
+
+    // -----------------------------
+    // NO CHANGE → SKIP
+    // -----------------------------
+    if (
+      existing.rows.length &&
+      existing.rows[0].state_hash === stateHash
+    ) {
+      continue;
+    }
+
+    // -----------------------------
+    // UPSERT NEW STATE
+    // -----------------------------
+    await pool.query(
+      `
+      INSERT INTO integration_entity_state
+        (workspace_id, provider, external_entity_id, state_hash, updated_at)
+      VALUES ($1, 'asana', $2, $3, NOW())
+      ON CONFLICT (workspace_id, provider, external_entity_id)
+      DO UPDATE SET
+        state_hash = EXCLUDED.state_hash,
+        updated_at = NOW()
+      `,
+      [workspaceId, task.gid, stateHash]
+    );
+
+    // -----------------------------
+    // EMIT ONLY ON CHANGE
+    // -----------------------------
+    emitWorkspaceEvent({
+      workspaceId,
+      actorUserId: systemActorId,
+      origin: "integration",
+      eventType: EVENT_TYPES.INTEGRATION_ACTIVITY_OBSERVED,
+      entityType: "integration_task",
+      entityId: null,
+      metadata: {
+        provider: "asana",
+        external_entity_id: task.gid,
+        ...state,
+      },
+    });
+  }
 }
 
 /**
@@ -117,6 +193,11 @@ export async function fetchAsanaProjectTasks(
   const start = (page - 1) * limit;
   const paginated = allTasks.slice(start, start + limit);
 
+  // ✅ Observe external activity (non-blocking)
+  if (process.env.INTEGRATION_SYNC_CONTEXT === "worker") {
+  observeAsanaTasks(workspaceId, paginated);
+}
+
   return {
     data: paginated,
     total: allTasks.length,
@@ -140,6 +221,7 @@ export async function updateAsanaTaskStatus(
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
+  const systemActorId = await getSystemActorId(workspaceId);
 
   await axios.put(
     `https://app.asana.com/api/1.0/tasks/${taskId}`,
@@ -149,7 +231,28 @@ export async function updateAsanaTaskStatus(
       },
     },
     { headers }
-  );
+  )
+  // 🔥 Emit completion signal
+emitWorkspaceEvent({
+  workspaceId,
+  actorUserId: systemActorId,
+  origin: "integration",
+
+  eventType: completed
+    ? EVENT_TYPES.INTEGRATION_TASK_COMPLETED
+    : EVENT_TYPES.INTEGRATION_TASK_UPDATED,
+
+  entityType: "integration_task",
+
+  // ✅ ALWAYS NULL for integrations
+  entityId: null,
+
+  metadata: {
+    provider: "asana",
+    external_entity_id: String(taskId),
+    completed,
+  },
+});;
 
   return { success: true };
 }

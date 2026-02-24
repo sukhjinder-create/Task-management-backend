@@ -5,6 +5,9 @@ import { advancedForecast } from "./forecast/forecast.engine.js";
 import { generateExecutiveSummary } from "./executiveSummary.generator.js";
 import { saveExecutiveSummary } from "../events/executive/executiveSummary.store.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
+import { getExecutionMetrics } from "./executionIntelligence.service.js";
+import { getExecutionSnapshot }
+  from "./executionSnapshot.service.js";
 
 /**
  * USER — Monthly performance
@@ -44,6 +47,10 @@ export async function getAdminInsights(req, res) {
     }
     let projectFilter = "";
     let projectParams = [];
+
+    // 🔥 unified execution reality (internal + external)
+const executionSnapshot =
+  await getExecutionSnapshot(workspaceId);
 
 // ROLE-BASED DATA SCOPE
 
@@ -123,7 +130,8 @@ const history = await pool.query(historyQuery, historyParams);
 
 const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
 
-const forecast = advancedForecast(scoreHistory);
+const forecast =
+  advancedForecast(scoreHistory, executionSnapshot);
 
 // use deterministic reasoning from engine
 let forecastReasoning = forecast.reasoning || null;
@@ -149,6 +157,24 @@ LIMIT 5
 leaderboardParams
 );
 
+  // -----------------------------
+// REAL EXECUTION INTELLIGENCE
+// -----------------------------
+const completionRate =
+  executionSnapshot.completionRate * 100;
+
+let executionPressure = "Stable";
+let executionRisk = "Low";
+
+if (completionRate < 40) {
+  executionPressure = "High";
+  executionRisk = "High";
+}
+else if (completionRate < 65) {
+  executionPressure = "Moderate";
+  executionRisk = "Medium";
+}
+
     return res.json({
   orgScore: {
     averageScore: stats.average_score
@@ -158,17 +184,31 @@ leaderboardParams
     highPerformers: Number(stats.high_performers),
     atRiskUsers: Number(stats.at_risk_users),
   },
+
   coachingEffectiveness: {},
+
   riskDistribution: {
     lowRisk: Number(stats.low_risk),
     mediumRisk: Number(stats.medium_risk),
     highRisk: Number(stats.high_risk),
   },
+
   forecast: {
-  ...forecast,
-  reasoning: forecastReasoning
-},
-  leaderboard: leaderboardResult.rows
+    ...forecast,
+    reasoning: forecastReasoning
+  },
+
+  leaderboard: leaderboardResult.rows,
+
+  // ⭐ REAL CONTROL CENTER DATA
+  execution: {
+    completionRate: Math.round(completionRate),
+    backlog:
+      executionSnapshot.totalWork -
+      executionSnapshot.completedWork,
+    pressure: executionPressure,
+    risk: executionRisk
+  }
 });
 } catch (err) {
   console.error("getAdminInsights error:", err);
@@ -235,22 +275,55 @@ const forecast = advancedForecast(scoreHistory);
 
     const stats = rows[0];
 
+    const executionMetrics =
+  await getExecutionMetrics(workspaceId, month);
+
+  // 🔥 unified execution reality
+const executionSnapshot =
+  await getExecutionSnapshot(workspaceId);
+  const executionContext = {
+  completionRate: Math.round(
+    executionSnapshot.completionRate * 100
+  ),
+  backlog:
+    executionSnapshot.totalWork -
+    executionSnapshot.completedWork
+};
+
     const data = {
-      month,
-      orgScore: {
-        averageScore: Number(stats.avg_score) || 0,
-        userCount: Number(stats.user_count) || 0,
-        highPerformers: Number(stats.high_performers) || 0,
-        atRiskUsers: Number(stats.at_risk) || 0,
-      },
-      riskDistribution: {
-        low_risk: Number(risk.rows[0].low_risk) || 0,
-        medium_risk: Number(risk.rows[0].medium_risk) || 0,
-        high_risk: Number(risk.rows[0].high_risk) || 0,
-      },
-      leaderboard: leaderboard.rows,
-      forecast
-    };
+  month,
+
+  execution: executionSnapshot,
+
+  executionContext: {
+    completionRate: Math.round(
+      executionSnapshot.completionRate * 100
+    ),
+    backlog:
+      executionSnapshot.totalWork -
+      executionSnapshot.completedWork
+  },
+
+  orgScore: {
+    averageScore: Number(stats.avg_score) || 0,
+    userCount: Number(stats.user_count) || 0,
+    highPerformers: Number(stats.high_performers) || 0,
+    atRiskUsers: Number(stats.at_risk) || 0,
+  },
+
+  riskDistribution: {
+    low_risk: Number(risk.rows[0].low_risk) || 0,
+    medium_risk: Number(risk.rows[0].medium_risk) || 0,
+    high_risk: Number(risk.rows[0].high_risk) || 0,
+  },
+
+  leaderboard: leaderboard.rows,
+
+  forecast: advancedForecast(
+    scoreHistory,
+    executionSnapshot
+  )
+};
 
     // ===== Check existing summary =====
     const existing = await pool.query(`

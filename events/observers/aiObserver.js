@@ -15,6 +15,10 @@ import { storeWorkspaceEvent } from "../store/eventStore.js";
 import { updateShortTermContext } from "../context/shortTermContext.service.js";
 
 export async function aiObserver(event) {
+  // 🚫 Prevent integration feedback loops
+if (event.origin === "integration") {
+  return;
+}
   try {
     // 1️⃣ Persist raw event (append-only)
     await storeWorkspaceEvent(event);

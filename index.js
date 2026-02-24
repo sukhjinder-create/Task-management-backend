@@ -46,7 +46,6 @@ import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
 import internalTasks from "./routes/internalTasks.js";
 import reportsRouter from "./routes/reports.js";
-import "./integrations/integration.bootstrap.js";
 // 🧠 Intelligence (READ-ONLY)
 import intelligenceRoutes from "./intelligence/intelligence.routes.js";
 
@@ -176,14 +175,17 @@ server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
 
-// ---------------- AI OBSERVATION BOOTSTRAP (CRITICAL) ----------------
+// ---------------- EVENT SYSTEM BOOTSTRAP ----------------
 
-// ✅ Register AI observer (already designed)
-registerObserver(aiObserver);
+import { executionSignalObserver } from "./events/observers/executionSignal.observer.js";
+registerObserver(executionSignalObserver);
 
-// ✅ Wrap services for passive observation (NO SERVICE FILE TOUCHED)
+// 2️⃣ Wrap services AFTER observers exist
 observeService(projectService, "project");
 observeService(taskService, "task");
 
-// ---------------- CRON ----------------
+// 3️⃣ NOW start integrations (AFTER observers ready)
+await import("./integrations/integration.bootstrap.js");
+
+// 4️⃣ Start cron LAST
 startAttendanceCron();

@@ -2,7 +2,8 @@ import { generateText } from "../llm/llmClient.js";
 
 export async function generateForecastReasoning({
   history,
-  forecast
+  forecast,
+  execution 
 }) {
 
   const prompt = `
@@ -33,6 +34,15 @@ Use workplace language:
 employees, teams, productivity, engagement, performance stability, organizational momentum.
 
 DATA:
+
+Execution Reality:
+Total Work: ${execution?.totalWork ?? "unknown"}
+Completed Work: ${execution?.completedWork ?? "unknown"}
+Completion Rate: ${
+  execution
+    ? Math.round(execution.completionRate * 100)
+    : "unknown"
+}%
 
 Historical scores:
 ${JSON.stringify(history)}

@@ -8,6 +8,7 @@ import { IntegrationEvents } from "../integration.event.types.js";
 import axios from "axios";
 import pool from "../../db.js";
 import qs from "qs";
+import { hashIntegrationState } from "../../events/utils/hashState.js";
 
 /* =====================================================
    TOKEN REFRESH (ASANA REQUIRES URLENCODED BODY)
@@ -61,6 +62,60 @@ async function fetchAllTasks(projectId, headers) {
   return allTasks;
 }
 
+/* =====================================================
+   STATE TRACKING (ENTERPRISE DIFFING)
+===================================================== */
+
+async function getPreviousState(workspaceId, externalId) {
+  const { rows } = await pool.query(
+    `
+    SELECT state_hash
+    FROM integration_entity_state
+    WHERE workspace_id = $1
+      AND provider = 'asana'
+      AND external_entity_id = $2
+    LIMIT 1
+    `,
+    [workspaceId, externalId]
+  );
+
+  return rows[0]?.state_hash || null;
+}
+
+async function saveState(workspaceId, externalId, hash) {
+  await pool.query(
+    `
+    INSERT INTO integration_entity_state
+      (workspace_id, provider, external_entity_id, state_hash, updated_at)
+    VALUES ($1, 'asana', $2, $3, NOW())
+    ON CONFLICT (workspace_id, provider, external_entity_id)
+    DO UPDATE SET
+      state_hash = EXCLUDED.state_hash,
+      updated_at = NOW()
+    `,
+    [workspaceId, externalId, hash]
+  );
+}
+
+/* =====================================================
+   BOOTSTRAP DETECTION (PREVENT EVENT FLOOD)
+===================================================== */
+
+async function hasWorkspaceBootstrapped(workspaceId) {
+  const { rows } = await pool.query(
+    `
+    SELECT 1
+    FROM integration_entity_state
+    WHERE workspace_id = $1
+      AND provider = 'asana'
+    LIMIT 1
+    `,
+    [workspaceId]
+  );
+
+  return rows.length > 0;
+}
+
 class AsanaProvider extends BaseProvider {
   constructor(config = {}) {
     super(config);
@@ -106,6 +161,9 @@ class AsanaProvider extends BaseProvider {
       const headers = {
         Authorization: `Bearer ${accessToken}`,
       };
+
+      // ✅ Detect if this is first sync (bootstrap)
+    const isBootstrapped = await hasWorkspaceBootstrapped(workspaceId);
 
       /* ---------------- STEP 1: WORKSPACES ---------------- */
       const wsRes = await axios.get(
@@ -160,31 +218,58 @@ for (const project of projects) {
     `✅ Tasks observed from ${project.name}: ${tasks.length}`
   );
 
-  // ✅ Emit OBSERVATION events (NOT creation)
   for (const task of tasks) {
 
-    await emitIntegrationEvent(
-      "integration.activity.observed",
-      {
-        provider: "asana",
-        workspaceId,
+  // ---- CREATE STATE SNAPSHOT ----
+  const state = {
+    completed: task.completed,
+    assignee: task.assignee?.gid || null,
+  };
 
-        entityType: "task",
-        externalId: task.gid,
+  const newHash = hashIntegrationState(state);
 
-        action: task.completed
-          ? "task_completed"
-          : "task_active",
+  const previousHash = await getPreviousState(
+    workspaceId,
+    task.gid
+  );
 
-        title: task.name,
-        projectName: project.name,
-
-        observedAt: new Date().toISOString(),
-        modifiedAt: task.modified_at,
-        createdAt: task.created_at,
-      }
-    );
+  // ✅ NOTHING CHANGED → SKIP
+  if (previousHash === newHash) {
+    continue;
   }
+
+  // ---- SAVE NEW STATE ----
+await saveState(workspaceId, task.gid, newHash);
+
+// 🚨 During bootstrap we DO NOT emit events
+if (!isBootstrapped) {
+  continue;
+}
+
+// ---- EMIT EVENT ONLY AFTER BOOTSTRAP ----
+await emitIntegrationEvent(
+  "integration.activity.observed",
+  {
+    origin: "integration",
+    provider: "asana",
+    workspaceId,
+
+    entityType: "task",
+    externalId: task.gid,
+
+    action: task.completed
+      ? "task_completed"
+      : "task_active",
+
+    title: task.name,
+    projectName: project.name,
+
+    observedAt: new Date().toISOString(),
+    modifiedAt: task.modified_at,
+    createdAt: task.created_at,
+  }
+);
+}
 }
 
     } catch (err) {

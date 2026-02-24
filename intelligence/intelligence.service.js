@@ -1,5 +1,6 @@
 import pool from "../db.js";
 import intelligenceRepository from "./intelligence.repository.js";
+import { getExecutionMetrics } from "./executionIntelligence.service.js";
 
 /**
  * IntelligenceService
@@ -54,15 +55,30 @@ class IntelligenceService {
 
   const metrics = rows[0] || {};
 
+  // 🔥 External execution contribution
+const executionMetrics =
+  await getExecutionMetrics(workspaceId, month);
+
+const externalExecution =
+  executionMetrics.externalCompleted +
+  executionMetrics.externalObservedCompletions;
+
   const total = Number(metrics.total_tasks) || 0;
   const completed = Number(metrics.completed_tasks) || 0;
   const late = Number(metrics.late_completions) || 0;
   const overdue = Number(metrics.active_overdue) || 0;
   const avgTime = Number(metrics.avg_completion_time_seconds) || 0;
 
-  // 🔹 Dimension calculations
-  const executionDiscipline =
-    total === 0 ? 0 : (completed / total) * 100;
+  // Include external execution as bonus credit
+const adjustedCompleted = completed + externalExecution;
+
+// prevent division by zero
+const adjustedTotal = Math.max(total, adjustedCompleted);
+
+const executionDiscipline =
+  adjustedTotal === 0
+    ? 0
+    : (adjustedCompleted / adjustedTotal) * 100;
 
   const timelinessIndex =
     completed === 0 ? 100 :
@@ -92,6 +108,12 @@ class IntelligenceService {
 
   // 🔹 Signals
   const signals = [];
+
+  if (externalExecution > 0) {
+  signals.push(
+    `External execution detected (${externalExecution} completed outside Aidrian)`
+  );
+}
 
   if (executionDiscipline < 50)
     signals.push("Low execution discipline");

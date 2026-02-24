@@ -1,6 +1,8 @@
 import pool from "../../db.js";
 import { saveMonthlyScore } from "./monthlyScore.store.js";
 import { buildMonthlyEvidence } from "./evidenceBuilder.service.js";
+import { getExecutionSnapshot }
+  from "../../intelligence/executionSnapshot.service.js";
 
 /**
  * Generates monthly score + evidence for ONE user
@@ -30,9 +32,15 @@ export async function generateMonthlyScore({
       e.event_type.startsWith("TASK")
     ).length,
   };
+  // 🔥 execution productivity (cross-platform)
+const execution =
+  await getExecutionSnapshot(workspaceId);
+
+const executionScore =
+  Math.round(execution.completionRate * 100);
 
   // 3️⃣ Deterministic scoring (NO AI here)
-  let score = 50; // baseline
+  let activityScore = 50; // baseline
 
   if (breakdown.activity >= 50) score += 10;
   if (breakdown.activity < 20) score -= 8;
@@ -43,6 +51,12 @@ export async function generateMonthlyScore({
   // Clamp score (enterprise rule)
   if (score > 100) score = 100;
   if (score < 0) score = 0;
+
+  // composite enterprise score
+const score = Math.round(
+  activityScore * 0.6 +
+  executionScore * 0.4
+);
 
   // 4️⃣ Build structured evidence (THIS is explanation quality)
   const evidence = buildMonthlyEvidence({

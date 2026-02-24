@@ -1,4 +1,7 @@
-export function advancedForecast(scores = []) {
+export function advancedForecast(
+  scores = [],
+  executionSnapshot = null
+) {
 
   // ---------- SAFETY ----------
   if (!Array.isArray(scores) || scores.length < 3) {
@@ -37,6 +40,19 @@ export function advancedForecast(scores = []) {
 
   // ---------- MOMENTUM (velocity of change) ----------
   const momentum = Number(slope.toFixed(2));
+
+  // ---------- EXECUTION DRAG (NEW INTELLIGENCE) ----------
+let executionDrag = "neutral";
+
+if (executionSnapshot) {
+  const completionRate =
+    executionSnapshot.completionRate * 100;
+
+  if (completionRate < 40)
+    executionDrag = "high_drag";
+  else if (completionRate < 60)
+    executionDrag = "moderate_drag";
+}
 
   // ---------- TRAJECTORY SHIFT (NEW INTELLIGENCE) ----------
 // compares recent performance vs earlier performance
@@ -160,6 +176,20 @@ if (confidence === "high") {
     "Moderate variance indicates partial predictability, balancing stability with some uncertainty in future outcomes."
   );
 }
+/**
+ * Execution drag interpretation (NEW)
+ */
+if (executionDrag === "high_drag") {
+  reasoningParts.push(
+    "Execution backlog levels indicate delivery capacity is lagging behind workload growth, increasing probability of future performance deterioration."
+  );
+}
+
+if (executionDrag === "moderate_drag") {
+  reasoningParts.push(
+    "Execution throughput shows early signs of pressure, suggesting organizational capacity may require adjustment to maintain performance stability."
+  );
+}
 
 const reasoning = reasoningParts.join(" ");
 
@@ -170,6 +200,7 @@ return {
   riskProjection,
   confidence,
   momentum,
-  reasoning
+  reasoning,
+  executionDrag
 };
 }

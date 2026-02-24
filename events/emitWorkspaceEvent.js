@@ -11,6 +11,7 @@ export async function emitWorkspaceEvent({
   eventType,
   entityType,
   entityId,
+  origin = "internal",
   metadata = {},
 }) {
   if (!workspaceId || !eventType || !entityType) {
@@ -23,15 +24,16 @@ export async function emitWorkspaceEvent({
   }
 
   const event = {
-    eventId: uuid(),
-    workspaceId,
-    actorUserId: actorUserId || "system",
-    eventType,
-    entityType,
-    entityId: entityId || null,
-    metadata,
-    timestamp: new Date().toISOString(),
-  };
+  eventId: uuid(),
+  workspaceId,
+  actorUserId: actorUserId || "system",
+  eventType,
+  entityType,
+  entityId: entityId || null,
+  origin, // ✅ ADD THIS LINE
+  metadata,
+  timestamp: new Date().toISOString(),
+};
 
   await publishEvent(event);
 }

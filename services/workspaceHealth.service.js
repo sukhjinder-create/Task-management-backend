@@ -1,33 +1,98 @@
 import pool from "../db.js";
-
 export async function recomputeWorkspaceHealth(workspaceId) {
+  try {
 
-  const { rows } = await pool.query(`
-    SELECT
-      COUNT(*) AS total,
-      COUNT(*) FILTER (WHERE status = 'completed') AS completed
-    FROM tasks
-    WHERE workspace_id = $1
-  `, [workspaceId]);
+    // --------------------------------------------------
+    // 1️⃣ INTERNAL TASK METRICS
+    // --------------------------------------------------
+    const internalResult = await pool.query(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status = 'completed') AS completed
+      FROM tasks
+      WHERE workspace_id = $1
+    `, [workspaceId]);
 
-  const total = Number(rows[0].total) || 0;
-  const completed = Number(rows[0].completed) || 0;
+    const internalTotal =
+      Number(internalResult.rows[0].total) || 0;
 
-  let healthScore = 70;
+    const internalCompleted =
+      Number(internalResult.rows[0].completed) || 0;
 
-  if (total > 0) {
-    healthScore = Math.round((completed / total) * 100);
+
+    // --------------------------------------------------
+    // 2️⃣ EXTERNAL TASK INVENTORY (TOTAL WORKLOAD)
+    // integration_entity_state = 1 row per external task
+    // --------------------------------------------------
+    const externalTotalResult = await pool.query(`
+      SELECT COUNT(*) AS total
+      FROM integration_entity_state
+      WHERE workspace_id = $1
+    `, [workspaceId]);
+
+    const externalTotal =
+      Number(externalTotalResult.rows[0].total) || 0;
+
+
+    // --------------------------------------------------
+    // 3️⃣ EXTERNAL COMPLETED TASKS
+    // derived from execution signals
+    // --------------------------------------------------
+    const externalCompletedResult = await pool.query(`
+      SELECT COUNT(DISTINCT external_id) AS completed
+      FROM workspace_execution_signals
+      WHERE workspace_id = $1
+        AND signal_type = 'INTEGRATION_TASK_COMPLETED'
+    `, [workspaceId]);
+
+    const externalCompleted =
+      Number(externalCompletedResult.rows[0].completed) || 0;
+
+
+    // --------------------------------------------------
+    // 4️⃣ COMBINED EXECUTION HEALTH
+    // --------------------------------------------------
+    const combinedTotal =
+      internalTotal + externalTotal;
+
+    const combinedCompleted =
+      internalCompleted + externalCompleted;
+
+    let healthScore = 70; // neutral baseline
+
+    if (combinedTotal > 0) {
+      healthScore = Math.round(
+        (combinedCompleted / combinedTotal) * 100
+      );
+    }
+
+    // clamp safety
+    healthScore = Math.max(0, Math.min(100, healthScore));
+
+
+    // --------------------------------------------------
+    // 5️⃣ UPSERT HEALTH SCORE
+    // --------------------------------------------------
+    const result = await pool.query(`
+      INSERT INTO workspace_health (workspace_id, health_score)
+      VALUES ($1, $2)
+      ON CONFLICT (workspace_id)
+      DO UPDATE SET
+        health_score = EXCLUDED.health_score,
+        updated_at = NOW()
+      RETURNING health_score
+    `, [workspaceId, healthScore]);
+
+    console.log(
+      "💓 Workspace health recomputed:",
+      workspaceId,
+      `→ ${healthScore}%`
+    );
+
+    return result.rows[0].health_score;
+
+  } catch (err) {
+    console.error("Workspace health recompute failed:", err);
+    return 70;
   }
-
-  const result = await pool.query(`
-    INSERT INTO workspace_health (workspace_id, health_score)
-    VALUES ($1, $2)
-    ON CONFLICT (workspace_id)
-    DO UPDATE SET
-      health_score = EXCLUDED.health_score,
-      updated_at = NOW()
-    RETURNING health_score
-  `, [workspaceId, healthScore]);
-
-  return result.rows[0].health_score;
 }
