@@ -111,7 +111,7 @@ const executionDiscipline =
 
   if (externalExecution > 0) {
   signals.push(
-    `External execution detected (${externalExecution} completed outside Aidrian)`
+    `External execution detected (${externalExecution} completed outside Platform)`
   );
 }
 

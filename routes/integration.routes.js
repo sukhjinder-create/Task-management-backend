@@ -1,12 +1,14 @@
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
-
 import {
   connectWorkspaceIntegration,
   getWorkspaceIntegrations,
   removeWorkspaceIntegration,
 } from "../services/integration.service.js";
+import asanaMigrationRoutes
+  from "../integrations/asana/asana.migration.routes.js";
+
 
 const router = express.Router();
 
@@ -61,5 +63,7 @@ router.delete("/:provider", async (req, res) => {
     res.status(500).json({ error: "Failed to disconnect integration" });
   }
 });
+
+router.use( asanaMigrationRoutes);
 
 export default router;

@@ -142,6 +142,22 @@ export async function fetchAsanaProjects(workspaceId) {
   return projects.data.data;
 }
 
+async function verifyProjectAccess(token, projectId) {
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const res = await axios.get(
+    `https://app.asana.com/api/1.0/projects/${projectId}`,
+    {
+      headers,
+      params: {
+        opt_fields: "gid,name,workspace"
+      }
+    }
+  );
+
+  return res.data.data.workspace?.gid;
+}
+
 /**
  * Fetch tasks for a project (LIVE)
  */
@@ -150,28 +166,51 @@ export async function fetchAsanaProjectTasks(
   projectId,
   { page = 1, limit = 25, search = "" }
 ) {
+
+  // ✅ STEP 1 — get token FIRST
   const token = await getToken(workspaceId);
 
   const headers = {
     Authorization: `Bearer ${token}`,
   };
 
+  // ✅ STEP 2 — verify access (prevents CloudFront 403)
+  const workspaceGid =
+    await verifyProjectAccess(token, projectId);
+
+  console.log("Project workspace:", workspaceGid);
+
   let offset = null;
   let allTasks = [];
 
-  // 🔥 walk ALL asana pages
+  // 🔥 WALK ALL ASANA PAGES
   do {
+
+    // ✅ SAFE PARAM BUILD
+    const params = {
+      project: projectId, // ⭐ REQUIRED
+      limit: 100,
+      opt_fields: "gid,name,completed,assignee,modified_at",
+    };
+
+    // only include offset when present
+    if (offset) {
+      params.offset = offset;
+    }
+
     const res = await axios.get(
-      `https://app.asana.com/api/1.0/projects/${projectId}/tasks`,
+      "https://app.asana.com/api/1.0/tasks",
       {
         headers,
-        params: {
-          limit: 100,
-          offset,
-          opt_fields:
-            "gid,name,completed,assignee,modified_at",
-        },
+        params,
       }
+    );
+
+    console.log(
+      "Fetched tasks:",
+      res.data.data.length,
+      "next:",
+      res.data?.next_page?.offset
     );
 
     allTasks.push(...res.data.data);
@@ -180,23 +219,22 @@ export async function fetchAsanaProjectTasks(
 
   } while (offset);
 
-  // ✅ GLOBAL SEARCH (after collecting all tasks)
+  // ✅ GLOBAL SEARCH
   if (search) {
     const q = search.toLowerCase();
-
     allTasks = allTasks.filter(t =>
       t.name?.toLowerCase().includes(q)
     );
   }
 
-  // ✅ REAL PAGE CALCULATION
+  // ✅ LOCAL PAGINATION
   const start = (page - 1) * limit;
   const paginated = allTasks.slice(start, start + limit);
 
-  // ✅ Observe external activity (non-blocking)
+  // ✅ OBSERVE EXTERNAL ACTIVITY
   if (process.env.INTEGRATION_SYNC_CONTEXT === "worker") {
-  observeAsanaTasks(workspaceId, paginated);
-}
+    observeAsanaTasks(workspaceId, paginated);
+  }
 
   return {
     data: paginated,
