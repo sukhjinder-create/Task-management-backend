@@ -63,7 +63,11 @@ class ProjectRepository {
     return result.rows[0];
   }
 
-  async deleteProject(id, workspaceId = "GLOBAL") {
+    async deleteProject(id, workspaceId = "GLOBAL") {
+
+    // ----------------------------------------
+    // 1️⃣ Delete project (tasks cascade delete)
+    // ----------------------------------------
     await pool.query(
       `
       DELETE FROM projects
@@ -71,6 +75,23 @@ class ProjectRepository {
       `,
       [id, workspaceId]
     );
+
+    // ----------------------------------------
+    // 2️⃣ CLEAN ORPHANED INTEGRATION MAPPINGS
+    // ----------------------------------------
+    await pool.query(
+      `
+      DELETE FROM integration_task_mappings m
+      WHERE m.workspace_id = $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM tasks t
+          WHERE t.id = m.internal_task_id
+        )
+      `,
+      [workspaceId]
+    );
+
     return true;
   }
 }

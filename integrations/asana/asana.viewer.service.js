@@ -158,6 +158,24 @@ async function verifyProjectAccess(token, projectId) {
   return res.data.data.workspace?.gid;
 }
 
+async function fetchFullTask(token, taskId) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+  };
+
+  const res = await axios.get(
+    `https://app.asana.com/api/1.0/tasks/${taskId}`,
+    {
+      headers,
+      params: {
+        opt_fields:"gid,name,completed,assignee,assignee.name,assignee.email,notes,due_on,subtasks"
+      }
+    }
+  );
+
+  return res.data.data;
+}
+
 /**
  * Fetch tasks for a project (LIVE)
  */
@@ -190,7 +208,8 @@ export async function fetchAsanaProjectTasks(
     const params = {
       project: projectId, // ⭐ REQUIRED
       limit: 100,
-      opt_fields: "gid,name,completed,assignee,modified_at",
+      opt_fields:
+"gid,name,completed,assignee.name,modified_at,due_on"
     };
 
     // only include offset when present
