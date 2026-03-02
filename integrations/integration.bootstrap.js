@@ -11,6 +11,7 @@ import { registerObserver } from "../events/eventBus.js";
 import { executionSignalObserver } from "../events/observers/executionSignal.observer.js";
 import { executionIntelligenceObserver }
   from "../events/observers/executionIntelligence.observer.js";
+import "./providers/youtrack.provider.js";
 
 registerObserver(executionSignalObserver);
 registerObserver(executionIntelligenceObserver);

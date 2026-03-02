@@ -59,14 +59,22 @@ import { observeService } from "./events/observers/serviceObserver.js";
 // 🔥 NEW: Import services ONLY to wrap them (no logic change)
 import projectService from "./services/project.service.js";
 import * as taskService from "./services/task.service.js";
+import universalIntegrationRoutes from "./integrations/core/integration.routes.js";
 import integrationRoutes from "./routes/integration.routes.js";
 import integrationDebugRoutes from "./routes/integrationDebug.routes.js";
 import asanaOAuthRoutes from "./integrations/asana/asana.oauth.routes.js";
 import asanaViewerRoutes from "./integrations/asana/asana.viewer.routes.js";
+import youtrackRoutes
+  from "./integrations/youtrack/youtrack.routes.js";
+import youtrackViewerRoutes
+  from "./integrations/youtrack/youtrack.viewer.routes.js";
+
 
 
 
 const app = express();
+
+app.set("etag", false);
 
 app.use((req, res, next) => {
   console.log("🌍 GLOBAL REQUEST:", req.method, req.originalUrl);
@@ -76,24 +84,20 @@ app.use((req, res, next) => {
 // ---------------- MIDDLEWARE ----------------
 app.use(
   cors({
-    origin: true, // ✅ allow requesting origin automatically
+    origin: "http://localhost:5173",
     credentials: true,
     methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
       "x-workspace-id",
+      "Cache-Control"
     ],
   })
 );
 
-// ✅ let cors handle OPTIONS automatically
-app.options("*", cors());
-
-app.use(
-  "/integrations",
-  integrationRoutes
-);
+// OLD integrations (existing — DO NOT TOUCH)
+app.use("/integrations", integrationRoutes);
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -101,6 +105,24 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use("/oauth/asana", asanaOAuthRoutes);
 app.use("/integrations/asana", asanaViewerRoutes);
 
+// CONNECT + MIGRATION
+app.use(
+  "/integrations/youtrack",
+  authMiddleware,
+  requireWorkspaceForUser,
+  youtrackRoutes
+);
+
+// VIEWER (projects + tasks)
+app.use(
+  "/integrations/youtrack",
+  authMiddleware,
+  requireWorkspaceForUser,
+  youtrackViewerRoutes
+);
+
+// NEW universal adapter routes (SAFE ADDITION)
+app.use("/integrations", universalIntegrationRoutes);
 app.use("/uploads", express.static("uploads"));
 app.use("/upload", uploadRoutes);
 
