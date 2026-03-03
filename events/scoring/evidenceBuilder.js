@@ -20,43 +20,38 @@ export async function buildUserEvidence({
 }) {
   const { start: monthStart, end: monthEnd } = getMonthRange(month);
 
- /* ===============================
-   1️⃣ ATTENDANCE (USING attendance_sessions)
-=============================== */
-const { rows: attendanceRows } = await pool.query(
-  `
-  SELECT
-    COUNT(DISTINCT DATE(sign_in_at)) AS present_days
-  FROM attendance_sessions
-  WHERE workspace_id = $1
-    AND user_id = $2
-    AND sign_in_at BETWEEN $3 AND $4
-  `,
-  [workspaceId, userId, monthStart, monthEnd]
-);
+  /* ===============================
+     1️⃣ ATTENDANCE
+  =============================== */
+  const { rows: attendanceRows } = await pool.query(
+    `
+    SELECT
+      COUNT(DISTINCT DATE(sign_in_at)) AS present_days
+    FROM attendance_sessions
+    WHERE workspace_id = $1
+      AND user_id = $2
+      AND sign_in_at BETWEEN $3::timestamptz AND $4::timestamptz
+    `,
+    [workspaceId, userId, monthStart, monthEnd]
+  );
 
-const presentDays = Number(attendanceRows[0]?.present_days || 0);
+  const presentDays = Number(attendanceRows[0]?.present_days || 0);
 
-/**
- * Total working days:
- * We approximate using distinct attendance days in the workspace
- * (enterprise-safe, avoids holiday logic for now)
- */
-const { rows: totalDaysRows } = await pool.query(
-  `
-  SELECT
-    COUNT(DISTINCT DATE(sign_in_at)) AS total_days
-  FROM attendance_sessions
-  WHERE workspace_id = $1
-    AND sign_in_at BETWEEN $2 AND $3
-  `,
-  [workspaceId, monthStart, monthEnd]
-);
+  const { rows: totalDaysRows } = await pool.query(
+    `
+    SELECT
+      COUNT(DISTINCT DATE(sign_in_at)) AS total_days
+    FROM attendance_sessions
+    WHERE workspace_id = $1
+      AND sign_in_at BETWEEN $2::timestamptz AND $3::timestamptz
+    `,
+    [workspaceId, monthStart, monthEnd]
+  );
 
-const totalDays = Number(totalDaysRows[0]?.total_days || 0);
+  const totalDays = Number(totalDaysRows[0]?.total_days || 0);
 
-const attendanceRatio =
-  totalDays > 0 ? presentDays / totalDays : 0;
+  const attendanceRatio =
+    totalDays > 0 ? presentDays / totalDays : 0;
 
   /* ===============================
      2️⃣ TASK COMPLETION
@@ -69,7 +64,7 @@ const attendanceRatio =
     FROM tasks
     WHERE workspace_id = $1
       AND assigned_to = $2
-      AND created_at BETWEEN $3 AND $4
+      AND created_at BETWEEN $3::timestamptz AND $4::timestamptz
     `,
     [workspaceId, userId, monthStart, monthEnd]
   );
@@ -80,34 +75,34 @@ const attendanceRatio =
   const taskCompletionRatio =
     totalTasks > 0 ? completedTasks / totalTasks : 0;
 
- /* ===============================
-   3️⃣ TIMELINESS (USING updated_at)
-=============================== */
-const { rows: timelinessRows } = await pool.query(
-  `
-  SELECT
-    COUNT(*) FILTER (
-      WHERE status = 'completed'
-        AND due_date IS NOT NULL
-        AND updated_at <= due_date
-    ) AS on_time,
-    COUNT(*) FILTER (WHERE status = 'completed') AS completed
-  FROM tasks
-  WHERE workspace_id = $1
-    AND assigned_to = $2
-    AND updated_at BETWEEN $3 AND $4
-  `,
-  [workspaceId, userId, monthStart, monthEnd]
-);
+  /* ===============================
+     3️⃣ TIMELINESS
+  =============================== */
+  const { rows: timelinessRows } = await pool.query(
+    `
+    SELECT
+      COUNT(*) FILTER (
+        WHERE status = 'completed'
+          AND due_date IS NOT NULL
+          AND updated_at <= due_date
+      ) AS on_time,
+      COUNT(*) FILTER (WHERE status = 'completed') AS completed
+    FROM tasks
+    WHERE workspace_id = $1
+      AND assigned_to = $2
+      AND updated_at BETWEEN $3::timestamptz AND $4::timestamptz
+    `,
+    [workspaceId, userId, monthStart, monthEnd]
+  );
 
-const onTime = Number(timelinessRows[0]?.on_time || 0);
-const completed = Number(timelinessRows[0]?.completed || 0);
+  const onTime = Number(timelinessRows[0]?.on_time || 0);
+  const completed = Number(timelinessRows[0]?.completed || 0);
 
-const timelinessRatio =
-  completed > 0 ? onTime / completed : 0;
+  const timelinessRatio =
+    completed > 0 ? onTime / completed : 0;
 
   /* ===============================
-     4️⃣ STABILITY (PROJECT SPREAD)
+     4️⃣ STABILITY (FIXED PARAM BUG)
   =============================== */
   const { rows: projectRows } = await pool.query(
     `
@@ -115,38 +110,36 @@ const timelinessRatio =
     FROM tasks
     WHERE workspace_id = $1
       AND assigned_to = $2
-      AND created_at BETWEEN $3 AND $4
+      AND created_at <= $3::timestamptz
     `,
-    [workspaceId, userId, monthStart, monthEnd]
+    [workspaceId, userId, monthEnd]
   );
 
   const projects = Number(projectRows[0]?.projects || 0);
 
-  // Fewer projects = higher stability (simple heuristic)
   const stabilityRatio =
     projects <= 1 ? 1 :
     projects === 2 ? 0.8 :
     projects === 3 ? 0.6 :
     0.4;
 
- /* ===============================
-   5️⃣ COLLABORATION (COMMENTS)
-=============================== */
-const { rows: commentRows } = await pool.query(
-  `
-  SELECT COUNT(*) AS comments
-  FROM comments
-  WHERE workspace_id = $1
-    AND added_by = $2
-    AND created_at BETWEEN $3 AND $4
-  `,
-  [workspaceId, userId, monthStart, monthEnd]
-);
+  /* ===============================
+     5️⃣ COLLABORATION (COMMENTS)
+  =============================== */
+  const { rows: commentRows } = await pool.query(
+    `
+    SELECT COUNT(*) AS comments
+    FROM comments
+    WHERE workspace_id = $1
+      AND added_by = $2
+      AND created_at BETWEEN $3::timestamptz AND $4::timestamptz
+    `,
+    [workspaceId, userId, monthStart, monthEnd]
+  );
 
-const comments = Number(commentRows[0]?.comments || 0);
+  const comments = Number(commentRows[0]?.comments || 0);
 
-// Normalize: 5+ comments = full score
-const collaborationRatio = Math.min(comments / 5, 1);
+  const collaborationRatio = Math.min(comments / 5, 1);
 
   /* ===============================
      FINAL OUTPUT

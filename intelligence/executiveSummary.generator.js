@@ -151,12 +151,20 @@ Momentum: ${data.forecast?.momentum}
         temperature: 0.35
       }
     });
+    console.log("LLM RAW:", summaryRaw);
 
     clearTimeout(timeout);
 
     if (!summaryRaw || typeof summaryRaw !== "string") {
-      throw new Error("Invalid LLM response");
-    }
+  console.warn("LLM returned empty or invalid text");
+  return {
+    month: data.month,
+    text: "AI summary temporarily unavailable. Showing structured data only.",
+    reasoning: null,
+    outlook: null,
+    isFallback: true
+  };
+}
 
     const fullText = summaryRaw.trim();
 
@@ -183,9 +191,11 @@ Momentum: ${data.forecast?.momentum}
     let summaryText = fullText;
 
     if (reasoningHeaderRegex.test(fullText)) {
-      summaryText = fullText.split(reasoningHeaderRegex)[0].trim();
-    }
-
+  const parts = fullText.split(reasoningHeaderRegex);
+  if (parts && parts[0] && parts[0].length > 50) {
+    summaryText = parts[0].trim();
+  }
+}
 
     // ===============================
     // PASS 2 — AI REASONING (FAST)
@@ -229,6 +239,10 @@ Write as reflective analyst notes.
         } catch (err) {
       console.warn("Reasoning generation skipped:", err.message);
     }
+
+    if (!summaryText || summaryText.length < 50) {
+  summaryText = fullText;
+}
 
     // ===============================
     // FINAL SUCCESS RETURN

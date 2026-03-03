@@ -40,19 +40,17 @@ const executionScore =
   Math.round(execution.completionRate * 100);
 
   // 3️⃣ Deterministic scoring (NO AI here)
-  let activityScore = 50; // baseline
+  let activityScore = 50;
 
-  if (breakdown.activity >= 50) score += 10;
-  if (breakdown.activity < 20) score -= 8;
+if (breakdown.activity >= 50) activityScore += 10;
+if (breakdown.activity < 20) activityScore -= 8;
 
-  if (breakdown.taskUpdates >= 20) score += 10;
-  if (breakdown.taskUpdates < 10) score -= 6;
+if (breakdown.taskUpdates >= 20) activityScore += 10;
+if (breakdown.taskUpdates < 10) activityScore -= 6;
 
-  // Clamp score (enterprise rule)
-  if (score > 100) score = 100;
-  if (score < 0) score = 0;
+// clamp
+activityScore = Math.max(0, Math.min(100, activityScore));
 
-  // composite enterprise score
 const score = Math.round(
   activityScore * 0.6 +
   executionScore * 0.4
