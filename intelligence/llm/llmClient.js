@@ -1,6 +1,6 @@
 import fetch from "node-fetch";
 
-const PROVIDER = process.env.LLM_PROVIDER || "ollama"; // ollama | openai
+const PROVIDER = process.env.LLM_PROVIDER || "ollama"; // ollama | openai | grok | groq | huggingface
 
 export async function generateText({ prompt, signal }) {
   if (PROVIDER === "ollama") {
@@ -9,6 +9,18 @@ export async function generateText({ prompt, signal }) {
 
   if (PROVIDER === "openai") {
     return callOpenAI(prompt);
+  }
+
+  if (PROVIDER === "grok") {
+    return callGrok(prompt);
+  }
+
+  if (PROVIDER === "groq") {
+    return callGroq(prompt);
+  }
+
+  if (PROVIDER === "huggingface") {
+    return callHuggingFace(prompt);
   }
 
   throw new Error("Unsupported LLM provider");
@@ -21,7 +33,7 @@ async function callOllama(prompt, signal) {
       headers: { "Content-Type": "application/json" },
       signal,
       body: JSON.stringify({
-        model: "llama3:8b-instruct-q4_0",
+        model: process.env.OLLAMA_MODEL || "llama3:8b-instruct-q4_0",
         prompt,
         stream: false,
         options: {
@@ -33,9 +45,16 @@ async function callOllama(prompt, signal) {
       }),
     });
 
-    // ✅ VERY IMPORTANT — detect HTTP failures
+    // ✅ VERY IMPORTANT — detect HTTP failures and capture error details
     if (!res.ok) {
-      throw new Error(`Ollama HTTP error ${res.status}`);
+      let errorDetail = "";
+      try {
+        const errorBody = await res.text();
+        errorDetail = errorBody ? `: ${errorBody}` : "";
+      } catch (e) {
+        // Ignore error reading body
+      }
+      throw new Error(`Ollama HTTP error ${res.status}${errorDetail}`);
     }
 
     const data = await res.json();
@@ -73,4 +92,82 @@ async function callOpenAI(prompt) {
 
   const data = await res.json();
   return data.choices[0].message.content;
+}
+
+async function callGrok(prompt) {
+  const res = await fetch("https://api.x.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "grok-beta",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.4,
+    }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Grok API error ${res.status}: ${errorText}`);
+  }
+
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+async function callGroq(prompt) {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL || "llama-3.1-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.4,
+      max_tokens: 500,
+    }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Groq API error ${res.status}: ${errorText}`);
+  }
+
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+async function callHuggingFace(prompt) {
+  const model = process.env.HF_MODEL || "mistralai/Mixtral-8x7B-Instruct-v0.1";
+
+  const res = await fetch(
+    `https://api-inference.huggingface.co/models/${model}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+      },
+      body: JSON.stringify({
+        inputs: prompt,
+        parameters: {
+          max_new_tokens: 500,
+          temperature: 0.4,
+          top_p: 0.9,
+        },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`HuggingFace API error ${res.status}: ${errorText}`);
+  }
+
+  const data = await res.json();
+  return Array.isArray(data) ? data[0].generated_text : data.generated_text;
 }

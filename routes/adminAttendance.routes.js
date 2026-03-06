@@ -16,6 +16,7 @@ const router = express.Router();
  */
 
 router.use(authMiddleware);
+router.use(requireWorkspaceForUser);
 
 // 🔐 Admin only
 router.use((req, res, next) => {
@@ -38,23 +39,19 @@ router.use((req, res, next) => {
  */
 router.get("/", async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin access required" });
-    }
-
     const { from, to, userId } = req.query;
 
-    const workspaceId =
-  req.query.workspaceId || req.headers["x-workspace-id"];
+    // Workspace ID is set by requireWorkspaceForUser middleware
+    const workspaceId = req.workspaceId;
 
-if (!workspaceId) {
-  return res.status(400).json({
-    error: "workspaceId is required for admin reports",
-  });
-}
+    if (!workspaceId) {
+      return res.status(400).json({
+        error: "workspaceId is required for admin reports",
+      });
+    }
 
-const conditions = [`workspace_id = $1`];
-const values = [workspaceId];
+    const conditions = [`workspace_id = $1`];
+    const values = [workspaceId];
 
     let idx = 2;
 
@@ -77,13 +74,13 @@ const values = [workspaceId];
       SELECT
         user_id,
         date,
-        total_signed_in_minutes,
+        signed_in_minutes AS total_signed_in_minutes,
         aws_minutes,
         lunch_minutes,
         available_minutes,
         screen_on_minutes,
         screen_off_minutes
-      FROM daily_attendance
+      FROM attendance_daily
       WHERE ${conditions.join(" AND ")}
       ORDER BY date DESC, user_id
       LIMIT 500

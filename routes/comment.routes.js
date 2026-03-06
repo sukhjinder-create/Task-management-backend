@@ -46,11 +46,11 @@ router.post("/:taskId", async (req, res) => {
     }
 
     const comment = await createComment({
-      task_id: taskId,
-      comment_text,
-      added_by: req.user.username,
-      workspaceId: req.workspaceId, // 🔐 enforced
-    });
+  task_id: taskId,
+  comment_text,
+  user: req.user,   // ✅ pass full user object
+  workspaceId: req.workspaceId,
+});
 
     res.status(201).json(comment);
   } catch (err) {
@@ -77,7 +77,7 @@ router.post("/", async (req, res) => {
     const comment = await createComment({
       task_id,
       comment_text,
-      added_by: added_by || req.user.username,
+      user: req.user,
       workspaceId: req.workspaceId, // 🔐 enforced
     });
 

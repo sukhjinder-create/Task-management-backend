@@ -23,6 +23,7 @@ import subtaskRoutes from "./routes/subtask.routes.js";
 import projectStatusRoutes from "./routes/projectStatus.routes.js";
 import reportRoutes from "./routes/report.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
+import { startAutopilotCron } from "./cron/autopilot.cron.js";
 
 // 🔵 Chat channels
 import chatMessagesRoutes from "./routes/chatMessages.routes.js";
@@ -41,6 +42,7 @@ import superadminRoutes from "./routes/superadmin.routes.js";
 import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
 import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
+import settingsAttendanceRoutes from "./routes/settingsAttendance.routes.js";
 
 import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
@@ -48,6 +50,8 @@ import internalTasks from "./routes/internalTasks.js";
 import reportsRouter from "./routes/reports.js";
 // 🧠 Intelligence (READ-ONLY)
 import intelligenceRoutes from "./intelligence/intelligence.routes.js";
+// 🤖 Autopilot AI
+import autopilotRoutes from "./routes/autopilot.routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
 import { registerObserver } from "./events/eventBus.js";
@@ -144,6 +148,8 @@ app.use(
   requireWorkspaceForUser,
   intelligenceRoutes
 );
+// 🤖 Autopilot AI
+app.use("/autopilot", autopilotRoutes);
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
@@ -153,6 +159,7 @@ app.use("/project-statuses", authMiddleware, requireWorkspaceForUser, projectSta
 app.use("/reports", authMiddleware, requireWorkspaceForUser, reportRoutes);
 app.use("/notifications", authMiddleware, requireWorkspaceForUser, notificationRoutes);
 app.use("/attendance", authMiddleware, requireWorkspaceForUser, attendanceRoutes);
+app.use("/settings", authMiddleware, requireWorkspaceForUser, settingsAttendanceRoutes);
 app.use("/users", authMiddleware, requireWorkspaceForUser, userRoutes);
 app.use("/workspaces", authMiddleware, requireWorkspaceForUser, workspaceRoutes);
 
@@ -177,6 +184,17 @@ app.use("/integration-debug", integrationDebugRoutes);
 
 // ---------------- ERROR HANDLER ----------------
 app.use((err, req, res, next) => {
+  // JSON parsing error
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    console.error("🔥 JSON parsing error:", err.message);
+    return res.status(400).json({
+      error: "Invalid JSON in request body",
+      details: err.message,
+      hint: "Check for trailing commas, missing quotes, or other JSON syntax errors"
+    });
+  }
+
+  // Payload too large
   if (err && (err.type === "entity.too.large" || err.status === 413)) {
     console.error("Payload too large:", err.message);
     return res.status(413).json({
@@ -184,6 +202,9 @@ app.use((err, req, res, next) => {
         "Request is too large. Try reducing the size of the description or attachments.",
     });
   }
+
+  // Generic error
+  console.error("Unhandled error:", err);
   next(err);
 });
 
@@ -211,3 +232,4 @@ await import("./integrations/integration.bootstrap.js");
 
 // 4️⃣ Start cron LAST
 startAttendanceCron();
+startAutopilotCron();

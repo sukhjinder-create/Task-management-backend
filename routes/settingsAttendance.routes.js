@@ -15,6 +15,7 @@ router.get("/attendance", async (req, res) => {
     return res.json({
       enabled: true,
       workspaceId,
+      idleThresholdMinutes: 10, // Default: 10 minutes of inactivity before considered idle
       tracking: {
         signIn: true,
         signOff: true,

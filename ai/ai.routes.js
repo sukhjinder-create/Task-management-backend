@@ -2,6 +2,9 @@ import express from "express";
 import { createChatMessage } from "../services/chat.service.js";
 import { canAIRespond } from "./ai.permissions.js";
 import { ensureSystemUser } from "../services/ai.system.service.js";
+import { runAIIntelligenceQuery } from "./ai.intelligence.service.js";
+import { authMiddleware } from "../middleware/auth.middleware.js";
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 
 const router = express.Router();
 
@@ -76,5 +79,84 @@ router.post("/message", async (req, res) => {
     res.status(500).json({ error: "AI message failed" });
   }
 });
+
+/**
+ * Strategic Intelligence Query
+ * 🔐 Requires authentication and workspace access
+ */
+router.post(
+  "/intelligence-query",
+  authMiddleware,
+  requireWorkspaceForUser,
+  async (req, res) => {
+    try {
+      const workspaceId = req.workspaceId;
+      const { scope, entityId, question } = req.body;
+
+      // Validate required fields
+      if (!scope || !question) {
+        return res.status(400).json({
+          error: "scope and question are required",
+          hint: "scope must be 'workspace', 'project', or 'task'"
+        });
+      }
+
+      // Validate scope value
+      if (!["workspace", "project", "task"].includes(scope)) {
+        return res.status(400).json({
+          error: "Invalid scope",
+          hint: "scope must be 'workspace', 'project', or 'task'"
+        });
+      }
+
+      // Validate entityId for project/task scopes
+      if ((scope === "project" || scope === "task") && !entityId) {
+        return res.status(400).json({
+          error: `entityId is required for ${scope} scope`,
+          hint: `Please provide the ${scope} ID in the entityId field`
+        });
+      }
+
+      const aiUser = await ensureSystemUser(workspaceId);
+
+      const answer = await runAIIntelligenceQuery({
+        workspaceId,
+        scope,
+        entityId,
+        question
+      });
+
+      res.json({
+        success: true,
+        answer,
+        aiUser
+      });
+
+    } catch (err) {
+      console.error("AI Intelligence error:", err);
+
+      // Handle specific errors
+      if (err.message.includes("not found")) {
+        return res.status(404).json({
+          error: err.message,
+          hint: "Verify the entity exists and belongs to your workspace"
+        });
+      }
+
+      if (err.message.includes("Context too large")) {
+        return res.status(400).json({
+          error: err.message,
+          hint: "Try asking a more specific question"
+        });
+      }
+
+      // Generic error
+      res.status(500).json({
+        error: "Strategic intelligence failed",
+        details: err.message
+      });
+    }
+  }
+);
 
 export default router;

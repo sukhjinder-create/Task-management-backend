@@ -2,6 +2,11 @@ import pool from "../db.js";
 
 class TaskRepository {
   async createTask(data) {
+    // 🔒 Require workspace_id
+    if (!data.workspaceId) {
+      throw new Error("workspaceId is required for task creation");
+    }
+
     const query = `
       INSERT INTO tasks (
         task,
@@ -27,14 +32,19 @@ class TaskRepository {
       data.assigned_to || null,
       data.due_date || null,
       data.description || "",
-      data.workspaceId || "GLOBAL",
+      data.workspaceId,
     ];
 
     const result = await pool.query(query, values);
     return result.rows[0];
   }
 
-  async getTasksByProject(projectId, filters = {}, workspaceId = "GLOBAL") {
+  async getTasksByProject(projectId, filters = {}, workspaceId) {
+    // 🔒 Require workspace_id
+    if (!workspaceId) {
+      throw new Error("workspaceId is required for querying tasks");
+    }
+
     let query = `
       SELECT *
       FROM tasks
@@ -77,6 +87,11 @@ class TaskRepository {
   }
 
   async updateTask(id, data) {
+    // 🔒 Require workspace_id
+    if (!data.workspaceId) {
+      throw new Error("workspaceId is required for task update");
+    }
+
     const query = `
       UPDATE tasks
       SET
@@ -100,14 +115,19 @@ class TaskRepository {
       data.due_date || null,
       data.description || "",
       id,
-      data.workspaceId || "GLOBAL",
+      data.workspaceId,
     ];
 
     const result = await pool.query(query, values);
     return result.rows[0];
   }
 
-  async deleteTask(id, workspaceId = "GLOBAL") {
+  async deleteTask(id, workspaceId) {
+    // 🔒 Require workspace_id
+    if (!workspaceId) {
+      throw new Error("workspaceId is required for task deletion");
+    }
+
     await pool.query(
       `
       DELETE FROM tasks

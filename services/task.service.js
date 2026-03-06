@@ -77,10 +77,14 @@ export async function createTask({
   due_date = null,
   description = "",
   priority = "medium",
-  workspaceId, // 🔹 ADD-ONLY
+  workspaceId, // 🔹 REQUIRED
 }) {
   if (!task || !project_id || !added_by) {
     throw new Error("task, project_id and added_by are required");
+  }
+
+  if (!workspaceId) {
+    throw new Error("workspaceId is required for task creation");
   }
 
   // 🔒 workspace check
@@ -88,24 +92,84 @@ export async function createTask({
 
   const assigned = assigned_to || null;
 
-  const query = `
-    INSERT INTO tasks (task, project_id, status, priority, added_by, assigned_to, due_date, description)
-    VALUES ($1,       $2,         $3,     $4,       $5,       $6,          $7,      $8)
-    RETURNING *;
-  `;
-  const values = [
-    task,
-    project_id,
-    status,
-    priority || "medium",
-    added_by,
-    assigned,
-    due_date,
-    description || "",
-  ];
+  let created;
 
-  const { rows } = await pool.query(query, values);
-  const created = rows[0];
+try {
+  await pool.query("BEGIN");
+
+  // 1️⃣ Increment project ticket sequence safely
+  const seqRes = await pool.query(
+    `
+    INSERT INTO project_ticket_sequences (project_id, last_number)
+    VALUES ($1, 1)
+    ON CONFLICT (project_id)
+    DO UPDATE SET last_number = project_ticket_sequences.last_number + 1
+    RETURNING last_number
+    `,
+    [project_id]
+  );
+
+  const ticketNumber = seqRes.rows[0].last_number;
+
+  // 2️⃣ Insert task with ticket_number and workspace_id
+  const insertRes = await pool.query(
+    `
+    INSERT INTO tasks
+    (task, project_id, status, priority, added_by, assigned_to, due_date, description, ticket_number, workspace_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    RETURNING *;
+    `,
+    [
+      task,
+      project_id,
+      status,
+      priority || "medium",
+      added_by,
+      assigned,
+      due_date,
+      description || "",
+      ticketNumber,
+      workspaceId  // ✅ NOW INCLUDED
+    ]
+  );
+
+  created = insertRes.rows[0];
+
+  // 📝 Log: Task Created
+await pool.query(`
+  INSERT INTO task_activity_logs
+  (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+  VALUES ($1,$2,$3,$4,$5,$6)
+`, [
+  created.id,
+  workspaceId,
+  added_by,
+  "TASK_CREATED",
+  null,
+  JSON.stringify({
+    task: created.task,
+    status: created.status,
+    priority: created.priority,
+    assigned_to: created.assigned_to
+  })
+]);
+
+  // Optional: prepend project code visually (does not affect numbering)
+const projectRes = await pool.query(
+  `SELECT project_code FROM projects WHERE id = $1`,
+  [project_id]
+);
+
+if (projectRes.rows[0]?.project_code) {
+  created.display_id = `${projectRes.rows[0].project_code}-${created.ticket_number}`;
+}
+
+  await pool.query("COMMIT");
+
+} catch (err) {
+  await pool.query("ROLLBACK");
+  throw err;
+}
   // 🧠 workspace intelligence update
 emitWorkspaceIntelligenceUpdate(workspaceId, {
   type: "task-created",
@@ -197,12 +261,11 @@ export async function getTasksByProjectForUser(projectId, user, filters = {}) {
 export async function updateTaskAsAdminOrManager(id, data) {
   const existing = await getTaskById(id);
 
-  // 🔒 workspace check
   await assertProjectInWorkspace(existing.project_id, data.workspaceId);
 
   const newTaskText = data.task ?? existing.task;
   const newStatus = data.status ?? existing.status;
-  const newAssignedTo = data.assigned_to || null;
+  const newAssignedTo = data.assigned_to ?? existing.assigned_to ?? null;
   const newDueDate = data.due_date ?? existing.due_date;
   const newDescription =
     data.description !== undefined
@@ -213,7 +276,9 @@ export async function updateTaskAsAdminOrManager(id, data) {
       ? data.priority
       : existing.priority || "medium";
 
-  const query = `
+  // 🔹 1️⃣ Perform Update
+  await pool.query(
+    `
     UPDATE tasks
     SET task = $1,
         status = $2,
@@ -223,53 +288,90 @@ export async function updateTaskAsAdminOrManager(id, data) {
         priority = $6,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = $7
-    RETURNING *;
-  `;
+    `,
+    [
+      newTaskText,
+      newStatus,
+      newAssignedTo,
+      newDueDate,
+      newDescription,
+      newPriority,
+      id,
+    ]
+  );
 
-  const { rows } = await pool.query(query, [
-    newTaskText,
-    newStatus,
-    newAssignedTo,
-    newDueDate,
-    newDescription,
-    newPriority,
-    id,
-  ]);
+  // 🔹 2️⃣ Fetch updated version
+  const updatedTask = await getTaskById(id);
 
-  const updated = rows[0];
+  // 🔹 3️⃣ LOG DIFFERENCES SAFELY
 
-  if (updated.assigned_to) {
-    await notifyUser({
-      user_id: updated.assigned_to,
-      type: "task_updated",
-      message: `Task "${updated.task}" was updated (status: ${updated.status})`,
-      task_id: updated.id,
-      project_id: updated.project_id,
-    });
+  const actorId = data.updated_by;
+
+  // ASSIGNEE CHANGE
+  if (existing.assigned_to !== updatedTask.assigned_to) {
+    await pool.query(`
+      INSERT INTO task_activity_logs
+      (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      id,
+      data.workspaceId,
+      actorId,
+      "ASSIGNEE_CHANGED",
+      JSON.stringify({ assigned_to: existing.assigned_to }),
+      JSON.stringify({ assigned_to: updatedTask.assigned_to })
+    ]);
   }
 
-  const updatedTask = await getTaskById(id);
-  // 🧠 trigger intelligence recalculation (async, non-blocking)
-import("../intelligence/manualScoring.service.js")
-  .then(({ runManualMonthlyScoring }) => {
-    const month = new Date().toISOString().slice(0, 7);
+  // STATUS CHANGE
+  if (existing.status !== updatedTask.status) {
+    await pool.query(`
+      INSERT INTO task_activity_logs
+      (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      id,
+      data.workspaceId,
+      actorId,
+      "STATUS_CHANGED",
+      JSON.stringify({ status: existing.status }),
+      JSON.stringify({ status: updatedTask.status })
+    ]);
+  }
 
-    runManualMonthlyScoring({
-      workspaceId,
-      month,
-      triggeredBy: userId || updatedTask.added_by,
-    }).catch(() => {});
-  })
-  .catch(() => {});
+  // PRIORITY CHANGE
+  if (existing.priority !== updatedTask.priority) {
+    await pool.query(`
+      INSERT INTO task_activity_logs
+      (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      id,
+      data.workspaceId,
+      actorId,
+      "PRIORITY_CHANGED",
+      JSON.stringify({ priority: existing.priority }),
+      JSON.stringify({ priority: updatedTask.priority })
+    ]);
+  }
 
-emitWorkspaceIntelligenceUpdate(data.workspaceId, {
-  type: "task-updated",
-  status: updatedTask.status,
-  projectId: updatedTask.project_id,
-  taskId: updatedTask.id,
-});
+  // DESCRIPTION CHANGE
+  if (existing.description !== updatedTask.description) {
+    await pool.query(`
+      INSERT INTO task_activity_logs
+      (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      id,
+      data.workspaceId,
+      actorId,
+      "DESCRIPTION_UPDATED",
+      null,
+      null
+    ]);
+  }
 
-return updatedTask;
+  return updatedTask;
 }
 
 /**
@@ -325,6 +427,20 @@ export async function updateTaskStatusAsUser(
     );
   }
 
+  // 📝 Log: Status Changed
+await pool.query(`
+  INSERT INTO task_activity_logs
+  (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+  VALUES ($1,$2,$3,$4,$5,$6)
+`, [
+  id,
+  workspaceId,
+  userId,
+  "STATUS_CHANGED",
+  existing.status,
+  newStatus
+]);
+
   const updatedTask = await getTaskById(id);
   // 🧠 trigger intelligence recalculation (async, non-blocking)
 import("../intelligence/manualScoring.service.js")
@@ -357,6 +473,20 @@ export async function deleteTask(id, workspaceId) {
 
   // 🔒 workspace check
   await assertProjectInWorkspace(existing.project_id, workspaceId);
+
+  // 📝 Log: Task Deleted
+await pool.query(`
+  INSERT INTO task_activity_logs
+  (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+  VALUES ($1,$2,$3,$4,$5,$6)
+`, [
+  existing.id,
+  workspaceId,
+  existing.added_by,
+  "TASK_DELETED",
+  JSON.stringify(existing),
+  null
+]);
 
   await pool.query(`DELETE FROM tasks WHERE id = $1`, [id]);
 

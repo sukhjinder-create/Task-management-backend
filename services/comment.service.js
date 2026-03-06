@@ -4,8 +4,8 @@ import { notifyUser } from "./notification.service.js";
 import { getTaskById } from "./task.service.js";
 import { getUserByUsername } from "../repositories/user.repository.js";
 
-export async function createComment({ task_id, comment_text, added_by }) {
-  if (!task_id || !comment_text || !added_by) {
+export async function createComment({ task_id, comment_text, user, workspaceId }) {
+  if (!task_id || !comment_text || !user?.id || !workspaceId) {
     throw new Error("task_id, comment_text and added_by are required");
   }
 
@@ -14,19 +14,31 @@ export async function createComment({ task_id, comment_text, added_by }) {
     VALUES ($1, $2, $3)
     RETURNING *;
   `;
-  const values = [task_id, comment_text, added_by];
+  const values = [task_id, comment_text, user.id];
   const { rows } = await pool.query(insertQuery, values);
   const comment = rows[0];
+  const task = await getTaskById(task_id);
+
+await pool.query(`
+  INSERT INTO task_activity_logs
+  (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+  VALUES ($1,$2,$3,$4,$5,$6)
+`, [
+  task_id,
+  workspaceId,    // ✅ CORRECT
+  user.id,
+  "COMMENT_ADDED",
+  null,
+  null
+]);
 
   try {
-    const task = await getTaskById(task_id);
-
     // 🔔 Notify assignee (existing behaviour) + include comment_id
     if (task.assigned_to) {
       await notifyUser({
         user_id: task.assigned_to,
         type: "comment_added",
-        message: `New comment on task "${task.task}" by ${added_by}`,
+        message: `New comment on task "${task.task}" by ${user.username}`,
         task_id: task.id,
         project_id: task.project_id,
         comment_id: comment.id,
@@ -53,7 +65,7 @@ export async function createComment({ task_id, comment_text, added_by }) {
         await notifyUser({
           user_id: mentionedUser.id,
           type: "comment_mention",
-          message: `${added_by} mentioned you in a comment on task "${task.task}"`,
+          message: `${user.username} mentioned you in a comment on task "${task.task}"`,
           task_id: task.id,
           project_id: task.project_id,
           comment_id: comment.id,
@@ -75,11 +87,15 @@ export async function createComment({ task_id, comment_text, added_by }) {
 
 export async function getCommentsByTask(taskId) {
   const query = `
-    SELECT *
-    FROM comments
-    WHERE task_id = $1
-    ORDER BY created_at DESC;
-  `;
+  SELECT 
+    c.*,
+    u.username,
+    u.email
+  FROM comments c
+  LEFT JOIN users u ON u.id = c.added_by
+  WHERE c.task_id = $1
+  ORDER BY c.created_at DESC;
+`;
   const { rows } = await pool.query(query, [taskId]);
   return rows;
 }

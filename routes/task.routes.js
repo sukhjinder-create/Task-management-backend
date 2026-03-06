@@ -1,3 +1,4 @@
+import pool from "../db.js";
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
@@ -178,9 +179,13 @@ router.put("/:id", async (req, res) => {
     }
 
     const updated = await updateTaskAsAdminOrManager(
-      id,
-      { ...req.body, workspaceId: req.workspaceId } // 🔐 enforced
-    );
+  id,
+  { 
+    ...req.body, 
+    workspaceId: req.workspaceId,
+    updated_by: req.user.id
+  }
+);
 
     res.json(updated);
   } catch (err) {
@@ -293,5 +298,32 @@ router.delete("/subtasks/:id", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+router.get("/:id/logs", async (req, res) => {
+  try {
+    const taskId = req.params.id;
+
+   const { rows } = await pool.query(`
+  SELECT 
+    l.*,
+    actor.username AS actor_username,
+    oldUser.username AS old_assignee_username,
+    newUser.username AS new_assignee_username
+  FROM task_activity_logs l
+  LEFT JOIN users actor ON actor.id = l.actor_id
+  LEFT JOIN users oldUser 
+    ON oldUser.id::text = (l.old_value->>'assigned_to')
+  LEFT JOIN users newUser 
+    ON newUser.id::text = (l.new_value->>'assigned_to')
+  WHERE l.task_id = $1
+  ORDER BY l.created_at ASC
+`, [taskId]);
+
+    res.json(rows);
+
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load logs" });
   }
 });
