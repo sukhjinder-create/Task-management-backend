@@ -12,6 +12,7 @@ import {
   rejectAction,
   runAutopilot,
   getAutopilotStats,
+  getAutopilotHistory,
 } from "../services/autopilot.service.js";
 
 const router = express.Router();
@@ -283,6 +284,43 @@ router.get("/stats", allowRoles("admin", "manager"), async (req, res) => {
   } catch (err) {
     console.error("Get autopilot stats failed:", err);
     res.status(500).json({ error: "Failed to get stats" });
+  }
+});
+
+/**
+ * GET /autopilot/history
+ * Get approved/executed/rejected action history with filters
+ */
+router.get("/history", allowRoles("admin", "manager"), async (req, res) => {
+  try {
+    const {
+      projectId,
+      page = 1,
+      limit = 10,
+      search = "",
+      status = "all",
+      fromDate = null,
+      toDate = null,
+    } = req.query;
+
+    const result = await getAutopilotHistory({
+      workspaceId: req.workspaceId,
+      projectId,
+      page,
+      limit,
+      search,
+      status,
+      fromDate,
+      toDate,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    console.error("Get autopilot history failed:", err);
+    res.status(500).json({ error: "Failed to get history" });
   }
 });
 

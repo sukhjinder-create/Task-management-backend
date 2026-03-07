@@ -27,33 +27,28 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
     return { message: 'Autopilot is disabled', actionsCreated: 0 };
   }
 
-  const actions = [];
-
-  // Run enabled analysis modules
+  // Run enabled analysis modules in parallel for better throughput.
+  const modulePromises = [];
   if (settings.auto_assign) {
-    const assignActions = await analyzeUnassignedTasks(workspaceId, projectId, settings);
-    actions.push(...assignActions);
+    modulePromises.push(analyzeUnassignedTasks(workspaceId, projectId, settings));
   }
-
   if (settings.auto_deadline_adjust) {
-    const deadlineActions = await analyzeDeadlines(workspaceId, projectId, settings);
-    actions.push(...deadlineActions);
+    modulePromises.push(analyzeDeadlines(workspaceId, projectId, settings));
   }
-
   if (settings.auto_escalate_blockers) {
-    const blockerActions = await analyzeBlockers(workspaceId, projectId, settings);
-    actions.push(...blockerActions);
+    modulePromises.push(analyzeBlockers(workspaceId, projectId, settings));
   }
-
   if (settings.auto_generate_standup) {
-    const standupActions = await generateStandupSummary(workspaceId, projectId, settings);
-    actions.push(...standupActions);
+    modulePromises.push(generateStandupSummary(workspaceId, projectId, settings));
   }
 
-  // Create action records in database
-  const createdActions = [];
-  for (const action of actions) {
-    const created = await createAutopilotAction({
+  const moduleResults = await Promise.all(modulePromises);
+  const actions = moduleResults.flat().filter(Boolean);
+  const uniqueActions = dedupeActionsInMemory(actions);
+
+  // Create action records with bounded concurrency to reduce runtime latency.
+  const createdActions = await runWithConcurrency(uniqueActions, 8, async (action) => {
+    return await createAutopilotAction({
       workspaceId,
       projectId: action.projectId,
       taskId: action.taskId,
@@ -65,8 +60,7 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
       requireApproval: settings.require_approval,
       autoApproveAfterHours: settings.auto_approve_after_hours,
     });
-    createdActions.push(created);
-  }
+  });
 
   return {
     actionsCreated: createdActions.length,
@@ -109,36 +103,36 @@ async function analyzeUnassignedTasks(workspaceId, projectId, settings) {
   `, [workspaceId]);
 
   const actions = [];
+  const userMap = new Map();
+  for (const u of allUsers) {
+    userMap.set(u.id, u.username || u.email || "unknown");
+  }
+  const availableUser = workloads.find(w =>
+    w.active_tasks < settings.max_tasks_per_user &&
+    w.overdue_tasks === 0
+  );
+  const leastBusyUser = workloads.length > 0 ? workloads[0] : null;
+  const fallbackUser = allUsers.length > 0 ? allUsers[0] : null;
 
   for (const task of unassignedTasks) {
     // Find best user for this task
     let bestUser = null;
     let reason = '';
 
-    // Strategy 1: Find user with lowest workload under threshold
-    const availableUser = workloads.find(w =>
-      w.active_tasks < settings.max_tasks_per_user &&
-      w.overdue_tasks === 0
-    );
-
     if (availableUser) {
       bestUser = availableUser.user_id;
       reason = `User has ${availableUser.active_tasks} active tasks (below ${settings.max_tasks_per_user} threshold), no overdue tasks, and avg completion time of ${Math.round(availableUser.avg_completion_days || 0)} days.`;
-    } else if (workloads.length > 0) {
+    } else if (leastBusyUser) {
       // Strategy 2: Find user with least tasks even if over threshold
-      const leastBusyUser = workloads[0];
       bestUser = leastBusyUser.user_id;
       reason = `All users are at capacity. Assigning to least busy user with ${leastBusyUser.active_tasks} active tasks.`;
-    } else if (allUsers.length > 0) {
+    } else if (fallbackUser) {
       // Strategy 3: Random assignment if no workload data
-      bestUser = allUsers[0].id;
+      bestUser = fallbackUser.id;
       reason = `No workload history available. Assigning to team member for initial distribution.`;
     }
 
     if (bestUser) {
-      // Get user details
-      const { rows: [user] } = await pool.query(`SELECT username FROM users WHERE id = $1`, [bestUser]);
-
       actions.push({
         type: 'reassign',
         taskId: task.id,
@@ -152,7 +146,7 @@ async function analyzeUnassignedTasks(workspaceId, projectId, settings) {
         },
         proposedChanges: {
           assigned_to: bestUser,
-          assigned_to_username: user.username,
+          assigned_to_username: userMap.get(bestUser) || "unknown",
         },
         confidence: availableUser ? 0.85 : (workloads.length > 0 ? 0.65 : 0.50),
       });
@@ -315,8 +309,10 @@ async function analyzeBlockers(workspaceId, projectId, settings) {
  * Generate AI-powered daily standup summary
  */
 async function generateStandupSummary(workspaceId, projectId, settings) {
-  // Get yesterday's activity
-  const { rows: completedTasks } = await pool.query(`
+  const scopeParams = projectId ? [workspaceId, projectId] : [workspaceId];
+
+  // Get yesterday's activity in parallel for lower latency.
+  const completedQuery = pool.query(`
     SELECT t.task, u.username, t.completed_at
     FROM tasks t
     LEFT JOIN users u ON u.id = t.assigned_to
@@ -326,9 +322,9 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
       AND t.completed_at > NOW() - INTERVAL '24 hours'
     ORDER BY t.completed_at DESC
     LIMIT 10
-  `, projectId ? [workspaceId, projectId] : [workspaceId]);
+  `, scopeParams);
 
-  const { rows: newTasks } = await pool.query(`
+  const newTasksQuery = pool.query(`
     SELECT t.task, u.username as assigned_to, t.created_at
     FROM tasks t
     LEFT JOIN users u ON u.id = t.assigned_to
@@ -337,9 +333,9 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
       AND t.created_at > NOW() - INTERVAL '24 hours'
     ORDER BY t.created_at DESC
     LIMIT 10
-  `, projectId ? [workspaceId, projectId] : [workspaceId]);
+  `, scopeParams);
 
-  const { rows: overdueTasks } = await pool.query(`
+  const overdueQuery = pool.query(`
     SELECT t.task, u.username as assigned_to, t.due_date
     FROM tasks t
     LEFT JOIN users u ON u.id = t.assigned_to
@@ -348,7 +344,13 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
       AND t.status NOT IN ('completed', 'cancelled')
       AND t.due_date < NOW()
     LIMIT 5
-  `, projectId ? [workspaceId, projectId] : [workspaceId]);
+  `, scopeParams);
+
+  const [
+    { rows: completedTasks },
+    { rows: newTasks },
+    { rows: overdueTasks },
+  ] = await Promise.all([completedQuery, newTasksQuery, overdueQuery]);
 
   // Generate AI summary
   const prompt = `Generate a concise daily standup summary (max 150 words):
@@ -424,6 +426,43 @@ async function createAutopilotAction({
   requireApproval = true,
   autoApproveAfterHours = 24,
 }) {
+  const dedupeHoursByType = {
+    reassign: 6,
+    adjust_deadline: 6,
+    escalate: 12,
+    create_standup: 20,
+  };
+  const dedupeHours = dedupeHoursByType[actionType] || 6;
+
+  // Prevent duplicate pending actions with identical intent over short windows.
+  const dedupe = await pool.query(
+    `
+    SELECT *
+    FROM autopilot_actions
+    WHERE workspace_id = $1
+      AND COALESCE(project_id::text, '') = COALESCE($2::text, '')
+      AND COALESCE(task_id::text, '') = COALESCE($3::text, '')
+      AND action_type = $4
+      AND status IN ('pending', 'approved', 'auto_approved', 'executed')
+      AND proposed_changes::jsonb = $5::jsonb
+      AND created_at > NOW() - ($6::int * INTERVAL '1 hour')
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [
+      workspaceId,
+      projectId,
+      taskId,
+      actionType,
+      JSON.stringify(proposedChanges || {}),
+      dedupeHours,
+    ]
+  );
+
+  if (dedupe.rows.length > 0) {
+    return null;
+  }
+
   const expiresAt = requireApproval
     ? new Date(Date.now() + autoApproveAfterHours * 60 * 60 * 1000)
     : null;
@@ -563,41 +602,74 @@ export async function executeAutopilotAction(actionId, approvedBy = null) {
 
 async function executeReassign(action) {
   const changes = action.proposed_changes;
-  await pool.query(`
+  const expectedAssignedTo =
+    action.current_state && Object.prototype.hasOwnProperty.call(action.current_state, "assigned_to")
+      ? action.current_state.assigned_to
+      : null;
+
+  const { rowCount } = await pool.query(`
     UPDATE tasks
     SET assigned_to = $1, updated_at = NOW()
     WHERE id = $2
-  `, [changes.assigned_to, action.task_id]);
+      AND (
+        ($3::uuid IS NULL AND assigned_to IS NULL)
+        OR assigned_to = $3::uuid
+      )
+      AND status NOT IN ('completed', 'cancelled')
+  `, [changes.assigned_to, action.task_id, expectedAssignedTo]);
+
+  if (rowCount === 0) {
+    throw new Error("Task assignment state changed; reassign action is no longer valid.");
+  }
 }
 
 async function executeDeadlineAdjust(action) {
   const changes = action.proposed_changes;
-  await pool.query(`
+  const expectedDueDate = action.current_state?.due_date || null;
+
+  const { rowCount } = await pool.query(`
     UPDATE tasks
     SET due_date = $1, updated_at = NOW()
     WHERE id = $2
-  `, [changes.due_date, action.task_id]);
+      AND status NOT IN ('completed', 'cancelled')
+      AND (
+        ($3::timestamptz IS NULL AND due_date IS NULL)
+        OR due_date = $3::timestamptz
+      )
+  `, [changes.due_date, action.task_id, expectedDueDate]);
+
+  if (rowCount === 0) {
+    throw new Error("Task due date changed; deadline adjustment is no longer valid.");
+  }
 }
 
 async function executeEscalation(action) {
-  // Send notification to managers
-  const { rows: managers } = await pool.query(`
-    SELECT id FROM users
-    WHERE workspace_id = $1 AND role IN ('manager', 'admin')
-  `, [action.workspace_id]);
+  const { rows: taskRows } = await pool.query(
+    `
+    SELECT id
+    FROM tasks
+    WHERE id = $1
+      AND status NOT IN ('completed', 'cancelled')
+    LIMIT 1
+    `,
+    [action.task_id]
+  );
 
-  for (const manager of managers) {
-    await pool.query(`
-      INSERT INTO notifications (user_id, type, message, task_id, project_id, created_at)
-      VALUES ($1, $2, $3, $4, $5, NOW())
-    `, [
-      manager.id,
-      'task_escalated',
-      action.reason,
-      action.task_id,
-      action.project_id,
-    ]);
+  if (taskRows.length === 0) {
+    throw new Error("Task is already completed/cancelled; escalation skipped.");
   }
+
+  // Send notification to managers/admins in a single insert.
+  await pool.query(
+    `
+    INSERT INTO notifications (user_id, type, message, task_id, project_id, created_at)
+    SELECT u.id, 'task_escalated', $1, $2, $3, NOW()
+    FROM users u
+    WHERE u.workspace_id = $4
+      AND u.role IN ('manager', 'admin')
+    `,
+    [action.reason, action.task_id, action.project_id, action.workspace_id]
+  );
 }
 
 async function executeStandupCreation(action) {
@@ -608,4 +680,47 @@ async function executeStandupCreation(action) {
 
   // Could post to chat, send emails, or create notification
   // Implementation depends on delivery method in proposed_changes
+}
+
+function actionKey(action) {
+  return JSON.stringify({
+    type: action?.type || null,
+    projectId: action?.projectId || null,
+    taskId: action?.taskId || null,
+    proposedChanges: action?.proposedChanges || {},
+  });
+}
+
+function dedupeActionsInMemory(actions) {
+  const seen = new Set();
+  const deduped = [];
+  for (const action of actions) {
+    const key = actionKey(action);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(action);
+  }
+  return deduped;
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+
+  const maxConcurrency = Math.max(1, Math.min(concurrency || 1, 20));
+  const results = [];
+  let cursor = 0;
+
+  const runners = Array.from({ length: Math.min(maxConcurrency, items.length) }, async () => {
+    while (true) {
+      const current = cursor;
+      cursor += 1;
+      if (current >= items.length) return;
+
+      const out = await worker(items[current], current);
+      if (out) results.push(out);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
 }

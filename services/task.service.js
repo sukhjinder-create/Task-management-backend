@@ -495,7 +495,8 @@ await pool.query(`
       user_id: existing.assigned_to,
       type: "task_deleted",
       message: `Task "${existing.task}" was deleted`,
-      task_id: existing.id,
+      // Task row is already deleted, so keep notification FK-safe.
+      task_id: null,
       project_id: existing.project_id,
     });
     emitWorkspaceIntelligenceUpdate(workspaceId, {

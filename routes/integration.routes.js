@@ -8,6 +8,8 @@ import {
 } from "../services/integration.service.js";
 import asanaMigrationRoutes
   from "../integrations/asana/asana.migration.routes.js";
+import youtrackMigrationRoutes
+  from "../integrations/youtrack/youtrack.migration.routes.js";
 
 
 const router = express.Router();
@@ -65,5 +67,6 @@ router.delete("/:provider", async (req, res) => {
 });
 
 router.use( asanaMigrationRoutes);
+router.use(youtrackMigrationRoutes);
 
 export default router;

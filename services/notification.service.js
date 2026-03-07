@@ -174,7 +174,7 @@ export async function notifyUser({
     task_id,
     project_id,
     comment_id,
-    workspace_id: resolvedWorkspaceId,
+    workspaceId: resolvedWorkspaceId,
   });
 
   // 2️⃣ Socket emit (frontend CAN see "GLOBAL")

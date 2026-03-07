@@ -9,7 +9,15 @@ import {
   updateTaskStatusAsUser,
   deleteTask,
   getTaskById,
+  createSubtask,
+  getSubtasks,
+  updateSubtask,
+  deleteSubtask,
 } from "../services/task.service.js";
+import {
+  createTasksFromNL,
+  suggestNLCompletions,
+} from "../services/nlTaskCreation.service.js";
 
 const router = express.Router();
 
@@ -22,6 +30,74 @@ router.use(requireWorkspaceForUser);
 function isValidUuid(value) {
   return typeof value === "string" && /^[0-9a-fA-F-]{36}$/.test(value);
 }
+
+/**
+ * POST /tasks/nl/create
+ * Natural language task creation (admin / manager only)
+ */
+router.post("/nl/create", async (req, res) => {
+  try {
+    if (req.user.role === "user") {
+      return res
+        .status(403)
+        .json({ error: "Only admin/manager can create tasks" });
+    }
+
+    const {
+      command,
+      project_id,
+      include_subtasks = true,
+      auto_assign_by_workload = true,
+      auto_set_dependencies = true,
+    } = req.body || {};
+
+    if (!command || String(command).trim().length < 6) {
+      return res.status(400).json({
+        error: "Command is required and must be descriptive",
+      });
+    }
+
+    if (project_id && !isValidUuid(project_id)) {
+      return res.status(400).json({ error: "Invalid project id" });
+    }
+
+    const result = await createTasksFromNL({
+      command: String(command).trim(),
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      projectId: project_id || null,
+      includeSubtasks: Boolean(include_subtasks),
+      autoAssignByWorkload: Boolean(auto_assign_by_workload),
+      autoSetDependencies: Boolean(auto_set_dependencies),
+    });
+
+    return res.status(201).json(result);
+  } catch (err) {
+    console.error("Error creating tasks from NL:", err);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /tasks/nl/suggestions?q=...
+ * Lightweight command suggestions for UX auto-complete
+ */
+router.get("/nl/suggestions", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.json([]);
+
+    const suggestions = await suggestNLCompletions({
+      partialCommand: q,
+      workspaceId: req.workspaceId,
+    });
+
+    return res.json(suggestions);
+  } catch (err) {
+    console.error("Error fetching NL suggestions:", err);
+    return res.status(500).json({ error: "Failed to fetch suggestions" });
+  }
+});
 
 /**
  * GET /tasks/:projectId

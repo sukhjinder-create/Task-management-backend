@@ -22,6 +22,7 @@ import attendanceRoutes from "./routes/attendance.routes.js";
 import subtaskRoutes from "./routes/subtask.routes.js";
 import projectStatusRoutes from "./routes/projectStatus.routes.js";
 import reportRoutes from "./routes/report.routes.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
 
@@ -150,6 +151,7 @@ app.use(
 );
 // 🤖 Autopilot AI
 app.use("/autopilot", autopilotRoutes);
+app.use("/dashboard", dashboardRoutes);
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);

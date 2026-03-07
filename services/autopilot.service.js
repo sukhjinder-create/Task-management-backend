@@ -206,6 +206,146 @@ export async function getAutopilotStats(workspaceId, projectId = null) {
   return rows[0];
 }
 
+export async function getAutopilotHistory({
+  workspaceId,
+  projectId = null,
+  page = 1,
+  limit = 10,
+  search = "",
+  status = "all",
+  fromDate = null,
+  toDate = null,
+}) {
+  const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+  const offset = (pageNum - 1) * pageSize;
+
+  const where = ["a.workspace_id = $1", "a.status <> 'pending'"];
+  const params = [workspaceId];
+  let idx = 2;
+
+  if (projectId) {
+    where.push(`a.project_id = $${idx++}`);
+    params.push(projectId);
+  }
+
+  if (status && status !== "all") {
+    where.push(`a.status = $${idx++}`);
+    params.push(status);
+  }
+
+  if (fromDate) {
+    where.push(`a.created_at >= $${idx++}::timestamptz`);
+    params.push(fromDate);
+  }
+
+  if (toDate) {
+    where.push(`a.created_at <= $${idx++}::timestamptz`);
+    params.push(toDate);
+  }
+
+  if (search && String(search).trim()) {
+    where.push(`
+      (
+        a.reason ILIKE $${idx}
+        OR a.action_type ILIKE $${idx}
+        OR COALESCE(t.task, '') ILIKE $${idx}
+        OR COALESCE(p.name, '') ILIKE $${idx}
+        OR COALESCE(approver.username, '') ILIKE $${idx}
+        OR COALESCE(decider.username, '') ILIKE $${idx}
+      )
+    `);
+    params.push(`%${String(search).trim()}%`);
+    idx += 1;
+  }
+
+  const whereSql = where.join(" AND ");
+
+  const dataQuery = `
+    SELECT
+      a.id,
+      a.workspace_id,
+      a.project_id,
+      a.task_id,
+      a.action_type,
+      a.status,
+      a.reason,
+      a.current_state,
+      a.proposed_changes,
+      a.confidence_score,
+      a.created_by,
+      a.created_at,
+      a.approved_at,
+      a.executed_at,
+      t.task AS task_title,
+      p.name AS project_name,
+      approver.username AS approved_by_username,
+      d.decision,
+      d.decision_at,
+      d.outcome_status,
+      d.user_feedback,
+      decider.username AS decision_by_username
+    FROM autopilot_actions a
+    LEFT JOIN tasks t ON t.id = a.task_id
+    LEFT JOIN projects p ON p.id = a.project_id
+    LEFT JOIN users approver ON approver.id = a.approved_by
+    LEFT JOIN LATERAL (
+      SELECT
+        ad.decision,
+        ad.decision_at,
+        ad.outcome_status,
+        ad.user_feedback,
+        ad.decision_by
+      FROM autopilot_decisions ad
+      WHERE ad.action_id = a.id
+      ORDER BY ad.decision_at DESC
+      LIMIT 1
+    ) d ON true
+    LEFT JOIN users decider ON decider.id = d.decision_by
+    WHERE ${whereSql}
+    ORDER BY COALESCE(a.executed_at, a.approved_at, a.created_at) DESC
+    LIMIT $${idx} OFFSET $${idx + 1}
+  `;
+
+  const countQuery = `
+    SELECT COUNT(*)::int AS total
+    FROM autopilot_actions a
+    LEFT JOIN tasks t ON t.id = a.task_id
+    LEFT JOIN projects p ON p.id = a.project_id
+    LEFT JOIN users approver ON approver.id = a.approved_by
+    LEFT JOIN LATERAL (
+      SELECT ad.decision_by
+      FROM autopilot_decisions ad
+      WHERE ad.action_id = a.id
+      ORDER BY ad.decision_at DESC
+      LIMIT 1
+    ) d ON true
+    LEFT JOIN users decider ON decider.id = d.decision_by
+    WHERE ${whereSql}
+  `;
+
+  const dataParams = [...params, pageSize, offset];
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    pool.query(dataQuery, dataParams),
+    pool.query(countQuery, params),
+  ]);
+
+  const total = countRows[0]?.total || 0;
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+
+  return {
+    items: rows,
+    pagination: {
+      page: pageNum,
+      limit: pageSize,
+      total,
+      totalPages,
+      hasNext: pageNum < totalPages,
+      hasPrev: pageNum > 1,
+    },
+  };
+}
+
 /* =====================================================
    AUTO-APPROVAL PROCESSOR (for cron)
 ===================================================== */
@@ -227,15 +367,33 @@ export async function processAutoApprovals() {
   console.log(`🤖 Processing ${expiredActions.length} auto-approvals`);
 
   const results = [];
-  for (const action of expiredActions) {
-    try {
-      await executeAutopilotAction(action.id, null);
-      results.push({ id: action.id, status: 'executed' });
-    } catch (err) {
-      console.error(`Failed to auto-execute action ${action.id}:`, err);
-      results.push({ id: action.id, status: 'failed', error: err.message });
-    }
-  }
+  const concurrency = 6;
+  let cursor = 0;
 
+  const workers = Array.from(
+    { length: Math.min(concurrency, expiredActions.length) },
+    async () => {
+      while (true) {
+        const current = cursor;
+        cursor += 1;
+        if (current >= expiredActions.length) return;
+
+        const action = expiredActions[current];
+        try {
+          await executeAutopilotAction(action.id, null);
+          results.push({ id: action.id, status: "executed" });
+        } catch (err) {
+          console.error(`Failed to auto-execute action ${action.id}:`, err);
+          results.push({
+            id: action.id,
+            status: "failed",
+            error: err?.message || "Unknown error",
+          });
+        }
+      }
+    }
+  );
+
+  await Promise.all(workers);
   return results;
 }

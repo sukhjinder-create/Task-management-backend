@@ -94,6 +94,34 @@ async function getOpenSessionId(userId, workspaceId) {
   return rows[0]?.id || null;
 }
 
+async function ensureOpenSessionForUser(userId, workspaceId) {
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) return null;
+
+  const key = String(userId);
+  let sessionId = attendanceSessionByUser.get(key);
+  if (sessionId) return sessionId;
+
+  sessionId = await getOpenSessionId(userId, workspaceId);
+  if (sessionId) {
+    attendanceSessionByUser.set(key, sessionId);
+    return sessionId;
+  }
+
+  // Fallback: create a new session if runtime state is out-of-sync.
+  const newSessionId = randomUUID();
+  await createSession({ sessionId: newSessionId, userId, workspaceId });
+  await recordAttendanceEvent({
+    userId,
+    workspaceId,
+    sessionId: newSessionId,
+    eventType: EVENT.SIGN_IN,
+    // Ensure subsequent state change events (e.g., lunch) sort later.
+    startedAt: new Date(Date.now() - 1000),
+  });
+  attendanceSessionByUser.set(key, newSessionId);
+  return newSessionId;
+}
+
 /* ------------------------------------------------------------
    🔥 HARD SESSION RESET (ADD-ONLY)
 ------------------------------------------------------------ */
@@ -277,8 +305,14 @@ export async function markAws(userId, minutes, workspaceId) {
   const mins = Number(minutes) || 0;
 
   const key = String(userId);
-  const sessionId = attendanceSessionByUser.get(key);
-  if (!sessionId) return;
+  const sessionId = await ensureOpenSessionForUser(userId, workspaceId);
+  if (!sessionId) {
+    console.warn("[attendance] No open session found for AWS", {
+      userId,
+      workspaceId,
+    });
+    return;
+  }
 
   const now = new Date();
 
@@ -310,8 +344,14 @@ export async function markLunch(userId, workspaceId) {
   const name = user?.username || "Unknown user";
 
   const key = String(userId);
-  const sessionId = attendanceSessionByUser.get(key);
-  if (!sessionId) return;
+  const sessionId = await ensureOpenSessionForUser(userId, workspaceId);
+  if (!sessionId) {
+    console.warn("[attendance] No open session found for lunch", {
+      userId,
+      workspaceId,
+    });
+    return;
+  }
 
   awsStateByUser.delete(key);
 
@@ -337,8 +377,20 @@ export async function markAvailableAfterAws(userId, workspaceId) {
   const name = user?.username || "Unknown user";
 
   const key = String(userId);
-  const sessionId = attendanceSessionByUser.get(key);
-  if (!sessionId) return;
+  let sessionId = attendanceSessionByUser.get(key);
+  if (!sessionId) {
+    sessionId = await getOpenSessionId(userId, workspaceId);
+    if (sessionId) {
+      attendanceSessionByUser.set(key, sessionId);
+    }
+  }
+  if (!sessionId) {
+    console.warn("[attendance] No open session found for available", {
+      userId,
+      workspaceId,
+    });
+    return;
+  }
 
   const state = awsStateByUser.get(key);
   awsStateByUser.delete(key);
