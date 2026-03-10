@@ -2,9 +2,9 @@ import fetch from "node-fetch";
 
 const PROVIDER = process.env.LLM_PROVIDER || "ollama"; // ollama | openai | grok | groq | huggingface
 
-export async function generateText({ prompt, signal }) {
+export async function generateText({ prompt, signal, maxTokens }) {
   if (PROVIDER === "ollama") {
-    return callOllama(prompt, signal);
+    return callOllama(prompt, signal, maxTokens);
   }
 
   if (PROVIDER === "openai") {
@@ -26,7 +26,7 @@ export async function generateText({ prompt, signal }) {
   throw new Error("Unsupported LLM provider");
 }
 
-async function callOllama(prompt, signal) {
+async function callOllama(prompt, signal, maxTokens) {
   try {
     const res = await fetch("http://localhost:11434/api/generate", {
       method: "POST",
@@ -37,11 +37,11 @@ async function callOllama(prompt, signal) {
         prompt,
         stream: false,
         options: {
-  num_predict: 900,
-  temperature: 0.4,
-  top_k: 20,
-  top_p: 0.9
-}
+          num_predict: maxTokens || 900,
+          temperature: 0.4,
+          top_k: 20,
+          top_p: 0.9,
+        },
       }),
     });
 

@@ -17,6 +17,8 @@ import {
 import {
   createTasksFromNL,
   suggestNLCompletions,
+  parseOnlyFromNL,
+  getNLContext,
 } from "../services/nlTaskCreation.service.js";
 
 const router = express.Router();
@@ -75,6 +77,56 @@ router.post("/nl/create", async (req, res) => {
   } catch (err) {
     console.error("Error creating tasks from NL:", err);
     return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /tasks/nl/parse
+ * Dry-run preview: parse command and return what would be created (no DB writes)
+ */
+router.post("/nl/parse", async (req, res) => {
+  try {
+    if (req.user.role === "user") {
+      return res.status(403).json({ error: "Only admin/manager can preview task creation" });
+    }
+
+    const { command, project_id } = req.body || {};
+    if (!command || String(command).trim().length < 6) {
+      return res.status(400).json({ error: "Command is required and must be descriptive" });
+    }
+
+    if (project_id && !isValidUuid(project_id)) {
+      return res.status(400).json({ error: "Invalid project id" });
+    }
+
+    const result = await parseOnlyFromNL({
+      command: String(command).trim(),
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+    });
+
+    if (project_id) {
+      result.tasks = result.tasks.map(t => ({ ...t, project_id }));
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error("Error parsing NL command:", err);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /tasks/nl/context
+ * Returns workspace projects and users for UI autocomplete / preview
+ */
+router.get("/nl/context", async (req, res) => {
+  try {
+    const context = await getNLContext(req.workspaceId);
+    return res.json(context);
+  } catch (err) {
+    console.error("Error fetching NL context:", err);
+    return res.status(500).json({ error: "Failed to fetch context" });
   }
 });
 

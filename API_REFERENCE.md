@@ -215,3 +215,116 @@ The AI receives structured context based on scope:
 
 **Backend Version:** 1.0.0
 **Last Updated:** March 5, 2026
+
+---
+
+## Git Automation API
+
+### Authenticated Settings Endpoints
+
+- `GET /integrations/git/projects/:projectId/settings`
+- `PUT /integrations/git/projects/:projectId/settings`
+- `GET /integrations/git/events?limit=50`
+- `POST /integrations/git/simulate/:provider/push`
+
+`provider` examples: `github`, `gitlab`, `bitbucket`.
+
+### Public Webhook Endpoint
+
+- `POST /webhooks/git/:workspaceId/:provider`
+
+If `GIT_WEBHOOK_SECRET` is set, pass it in one of:
+- `x-git-webhook-secret`
+- `x-gitlab-token`
+- `x-webhook-token`
+
+### Settings Payload (PUT)
+
+```json
+{
+  "enabled": true,
+  "autoStatusEnabled": true,
+  "autoCompleteOnProd": false,
+  "autoInferTasks": true,
+  "minInferenceConfidence": 62,
+  "maxInferredTasks": 2,
+  "repoFullName": "org/repo-name",
+  "environmentSequence": ["dev", "qa", "stage", "uat", "prod"],
+  "branchEnvironmentMap": {
+    "develop": "dev",
+    "qa": "qa",
+    "staging": "stage",
+    "release/*": "stage",
+    "main": "prod"
+  },
+  "requireTaskKey": true
+}
+```
+
+Inference behavior:
+- `autoInferTasks=true` allows automatic task matching from commit text + changed files.
+- `minInferenceConfidence` controls strictness (higher = safer, lower = broader automation).
+- `maxInferredTasks` caps number of inferred tasks per push event.
+
+### Task Identification Rules
+
+Tasks are auto-linked using keys like `PROJ-123` from:
+- Branch name
+- Commit message
+- Commit id text
+
+The key maps to:
+- `projects.project_code = PROJ`
+- `tasks.ticket_number = 123`
+
+### Auto Status Behavior
+
+- Non-prod environments auto-create project columns in order:
+  - `env_dev`, `env_qa`, `env_stage`, etc.
+- On push, task status moves forward only by env sequence.
+- Backward or duplicate transitions are skipped.
+- Prod transition sets `completed` only when `autoCompleteOnProd = true`.
+
+## Testing Agent API
+
+### Authenticated Endpoints
+
+- `GET /testing-agent/settings`
+- `PUT /testing-agent/settings` (admin/manager)
+- `GET /testing-agent/projects/profiles?search=`
+- `PUT /testing-agent/projects/:projectId/profile` (admin/manager)
+- `GET /testing-agent/tasks/options?search=&limit=30`
+- `POST /testing-agent/tasks/:taskId/generate`
+- `POST /testing-agent/tasks/:taskId/run`
+- `GET /testing-agent/runs?page=1&limit=20&search=`
+- `GET /testing-agent/runs/:runId`
+
+### Settings Payload (PUT)
+
+```json
+{
+  "enabled": true,
+  "autoGenerateOnGit": true,
+  "autoRunOnGit": false,
+  "maxRuntimeSeconds": 900,
+  "testCommands": ["npm test -- --runInBand"]
+}
+```
+
+### Git Automation Integration
+
+- When Git automation applies task transitions, Testing Agent auto-flow is triggered in background.
+- If `autoGenerateOnGit=true`, test cases are generated.
+- If `autoRunOnGit=true`, configured/default test commands are executed automatically.
+- Manual run is always available from UI/API using `POST /testing-agent/tasks/:taskId/run`.
+
+### Advanced Execution Behavior
+
+- Testing Agent resolves project repo path using this priority:
+  1. `testing_agent_project_profiles.repo_path`
+  2. Auto-discovery from Git repo name/project slug under:
+     - `TESTING_AGENT_REPOS_ROOT`
+     - `TESTING_AGENT_WORKDIR`
+     - backend cwd and parent directories
+- Framework and recommended commands are auto-detected from repo files (`package.json`, `pytest.ini`, `go.mod`, `pom.xml`, etc.).
+- If command cannot run in environment, run is marked `blocked` (not `failed`) with explicit reason.

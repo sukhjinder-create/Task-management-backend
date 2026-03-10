@@ -23,6 +23,7 @@ import subtaskRoutes from "./routes/subtask.routes.js";
 import projectStatusRoutes from "./routes/projectStatus.routes.js";
 import reportRoutes from "./routes/report.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
+import testingAgentRoutes from "./routes/testingAgent.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
 
@@ -73,6 +74,10 @@ import youtrackRoutes
   from "./integrations/youtrack/youtrack.routes.js";
 import youtrackViewerRoutes
   from "./integrations/youtrack/youtrack.viewer.routes.js";
+import {
+  gitAutomationRoutes,
+  gitAutomationWebhookRoutes,
+} from "./integrations/git/git.automation.routes.js";
 
 
 
@@ -104,7 +109,10 @@ app.use(
 // OLD integrations (existing — DO NOT TOUCH)
 app.use("/integrations", integrationRoutes);
 
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({
+  limit: "50mb",
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 app.use("/oauth/asana", asanaOAuthRoutes);
@@ -152,6 +160,7 @@ app.use(
 // 🤖 Autopilot AI
 app.use("/autopilot", autopilotRoutes);
 app.use("/dashboard", dashboardRoutes);
+app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, testingAgentRoutes);
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
@@ -182,6 +191,8 @@ app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
 app.use("/admin/attendance", adminAttendanceExportRoutes);
 
 app.use("/integration-debug", integrationDebugRoutes);
+app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);
+app.use("/webhooks/git", gitAutomationWebhookRoutes);
 
 
 // ---------------- ERROR HANDLER ----------------

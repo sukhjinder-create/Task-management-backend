@@ -24,13 +24,15 @@ class ProjectService {
       throw new Error("Project data is required");
     }
 
+    let created = null;
+
     // Try modern repository (workspace-aware)
     try {
-      return await projectRepository.createProject(data);
+      created = await projectRepository.createProject(data);
     } catch (err) {
       // Legacy fallback (older repo versions)
       try {
-        return await projectRepository.createProject({
+        created = await projectRepository.createProject({
           name: data.name,
           added_by: data.added_by,
         });
@@ -38,6 +40,42 @@ class ProjectService {
         throw err;
       }
     }
+
+    // Zero-touch Git automation defaults for new projects (best effort).
+    // Non-blocking to avoid impacting project creation reliability.
+    if (created?.id && (data?.workspaceId || created?.workspace_id)) {
+      import("../integrations/git/git.automation.service.js")
+        .then(({ upsertGitProjectAutomationSettings }) =>
+          upsertGitProjectAutomationSettings({
+            workspaceId: data.workspaceId || created.workspace_id,
+            projectId: created.id,
+            enabled: true,
+            autoStatusEnabled: true,
+            autoCompleteOnProd: true,
+            repoFullName: null,
+            environmentSequence: ["dev", "qa", "stage", "uat", "prod"],
+            branchEnvironmentMap: {
+              develop: "dev",
+              "feature/*": "dev",
+              qa: "qa",
+              test: "qa",
+              staging: "stage",
+              "release/*": "stage",
+              uat: "uat",
+              main: "prod",
+              master: "prod",
+            },
+            requireTaskKey: false,
+            autoInferTasks: true,
+            minInferenceConfidence: 62,
+            maxInferredTasks: 2,
+            actorId: null,
+          })
+        )
+        .catch(() => {});
+    }
+
+    return created;
   }
 
   /**

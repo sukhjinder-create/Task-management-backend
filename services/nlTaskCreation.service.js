@@ -19,62 +19,58 @@ export async function parseNaturalLanguageCommand({
   workspaceId,
   userId
 }) {
-  console.log("🎙️ Parsing NL command:", command);
+  console.log("Parsing NL command:", command);
 
   // Step 1: Get context (available projects, users)
   const context = await getWorkspaceContext(workspaceId);
   const commandInEnglish = await normalizeCommandToEnglish(command);
 
+  // Pre-extract signals from raw command to help LLM
+  const detectedPriority = extractPriorityFromKeywords(commandInEnglish);
+  const detectedDate = extractRelativeDate(commandInEnglish.toLowerCase());
+  const detectedTags = extractTags(commandInEnglish);
+  const today = new Date().toISOString().split("T")[0];
+
   // Step 2: Use AI to extract structured data
   const prompt = `You are a task creation assistant. Extract task details from natural language.
-The command may be written in ANY human language.
 
 WORKSPACE CONTEXT:
-Projects: ${context.projects.map(p => `"${p.name}" (id: ${p.id})`).join(", ")}
-Users: ${context.users.map(u => `"${u.username}" (id: ${u.id})`).join(", ")}
+Projects: ${context.projects.map(p => `"${p.name}" (id: ${p.id})`).join(", ") || "none"}
+Users: ${context.users.map(u => `"${u.username}" (id: ${u.id})`).join(", ") || "none"}
 
-USER COMMAND (already normalized to English): "${commandInEnglish}"
+USER COMMAND: "${commandInEnglish}"
 
-Extract and return ONLY valid JSON (no markdown, no explanation):
-{
-  "tasks": [
-    {
-      "task": "task title",
-      "description": "optional description",
-      "project_id": "uuid or null",
-      "assigned_to": "uuid or null",
-      "priority": "high|medium|low",
-      "due_date": "YYYY-MM-DD or null",
-      "subtasks": ["subtask 1", "subtask 2"]
-    }
-  ],
-  "summary": "brief summary of what was created"
-}
+Pre-detected signals (use these as hints):
+- Priority: ${detectedPriority || "not detected, default medium"}
+- Due date: ${detectedDate || "not detected, use null"}
+- Tags: ${detectedTags.length ? detectedTags.join(", ") : "none"}
+- Today: ${today}
+
+Return ONLY valid JSON (no markdown, no explanation):
+{"tasks":[{"task":"title","description":"description","project_id":"uuid or null","assigned_to":"uuid or null","priority":"high|medium|low","due_date":"YYYY-MM-DD or null","tags":["tag1"],"subtasks":["subtask 1","subtask 2"]}],"summary":"brief summary"}
 
 RULES:
-- If no project mentioned, use project_id: null
-- If user mentions a project name, match it to available projects
-- If user mentions a person, match to available users
-- If "X tasks" mentioned, create X separate task objects
-- Default priority: "medium"
-- For relative dates like "Friday", "next week", calculate actual date
-- If creating multiple tasks, number them or make titles distinct
-- Add 2-4 realistic subtasks per task when possible
-- Always return task titles, descriptions, summary, and subtasks in English
-- Today is ${new Date().toISOString().split('T')[0]}
-
-Return ONLY the JSON, nothing else.`;
+- If command has a bulleted/numbered list (-, *, 1., 2., etc), each list item = one separate task
+- If "X tasks" mentioned, create X task objects with distinct titles
+- Match project names to available projects; if none matched, use project_id: null
+- Match person names/usernames to available users; if none matched, use assigned_to: null
+- Use pre-detected priority if provided, else infer from context
+- Use pre-detected due date if provided, else infer from text ("Friday" → next Friday, etc.)
+- Add 2-4 realistic subtasks per task
+- All output text must be in English
+- Keep task titles concise (under 80 chars)
+- Return ONLY the JSON object`;
 
   try {
-    const response = await generateText({ prompt });
+    const response = await generateText({ prompt, maxTokens: 2000 });
 
-    // Clean response (remove markdown code blocks if present)
-    let jsonStr = response.trim();
-    if (jsonStr.startsWith('```json')) {
-      jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-    } else if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/```\n?/g, '');
-    }
+    let jsonStr = response.trim()
+      .replace(/^```json\n?/i, "").replace(/^```\n?/, "").replace(/```\n?$/, "").trim();
+
+    // Extract JSON object if there's surrounding text
+    const start = jsonStr.indexOf("{");
+    const end = jsonStr.lastIndexOf("}");
+    if (start !== -1 && end !== -1) jsonStr = jsonStr.slice(start, end + 1);
 
     const parsed = JSON.parse(jsonStr);
 
@@ -96,6 +92,29 @@ Return ONLY the JSON, nothing else.`;
       commandInEnglish: commandInEnglish || command,
     };
   }
+}
+
+/**
+ * Parse-only (dry run) — returns what would be created without saving anything
+ */
+export async function parseOnlyFromNL({ command, workspaceId, userId }) {
+  const parsed = await parseNaturalLanguageCommand({ command, workspaceId, userId });
+  return {
+    tasks: parsed.tasks,
+    summary: parsed.summary,
+    commandInEnglish: parsed.commandInEnglish,
+    context: {
+      projects: parsed.context.projects.map(p => ({ id: p.id, name: p.name })),
+      users: parsed.context.users.map(u => ({ id: u.id, username: u.username, email: u.email })),
+    },
+  };
+}
+
+/**
+ * Get workspace context (exported for the /nl/context route)
+ */
+export async function getNLContext(workspaceId) {
+  return getWorkspaceContext(workspaceId);
 }
 
 /**
@@ -361,6 +380,36 @@ function normalizeSubtasks(subtasks) {
     .slice(0, 5);
 }
 
+/**
+ * Extract priority signal from urgency keywords
+ */
+function extractPriorityFromKeywords(text) {
+  const lower = String(text || "").toLowerCase();
+  if (/\b(urgent|critical|blocker|asap|immediately|emergency|p0|p1|hotfix|showstopper)\b/.test(lower)) return "high";
+  if (/\b(low priority|minor|nice.?to.?have|when possible|someday|p3|p4|backlog)\b/.test(lower)) return "low";
+  return null;
+}
+
+/**
+ * Extract tags from #hashtags or known tech keywords
+ */
+function extractTags(text) {
+  const tags = [];
+  const hashTags = String(text || "").match(/#([a-zA-Z][a-zA-Z0-9_-]+)/g);
+  if (hashTags) tags.push(...hashTags.map(t => t.slice(1).toLowerCase()));
+
+  const keywords = [
+    "frontend", "backend", "api", "ui", "ux", "database", "db",
+    "bug", "feature", "hotfix", "security", "performance",
+    "testing", "qa", "devops", "infra", "mobile", "auth",
+  ];
+  const lower = String(text || "").toLowerCase();
+  for (const kw of keywords) {
+    if (lower.includes(kw) && !tags.includes(kw)) tags.push(kw);
+  }
+  return tags.slice(0, 5);
+}
+
 function pickLeastLoadedUser(workloadMap) {
   if (!workloadMap || workloadMap.size === 0) return null;
   let selectedUserId = null;
@@ -403,17 +452,39 @@ async function getWorkloadMap(workspaceId, users) {
 function fallbackParseCommand(command, context) {
   const text = String(command || "").trim();
   const lower = text.toLowerCase();
+
+  // Check for bulleted/numbered list items first
+  const listItems = text.match(/^[\s]*(?:[-*•]|\d+[.):])\s+(.+)$/gm);
+  if (listItems && listItems.length > 1) {
+    const assignedTo = matchUserId(text, context.users || []);
+    const matchedProject = matchProjectId(text, context.projects || []);
+    const priority = extractPriorityFromKeywords(text) || "medium";
+    const dueDate = extractRelativeDate(lower);
+    const tasks = listItems.map((item, i) => {
+      const title = item.replace(/^[\s]*(?:[-*•]|\d+[.):])\s+/, "").trim();
+      return {
+        task: title,
+        description: `Auto-generated from command`,
+        project_id: matchedProject,
+        assigned_to: assignedTo,
+        priority,
+        due_date: dueDate,
+        subtasks: buildDefaultSubtasks(title, i),
+      };
+    });
+    return { tasks, summary: `Generated ${tasks.length} task(s) from list` };
+  }
+
   const countMatch = lower.match(/(\d+)\s+tasks?/);
   const requestedCount = Math.max(
     1,
     Math.min(10, Number(countMatch?.[1] || 1))
   );
 
-  const priority = lower.includes("high priority")
-    ? "high"
-    : lower.includes("low priority")
-      ? "low"
-      : "medium";
+  const priority = extractPriorityFromKeywords(text) || (
+    lower.includes("high priority") ? "high" :
+    lower.includes("low priority") ? "low" : "medium"
+  );
 
   const dueDate = extractRelativeDate(lower);
   const assignedTo = matchUserId(text, context.users || []);
@@ -498,25 +569,64 @@ function matchProjectId(text, projects) {
 }
 
 function extractRelativeDate(lower) {
-  const weekdays = [
-    "sunday",
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-  ];
-  const matchedDay = weekdays.find((d) => lower.includes(d));
-  if (!matchedDay) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
 
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const target = weekdays.indexOf(matchedDay);
-  let delta = target - now.getDay();
-  if (delta <= 0) delta += 7;
-  now.setDate(now.getDate() + delta);
-  return now.toISOString().slice(0, 10);
+  const addDays = (d, n) => {
+    const r = new Date(d);
+    r.setDate(r.getDate() + n);
+    return r.toISOString().slice(0, 10);
+  };
+
+  // today / ASAP / urgent / immediately
+  if (/\b(today|asap|urgent|immediately|now)\b/.test(lower)) return addDays(today, 0);
+
+  // tomorrow
+  if (/\btomorrow\b/.test(lower)) return addDays(today, 1);
+
+  // end of week / this week / by friday
+  if (/\b(end of week|this week|by friday|eow)\b/.test(lower)) {
+    const toFri = ((5 - today.getDay()) + 7) % 7 || 7;
+    return addDays(today, toFri);
+  }
+
+  // next week
+  if (/\bnext week\b/.test(lower)) return addDays(today, 7);
+
+  // end of month / eom
+  if (/\b(end of month|eom)\b/.test(lower)) {
+    return new Date(today.getFullYear(), today.getMonth() + 1, 0).toISOString().slice(0, 10);
+  }
+
+  // next month
+  if (/\bnext month\b/.test(lower)) {
+    const d = new Date(today);
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().slice(0, 10);
+  }
+
+  // end of sprint / next sprint (~2 weeks)
+  if (/\b(sprint|end of sprint|next sprint)\b/.test(lower)) return addDays(today, 14);
+
+  // in X days
+  const inDays = lower.match(/\bin\s+(\d+)\s+days?\b/);
+  if (inDays) return addDays(today, parseInt(inDays[1], 10));
+
+  // in X weeks
+  const inWeeks = lower.match(/\bin\s+(\d+)\s+weeks?\b/);
+  if (inWeeks) return addDays(today, parseInt(inWeeks[1], 10) * 7);
+
+  // named weekday (next Monday, Friday, etc.)
+  const weekdays = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const matchedDay = weekdays.find((d) => lower.includes(d));
+  if (matchedDay) {
+    const target = weekdays.indexOf(matchedDay);
+    let delta = target - today.getDay();
+    if (delta <= 0) delta += 7;
+    return addDays(today, delta);
+  }
+
+  return null;
 }
 
 function applyExplicitAssignmentFromCommand(command, tasks, users) {
