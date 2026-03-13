@@ -31,6 +31,48 @@ class ProjectRepository {
     return result.rows;
   }
 
+  /**
+   * Role-scoped project list:
+   *  admin   → all projects in workspace
+   *  manager → projects in the user's `projects` array
+   *  user    → projects where the user has at least one assigned task
+   */
+  async getProjectsByRole(workspaceId, userId, role) {
+    if (role === "admin") {
+      return this.getProjects(workspaceId);
+    }
+
+    if (role === "manager") {
+      const result = await pool.query(
+        `
+        SELECT p.*
+        FROM projects p
+        INNER JOIN users u ON u.id = $2
+        WHERE p.workspace_id = $1
+          AND p.id = ANY(u.projects)
+        ORDER BY p.created_at DESC
+        `,
+        [workspaceId, userId]
+      );
+      return result.rows;
+    }
+
+    // user role: only projects with at least one task assigned to this user
+    const result = await pool.query(
+      `
+      SELECT DISTINCT p.*
+      FROM projects p
+      INNER JOIN tasks t ON t.project_id = p.id
+      WHERE p.workspace_id = $1
+        AND t.workspace_id = $1
+        AND t.assigned_to = $2
+      ORDER BY p.created_at DESC
+      `,
+      [workspaceId, userId]
+    );
+    return result.rows;
+  }
+
   async getProjectById(id, workspaceId = "GLOBAL") {
     const result = await pool.query(
       `

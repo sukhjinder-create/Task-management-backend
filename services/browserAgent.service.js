@@ -1,7 +1,14 @@
 // services/browserAgent.service.js
+import fs from "fs";
+import path from "path";
 import { chromium } from "playwright";
 import { generateText } from "../intelligence/llm/llmClient.js";
 import pool from "../db.js";
+import {
+  createRunController,
+  isRunCancelledError,
+  RunCancelledError,
+} from "./testingRunControl.service.js";
 
 // ─────────────────────────────────────────────────────────
 // HELPERS
@@ -31,6 +38,986 @@ async function takeScreenshot(page) {
   }
 }
 
+function clipText(value, max = 180) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function sanitizeJsonString(value = "") {
+  const input = String(value ?? "");
+  let out = "";
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = input.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += input[i] + input[i + 1];
+        i++;
+      } else {
+        out += "\uFFFD";
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      out += "\uFFFD";
+    } else {
+      out += input[i];
+    }
+  }
+  return out;
+}
+
+function sanitizeForJson(value) {
+  if (value == null) return value;
+  if (typeof value === "string") return sanitizeJsonString(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeForJson(item));
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, innerValue] of Object.entries(value)) {
+      out[key] = sanitizeForJson(innerValue);
+    }
+    return out;
+  }
+  return value;
+}
+
+function safeJsonStringify(value) {
+  return JSON.stringify(sanitizeForJson(value));
+}
+
+function normalizeActionTimeoutMs(value, fallback = 20000) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(parsed, 1000);
+}
+
+async function waitWithCancellation(page, ms = 0, runController = null) {
+  const total = Math.max(0, Number(ms || 0));
+  if (!total) return;
+  const sliceMs = 250;
+  let elapsed = 0;
+  while (elapsed < total) {
+    if (runController) {
+      await runController.assertActive({ phase: "wait", remainingMs: total - elapsed });
+    }
+    const chunk = Math.min(sliceMs, total - elapsed);
+    await page.waitForTimeout(chunk);
+    elapsed += chunk;
+  }
+}
+
+function shouldSkipOptionalError(message = "") {
+  const text = String(message || "").toLowerCase();
+  return [
+    "could not find",
+    "not found on page",
+    "element not found",
+    "no tab found",
+    "unknown action",
+    "no element for",
+    "could not find chat input",
+    "could not find selectable control",
+    "no matching option",
+    "input[type=\"file\"]",
+  ].some((pattern) => text.includes(pattern));
+}
+
+function pushBounded(list, entry, max = 30) {
+  if (!Array.isArray(list)) return;
+  list.push(entry);
+  if (list.length > max) list.splice(0, list.length - max);
+}
+
+function ensurePageDiagnostics(page) {
+  if (page.__testAgentDiagnostics) return page.__testAgentDiagnostics;
+
+  const state = {
+    pageErrors: [],
+    consoleErrors: [],
+    requestFailures: [],
+    responseFailures: [],
+    dialogs: [],
+  };
+
+  page.on("pageerror", (err) => {
+    pushBounded(state.pageErrors, {
+      message: clipText(err?.message || err, 220),
+      time: Date.now(),
+    });
+  });
+
+  page.on("console", (msg) => {
+    const type = String(msg.type?.() || "");
+    if (!["error", "warning"].includes(type)) return;
+    pushBounded(state.consoleErrors, {
+      type,
+      text: clipText(msg.text?.() || "", 220),
+      time: Date.now(),
+    });
+  });
+
+  page.on("requestfailed", (req) => {
+    pushBounded(state.requestFailures, {
+      method: req.method?.() || "GET",
+      url: clipText(req.url?.() || "", 180),
+      errorText: clipText(req.failure?.()?.errorText || "request failed", 180),
+      time: Date.now(),
+    });
+  });
+
+  page.on("response", (res) => {
+    const status = Number(res.status?.() || 0);
+    if (status < 400) return;
+    pushBounded(state.responseFailures, {
+      status,
+      url: clipText(res.url?.() || "", 180),
+      time: Date.now(),
+    });
+  });
+
+  page.on("dialog", (dialog) => {
+    pushBounded(state.dialogs, {
+      type: dialog.type?.() || "dialog",
+      message: clipText(dialog.message?.() || "", 180),
+      time: Date.now(),
+    });
+  });
+
+  page.__testAgentDiagnostics = state;
+  return state;
+}
+
+function snapshotPageDiagnostics(state) {
+  return {
+    pageErrors: state.pageErrors.length,
+    consoleErrors: state.consoleErrors.length,
+    requestFailures: state.requestFailures.length,
+    responseFailures: state.responseFailures.length,
+    dialogs: state.dialogs.length,
+  };
+}
+
+function collectPageDiagnosticsDelta(state, snapshot) {
+  const delta = {
+    pageErrors: state.pageErrors.slice(snapshot.pageErrors),
+    consoleErrors: state.consoleErrors.slice(snapshot.consoleErrors),
+    requestFailures: state.requestFailures.slice(snapshot.requestFailures),
+    responseFailures: state.responseFailures.slice(snapshot.responseFailures),
+    dialogs: state.dialogs.slice(snapshot.dialogs),
+  };
+  delta.counts = {
+    pageErrors: delta.pageErrors.length,
+    consoleErrors: delta.consoleErrors.length,
+    requestFailures: delta.requestFailures.length,
+    responseFailures: delta.responseFailures.length,
+    dialogs: delta.dialogs.length,
+  };
+  return delta;
+}
+
+function hasPageDiagnostics(delta) {
+  if (!delta?.counts) return false;
+  return Object.values(delta.counts).some((count) => Number(count || 0) > 0);
+}
+
+function summarizeRunDiagnostics(stepResults = []) {
+  const summary = {
+    pageErrors: 0,
+    consoleErrors: 0,
+    requestFailures: 0,
+    responseFailures: 0,
+    dialogs: 0,
+    examples: [],
+  };
+
+  for (const step of stepResults) {
+    const diag = step?.diagnostics;
+    if (!diag?.counts) continue;
+    summary.pageErrors += diag.counts.pageErrors || 0;
+    summary.consoleErrors += diag.counts.consoleErrors || 0;
+    summary.requestFailures += diag.counts.requestFailures || 0;
+    summary.responseFailures += diag.counts.responseFailures || 0;
+    summary.dialogs += diag.counts.dialogs || 0;
+
+    const sample =
+      diag.pageErrors?.[0]?.message ||
+      diag.consoleErrors?.[0]?.text ||
+      diag.requestFailures?.[0]?.errorText ||
+      (diag.responseFailures?.[0] ? `${diag.responseFailures[0].status} ${diag.responseFailures[0].url}` : "") ||
+      diag.dialogs?.[0]?.message;
+
+    if (sample && summary.examples.length < 8) {
+      summary.examples.push(`${step.description}: ${clipText(sample, 140)}`);
+    }
+  }
+
+  return summary;
+}
+
+function ensureUploadFixtureFile() {
+  const uploadsDir = path.join(process.cwd(), "uploads");
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  const fixturePath = path.join(uploadsDir, "__test_agent_upload.txt");
+  if (!fs.existsSync(fixturePath)) {
+    fs.writeFileSync(
+      fixturePath,
+      "Test Agent Upload Fixture\nGenerated automatically for browser upload coverage.\n",
+      "utf8"
+    );
+  }
+  return fixturePath;
+}
+
+function normalizeHintWords(description = "") {
+  return String(description || "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .filter((word) => ![
+      "select",
+      "option",
+      "dropdown",
+      "choose",
+      "pick",
+      "field",
+      "input",
+      "filter",
+      "value",
+      "the",
+      "and",
+      "for",
+      "with",
+      "from",
+      "into",
+      "form",
+      "list",
+      "box",
+      "menu",
+    ].includes(word));
+}
+
+function inferFillIntent(description = "") {
+  const text = String(description || "").toLowerCase();
+  if (!text) return "text";
+  if (/\bpassword|passcode|pwd\b/.test(text)) return "password";
+  if (/\bemail|e-mail\b/.test(text)) return "email";
+  if (/\busername|user name|login\b/.test(text)) return "username";
+  if (/\bsearch|query\b/.test(text)) return "search";
+  if (/\burl|website|link\b/.test(text)) return "url";
+  if (/\bnumber|count|qty|quantity|amount|age|year\b/.test(text)) return "number";
+  if (/\bdate\b/.test(text)) return "date";
+  if (/\btime\b/.test(text)) return "time";
+  if (/\bdescription|comment|message|note|bio|details\b/.test(text)) return "textarea";
+  return "text";
+}
+
+async function findBestSelectableControl(page, description = "") {
+  const hintWords = normalizeHintWords(description);
+  return page.evaluate((words) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const textOf = (el) => normalize(el?.textContent || "");
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const escapeAttr = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const name = el.getAttribute("name");
+      if (name) return `${tag}[name="${escapeAttr(name)}"]`;
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) return `${tag}[aria-label="${escapeAttr(ariaLabel)}"]`;
+      const placeholder = el.getAttribute("placeholder");
+      if (placeholder && placeholder.length < 160) return `${tag}[placeholder="${escapeAttr(placeholder)}"]`;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+    const labelTextFor = (el) => {
+      const parts = [];
+      const push = (value) => {
+        const text = normalize(value);
+        if (text && !parts.includes(text)) parts.push(text);
+      };
+      push(el.getAttribute?.("aria-label"));
+      push(el.getAttribute?.("placeholder"));
+      push(el.getAttribute?.("name"));
+      push(el.id);
+
+      const labelledBy = el.getAttribute?.("aria-labelledby");
+      if (labelledBy) {
+        for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+          push(textOf(document.getElementById(id)));
+        }
+      }
+
+      if (el.id) {
+        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        push(textOf(label));
+      }
+
+      push(textOf(el.closest("label")));
+
+      const fieldContainer =
+        el.closest("[data-testid], [role='group'], [role='dialog'], form, .field, .form-group, .input-group, .filters, .filter, .rs__control, [class*='select__control']") ||
+        el.parentElement;
+      if (fieldContainer) {
+        const nearby = fieldContainer.querySelector("label, span, strong, legend, p");
+        push(textOf(nearby));
+      }
+
+      return parts.join(" ");
+    };
+    const score = (text) => {
+      if (!words.length) return 0;
+      return words.reduce((sum, word) => sum + (text.includes(word) ? 2 : 0), 0);
+    };
+
+    const nodes = [
+      ...document.querySelectorAll("select"),
+      ...document.querySelectorAll("input[role='combobox']"),
+      ...document.querySelectorAll("[role='combobox']"),
+      ...document.querySelectorAll("input[id*='react-select'][id$='-input']"),
+      ...document.querySelectorAll("[class*='select__control'], [class*='rs__control'], [class*='react-select__control']"),
+    ];
+
+    const seen = new Set();
+    const candidates = [];
+    for (const node of nodes) {
+      let target = node;
+      let mode = "combobox";
+
+      if (node.matches("select")) {
+        mode = "native-select";
+      } else if (node.matches("[class*='select__control'], [class*='rs__control'], [class*='react-select__control']")) {
+        target = node.querySelector("input[role='combobox'], input") || node;
+        mode = target.matches("input, textarea") ? "combobox-input" : "combobox";
+      } else if (node.matches("input, textarea")) {
+        mode = "combobox-input";
+      }
+
+      const selector = cssPath(target);
+      if (!selector || seen.has(selector)) continue;
+      seen.add(selector);
+
+      const labelText = labelTextFor(target);
+      candidates.push({
+        selector,
+        mode,
+        score: score(labelText),
+        visible: visible(target) ? 1 : 0,
+        labelText,
+      });
+    }
+
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.visible !== a.visible) return b.visible - a.visible;
+      if (a.mode === "native-select" && b.mode !== "native-select") return -1;
+      if (b.mode === "native-select" && a.mode !== "native-select") return 1;
+      return 0;
+    });
+
+    return candidates[0] || null;
+  }, hintWords).catch(() => null);
+}
+
+async function findBestFillableInput(page, description = "") {
+  const hintWords = normalizeHintWords(description).filter(
+    (word) => !["fill", "type", "enter", "input", "field", "box", "value", "text"].includes(word)
+  );
+  const intent = inferFillIntent(description);
+  return page.evaluate(({ words, wantedIntent }) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const textOf = (el) => normalize(el?.textContent || "");
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const escapeAttr = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const namedAttr = [
+        ["data-testid", el.getAttribute("data-testid")],
+        ["data-test", el.getAttribute("data-test")],
+        ["data-qa", el.getAttribute("data-qa")],
+      ].find(([, value]) => value);
+      if (namedAttr) return `${tag}[${namedAttr[0]}="${escapeAttr(namedAttr[1])}"]`;
+      const name = el.getAttribute("name");
+      if (name) return `${tag}[name="${escapeAttr(name)}"]`;
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) return `${tag}[aria-label="${escapeAttr(ariaLabel)}"]`;
+      const placeholder = el.getAttribute("placeholder");
+      if (placeholder && placeholder.length < 160) return `${tag}[placeholder="${escapeAttr(placeholder)}"]`;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+    const labelTextFor = (input) => {
+      const parts = [];
+      const push = (value) => {
+        const text = normalize(value);
+        if (text && !parts.includes(text)) parts.push(text);
+      };
+      push(input.getAttribute("aria-label"));
+      push(input.getAttribute("placeholder"));
+      push(input.getAttribute("name"));
+      push(input.id);
+      const labelledBy = input.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+          push(textOf(document.getElementById(id)));
+        }
+      }
+      if (input.id) {
+        const label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+        push(textOf(label));
+      }
+      push(textOf(input.closest("label")));
+      push(textOf(input.closest("form, [role='dialog'], .field, .form-group, .input-group, [role='group']")?.querySelector("label, span, strong, legend, p")));
+      push(textOf(input.parentElement?.querySelector("label, span, strong, legend, p")));
+      push(textOf(input.parentElement?.previousElementSibling));
+      push(textOf(input.closest("section, article, main, aside, div")?.querySelector("h1, h2, h3, h4, legend, [class*='title'], [class*='heading']")));
+      return parts.join(" ");
+    };
+    const score = (candidate) => {
+      let total = candidate.visible ? 1 : 0;
+      const corpus = [
+        candidate.labelText,
+        candidate.placeholder,
+        candidate.name,
+        candidate.id,
+        candidate.type,
+      ]
+        .map((value) => normalize(value))
+        .join(" ");
+      total += words.reduce((sum, word) => {
+        if (!word) return sum;
+        if (corpus === word) return sum + 6;
+        if (corpus.includes(word)) return sum + 3;
+        return sum;
+      }, 0);
+
+      if (wantedIntent === "email") {
+        if (candidate.type === "email" || /\bemail\b/.test(corpus)) total += 10;
+        if (/\buser(name)?\b|\blogin\b/.test(corpus)) total += 4;
+        if (/\bpassword\b/.test(corpus)) total -= 10;
+      } else if (wantedIntent === "password") {
+        if (candidate.type === "password" || /\bpassword|passcode|pwd\b/.test(corpus)) total += 10;
+        if (/\bemail\b/.test(corpus)) total -= 8;
+      } else if (wantedIntent === "search") {
+        if (candidate.type === "search" || /\bsearch|query\b/.test(corpus)) total += 8;
+      } else if (wantedIntent === "url") {
+        if (candidate.type === "url" || /\burl|website|link\b/.test(corpus)) total += 8;
+      } else if (wantedIntent === "number") {
+        if (candidate.type === "number" || /\bnumber|count|qty|quantity|amount|age|year\b/.test(corpus)) total += 8;
+      } else if (wantedIntent === "date") {
+        if (candidate.type === "date" || /\bdate\b/.test(corpus)) total += 8;
+      } else if (wantedIntent === "time") {
+        if (candidate.type === "time" || /\btime\b/.test(corpus)) total += 8;
+      } else if (wantedIntent === "textarea") {
+        if (candidate.type === "textarea" || /\bdescription|comment|message|note|bio|details\b/.test(corpus)) total += 8;
+      }
+
+      return total;
+    };
+
+    const raw = [
+      ...document.querySelectorAll("input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']):not([type='file'])"),
+      ...document.querySelectorAll("textarea"),
+      ...document.querySelectorAll("[contenteditable='true']"),
+      ...document.querySelectorAll("[role='textbox']"),
+    ];
+    const seen = new Set();
+    const candidates = [];
+
+    for (const input of raw) {
+      const selector = cssPath(input);
+      if (!selector || seen.has(selector)) continue;
+      seen.add(selector);
+      const type = (input.getAttribute("type") || input.tagName || "").toLowerCase();
+      candidates.push({
+        selector,
+        labelText: labelTextFor(input),
+        placeholder: input.getAttribute("placeholder") || null,
+        name: input.getAttribute("name") || null,
+        id: input.id || null,
+        type,
+        visible: visible(input) ? 1 : 0,
+        attached: input.isConnected ? 1 : 0,
+      });
+    }
+
+    candidates.sort((a, b) => {
+      const scoreDiff = score(b) - score(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      if (b.visible !== a.visible) return b.visible - a.visible;
+      return b.attached - a.attached;
+    });
+
+    return candidates[0] || null;
+  }, { words: hintWords, wantedIntent: intent }).catch(() => null);
+}
+
+async function locatorMatchesFillIntent(locator, description = "") {
+  const intent = inferFillIntent(description);
+  if (!description || intent === "text") return true;
+  return locator.evaluate((el, wantedIntent) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const textOf = (node) => normalize(node?.textContent || "");
+    const parts = [];
+    const push = (value) => {
+      const text = normalize(value);
+      if (text && !parts.includes(text)) parts.push(text);
+    };
+    const type = normalize(el.getAttribute?.("type") || el.tagName || "");
+    push(el.getAttribute?.("aria-label"));
+    push(el.getAttribute?.("placeholder"));
+    push(el.getAttribute?.("name"));
+    push(el.id);
+    if (el.id) {
+      push(textOf(document.querySelector(`label[for="${CSS.escape(el.id)}"]`)));
+    }
+    push(textOf(el.closest("label")));
+    push(textOf(el.parentElement?.previousElementSibling));
+    push(textOf(el.closest("form, [role='dialog'], .field, .form-group, .input-group, [role='group']")?.querySelector("label, span, strong, legend, p")));
+    const corpus = parts.join(" ");
+
+    if (wantedIntent === "email") {
+      return type === "email" || ((/\bemail\b/.test(corpus) || /\buser(name)?\b|\blogin\b/.test(corpus)) && !/\bpassword\b/.test(corpus));
+    }
+    if (wantedIntent === "password") {
+      return type === "password" || /\bpassword|passcode|pwd\b/.test(corpus);
+    }
+    if (wantedIntent === "search") {
+      return type === "search" || /\bsearch|query\b/.test(corpus);
+    }
+    if (wantedIntent === "url") {
+      return type === "url" || /\burl|website|link\b/.test(corpus);
+    }
+    if (wantedIntent === "number") {
+      return type === "number" || /\bnumber|count|qty|quantity|amount|age|year\b/.test(corpus);
+    }
+    if (wantedIntent === "date") {
+      return type === "date" || /\bdate\b/.test(corpus);
+    }
+    if (wantedIntent === "time") {
+      return type === "time" || /\btime\b/.test(corpus);
+    }
+    if (wantedIntent === "textarea") {
+      return el.tagName.toLowerCase() === "textarea" || /\bdescription|comment|message|note|bio|details\b/.test(corpus);
+    }
+    return true;
+  }, intent).catch(() => true);
+}
+
+async function setInputValueDirectly(page, selector, value, description = "") {
+  const assignBySelector = async (sel) => {
+    if (!sel) return false;
+    return page.evaluate(({ rawSelector, rawValue }) => {
+      const assign = (el) => {
+        if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+        el.focus();
+        el.value = "";
+        el.value = rawValue;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      };
+
+      let el = document.querySelector(rawSelector);
+      if (!el) {
+        const placeholderMatch = rawSelector.match(/placeholder="([\s\S]+?)"/i);
+        if (placeholderMatch) {
+          const wanted = placeholderMatch[1].replace(/\\\\/g, "\\");
+          el = [...document.querySelectorAll("input, textarea")].find((node) => {
+            const placeholder = node.getAttribute("placeholder") || "";
+            return placeholder === wanted || (wanted && placeholder.includes(wanted.split(/\r?\n/)[0]));
+          }) || null;
+        }
+      }
+      return assign(el);
+    }, { rawSelector: sel, rawValue: value }).catch(() => false);
+  };
+
+  if (await assignBySelector(selector)) return true;
+  if (description) {
+    const fallbackCandidate = await findBestFillableInput(page, description);
+    if (fallbackCandidate?.selector) {
+      return assignBySelector(fallbackCandidate.selector);
+    }
+  }
+  return false;
+}
+
+async function findBestFileInput(page, description = "") {
+  const hintWords = normalizeHintWords(description).filter((word) => !["upload", "file", "attachment", "attach"].includes(word));
+  return page.evaluate((words) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const escapeAttr = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const namedAttr = [
+        ["data-testid", el.getAttribute("data-testid")],
+        ["data-test", el.getAttribute("data-test")],
+        ["data-qa", el.getAttribute("data-qa")],
+      ].find(([, value]) => value);
+      if (namedAttr) return `${tag}[${namedAttr[0]}="${escapeAttr(namedAttr[1])}"]`;
+      const name = el.getAttribute("name");
+      if (name) return `${tag}[name="${escapeAttr(name)}"]`;
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) return `${tag}[aria-label="${escapeAttr(ariaLabel)}"]`;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+    const score = (text) => {
+      if (!words.length) return 0;
+      return words.reduce((sum, word) => sum + (text.includes(word) ? 2 : 0), 0);
+    };
+    const textOf = (el) => normalize(el?.textContent || "");
+    const labelTextFor = (input) => {
+      const parts = [];
+      const push = (value) => {
+        const text = normalize(value);
+        if (text && !parts.includes(text)) parts.push(text);
+      };
+      push(input.getAttribute("aria-label"));
+      push(input.getAttribute("name"));
+      push(input.id);
+      if (input.id) {
+        const label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+        push(textOf(label));
+      }
+      push(textOf(input.closest("label")));
+      push(textOf(input.closest("form, [role='dialog'], .field, .form-group, .input-group")?.querySelector("label, span, p, button")));
+      return parts.join(" ");
+    };
+
+    const candidates = [...document.querySelectorAll('input[type="file"]')]
+      .map((input) => ({
+        selector: cssPath(input),
+        labelText: labelTextFor(input),
+        visible: visible(input) ? 1 : 0,
+        attached: input.isConnected ? 1 : 0,
+      }))
+      .filter((item) => item.selector);
+
+    candidates.sort((a, b) => {
+      const scoreDiff = score(b.labelText) - score(a.labelText);
+      if (scoreDiff !== 0) return scoreDiff;
+      if (b.visible !== a.visible) return b.visible - a.visible;
+      return b.attached - a.attached;
+    });
+
+    return candidates[0] || null;
+  }, hintWords).catch(() => null);
+}
+
+async function pickVisibleOptionFromPopup(page, value, timeoutMs = 10000) {
+  const desired = String(value || "").trim().toLowerCase();
+  const selector = await page.evaluate((wanted) => {
+    const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const escapeAttr = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const namedAttr = [
+        ["data-testid", el.getAttribute("data-testid")],
+        ["data-test", el.getAttribute("data-test")],
+        ["data-qa", el.getAttribute("data-qa")],
+      ].find(([, value]) => value);
+      if (namedAttr) return `${tag}[${namedAttr[0]}="${escapeAttr(namedAttr[1])}"]`;
+      const name = el.getAttribute("name");
+      if (name) return `${tag}[name="${escapeAttr(name)}"]`;
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) return `${tag}[aria-label="${escapeAttr(ariaLabel)}"]`;
+      const placeholder = el.getAttribute("placeholder");
+      if (placeholder && placeholder.length < 160) return `${tag}[placeholder="${escapeAttr(placeholder)}"]`;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+
+    const candidates = [
+      ...document.querySelectorAll("[role='option']"),
+      ...document.querySelectorAll("[id*='-option-']"),
+      ...document.querySelectorAll(".rs__option, [class*='select__option']"),
+      ...document.querySelectorAll("[role='listbox'] *"),
+    ]
+      .filter((el) => visible(el))
+      .map((el) => ({
+        selector: cssPath(el),
+        text: normalize(el.textContent || ""),
+      }))
+      .filter((item) => item.selector && item.text);
+
+    const exact = candidates.find((item) => item.text === wanted);
+    if (exact) return exact.selector;
+    const includes = candidates.find((item) => item.text.includes(wanted) || wanted.includes(item.text));
+    return includes?.selector || null;
+  }, desired).catch(() => null);
+
+  if (!selector) return false;
+  const option = page.locator(selector).first();
+  await option.click({ timeout: Math.min(timeoutMs, 6000) });
+  return true;
+}
+
+async function selectOptionRobust(page, step, timeoutMs = 10000) {
+  const desiredValue = String(step.value ?? "").trim();
+  const description = String(step.description ?? "").trim();
+  const optionText = desiredValue || description;
+
+  // ── Detect bad selectors: React dynamic IDs (#\:r2\:) and deep structural paths ──
+  const hasDynamicId = /#\\?:[a-z0-9]+/i.test(step.selector || "");
+  const isTooDeep = (step.selector || "").split(">").length > 4;
+  const selectorIsUsable = step.selector && !hasDynamicId && !isTooDeep;
+
+  // ── Phase 1: Handle native <select> ──
+  if (selectorIsUsable) {
+    try {
+      const located = await smartLocate(page, step.selector, 4000);
+      const tag = await located.loc.evaluate(el => el.tagName.toLowerCase()).catch(() => "");
+      if (tag === "select") {
+        const matched = await located.loc.evaluate((el, wanted) => {
+          if (!(el instanceof HTMLSelectElement)) return null;
+          const norm = v => String(v || "").trim().toLowerCase();
+          const opts = [...el.options].filter(o => !o.disabled);
+          const found = opts.find(o => norm(o.value) === norm(wanted) || norm(o.textContent) === norm(wanted))
+            || opts.find(o => norm(o.value).includes(norm(wanted)) || norm(o.textContent).includes(norm(wanted)));
+          return found ? { value: found.value } : null;
+        }, desiredValue).catch(() => null);
+        if (matched?.value) {
+          await located.loc.selectOption(matched.value, { timeout: timeoutMs });
+          return { usedSelector: located.usedSelector, healed: located.healed, mode: "native-select" };
+        }
+      }
+    } catch { /* fall through to semantic approach */ }
+  }
+
+  // ── Phase 2: Check if listbox/dropdown is already open ──
+  const alreadyOpen = await page.evaluate(() =>
+    !!document.querySelector('[role="listbox"]:not([aria-hidden="true"]), .MuiMenu-paper:not([aria-hidden="true"]), .MuiPopover-paper [role="option"]')
+  ).catch(() => false);
+
+  // ── Phase 3: Find + click the trigger to open the dropdown ──
+  let triggerSelector = null;
+  if (!alreadyOpen) {
+    // Try provided selector ONLY if it's a combobox/trigger (not a listbox item)
+    let triggerLoc = null;
+    if (selectorIsUsable) {
+      try {
+        const located = await smartLocate(page, step.selector, 3000);
+        const isOption = await located.loc.evaluate(el =>
+          el.getAttribute("role") === "option" ||
+          el.getAttribute("aria-disabled") === "true" ||
+          el.tagName.toLowerCase() === "li"
+        ).catch(() => false);
+        if (!isOption) {
+          triggerLoc = located.loc;
+          triggerSelector = located.usedSelector;
+        }
+      } catch { /* fall through */ }
+    }
+
+    // Semantic trigger discovery by description
+    if (!triggerLoc) {
+      const descWords = description.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      const allTriggers = await page.evaluate(() => {
+        const selects = document.querySelectorAll(
+          '[role="combobox"], .MuiSelect-select, [aria-haspopup="listbox"], select, [class*="select-trigger"], [class*="SelectTrigger"]'
+        );
+        return [...selects].filter(el => {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        }).map(el => ({
+          text: (el.textContent || el.innerText || el.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ").slice(0, 60),
+          label: (() => {
+            const p = el.closest(".MuiFormControl-root, .form-group, [class*='field'], [class*='Field']");
+            return p ? (p.querySelector("label, .MuiFormLabel-root, .MuiInputLabel-root")?.textContent || "").trim() : "";
+          })(),
+          ariaLabel: el.getAttribute("aria-label") || "",
+          id: el.id || "",
+        }));
+      }).catch(() => []);
+
+      // Score each trigger
+      let bestScore = 0;
+      let bestTrigger = null;
+      for (const t of allTriggers) {
+        const haystack = (t.text + " " + t.label + " " + t.ariaLabel).toLowerCase();
+        const score = descWords.filter(w => haystack.includes(w)).length;
+        if (score > bestScore) { bestScore = score; bestTrigger = t; }
+      }
+
+      if (bestTrigger) {
+        const sel = bestTrigger.id ? `#${CSS.escape(bestTrigger.id)}` :
+          bestTrigger.ariaLabel ? `[aria-label="${bestTrigger.ariaLabel}"]` :
+          '[role="combobox"]';
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
+            triggerLoc = loc; triggerSelector = sel;
+          }
+        } catch { /* next */ }
+      }
+
+      // Last resort: first visible combobox
+      if (!triggerLoc) {
+        const fallbackLoc = page.locator('[role="combobox"], .MuiSelect-select, [aria-haspopup="listbox"]').first();
+        if (await fallbackLoc.isVisible({ timeout: 2000 }).catch(() => false)) {
+          triggerLoc = fallbackLoc; triggerSelector = '[role="combobox"]';
+        }
+      }
+    }
+
+    if (!triggerLoc) {
+      throw new Error(`Could not find dropdown trigger for "${description || desiredValue}"`);
+    }
+
+    await triggerLoc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await triggerLoc.click({ timeout: 6000 });
+    await page.waitForTimeout(500);
+  }
+
+  // ── Phase 4: Pick option by text from open listbox ──
+  await page.waitForSelector('[role="option"], [role="listbox"]', { timeout: 5000 }).catch(() => {});
+
+  const escText = optionText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const optionLoc = page.locator(
+    '[role="option"]:not([aria-disabled="true"]):not(.Mui-disabled), [role="listbox"] li:not([aria-disabled="true"]):not(.Mui-disabled)'
+  ).filter({ hasText: new RegExp(escText, "i") }).first();
+
+  if (await optionLoc.isVisible({ timeout: 3000 }).catch(() => false)) {
+    await optionLoc.click({ timeout: 5000 });
+    await page.waitForTimeout(400);
+    return { usedSelector: triggerSelector || '[role="combobox"]', healed: true, mode: "listbox-text" };
+  }
+
+  // Scan all non-disabled options for text match
+  const allOptions = await page.locator('[role="option"]:not([aria-disabled="true"]):not(.Mui-disabled)').all().catch(() => []);
+  for (const opt of allOptions.slice(0, 30)) {
+    const text = await opt.textContent().catch(() => "");
+    if (text.trim().toLowerCase().includes(optionText.toLowerCase())) {
+      await opt.scrollIntoViewIfNeeded({ timeout: 1000 }).catch(() => {});
+      await opt.click({ timeout: 5000 });
+      await page.waitForTimeout(400);
+      return { usedSelector: triggerSelector || '[role="combobox"]', healed: true, mode: "listbox-scan" };
+    }
+  }
+
+  // Pick first available option if nothing matches text
+  if (allOptions.length > 0) {
+    await allOptions[0].click({ timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    return { usedSelector: triggerSelector || '[role="combobox"]', healed: true, mode: "listbox-first" };
+  }
+
+  // Fallback: type-to-filter combobox
+  const inputLoc = page.locator('input[role="combobox"], input[aria-autocomplete="list"], input[aria-haspopup="listbox"]').first();
+  if (await inputLoc.isVisible({ timeout: 1500 }).catch(() => false)) {
+    await inputLoc.fill("", { timeout: 3000 }).catch(() => {});
+    await inputLoc.type(optionText, { delay: 30 });
+    await page.waitForTimeout(400);
+    const clickedOption = await pickVisibleOptionFromPopup(page, optionText, timeoutMs);
+    if (!clickedOption) await page.keyboard.press("Enter").catch(() => {});
+    await page.waitForTimeout(400);
+    return { usedSelector: triggerSelector || 'input[role="combobox"]', healed: true, mode: "combobox-type" };
+  }
+
+  await page.keyboard.press("Escape").catch(() => {});
+  throw new Error(`Could not select option "${optionText}" — no matching non-disabled option found`);
+}
+
 // ─────────────────────────────────────────────────────────
 // STEALTH BROWSER FACTORY
 // ─────────────────────────────────────────────────────────
@@ -46,14 +1033,14 @@ async function createStealthBrowser() {
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-infobars",
-      "--window-size=1280,800",
+      "--window-size=1920,1080",
     ],
   });
 }
 
 async function createStealthContext(browser) {
   const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
+    viewport: { width: 1920, height: 1080 },
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
@@ -91,6 +1078,121 @@ async function forceAcceptConsent(page) {
   }).catch(() => null);
   if (clicked) { await page.waitForTimeout(600); return true; }
   return false;
+}
+
+// ─────────────────────────────────────────────────────────
+// FORCE CLOSE MODAL — multi-strategy, verifies closure
+// Replaces bare keyboard.press("Escape") throughout the agent.
+// Always call this after interacting with a modal; it guarantees
+// the modal is gone before the next step executes.
+// ─────────────────────────────────────────────────────────
+async function isModalOpen(page) {
+  return page.evaluate(() => {
+    const sel = [
+      '[role="dialog"]:not([aria-hidden="true"])',
+      '[aria-modal="true"]:not([aria-hidden="true"])',
+      '.MuiDialog-root:not([aria-hidden="true"])',
+      '.MuiModal-root:not([aria-hidden="true"])',
+      '[class*="modal-open"], [class*="Modal"]:not([aria-hidden="true"])',
+    ].join(", ");
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const s = window.getComputedStyle(el);
+    return s.display !== "none" && s.visibility !== "hidden" && (r.width > 0 || r.height > 0);
+  }).catch(() => false);
+}
+
+async function forceCloseModal(page, maxAttempts = 4) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const open = await isModalOpen(page);
+    if (!open) return true; // already closed
+
+    if (attempt === 1) {
+      // Strategy 1: Escape key
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(350);
+    } else if (attempt === 2) {
+      // Strategy 2: Find Cancel/Close/X button inside the modal and click it
+      const clicked = await page.evaluate(() => {
+        const CLOSE_TEXT = /^(cancel|close|dismiss|discard|don't save|no thanks|✕|×|x|back|abort)$/i;
+        const CLOSE_LABEL = /close|cancel|dismiss/i;
+        const modals = document.querySelectorAll(
+          '[role="dialog"]:not([aria-hidden="true"]), [aria-modal="true"]:not([aria-hidden="true"]), .MuiDialog-root:not([aria-hidden="true"])'
+        );
+        for (const modal of modals) {
+          const btn =
+            [...modal.querySelectorAll("button")].find(b => {
+              const t = (b.innerText || b.getAttribute("aria-label") || b.title || "").trim();
+              return CLOSE_TEXT.test(t) || CLOSE_LABEL.test(t);
+            }) ||
+            modal.querySelector('[aria-label="Close"], [aria-label="close"], [data-testid="close"], [class*="close-btn"], [class*="CloseButton"], [class*="modal-close"]') ||
+            // MUI: the X button is typically the first button in DialogTitle
+            modal.querySelector('.MuiDialogTitle-root button, .MuiModal-root > div > button');
+          if (btn) { btn.click(); return true; }
+        }
+        return false;
+      }).catch(() => false);
+      if (!clicked) {
+        // Second Escape attempt
+        await page.keyboard.press("Escape").catch(() => {});
+      }
+      await page.waitForTimeout(400);
+    } else if (attempt === 3) {
+      // Strategy 3: Click the backdrop/overlay (outside the modal box)
+      const clickedBackdrop = await page.evaluate(() => {
+        const backdrop =
+          document.querySelector(".MuiBackdrop-root, .MuiModal-backdrop, [class*='overlay'], [class*='Overlay'], [class*='backdrop'], [class*='Backdrop']");
+        if (backdrop) { backdrop.click(); return true; }
+        // Click outside the modal box at top-left corner
+        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+        if (modal) {
+          const r = modal.getBoundingClientRect();
+          if (r.top > 20) {
+            // Click above the modal
+            document.elementFromPoint(r.left + r.width / 2, r.top - 10)?.click();
+            return true;
+          }
+        }
+        return false;
+      }).catch(() => false);
+      if (!clickedBackdrop) {
+        await page.mouse.click(10, 10).catch(() => {}); // click top-left corner
+      }
+      await page.waitForTimeout(400);
+    } else {
+      // Strategy 4: JS force-remove the modal from DOM (last resort)
+      await page.evaluate(() => {
+        const modals = document.querySelectorAll(
+          '[role="dialog"]:not([aria-hidden="true"]), [aria-modal="true"]:not([aria-hidden="true"]), .MuiDialog-root:not([aria-hidden="true"])'
+        );
+        modals.forEach(m => {
+          m.setAttribute("aria-hidden", "true");
+          m.style.display = "none";
+        });
+        // Also remove body overflow lock
+        document.body.style.overflow = "";
+        document.body.classList.remove("modal-open", "overflow-hidden");
+      }).catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  }
+
+  // Final verification
+  const stillOpen = await isModalOpen(page).catch(() => false);
+  if (stillOpen) {
+    console.warn("[forceCloseModal] Modal could not be closed after all strategies — forcing DOM removal");
+    await page.evaluate(() => {
+      document.querySelectorAll('[role="dialog"], [aria-modal="true"], .MuiDialog-root, .MuiModal-root').forEach(m => {
+        m.style.display = "none";
+        m.setAttribute("aria-hidden", "true");
+      });
+      document.body.style.overflow = "";
+      document.body.style.paddingRight = "";
+    }).catch(() => {});
+    await page.waitForTimeout(200);
+  }
+  return true;
 }
 
 async function dismissOverlays(page) {
@@ -315,7 +1417,7 @@ async function updateRunLive(runId, stepResults) {
       `UPDATE testing_agent_runs
        SET output_json = jsonb_set(COALESCE(output_json, '{}'), '{stepResults}', $2::jsonb)
        WHERE id = $1`,
-      [runId, JSON.stringify(livePayload)]
+      [runId, safeJsonStringify(livePayload)]
     );
   } catch (err) {
     console.warn("[browserAgent] Live update failed:", err.message);
@@ -330,7 +1432,7 @@ async function updateCurrentScreen(runId, screenshot, caption = "") {
       `UPDATE testing_agent_runs
        SET output_json = jsonb_set(COALESCE(output_json, '{}'), '{currentScreen}', $2::jsonb)
        WHERE id = $1`,
-      [runId, JSON.stringify({ screenshot: screenshot || null, caption, ts: Date.now() })]
+      [runId, safeJsonStringify({ screenshot: screenshot || null, caption, ts: Date.now() })]
     );
   } catch { /* silent */ }
 }
@@ -369,10 +1471,16 @@ async function smartLocate(page, selector, timeoutMs = 10000) {
   let textHint = null;
   const textMatch = selector.match(/(?:has-text\(['"]?|text=)(['"]?)([^'")\]]+)\1/i);
   if (textMatch) textHint = textMatch[2].trim();
+  const placeholderMatch = selector.match(/placeholder="([\s\S]+?)"/i);
+  const placeholderHint = placeholderMatch ? placeholderMatch[1].trim() : null;
+  const placeholderFirstLine = placeholderHint ? placeholderHint.split(/\r?\n/)[0].trim() : null;
+  const escapeCssValue = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
   // Extract words from hint for partial matching
   const hintWords = textHint ? textHint.toLowerCase().split(/\s+/).filter(s => s.length > 2) : [];
   const firstWord = hintWords[0] || null;
+  const placeholderWords = placeholderFirstLine ? placeholderFirstLine.toLowerCase().split(/\s+/).filter((s) => s.length > 2) : [];
+  const placeholderWord = placeholderWords[0] || null;
 
   const strategies = [
     selector,
@@ -383,10 +1491,14 @@ async function smartLocate(page, selector, timeoutMs = 10000) {
     textHint ? `a:has-text("${textHint}")` : null,
     textHint ? `[aria-label="${textHint}"]` : null,
     textHint ? `input[placeholder="${textHint}"]` : null,
+    placeholderFirstLine ? `textarea[placeholder*="${escapeCssValue(placeholderFirstLine)}"]` : null,
+    placeholderFirstLine ? `input[placeholder*="${escapeCssValue(placeholderFirstLine)}"]` : null,
     // Broader partial matches for inputs
     firstWord ? `input[placeholder*="${firstWord}"]` : null,
     firstWord ? `[aria-label*="${firstWord}"]` : null,
     firstWord ? `input[name*="${firstWord}"]` : null,
+    placeholderWord ? `textarea[placeholder*="${escapeCssValue(placeholderWord)}"]` : null,
+    placeholderWord ? `input[placeholder*="${escapeCssValue(placeholderWord)}"]` : null,
     // Generic search input fallback
     textHint && (textHint.includes("search") || textHint.includes("query"))
       ? `input[type="search"], input[name="search_query"], input[name="q"]`
@@ -524,8 +1636,19 @@ async function aiIdentifySelector(page, description) {
   // ── Password inputs — ONLY when description is about the input itself ──
   if (isInputIntent && !isButtonIntent && desc.includes("password")) {
     const found = await page.evaluate(() => {
-      const el = document.querySelector('input[type="password"]');
-      return el ? (el.id ? `#${el.id}` : 'input[type="password"]') : null;
+      const el =
+        document.querySelector('input[type="password"]') ||
+        document.querySelector('input[name*="password" i]') ||
+        document.querySelector('input[autocomplete="current-password"]') ||
+        document.querySelector('input[autocomplete="new-password"]') ||
+        document.querySelector('input[placeholder*="password" i]') ||
+        document.querySelector('input[aria-label*="password" i]');
+      if (!el) return null;
+      if (el.name) return `input[name="${el.name}"]`;
+      if (el.id) return `#${el.id}`;
+      if (el.getAttribute("placeholder")) return `input[placeholder="${el.getAttribute("placeholder")}"]`;
+      if (el.getAttribute("aria-label")) return `input[aria-label="${el.getAttribute("aria-label")}"]`;
+      return 'input[type="password"]';
     }).catch(() => null);
     if (found) return found;
   }
@@ -534,14 +1657,20 @@ async function aiIdentifySelector(page, description) {
   if (isInputIntent && !isButtonIntent && (desc.includes("email") || desc.includes("username") || desc.includes("user name"))) {
     const found = await page.evaluate(() => {
       const el = document.querySelector('input[type="email"]') ||
-                 document.querySelector('input[name="email"]') ||
-                 document.querySelector('input[name="username"]') ||
+                 document.querySelector('input[name*="email" i]') ||
+                 document.querySelector('input[name*="user" i]') ||
                  document.querySelector('input[autocomplete="email"]') ||
-                 document.querySelector('input[autocomplete="username"]');
+                 document.querySelector('input[autocomplete="username"]') ||
+                 document.querySelector('input[placeholder*="email" i]') ||
+                 document.querySelector('input[placeholder*="user" i]') ||
+                 document.querySelector('input[aria-label*="email" i]') ||
+                 document.querySelector('input[aria-label*="user" i]');
       if (!el) return null;
       if (el.name) return `input[name="${el.name}"]`;
       if (el.id) return `#${el.id}`;
-      return 'input[type="email"]';
+      if (el.placeholder) return `input[placeholder="${el.placeholder}"]`;
+      if (el.getAttribute("aria-label")) return `input[aria-label="${el.getAttribute("aria-label")}"]`;
+      return el.type === "email" ? 'input[type="email"]' : 'input[type="text"]';
     }).catch(() => null);
     if (found) return found;
   }
@@ -857,12 +1986,49 @@ Return ONLY the selector string. No quotes, no explanation.`;
 // LAYER 4: ELEMENT VALIDATION (pre-flight before action)
 // Observe → Plan → Select → [Validate] → Execute → Verify
 // ─────────────────────────────────────────────────────────
-async function validateElementForAction(page, description) {
+async function validateElementForAction(page, description, mode = "click") {
   if (!description || typeof description !== "string") {
     return { found: false, loc: null, confidence: 0, selector: null, reason: "invalid description" };
   }
 
   try {
+    if (mode === "fill") {
+      const semanticCandidate = await findBestFillableInput(page, description);
+      if (semanticCandidate?.selector) {
+        try {
+          const located = await smartLocate(page, semanticCandidate.selector, 4000);
+          const visible = await located.loc.isVisible({ timeout: 1000 }).catch(() => false);
+          return {
+            found: visible,
+            loc: located.loc,
+            confidence: visible ? 0.95 : 0.3,
+            selector: located.usedSelector,
+            reason: visible ? "fillable control found semantically" : "fillable control found but not visible",
+          };
+        } catch {
+          // Fall through to other fill-only strategies.
+        }
+      }
+
+      for (const selector of ['input:not([type="hidden"])', "textarea", "select", '[role="textbox"]', '[contenteditable="true"]']) {
+        try {
+          const loc = page.locator(selector).first();
+          const visible = await loc.isVisible({ timeout: 1000 }).catch(() => false);
+          if (visible) {
+            return {
+              found: true,
+              loc,
+              confidence: 0.4,
+              selector,
+              reason: "generic fillable control found",
+            };
+          }
+        } catch {
+          // Keep trying.
+        }
+      }
+    }
+
     const selector = await aiIdentifySelector(page, description);
     if (!selector || typeof selector !== "string") {
       return { found: false, loc: null, confidence: 0, selector: null, reason: "aiIdentifySelector returned nothing" };
@@ -872,23 +2038,25 @@ async function validateElementForAction(page, description) {
     let loc = null;
     let usedSelector = selector;
     try {
-      const located = await smartLocate(page, selector, 4000);
+      const located = await smartLocate(page, selector, 1500); // short pre-flight timeout
       loc = located.loc;
       usedSelector = located.usedSelector;
     } catch {
-      // Try Playwright role-based fallback
+      // Quick role-based fallback (800ms per attempt — pre-flight must be fast)
       const words = description.replace(/['"]/g, "").split(/\s+/).filter(w => w.length > 2).slice(0, 3);
       for (const word of words) {
-        try {
-          const roleLoc = page.getByRole("button", { name: new RegExp(word, "i") }).first();
-          const vis = await roleLoc.isVisible({ timeout: 1500 }).catch(() => false);
-          if (vis) { loc = roleLoc; usedSelector = `role=button[name~=${word}]`; break; }
-        } catch { /* continue */ }
-        try {
-          const textLoc = page.getByText(new RegExp(word, "i")).first();
-          const vis = await textLoc.isVisible({ timeout: 1500 }).catch(() => false);
-          if (vis) { loc = textLoc; usedSelector = `text~=${word}`; break; }
-        } catch { /* continue */ }
+        if (mode !== "fill") {
+          try {
+            const roleLoc = page.getByRole("button", { name: new RegExp(word, "i") }).first();
+            const vis = await roleLoc.isVisible({ timeout: 800 }).catch(() => false);
+            if (vis) { loc = roleLoc; usedSelector = `role=button[name~=${word}]`; break; }
+          } catch { /* continue */ }
+          try {
+            const textLoc = page.getByText(new RegExp(word, "i")).first();
+            const vis = await textLoc.isVisible({ timeout: 800 }).catch(() => false);
+            if (vis) { loc = textLoc; usedSelector = `text~=${word}`; break; }
+          } catch { /* continue */ }
+        }
       }
     }
 
@@ -934,6 +2102,93 @@ Return JSON only (no markdown):
     if (parsed && typeof parsed === "object") return { ...defaultInsights, ...parsed };
   } catch { /* fall through */ }
   return defaultInsights;
+}
+
+// ─────────────────────────────────────────────────────────
+// ANALYZE TEST CASE RESULT
+// Compares actual execution results against the expected result
+// to produce a PASS / FAIL / BUG verdict with full bug details.
+// Called per test case after Phase 3 execution.
+// ─────────────────────────────────────────────────────────
+async function analyzeTestCaseResult({ testCase, stepResults, pageText = "", screenshot = null }) {
+  const passedCount = stepResults.filter(s => s.status === "passed").length;
+  const failedSteps = stepResults.filter(s => s.status === "failed");
+  const failedSummary = failedSteps
+    .map(s => `  - [${s.action}] "${s.description}": ${String(s.error || "no error").slice(0, 120)}`)
+    .join("\n");
+  const assertionResults = stepResults
+    .filter(s => s.action === "ai_assert")
+    .map(s => `  ${s.status === "passed" ? "✓" : "✗"} ${s.description}`)
+    .join("\n");
+
+  const prompt = `You are a senior QA engineer reviewing test execution results.
+
+TEST CASE: ${testCase.id || "TC-???"}
+Title: "${testCase.title || "Untitled"}"
+Priority: ${testCase.priority || "P1"}
+Category: ${testCase.category || "functional"}
+
+EXPECTED RESULT:
+"${testCase.expected || "test passed without errors"}"
+
+ACTUAL EXECUTION:
+- Steps run: ${stepResults.length} (${passedCount} passed, ${failedSteps.length} failed)
+${failedSummary ? "- Failed steps:\n" + failedSummary : "- No step failures"}
+${assertionResults ? "- Assertions:\n" + assertionResults : ""}
+- Page text visible after test: "${String(pageText || "").slice(0, 400)}"
+
+Determine: does actual behavior match expected?
+Key question: Is this a REAL APP BUG or just an automation/selector issue?
+- "selector not found" / "timeout" alone = likely NOT a real bug (mark FAIL, not BUG)
+- "button clicked but nothing happened" / "wrong error message" / "feature non-functional" = REAL BUG
+- "XSS/SQL passed through without sanitization" = CRITICAL SECURITY BUG
+- "validation errors not shown on empty submit" = MEDIUM BUG
+- "missing feature" (feature described in UI but not implemented) = HIGH BUG
+
+Return ONLY this JSON (no markdown):
+{
+  "status": "PASS",
+  "actualBehavior": "one sentence describing what actually happened",
+  "isBug": false,
+  "bug": null
+}
+OR if a real bug:
+{
+  "status": "BUG",
+  "actualBehavior": "one sentence describing what actually happened",
+  "isBug": true,
+  "bug": {
+    "title": "short precise bug title",
+    "severity": "Critical",
+    "defectType": "Security Vulnerability | Functional Bug | Missing Feature | UX Issue | Performance Issue",
+    "impact": "one sentence user/business impact",
+    "fix": "one to two sentence fix recommendation"
+  }
+}`;
+
+  try {
+    const raw = await generateText({ prompt, maxTokens: 400 });
+    const parsed = parseJsonSafe(raw, null);
+    if (parsed && typeof parsed.status === "string") {
+      return {
+        status: parsed.status,
+        actualBehavior: String(parsed.actualBehavior || "").slice(0, 300),
+        isBug: Boolean(parsed.isBug),
+        bug: parsed.isBug && parsed.bug ? parsed.bug : null,
+      };
+    }
+  } catch { /* fall through */ }
+
+  // Safe default: if more than half steps failed, mark as FAIL; else PASS
+  const verdict = failedSteps.length > stepResults.length / 2 ? "FAIL" : "PASS";
+  return {
+    status: verdict,
+    actualBehavior: verdict === "PASS"
+      ? `${passedCount} of ${stepResults.length} steps passed.`
+      : `${failedSteps.length} of ${stepResults.length} steps failed: ${failedSteps[0]?.description || "unknown step"}.`,
+    isBug: false,
+    bug: null,
+  };
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1183,11 +2438,23 @@ function fallbackParseInstructions(instructions) {
 // ─────────────────────────────────────────────────────────
 // ENHANCED BROWSER EXECUTOR
 // ─────────────────────────────────────────────────────────
-async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, stopOnFailure = true, _existingPage = null, _existingContext = null, _existingBrowser = null, _resultOffset = 0, liveScreen = false, autoScreenshot = false } = {}) {
+async function executeBrowserSteps(steps, timeoutMs = 120000, {
+  runId = null,
+  stopOnFailure = true,
+  _existingPage = null,
+  _existingContext = null,
+  _existingBrowser = null,
+  _resultOffset = 0,
+  liveScreen = false,
+  autoScreenshot = false,
+  runController = null,
+} = {}) {
+  timeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
   const _ownsBrowser = !_existingPage;
   let liveScreenInterval = null;
   const browser = _existingBrowser || await createStealthBrowser();
   const results = [];
+  const activeRunController = runController || (runId ? createRunController(runId) : null);
   // Shared variable store — extract_text stores here, ${varName} is interpolated in later steps
   const variables = {};
   // Tab/page registry for multi-tab workflows
@@ -1199,6 +2466,7 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
   try {
     const context = _existingContext || await createStealthContext(browser);
     const page = _existingPage || await context.newPage();
+    ensurePageDiagnostics(page);
     pages.push(page);
     let activePage = page; // pointer to currently active tab
 
@@ -1226,6 +2494,9 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
     }
 
     for (let i = 0; i < expandedSteps.length; i++) {
+      if (activeRunController) {
+        await activeRunController.assertActive({ stepIndex: i + _resultOffset });
+      }
       // Interpolate ${varName} references in value/url/expected fields from extracted variables
       const rawStep = expandedSteps[i];
       const step = {
@@ -1253,6 +2524,60 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
 
       // Always work on the active tab (multi-tab support)
       const page = activePage;
+      const pageDiagnostics = ensurePageDiagnostics(page);
+      const diagnosticsSnapshot = snapshotPageDiagnostics(pageDiagnostics);
+
+      // ── Overlay-state guard ───────────────────────────────────────
+      // Before navigate/click/fill/assert steps: close any lingering modal OR
+      // open dropdown/listbox/popover left over from a previous step.
+      // An open dropdown will intercept all subsequent clicks if not dismissed first.
+      if (["navigate", "ai_click", "click", "ai_fill", "ai_assert", "select_option"].includes(step.action)) {
+        // 1. Check for open modal (dialog)
+        const modalStillOpen = await isModalOpen(page).catch(() => false);
+        if (modalStillOpen && step.action !== "select_option") {
+          // Don't close modal before select_option — the modal itself may contain the select
+          await forceCloseModal(page);
+          await page.waitForTimeout(300);
+        }
+
+        // 2. Check for open dropdown / listbox / popover / menu
+        //    These are NOT dialogs — MUI renders them as portals outside the modal
+        const dropdownStillOpen = await page.evaluate(() => {
+          const selectors = [
+            '[role="listbox"]:not([aria-hidden="true"])',
+            '[role="menu"]:not([aria-hidden="true"])',
+            '.MuiMenu-paper:not([aria-hidden="true"])',
+            '.MuiPopover-paper:not([aria-hidden="true"])',
+            '.MuiAutocomplete-popper:not([aria-hidden="true"])',
+            '[data-popper-placement]:not([aria-hidden="true"])',
+            '[class*="dropdown-menu"]:not([aria-hidden="true"])',
+            '[class*="DropdownMenu"]:not([aria-hidden="true"])',
+          ].join(", ");
+          const el = document.querySelector(selectors);
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0;
+        }).catch(() => false);
+
+        if (dropdownStillOpen && step.action !== "select_option") {
+          // Dismiss with Escape — dropdowns always close on Escape
+          await page.keyboard.press("Escape").catch(() => {});
+          await page.waitForTimeout(250);
+          // If still open, click outside at top-left corner
+          const stillOpen = await page.evaluate(() => {
+            const el = document.querySelector('[role="listbox"]:not([aria-hidden="true"]), [role="menu"]:not([aria-hidden="true"]), .MuiMenu-paper:not([aria-hidden="true"])');
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }).catch(() => false);
+          if (stillOpen) {
+            await page.mouse.click(10, 10).catch(() => {});
+            await page.waitForTimeout(200);
+          }
+        }
+      }
+      // ──────────────────────────────────────────────────────────────
 
       try {
         switch (step.action) {
@@ -1313,13 +2638,20 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
 
             // LAYER 4: Validate element exists before acting (Observe → Plan → Select → Validate → Execute → Verify)
             let locResult = null;
-            const validated = await validateElementForAction(page, step.description);
+            if (step.selector) {
+              try {
+                locResult = await smartLocate(page, step.selector, timeoutMs);
+              } catch { /* fall through to semantic lookup */ }
+            }
+            const validated = locResult
+              ? { found: true, confidence: 1, loc: locResult.loc, selector: locResult.usedSelector, reason: "selector provided" }
+              : await validateElementForAction(page, step.description);
             result.confidence = validated.confidence;
 
-            if (validated.found && validated.confidence >= 0.5) {
+            if (!locResult && validated.found && validated.confidence >= 0.5) {
               // High-confidence: element found and visible — use it directly
               locResult = { loc: validated.loc, usedSelector: validated.selector, healed: false };
-            } else {
+            } else if (!locResult) {
               // Lower confidence: try additional recovery strategies
               const sel = validated.selector || await aiIdentifySelector(page, step.description);
 
@@ -1410,19 +2742,43 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
           case "ai_fill": {
             result.description = `AI fill: ${step.description}`;
             let fillLocResult = null;
+            let semanticFillCandidate = null;
 
             // LAYER 4: Validate element exists before filling (Observe → Plan → Select → Validate → Execute)
-            const fillValidated = await validateElementForAction(page, step.description);
+            if (step.selector) {
+              try {
+                fillLocResult = await smartLocate(page, step.selector, timeoutMs);
+              } catch { /* fall through to semantic lookup */ }
+            }
+            if (!fillLocResult && step.description) {
+              semanticFillCandidate = await findBestFillableInput(page, step.description);
+              if (semanticFillCandidate?.selector) {
+                try {
+                  fillLocResult = await smartLocate(page, semanticFillCandidate.selector, timeoutMs);
+                  fillLocResult.healed = true;
+                } catch { /* continue to broader validation */ }
+              }
+            }
+            const fillValidated = fillLocResult
+              ? { found: true, confidence: 1, loc: fillLocResult.loc, selector: fillLocResult.usedSelector, reason: "selector provided" }
+              : await validateElementForAction(page, step.description, "fill");
             result.confidence = fillValidated.confidence;
 
-            if (fillValidated.found && fillValidated.confidence >= 0.5) {
+            if (!fillLocResult && fillValidated.found && fillValidated.confidence >= 0.5) {
               // High-confidence — element found and visible, use directly
               fillLocResult = { loc: fillValidated.loc, usedSelector: fillValidated.selector, healed: false };
-            } else {
+            } else if (!fillLocResult) {
               const fillSel = fillValidated.selector || await aiIdentifySelector(page, step.description);
 
               // Attempt 1: AI-identified selector
               try { fillLocResult = await smartLocate(page, fillSel, timeoutMs); } catch { /* try fallbacks */ }
+
+              if (!fillLocResult && semanticFillCandidate?.selector) {
+                try {
+                  fillLocResult = await smartLocate(page, semanticFillCandidate.selector, timeoutMs);
+                  fillLocResult.healed = true;
+                } catch { /* continue */ }
+              }
 
               // Attempt 2: scroll down and retry
               if (!fillLocResult) {
@@ -1456,8 +2812,73 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
               throw new Error(`Could not find input for: "${step.description}" — confidence=${fillValidated.confidence.toFixed(2)}, reason: ${fillValidated.reason}`);
             }
 
+            if (step.description) {
+              const matchesIntent = await locatorMatchesFillIntent(fillLocResult.loc, step.description);
+              if (!matchesIntent) {
+                const fallbackCandidate = await findBestFillableInput(page, step.description);
+                if (fallbackCandidate?.selector && fallbackCandidate.selector !== fillLocResult.usedSelector) {
+                  try {
+                    fillLocResult = await smartLocate(page, fallbackCandidate.selector, timeoutMs);
+                    fillLocResult.healed = true;
+                  } catch {
+                    throw new Error(`Located field for "${step.description}" does not match the requested input type`);
+                  }
+                } else {
+                  throw new Error(`Located field for "${step.description}" does not match the requested input type`);
+                }
+              }
+            }
+
             result.usedSelector = fillLocResult.usedSelector;
             result.healed = fillLocResult.healed;
+
+            // Verify the located element is actually fillable
+            const isActualInput = await fillLocResult.loc.evaluate((el) =>
+              el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ||
+              el.contentEditable === "true" || el.isContentEditable
+            ).catch(() => false);
+
+            if (!isActualInput) {
+              // Strategy A: look for input nested inside the located element
+              const innerInput = fillLocResult.loc.locator("input, textarea, [contenteditable='true']").first();
+              const innerVis = await innerInput.isVisible({ timeout: 800 }).catch(() => false);
+              if (innerVis) {
+                fillLocResult = { ...fillLocResult, loc: innerInput, healed: true };
+              } else {
+                // Strategy B: click the element to focus it, then use document.activeElement
+                // Custom search components (MUI SearchBar, etc.) focus an inner <input> on click
+                await fillLocResult.loc.click({ timeout: 2000 }).catch(() => {});
+                await page.waitForTimeout(200);
+                const activeIsInput = await page.evaluate(() => {
+                  const ae = document.activeElement;
+                  return ae && (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || ae.contentEditable === "true");
+                }).catch(() => false);
+                if (activeIsInput) {
+                  // activeElement is now the real input — use keyboard type directly
+                  await page.keyboard.type(String(step.value ?? ""), { delay: 20 });
+                  break; // skip the fill block below, we already typed
+                }
+                // Strategy C: page-wide input scan
+                const inputs = [
+                  'input[type="search"]', 'input[type="text"]',
+                  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])',
+                  'textarea', '[contenteditable="true"]',
+                ];
+                let found = false;
+                for (const sel of inputs) {
+                  const candidate = page.locator(sel).first();
+                  const vis = await candidate.isVisible({ timeout: 600 }).catch(() => false);
+                  if (vis) {
+                    fillLocResult = { ...fillLocResult, loc: candidate, usedSelector: sel, healed: true };
+                    found = true;
+                    break;
+                  }
+                }
+                if (!found) {
+                  throw new Error(`Located element for "${step.description}" is not fillable (tag: ${await fillLocResult.loc.evaluate(el => el.tagName).catch(() => "unknown")})`);
+                }
+              }
+            }
 
             // Check if target is a contenteditable div (chat apps, rich text editors)
             const isContentEditable = await fillLocResult.loc.evaluate((el) =>
@@ -1467,8 +2888,42 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, { runId = null, st
             if (isContentEditable) {
               await typeSlowly(page, fillLocResult.loc, String(step.value ?? ""), 30);
             } else {
+              const inputMeta = await fillLocResult.loc.evaluate((el) => ({
+                tag: el.tagName.toLowerCase(),
+                type: (el.getAttribute("type") || "").toLowerCase(),
+              })).catch(() => ({ tag: "", type: "" }));
+              const fillValue = String(step.value ?? "");
               await fillLocResult.loc.click({ timeout: 3000 }).catch(() => {});
-              await fillLocResult.loc.fill(String(step.value ?? ""), { timeout: timeoutMs });
+              try {
+                await fillLocResult.loc.fill(fillValue, { timeout: timeoutMs });
+              } catch (fillError) {
+                const assigned = await fillLocResult.loc.evaluate((el, value) => {
+                  if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+                  el.focus();
+                  el.value = "";
+                  el.value = value;
+                  el.dispatchEvent(new Event("input", { bubbles: true }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                  return true;
+                }, fillValue).catch(() => false);
+                if (!assigned) {
+                  const assignedDirectly = await setInputValueDirectly(page, fillLocResult.usedSelector, fillValue, step.description);
+                  if (assignedDirectly) {
+                    break;
+                  }
+                  if (["number", "date", "time", "datetime-local"].includes(inputMeta.type)) {
+                    await fillLocResult.loc.evaluate((el, value) => {
+                      el.focus();
+                      el.value = "";
+                      el.value = value;
+                      el.dispatchEvent(new Event("input", { bubbles: true }));
+                      el.dispatchEvent(new Event("change", { bubbles: true }));
+                    }, fillValue);
+                  } else {
+                    throw fillError;
+                  }
+                }
+              }
             }
             break;
           }
@@ -1570,7 +3025,7 @@ Reply ONLY with YES or NO.`;
           }
 
           case "wait": {
-            await page.waitForTimeout(Number(step.ms) || 1000);
+            await waitWithCancellation(page, Number(step.ms) || 1000, activeRunController);
             break;
           }
 
@@ -1628,7 +3083,9 @@ Reply ONLY with YES or NO.`;
           }
 
           case "select": {
-            await page.locator(step.selector).first().selectOption(step.value, { timeout: timeoutMs });
+            const selectMeta = await selectOptionRobust(page, step, timeoutMs);
+            result.usedSelector = selectMeta.usedSelector;
+            result.healed = selectMeta.healed;
             break;
           }
 
@@ -1784,6 +3241,9 @@ Reply ONLY with YES or NO.`;
             let conditionMet = false;
 
             while (!conditionMet && iterations < maxIter) {
+              if (activeRunController) {
+                await activeRunController.assertActive({ stepIndex: i + _resultOffset, loop: "loop_until", iteration: iterations + 1 });
+              }
               iterations++;
 
               // Execute inner steps for this iteration (don't stop on failure)
@@ -1795,6 +3255,7 @@ Reply ONLY with YES or NO.`;
                   _existingContext: context,
                   _existingBrowser: browser,
                   _resultOffset: _resultOffset + results.length + iterations,
+                  runController: activeRunController,
                 });
                 // Push sub-step results into the live run
                 if (runId && innerResult.length > 0) {
@@ -1803,7 +3264,7 @@ Reply ONLY with YES or NO.`;
                 }
               }
 
-              await page.waitForTimeout(step.pauseMs || 800);
+              await waitWithCancellation(page, step.pauseMs || 800, activeRunController);
 
               // Check condition
               if (step.jsCondition) {
@@ -1838,10 +3299,13 @@ Reply ONLY with YES or NO.`;
             let flowStepCount = 0;
 
             while (!flowDone && flowStepCount < maxSteps) {
+              if (activeRunController) {
+                await activeRunController.assertActive({ stepIndex: i + _resultOffset, loop: "complete_flow", flowStepCount: flowStepCount + 1 });
+              }
               flowStepCount++;
 
               // Observe current page state
-              await page.waitForTimeout(800);
+              await waitWithCancellation(page, 800, activeRunController);
               await dismissOverlays(page).catch(() => {});
 
               const pageInfo = await extractPageInfoFull(page).catch(() => ({ elements: [], hasForms: false, hasCreateBtn: false, hasTable: false, hasSearch: false, visibleText: "", title: "" }));
@@ -1886,6 +3350,7 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
                 _existingContext: context,
                 _existingBrowser: browser,
                 _resultOffset: _resultOffset + results.length + flowStepCount,
+                runController: activeRunController,
               });
               if (runId && actionResult.length > 0) {
                 await updateRunLive(runId, [...results, ...actionResult]);
@@ -1937,6 +3402,7 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
           case "open_tab": {
             result.description = `Open new tab${step.url ? `: ${step.url}` : ""}`;
             const newPage = await context.newPage();
+            ensurePageDiagnostics(newPage);
             newPage.on("dialog", async (d) => { try { await d.accept(); } catch { /* ignore */ } });
             pages.push(newPage);
             activePage = newPage;
@@ -1962,6 +3428,7 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
             } else {
               activePage = pages[pages.length - 1]; // last tab
             }
+            ensurePageDiagnostics(activePage);
             result.description = `Switched to tab: ${activePage.url()}`;
             result.screenshot = await takeScreenshot(activePage);
             break;
@@ -2090,7 +3557,16 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
             const errors = await page.evaluate(() =>
               window.__testAgentErrors || []
             ).catch(() => []);
-            if (errors.length > 0) throw new Error(`JS errors detected: ${errors.slice(0, 3).join("; ")}`);
+            const runtime = ensurePageDiagnostics(page);
+            const runtimeIssues = [
+              ...runtime.pageErrors.slice(-3).map((e) => e.message),
+              ...runtime.consoleErrors.slice(-3).map((e) => `${e.type}: ${e.text}`),
+              ...runtime.requestFailures.slice(-2).map((e) => `${e.method} ${e.url}: ${e.errorText}`),
+              ...runtime.responseFailures.slice(-2).map((e) => `HTTP ${e.status} ${e.url}`),
+            ];
+            if (errors.length > 0 || runtimeIssues.length > 0) {
+              throw new Error(`JS/runtime errors detected: ${[...errors.slice(0, 3), ...runtimeIssues].slice(0, 4).join("; ")}`);
+            }
             // Also check for obvious error pages
             const title = await page.title().catch(() => "");
             if (/error|404|500|forbidden|not found/i.test(title)) {
@@ -2239,17 +3715,38 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
 
           // ─── upload_file: upload a file through a file input ───
           case "upload_file": {
-            result.description = `Upload file: ${step.filePath}`;
-            // Find file input by description or generic
+            const resolvedFilePath = step.filePath && fs.existsSync(step.filePath)
+              ? path.resolve(step.filePath)
+              : step.file && fs.existsSync(step.file)
+                ? path.resolve(step.file)
+                : ensureUploadFixtureFile();
+            result.description = `Upload file: ${path.basename(resolvedFilePath)}`;
             let fileInput = null;
-            if (step.description) {
+            let usedSelector = null;
+            if (step.selector) {
               try {
-                const sel = await aiIdentifySelector(page, step.description);
-                fileInput = page.locator(sel).first();
-              } catch { /* fallback */ }
+                const located = await smartLocate(page, step.selector, timeoutMs);
+                fileInput = located.loc;
+                usedSelector = located.usedSelector;
+                result.healed = located.healed;
+              } catch {
+                // Dynamic forms often rerender file inputs; fall back to semantic discovery below.
+              }
             }
-            if (!fileInput) fileInput = page.locator('input[type="file"]').first();
-            await fileInput.setInputFiles(step.filePath || step.file, { timeout: timeoutMs });
+            if (!fileInput && step.description) {
+              const discovered = await findBestFileInput(page, step.description);
+              if (discovered?.selector) {
+                fileInput = page.locator(discovered.selector).first();
+                usedSelector = discovered.selector;
+                result.healed = true;
+              }
+            }
+            if (!fileInput) {
+              usedSelector = 'input[type="file"]';
+              fileInput = page.locator(usedSelector).first();
+            }
+            result.usedSelector = usedSelector;
+            await fileInput.setInputFiles(resolvedFilePath, { timeout: timeoutMs });
             await page.waitForTimeout(500);
             result.screenshot = await takeScreenshot(page);
             break;
@@ -2272,12 +3769,9 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
           // ─── select_option: select dropdown option by value or text ───
           case "select_option": {
             result.description = `Select option "${step.value}" in ${step.description}`;
-            let sel = step.selector;
-            if (!sel && step.description) sel = await aiIdentifySelector(page, step.description);
-            await page.locator(sel || "select").first().selectOption(
-              step.value,
-              { timeout: timeoutMs }
-            );
+            const selectMeta = await selectOptionRobust(page, step, timeoutMs);
+            result.usedSelector = selectMeta.usedSelector;
+            result.healed = selectMeta.healed;
             result.screenshot = await takeScreenshot(page);
             break;
           }
@@ -2410,13 +3904,29 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
           }
         }
       } catch (err) {
-        result.status = "failed";
-        result.error = err.message?.slice(0, 400) ?? "Unknown error";
+        if (isRunCancelledError(err)) {
+          throw err;
+        }
+        const errorMessage = err.message?.slice(0, 400) ?? "Unknown error";
+        result.error = errorMessage;
+        if (step.optional && shouldSkipOptionalError(errorMessage)) {
+          result.status = "skipped";
+          result.description = `Optional: ${result.description}`;
+        } else {
+          result.status = "failed";
+        }
         try { result.screenshot = await takeScreenshot(page); } catch { /* ignore */ }
-        result.aiAnalysis = await aiAnalyzeFailure(step, result.error);
+        if (result.status === "failed") {
+          result.aiAnalysis = await aiAnalyzeFailure(step, result.error);
+        }
       }
 
       result.durationMs = Date.now() - t0;
+      result.currentUrl = clipText(activePage.url(), 220);
+      const diagnosticsDelta = collectPageDiagnosticsDelta(pageDiagnostics, diagnosticsSnapshot);
+      if (hasPageDiagnostics(diagnosticsDelta)) {
+        result.diagnostics = diagnosticsDelta;
+      }
       // Capture screenshot after every step when autoScreenshot is enabled
       if (autoScreenshot && !result.screenshot) {
         try { result.screenshot = await takeScreenshot(activePage); } catch { /* ignore */ }
@@ -2508,6 +4018,8 @@ export async function autoDiscoverAndTest({
     [workspaceId, projectId, taskId, triggerSource, triggeredBy || null]
   );
   if (onRunCreated) onRunCreated(run.id);
+  const runController = createRunController(run.id);
+  const actionTimeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
 
   // Phase 1: Discover page (stealth browser)
   let pageInfo = { title: "", visibleText: "", elements: [] };
@@ -2516,7 +4028,7 @@ export async function autoDiscoverAndTest({
   try {
     const ctx = await createStealthContext(discoverBrowser);
     const page = await ctx.newPage();
-    await page.goto(url, { timeout: timeoutMs, waitUntil: "domcontentloaded" });
+    await page.goto(url, { timeout: actionTimeoutMs, waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
     try { await page.waitForLoadState("networkidle", { timeout: 5000 }); } catch { /* ok */ }
     await dismissOverlays(page);
@@ -2538,7 +4050,7 @@ export async function autoDiscoverAndTest({
     await discoverBrowser.close().catch(() => {});
     await pool.query(
       `UPDATE testing_agent_runs SET status='failed', output_json=$2, finished_at=NOW() WHERE id=$1`,
-      [run.id, JSON.stringify({ error: `Page discovery failed: ${err.message}`, url })]
+      [run.id, safeJsonStringify({ error: `Page discovery failed: ${err.message}`, url })]
     );
     throw err;
   }
@@ -2554,17 +4066,50 @@ export async function autoDiscoverAndTest({
 
   await pool.query(
     `UPDATE testing_agent_runs SET commands=$2::jsonb WHERE id=$1`,
-    [run.id, JSON.stringify(discoveredSteps)]
+    [run.id, safeJsonStringify(discoveredSteps)]
   );
 
   // Phase 3: Execute
   let stepResults = [];
   try {
-    stepResults = await executeBrowserSteps(discoveredSteps, timeoutMs, { runId: run.id, stopOnFailure: false });
+    stepResults = await executeBrowserSteps(discoveredSteps, actionTimeoutMs, {
+      runId: run.id,
+      stopOnFailure: false,
+      runController,
+    });
   } catch (err) {
+    if (isRunCancelledError(err)) {
+      const output = {
+        url,
+        pageTitle: pageInfo.title,
+        initialScreenshot,
+        discoveredSteps,
+        stepResults,
+        cancelControl: {
+          message: err.message,
+          details: err.details || null,
+        },
+        summary: {
+          total: stepResults.length,
+          passed: stepResults.filter((step) => step.status === "passed").length,
+          failed: stepResults.filter((step) => step.status === "failed").length,
+          skipped: stepResults.filter((step) => step.status === "skipped").length,
+          cancelled: true,
+        },
+      };
+      await pool.query(
+        `UPDATE testing_agent_runs SET status='cancelled', output_json=$2, finished_at=NOW() WHERE id=$1`,
+        [run.id, safeJsonStringify(output)]
+      );
+      return {
+        runId: run.id,
+        status: "cancelled",
+        summary: output.summary,
+      };
+    }
     await pool.query(
       `UPDATE testing_agent_runs SET status='failed', output_json=$2, finished_at=NOW() WHERE id=$1`,
-      [run.id, JSON.stringify({ error: err.message, url, discoveredSteps })]
+      [run.id, safeJsonStringify({ error: err.message, url, discoveredSteps })]
     );
     throw err;
   }
@@ -2579,7 +4124,7 @@ export async function autoDiscoverAndTest({
 
   await pool.query(
     `UPDATE testing_agent_runs SET status=$2, output_json=$3, finished_at=NOW() WHERE id=$1`,
-    [run.id, finalStatus, JSON.stringify(output)]
+    [run.id, finalStatus, safeJsonStringify(output)]
   );
 
   return {
@@ -2626,6 +4171,22 @@ Return ONLY the JSON object. No markdown.`;
   };
 }
 
+function buildMultiScenarioSummary(scenarioResults = []) {
+  const total = scenarioResults.length;
+  const passed = scenarioResults.filter((scenario) => scenario.status === "passed").length;
+  const failed = scenarioResults.filter((scenario) => scenario.status === "failed").length;
+  const skipped = scenarioResults.filter((scenario) => scenario.status === "skipped").length;
+  const cancelled = scenarioResults.some((scenario) => scenario.status === "cancelled");
+  const overallStatus = cancelled
+    ? "cancelled"
+    : total > 0 && passed === total
+      ? "passed"
+      : total > 0 && failed === total
+        ? "failed"
+        : "partial";
+  return { total, passed, failed, skipped, cancelled, overallStatus };
+}
+
 export async function runMultiScenario({
   workspaceId,
   taskId,
@@ -2634,6 +4195,7 @@ export async function runMultiScenario({
   triggeredBy = null,
   triggerSource = "manual",
   timeoutMs = 60000,
+  onRunCreated = null,
 }) {
   if (!description || String(description).trim().length < 5) throw new Error("Feature description is required");
 
@@ -2646,38 +4208,93 @@ export async function runMultiScenario({
 
   const scenarios = await generateScenarioPlans(description.trim(), url || "");
   const LABELS = { happy_path: "Happy Path", error_handling: "Error Handling", edge_cases: "Edge Cases", performance: "Performance" };
+  const actionTimeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
+
+  const plannedScenarioTypes = Object.entries(scenarios)
+    .filter(([, steps]) => Array.isArray(steps) && steps.length > 0)
+    .map(([type]) => type);
+
+  const { rows: [run] } = await pool.query(
+    `INSERT INTO testing_agent_runs
+       (workspace_id, project_id, task_id, trigger_source, mode, status, generated_cases, commands, output_json, created_by)
+     VALUES ($1,$2,$3,$4,'multi_scenario','running',$5::jsonb,$6::jsonb,$7::jsonb,$8)
+     RETURNING *`,
+    [
+      workspaceId,
+      projectId,
+      taskId,
+      triggerSource,
+      safeJsonStringify(plannedScenarioTypes),
+      safeJsonStringify(plannedScenarioTypes.map((type) => LABELS[type] || type)),
+      safeJsonStringify({
+        description,
+        url,
+        scenarios: [],
+        stepResults: [],
+        summary: {
+          total: plannedScenarioTypes.length,
+          passed: 0,
+          failed: 0,
+          skipped: 0,
+          cancelled: false,
+          overallStatus: "running",
+        },
+      }),
+      triggeredBy || null,
+    ]
+  );
+  if (onRunCreated) onRunCreated(run.id);
+  const runController = createRunController(run.id);
 
   const scenarioResults = [];
 
   for (const [type, steps] of Object.entries(scenarios)) {
     if (!Array.isArray(steps) || steps.length === 0) continue;
 
-    const { rows: [run] } = await pool.query(
-      `INSERT INTO testing_agent_runs
-         (workspace_id, project_id, task_id, trigger_source, mode, status, generated_cases, commands, output_json, created_by)
-       VALUES ($1,$2,$3,$4,'multi_scenario','running','[]'::jsonb,$5::jsonb,'{"stepResults":[]}'::jsonb,$6)
-       RETURNING *`,
-      [workspaceId, projectId, taskId, triggerSource, JSON.stringify([`${type}`]), triggeredBy || null]
-    );
-
     let stepResults = [];
     try {
-      stepResults = await executeBrowserSteps(steps, timeoutMs, { runId: run.id, stopOnFailure: false });
+      await runController.assertActive({ phase: "scenario_start", scenario: type });
+      stepResults = await executeBrowserSteps(steps, actionTimeoutMs, {
+        runId: run.id,
+        stopOnFailure: false,
+        runController,
+      });
     } catch (err) {
+      if (isRunCancelledError(err)) {
+        const summary = buildMultiScenarioSummary(scenarioResults);
+        const output = {
+          description,
+          url,
+          scenarios: scenarioResults,
+          stepResults: scenarioResults.flatMap((scenario) => scenario.stepResults || []),
+          summary,
+          overallStatus: "cancelled",
+          cancelControl: {
+            message: err.message,
+            details: err.details || null,
+          },
+        };
+        await pool.query(
+          `UPDATE testing_agent_runs SET status='cancelled', output_json=$2, finished_at=NOW() WHERE id=$1`,
+          [run.id, safeJsonStringify(output)]
+        );
+        return {
+          runId: run.id,
+          status: "cancelled",
+          description,
+          scenarios: scenarioResults,
+          overallStatus: "cancelled",
+          summary,
+        };
+      }
       stepResults = [{ stepIndex: 0, action: "error", description: err.message, status: "failed", error: err.message, screenshot: null, metrics: null, durationMs: 0, healed: false, aiAnalysis: null, usedSelector: null, value: null, selector: null }];
     }
 
     const passed = stepResults.filter((s) => s.status === "passed").length;
     const failed = stepResults.filter((s) => s.status === "failed").length;
+    const skipped = stepResults.filter((s) => s.status === "skipped").length;
     const finalStatus = failed > 0 ? "failed" : "passed";
     const insights = await generateRunInsights(stepResults, `multi_scenario:${type}`);
-
-    const output = { scenarioType: type, scenarioLabel: LABELS[type], description, stepResults, insights, summary: { total: stepResults.length, passed, failed } };
-
-    await pool.query(
-      `UPDATE testing_agent_runs SET status=$2, output_json=$3, finished_at=NOW() WHERE id=$1`,
-      [run.id, finalStatus, JSON.stringify(output)]
-    );
 
     scenarioResults.push({
       runId: run.id,
@@ -2685,23 +4302,49 @@ export async function runMultiScenario({
       label: LABELS[type],
       status: finalStatus,
       insights,
-      summary: output.summary,
+      stepResults,
+      summary: { total: stepResults.length, passed, failed, skipped },
       steps: stepResults.map((s) => ({ ...s, screenshot: s.screenshot ? true : null })),
     });
+
+    const summary = buildMultiScenarioSummary(scenarioResults);
+    await pool.query(
+      `UPDATE testing_agent_runs SET output_json=$2 WHERE id=$1`,
+      [run.id, safeJsonStringify({
+        description,
+        url,
+        scenarios: scenarioResults,
+        stepResults: scenarioResults.flatMap((scenario) => scenario.stepResults || []),
+        summary,
+        overallStatus: summary.overallStatus,
+        activeScenario: type,
+      })]
+    );
   }
 
-  const allPassed = scenarioResults.every((s) => s.status === "passed");
-  const allFailed = scenarioResults.every((s) => s.status === "failed");
+  const summary = buildMultiScenarioSummary(scenarioResults);
+  const finalStatus = summary.overallStatus === "passed" ? "passed" : summary.overallStatus === "failed" ? "failed" : "partial";
+  const output = {
+    description,
+    url,
+    scenarios: scenarioResults,
+    stepResults: scenarioResults.flatMap((scenario) => scenario.stepResults || []),
+    summary,
+    overallStatus: finalStatus,
+  };
+
+  await pool.query(
+    `UPDATE testing_agent_runs SET status=$2, output_json=$3, finished_at=NOW() WHERE id=$1`,
+    [run.id, finalStatus, safeJsonStringify(output)]
+  );
 
   return {
+    runId: run.id,
+    status: finalStatus,
     description,
     scenarios: scenarioResults,
-    overallStatus: allPassed ? "passed" : allFailed ? "failed" : "partial",
-    summary: {
-      total: scenarioResults.length,
-      passed: scenarioResults.filter((s) => s.status === "passed").length,
-      failed: scenarioResults.filter((s) => s.status === "failed").length,
-    },
+    overallStatus: finalStatus,
+    summary,
   };
 }
 
@@ -2709,99 +4352,302 @@ export async function runMultiScenario({
 // DEEP EXPLORATION HELPERS
 // ─────────────────────────────────────────────────────────
 
+function extractCredentialValue(instructions, labels = []) {
+  for (const label of labels) {
+    const regex = new RegExp(
+      `${label}\\s*(?:=|:|-)\\s*(?:"([^"]+)"|'([^']+)'|([^\\n,;]+))`,
+      "i"
+    );
+    const match = instructions.match(regex);
+    if (!match) continue;
+    const value = match[1] || match[2] || match[3];
+    if (value && value.trim()) return value.trim();
+  }
+  return null;
+}
+
 function parseCredentialsFromInstructions(instructions) {
+  const explicitUrl = extractCredentialValue(instructions, ["url", "website", "site"]);
   const urlMatch = instructions.match(/https?:\/\/[^\s,'"]+/);
-  const url = urlMatch ? urlMatch[0] : null;
-  const emailMatch =
-    instructions.match(/email\s*[-:]\s*([^\s,;]+@[^\s,;]+)/i) ||
-    instructions.match(/email\s*[-:]\s*([^\s,;]+)/i) ||
-    instructions.match(/username\s*[-:]\s*([^\s,;]+)/i);
-  const passwordMatch =
-    instructions.match(/password\s*[-:]\s*([^\s,;]+)/i) ||
-    instructions.match(/pass\s*[-:]\s*([^\s,;]+)/i);
+  const url = explicitUrl || (urlMatch ? urlMatch[0] : null);
+  const email = extractCredentialValue(instructions, ["email", "e-mail", "username", "user", "login"]);
+  const password = extractCredentialValue(instructions, ["password", "pass", "pwd"]);
+
   return {
     url,
-    email: emailMatch ? emailMatch[1].replace(/[,;]$/, "") : null,
-    password: passwordMatch ? passwordMatch[1].replace(/[,;]$/, "") : null,
+    email,
+    password,
   };
 }
 
-// Broad navigation discovery — scans links, tabs, role-based elements AND clickable divs in nav containers
+async function navigateToDiscoveredModule(page, navItem, originUrl = null) {
+  try {
+    if (navItem?.href && /^https?:\/\//.test(navItem.href)) {
+      await page.goto(navItem.href, { timeout: 20000, waitUntil: "domcontentloaded" });
+    } else if (navItem?.href && navItem.href.startsWith("/")) {
+      const origin = originUrl ? new URL(originUrl).origin : new URL(page.url()).origin;
+      await page.goto(new URL(navItem.href, origin).toString(), { timeout: 20000, waitUntil: "domcontentloaded" });
+    } else if (navItem?.url && /^https?:\/\//.test(navItem.url)) {
+      await page.goto(navItem.url, { timeout: 20000, waitUntil: "domcontentloaded" });
+    } else if (navItem?.text) {
+      const loc = page.getByText(navItem.text, { exact: false }).first();
+      const vis = await loc.isVisible({ timeout: 3000 }).catch(() => false);
+      if (!vis) return false;
+      await loc.click({ timeout: 5000 });
+    } else {
+      return false;
+    }
+
+    await page.waitForTimeout(1500);
+    try { await page.waitForLoadState("networkidle", { timeout: 6000 }); } catch { /* ok */ }
+    await dismissOverlays(page).catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Broad navigation discovery — uses position-based primary + class-based secondary
 async function discoverAllNavigationItems(page) {
-  return page.evaluate(() => {
+  // ── Pre-step 1: Try to open collapsed MUI Drawer / hamburger menu ──
+  // MUI Drawer items have getBoundingClientRect() = 0 when collapsed (CSS transform off-screen)
+  // Clicking the hamburger opens the drawer so DOM items become visible
+  const hamburgerClicked = await page.evaluate(() => {
+    // Look for hamburger/menu toggle in the header/appbar area
+    const candidates = [
+      document.querySelector('[aria-label*="menu" i]:not([aria-haspopup="listbox"]):not([aria-haspopup="menu"])'),
+      document.querySelector('[aria-label*="open navigation" i]'),
+      document.querySelector('[aria-label*="open sidebar" i]'),
+      document.querySelector('[aria-label*="toggle menu" i]'),
+      document.querySelector('[aria-label*="toggle nav" i]'),
+      document.querySelector('.MuiIconButton-root[aria-label*="menu" i]'),
+      // MUI hamburger: button wrapping a MenuIcon SVG
+      document.querySelector('button svg[data-testid="MenuIcon"]')?.closest("button"),
+      document.querySelector('button svg[data-testid="MenuOpenIcon"]')?.closest("button"),
+      // Generic: button in header with no text (icon-only buttons)
+      ...[...document.querySelectorAll("header button, [class*='AppBar'] button, [class*='appbar'] button, [class*='toolbar'] button, [class*='Toolbar'] button")]
+        .filter(b => {
+          const r = b.getBoundingClientRect();
+          const txt = (b.innerText || b.getAttribute("aria-label") || "").trim();
+          // Icon-only button (no text or very short) in the header area
+          return r.top < 80 && r.width > 0 && txt.length < 5;
+        }),
+    ].filter(Boolean);
+    if (candidates[0]) { try { candidates[0].click(); return true; } catch {} }
+    return false;
+  }).catch(() => false);
+  if (hamburgerClicked) await page.waitForTimeout(700).catch(() => {});
+
+  // ── Pre-step 2: Expand any collapsed accordion/nav groups ──
+  await page.evaluate(() => {
+    document.querySelectorAll("[aria-expanded='false'][role='button'], [aria-expanded='false'][class*='Accordion'], [aria-expanded='false'][class*='Collapse']").forEach(el => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && rect.left < 400) { try { el.click(); } catch {} }
+    });
+  }).catch(() => {});
+  await page.waitForTimeout(500).catch(() => {});
+
+  // ── STRATEGY 0: Full DOM href scan (catches MUI Drawer items even when drawer is collapsed) ──
+  // MUI Drawer with variant="persistent"/"temporary" renders <a href> in DOM even when off-screen.
+  // getBoundingClientRect() returns zero for these, so position-based scan misses them.
+  // This scan finds ALL internal href links regardless of visibility.
+  const hrefItems = await page.evaluate(() => {
     const seen = new Set();
     const items = [];
+    const hostname = window.location.hostname;
+    const NOISE = /^(sign.?out|log.?out|close|×|✕|cancel|help|support|ok|profile|avatar|logo|\?|⚙|settings|back|home icon|notifications?|\d+)$/i;
 
-    function isVisible(el) {
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && rect.width < 600;
-    }
-    function getText(el) {
-      return (el.innerText || el.getAttribute("aria-label") || el.title || el.getAttribute("data-label") || "")
-        .trim().replace(/\s+/g, " ").slice(0, 60);
-    }
-    function addItem(el, hrefOverride) {
-      const text = getText(el);
-      if (!text || text.length < 2 || text.length > 50) return;
+    // Scan every <a href> in the entire document (including hidden/off-screen ones)
+    document.querySelectorAll("a[href]").forEach(el => {
+      const href = el.getAttribute("href") || "";
+      const text = (el.innerText || el.getAttribute("aria-label") || el.title || "").trim().replace(/\s+/g, " ").slice(0, 60);
+      if (!text || text.length < 2 || text.length > 55) return;
+      if (NOISE.test(text)) return;
       if (seen.has(text.toLowerCase())) return;
-      if (!isVisible(el)) return;
-      const href = hrefOverride || el.getAttribute("href") || "";
       if (/^(mailto:|tel:|javascript:|#$)/.test(href)) return;
       if (/^https?:\/\//.test(href)) {
-        try { if (new URL(href).hostname !== window.location.hostname) return; } catch { return; }
+        try { if (new URL(href).hostname !== hostname) return; } catch { return; }
       }
+      // Skip external-looking hrefs
+      if (href.startsWith("http") && !href.includes(hostname)) return;
+      seen.add(text.toLowerCase());
+      items.push({ text, href: href || null });
+    });
+    return items.slice(0, 60);
+  }).catch(() => []);
+
+  // ── PRIMARY STRATEGY: Position-based scan ──
+  // Find ALL clickable elements visually located in the left sidebar region (x < 320px, y > 56px)
+  // This works regardless of CSS framework, class names, or component library
+  const positionItems = await page.evaluate(() => {
+    const seen = new Set();
+    const items = [];
+    const SIDEBAR_MAX_X = Math.min(340, window.innerWidth * 0.22);
+    const HEADER_HEIGHT = 56;
+    const NOISE = /^(×|✕|close|≡|☰|🔔|\?|⚙|›|‹|>|<|\d{1,3}|notifications?|account|avatar|logo)$/i;
+
+    const candidates = [
+      ...document.querySelectorAll(
+        'a, button, [role="button"], [role="menuitem"], [role="link"], [role="tab"], [tabindex]:not([tabindex="-1"])'
+      )
+    ];
+
+    for (const el of candidates) {
+      const rect = el.getBoundingClientRect();
+      if (rect.left > SIDEBAR_MAX_X) continue;
+      if (rect.top < HEADER_HEIGHT) continue;
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (rect.height > 72) continue; // skip large panels
+
+      // Get the cleanest text available (prefer direct children, avoid icon text)
+      const raw = (el.innerText || el.getAttribute("aria-label") || el.title || el.getAttribute("data-label") || "")
+        .trim().replace(/\s+/g, " ");
+      // Remove leading icon characters (emojis, SVG text artefacts)
+      const text = raw.replace(/^[\s\u{1F000}-\u{1FFFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]+/u, "").trim().slice(0, 60);
+
+      if (!text || text.length < 2 || text.length > 55) continue;
+      if (NOISE.test(text)) continue;
+      if (seen.has(text.toLowerCase())) continue;
+
+      const href = el.getAttribute("href") || null;
+      if (href && /^(mailto:|tel:|javascript:|#$)/.test(href)) continue;
+      if (href && /^https?:\/\//.test(href)) {
+        try { if (new URL(href).hostname !== window.location.hostname) continue; } catch { continue; }
+      }
+
       seen.add(text.toLowerCase());
       items.push({ text, href: href || null });
     }
-
-    // 1. Traditional link-based nav
-    const linkSelectors = [
-      "nav a", "aside a", "[role='navigation'] a",
-      "[data-sidebar] a", ".sidebar a", ".nav a", ".side-nav a",
-      "header nav a", ".topbar a", ".app-header a",
-      ".menu a", "ul.menu li a",
-      "[class*='sidebar'] a", "[class*='nav-item'] a",
-      "[class*='menu-item'] a", "ul[class*='nav'] li a",
-      "[class*='navlink']", "[class*='nav-link']",
-    ];
-    for (const sel of linkSelectors) {
-      try { [...document.querySelectorAll(sel)].forEach((el) => addItem(el)); } catch { /* ignore */ }
-    }
-
-    // 2. ARIA / data-attribute nav (React Router, tabs, drawers)
-    for (const sel of ["[role='tab']", "[role='menuitem']", "[role='option']", "[data-tab]", "[data-route]", "[data-page]"]) {
-      try { [...document.querySelectorAll(sel)].forEach((el) => addItem(el)); } catch { /* ignore */ }
-    }
-
-    // 3. Clickable items INSIDE known nav containers (buttons, divs, li)
-    const navContainerSelectors = [
-      "nav", "aside", "[role='navigation']", "[role='sidebar']",
-      "[class*='sidebar']", "[class*='nav-bar']", "[class*='side-bar']",
-      "[class*='app-nav']", "[class*='main-nav']", "[class*='left-panel']",
-      "[class*='left-menu']", "[class*='drawer']",
-    ];
-    for (const csel of navContainerSelectors) {
-      try {
-        const container = document.querySelector(csel);
-        if (!container) continue;
-        [...container.querySelectorAll("button, li, div[class*='item'], div[class*='link'], span[class*='item']")]
-          .forEach((el) => {
-            if (el.querySelectorAll("a, button").length > 2) return; // skip wrapper containers
-            addItem(el);
-          });
-      } catch { /* ignore */ }
-    }
-
-    // 4. Explicit tab-class buttons (top-level horizontal tab bars common in React apps)
-    for (const sel of [
-      "button[class*='tab']", "li[class*='tab']",
-      "div[class*='tab-item']", "div[class*='tabItem']", "div[class*='TabItem']",
-    ]) {
-      try { [...document.querySelectorAll(sel)].forEach((el) => addItem(el)); } catch { /* ignore */ }
-    }
-
-    return items.slice(0, 25);
+    return items;
   }).catch(() => []);
+
+  // ── SECONDARY STRATEGY: Class/selector-based scan ──
+  // Catches items that may be outside the left column or use non-standard positions
+  const classItems = await page.evaluate(() => {
+    const seen = new Set();
+    const collected = [];
+    const NOISE = /^(×|✕|close|≡|☰|🔔|\?|⚙|›|‹)$/i;
+
+    function getText(el) {
+      return (el.innerText || el.getAttribute("aria-label") || el.title || "").trim().replace(/\s+/g, " ").slice(0, 60);
+    }
+    function isVisible(el) {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+    function addItem(el) {
+      const text = getText(el);
+      if (!text || text.length < 2 || text.length > 55) return;
+      if (NOISE.test(text)) return;
+      if (seen.has(text.toLowerCase())) return;
+      if (!isVisible(el)) return;
+      const href = el.getAttribute("href") || null;
+      if (href && /^(mailto:|tel:|javascript:|#$)/.test(href)) return;
+      if (href && /^https?:\/\//.test(href)) {
+        try { if (new URL(href).hostname !== window.location.hostname) return; } catch { return; }
+      }
+      seen.add(text.toLowerCase());
+      collected.push({ text, href: href || null });
+    }
+
+    // Nav containers
+    const containers = [
+      "nav", "aside", "[role='navigation']",
+      "[class*='sidebar']", "[class*='Sidebar']", "[class*='side-bar']",
+      "[class*='drawer']", "[class*='Drawer']", "[class*='SideNav']",
+      "[class*='app-nav']", "[class*='main-nav']", "[class*='left-panel']",
+    ];
+    for (const csel of containers) {
+      const container = document.querySelector(csel);
+      if (!container) continue;
+      container.querySelectorAll("a[href], button, [role='menuitem'], [role='option'], [role='tab']").forEach(addItem);
+      // MUI-specific
+      container.querySelectorAll("[class*='MuiListItemButton'], [class*='MuiMenuItem']").forEach(el => {
+        if (el.querySelectorAll("[class*='MuiListItemButton']").length > 1) return;
+        addItem(el);
+      });
+    }
+
+    // Global MUI nav elements
+    document.querySelectorAll("[class*='MuiListItemButton-root']").forEach(el => {
+      if (el.querySelectorAll("[class*='MuiListItemButton']").length > 1) return;
+      addItem(el);
+    });
+
+    // ARIA roles
+    document.querySelectorAll("[role='menuitem'], [role='tab'], [data-route], [data-page]").forEach(addItem);
+
+    return collected.slice(0, 60);
+  }).catch(() => []);
+
+  // ── Merge: hrefItems first (catches hidden drawer), then position-based, then class-based ──
+  const seen = new Set();
+  const merged = [];
+  for (const item of [...hrefItems, ...positionItems]) {
+    if (!seen.has(item.text.toLowerCase())) {
+      seen.add(item.text.toLowerCase());
+      merged.push(item);
+    }
+  }
+  for (const item of classItems) {
+    if (!seen.has(item.text.toLowerCase())) {
+      merged.push(item);
+      seen.add(item.text.toLowerCase());
+    }
+  }
+
+  // ── Scroll sidebar halfway + re-scan for items below fold ──
+  await page.evaluate(() => {
+    const sidebar = document.querySelector(
+      "aside, nav, [class*='sidebar'], [class*='Sidebar'], [class*='drawer'], [class*='Drawer'], [role='navigation']"
+    );
+    if (sidebar && sidebar.scrollHeight > sidebar.clientHeight) {
+      sidebar.scrollTop = sidebar.scrollHeight / 2;
+    }
+  }).catch(() => {});
+  await page.waitForTimeout(400).catch(() => {});
+
+  const extraItems = await page.evaluate(() => {
+    const seen2 = new Set();
+    const extra = [];
+    const SIDEBAR_MAX_X = Math.min(340, window.innerWidth * 0.22);
+    const candidates = [...document.querySelectorAll('a, button, [role="menuitem"], [role="link"]')];
+    for (const el of candidates) {
+      const rect = el.getBoundingClientRect();
+      if (rect.left > SIDEBAR_MAX_X) continue;
+      if (rect.top < 56) continue;
+      if (rect.width === 0 || rect.height === 0) continue;
+      const text = (el.innerText || el.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ").slice(0, 60);
+      if (!text || text.length < 2 || text.length > 55) continue;
+      if (seen2.has(text.toLowerCase())) continue;
+      seen2.add(text.toLowerCase());
+      extra.push({ text, href: el.getAttribute("href") || null });
+    }
+    return extra;
+  }).catch(() => []);
+
+  for (const item of extraItems) {
+    if (!seen.has(item.text.toLowerCase())) {
+      merged.push(item);
+      seen.add(item.text.toLowerCase());
+    }
+  }
+
+  // ── Scroll sidebar back to top ──
+  await page.evaluate(() => {
+    const sidebar = document.querySelector("aside, nav, [class*='sidebar'], [class*='Sidebar'], [class*='drawer'], [class*='Drawer']");
+    if (sidebar) sidebar.scrollTop = 0;
+  }).catch(() => {});
+
+  // ── Filter noise ──
+  const noisePattern = /^(sign.?out|log.?out|close|cancel|back|help|support|ok|yes|no|confirm|notification|profile picture|avatar|logo|home icon)$/i;
+  const finalSeen = new Set();
+  return merged.filter(item => {
+    if (!item.text || noisePattern.test(item.text.trim())) return false;
+    if (finalSeen.has(item.text.toLowerCase())) return false;
+    finalSeen.add(item.text.toLowerCase());
+    return true;
+  });
 }
 
 // Discover tabs / sub-sections within the currently visible page
@@ -2809,14 +4655,31 @@ async function discoverPageTabs(page) {
   return page.evaluate(() => {
     const seen = new Set();
     const tabs = [];
-    const selectors = [
-      "[role='tablist'] [role='tab']",
-      "[role='tab']",
-      ".tabs a, .tabs button, .tabs li",
-      "[class*='tab-bar'] a, [class*='tab-bar'] button",
-      "[class*='tabs'] a, [class*='tabs'] button",
-      "ul.nav-tabs li a",
-    ];
+  const selectors = [
+    "[role='tablist'] [role='tab']",
+    "[role='tab']",
+    // MUI Tabs
+    "[class*='MuiTab-root']",
+    "[class*='MuiTabs-root'] button",
+    "[class*='MuiButtonBase-root'][class*='tab']",
+    // Ant Design
+    ".ant-tabs-tab",
+    ".ant-tabs-nav [role='tab']",
+    // Headless UI / Radix
+    "[data-state='active'][role='tab']",
+    "[data-headlessui-state] button[role='tab']",
+    // Generic CSS patterns
+    ".tabs a, .tabs button, .tabs li",
+    "[class*='tab-bar'] a, [class*='tab-bar'] button",
+    "[class*='tabs'] a, [class*='tabs'] button",
+    "[class*='Tabs'] button",
+    "[class*='TabItem']",
+    "[class*='tab-item']",
+    "ul.nav-tabs li a",
+    // Bootstrap
+    ".nav-tabs .nav-link",
+    ".nav-pills .nav-link",
+  ];
     for (const sel of selectors) {
       try {
         [...document.querySelectorAll(sel)].forEach((el) => {
@@ -2829,13 +4692,119 @@ async function discoverPageTabs(page) {
         });
       } catch { /* ignore */ }
     }
-    return tabs.slice(0, 6);
+    return tabs.slice(0, 12);
   }).catch(() => []);
 }
 
 // Detect if a modal/dialog/drawer/sheet has opened and extract its actual fields
 async function detectOpenModal(page) {
   return page.evaluate(() => {
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const escapeAttr = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const namedAttr = [
+        ["data-testid", el.getAttribute("data-testid")],
+        ["data-test", el.getAttribute("data-test")],
+        ["data-qa", el.getAttribute("data-qa")],
+      ].find(([, value]) => value);
+      if (namedAttr) return `${tag}[${namedAttr[0]}="${escapeAttr(namedAttr[1])}"]`;
+      const name = el.getAttribute("name");
+      if (name) return `${tag}[name="${escapeAttr(name)}"]`;
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) return `${tag}[aria-label="${escapeAttr(ariaLabel)}"]`;
+      const placeholder = el.getAttribute("placeholder");
+      if (placeholder && placeholder.length < 160) return `${tag}[placeholder="${escapeAttr(placeholder)}"]`;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+    const labelTextFor = (el, scope) => {
+      const parts = [];
+      const push = (value) => {
+        const text = normalize(value);
+        if (text && !parts.includes(text)) parts.push(text);
+      };
+      push(el.getAttribute?.("aria-label"));
+      push(el.getAttribute?.("placeholder"));
+      push(el.getAttribute?.("name"));
+      push(el.id);
+      const labelledBy = el.getAttribute?.("aria-labelledby");
+      if (labelledBy) {
+        for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+          push(scope.querySelector(`#${CSS.escape(id)}`)?.textContent);
+          push(document.getElementById(id)?.textContent);
+        }
+      }
+      if (el.id) {
+        const label = scope.querySelector(`label[for="${CSS.escape(el.id)}"]`) || document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        push(label?.textContent);
+      }
+      push(el.closest("label")?.textContent);
+      push(el.closest(".field, .form-group, .input-group, [role='group']")?.querySelector("label, span, strong, legend, p")?.textContent);
+      push(el.parentElement?.querySelector("label, span, strong, legend, p")?.textContent);
+      push(el.parentElement?.previousElementSibling?.textContent);
+      push(el.closest("div, section, article")?.querySelector("label, span, strong, legend, p")?.textContent);
+      return parts.join(" ");
+    };
+    const fieldFrom = (el, scope) => {
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute("type") || tag).toLowerCase();
+      let kind = "input";
+      if (type === "file") kind = "file";
+      else if (tag === "select") kind = "select";
+      else if (type === "checkbox") kind = "checkbox";
+      else if (type === "radio") kind = "radio";
+      else if (tag === "textarea") kind = "textarea";
+      else if (el.getAttribute("role") === "combobox" || /react-select/i.test(el.id || "") || el.getAttribute("aria-autocomplete") === "list") kind = "combobox";
+      else if (type === "date" || type === "datetime-local" || type === "time") kind = type;
+      else if (type === "number" || type === "range") kind = "number";
+      else if (el.isContentEditable || el.getAttribute("contenteditable") === "true") kind = "richtext";
+      const options = tag === "select"
+        ? [...el.options]
+            .filter((opt) => !opt.disabled)
+            .map((opt) => ({ value: opt.value, text: normalize(opt.textContent || opt.value) }))
+            .filter((opt) => opt.text)
+            .slice(0, 20)
+        : [];
+      return {
+        tag,
+        type,
+        kind,
+        selector: cssPath(el),
+        name: el.getAttribute("name") || null,
+        placeholder: el.getAttribute("placeholder") || null,
+        ariaLabel: el.getAttribute("aria-label") || null,
+        id: el.id || null,
+        label: labelTextFor(el, scope) || null,
+        required: Boolean(el.required || el.getAttribute("aria-required") === "true"),
+        options,
+      };
+    };
     const modalSelectors = [
       "[role='dialog']", "[role='alertdialog']",
       "[aria-modal='true']",
@@ -2848,32 +4817,37 @@ async function detectOpenModal(page) {
     ];
     for (const sel of modalSelectors) {
       try {
-        const el = document.querySelector(sel);
-        if (!el) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 50 || rect.height < 50) continue;
+        const nodes = [...document.querySelectorAll(sel)].filter((node) => visible(node));
+        for (const el of nodes) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 50 || rect.height < 50) continue;
 
-        const inputs = [...el.querySelectorAll(
-          "input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea, select"
-        )].map(inp => ({
-          type: inp.type || inp.tagName.toLowerCase(),
-          name: inp.name || null,
-          placeholder: inp.placeholder || null,
-          ariaLabel: inp.getAttribute("aria-label") || null,
-          id: inp.id || null,
-          required: inp.required,
-        }));
-        const buttons = [...el.querySelectorAll("button, [role='button'], input[type='submit']")]
-          .map(b => (b.innerText || b.value || b.getAttribute("aria-label") || "").trim())
-          .filter(t => t.length > 0 && t.length < 50);
-        const title = (
-          el.querySelector("h1,h2,h3,h4,[class*='title'],[class*='heading'],[class*='header']")?.innerText || ""
-        ).trim().slice(0, 80);
-        return { found: true, inputs, buttons, title };
+          const seenInputs = new Set();
+          const inputs = [...el.querySelectorAll(
+            "input:not([type='hidden']):not([type='submit']), textarea, select, [role='combobox'], [contenteditable='true']"
+          )]
+            .filter((inp) => visible(inp))
+            .map((inp) => fieldFrom(inp, el))
+            .filter((inp) => inp.selector && !seenInputs.has(inp.selector) && seenInputs.add(inp.selector));
+
+          const buttonDetails = [...el.querySelectorAll("button, [role='button'], input[type='submit']")]
+            .filter((btn) => visible(btn))
+            .map((btn) => ({
+              text: normalize(btn.innerText || btn.value || btn.getAttribute("aria-label") || btn.getAttribute("title") || ""),
+              selector: cssPath(btn),
+            }))
+            .filter((btn) => btn.text && btn.text.length < 80)
+            .slice(0, 10);
+          const buttons = buttonDetails.map((btn) => btn.text);
+          const title = (
+            el.querySelector("h1,h2,h3,h4,[class*='title'],[class*='heading'],[class*='header']")?.innerText || ""
+          ).trim().slice(0, 80);
+          return { found: true, inputs, buttons, buttonDetails, title };
+        }
       } catch { /* ignore */ }
     }
-    return { found: false, inputs: [], buttons: [], title: "" };
-  }).catch(() => ({ found: false, inputs: [], buttons: [], title: "" }));
+    return { found: false, inputs: [], buttons: [], buttonDetails: [], title: "" };
+  }).catch(() => ({ found: false, inputs: [], buttons: [], buttonDetails: [], title: "" }));
 }
 
 // Improved page info extraction — only scans visible elements
@@ -2909,23 +4883,756 @@ async function extractPageInfoFull(page) {
   }).catch(() => ({ elements: [], hasForms: false, hasTable: false, hasSearch: false, hasCreateBtn: false, visibleText: "", title: "" }));
 }
 
+function getFormFieldLabel(field = {}) {
+  return clipText(
+    field.label ||
+    field.placeholder ||
+    field.ariaLabel ||
+    field.name ||
+    field.id ||
+    field.title ||
+    field.kind ||
+    field.type ||
+    "field",
+    80
+  );
+}
+
+function getFormFieldKind(field = {}) {
+  const raw = String(field.kind || field.type || field.tag || "").toLowerCase();
+  if (raw.includes("file")) return "file";
+  if (raw.includes("select")) return "select";
+  if (raw.includes("combobox")) return "combobox";
+  if (raw.includes("checkbox")) return "checkbox";
+  if (raw.includes("radio")) return "radio";
+  if (raw.includes("textarea")) return "textarea";
+  if (raw.includes("number") || raw.includes("range")) return "number";
+  if (raw.includes("date")) return "date";
+  if (raw.includes("time")) return "time";
+  if (raw.includes("datetime")) return "datetime";
+  if (raw.includes("email")) return "email";
+  if (raw.includes("password")) return "password";
+  if (raw.includes("url")) return "url";
+  if (raw.includes("search")) return "search";
+  if (raw.includes("richtext")) return "richtext";
+  return "text";
+}
+
+function isTextLikeFormField(field = {}) {
+  return ["text", "textarea", "email", "password", "url", "search", "number", "richtext"].includes(getFormFieldKind(field));
+}
+
+function chooseSubmitButton(buttons = []) {
+  const list = Array.isArray(buttons) ? buttons : [];
+  const normalized = list
+    .map((btn) => typeof btn === "string" ? { text: btn, selector: null } : btn)
+    .filter((btn) => btn && btn.text);
+  const priority = [
+    /^(save|create|submit|update|apply|send|run|generate|invite|confirm|continue|next|done|finish|start)\b/i,
+    /\b(save|create|submit|update|apply|send|run|generate|invite|confirm|continue|next|done|finish|start)\b/i,
+  ];
+  for (const pattern of priority) {
+    const match = normalized.find((btn) => pattern.test(btn.text));
+    if (match) return match;
+  }
+  return normalized[0] || null;
+}
+
+function pickOptionForField(field = {}, preference = "valid") {
+  const options = Array.isArray(field.options) ? field.options : [];
+  if (options.length === 0) return null;
+  const filtered = options.filter((opt) => {
+    const text = String(opt?.text || opt?.value || "").trim().toLowerCase();
+    return text && !["select", "select...", "choose", "choose..."].includes(text);
+  });
+  const usable = filtered.length > 0 ? filtered : options;
+  if (preference === "alternate" && usable[1]) return usable[1];
+  return usable[0] || null;
+}
+
+function buildFieldScenarioValue(field = {}, scenario = "valid", context = {}) {
+  const kind = getFormFieldKind(field);
+  const label = getFormFieldLabel(field).toLowerCase();
+  const moduleName = String(context?.moduleName || "module");
+  const sessionMemory = context?.sessionMemory || null;
+  const today = new Date().toISOString().slice(0, 10);
+  const dateTime = `${today}T09:30`;
+  const token = `${moduleName.replace(/[^a-z0-9]+/gi, "-").toLowerCase().slice(0, 14) || "module"}-${String(sessionMemory?.seed || "deep").slice(-8)}`;
+  const compactToken = token.replace(/[^a-z0-9]+/gi, "").slice(-10) || "deepqa";
+  const prettyToken = compactToken.slice(-6).toUpperCase();
+
+  if (kind === "file") return ensureUploadFixtureFile();
+  if (kind === "checkbox" || kind === "radio") return true;
+  if (kind === "select" || kind === "combobox") {
+    const picked = pickOptionForField(field, scenario === "boundary" ? "alternate" : "valid");
+    return picked ? (picked.value || picked.text) : null;
+  }
+  if (kind === "date") return today;
+  if (kind === "time") return "09:30";
+  if (kind === "datetime") return dateTime;
+
+  if (scenario === "xss") return BREAK_TEST_VALUES.xssImg;
+  if (scenario === "sql") return BREAK_TEST_VALUES.sqlBasic;
+  if (scenario === "boundary") {
+    if (kind === "number") return BREAK_TEST_VALUES.overflowNum;
+    return BREAK_TEST_VALUES.longString;
+  }
+  if (scenario === "invalid") {
+    if (kind === "email") return "not-an-email";
+    if (kind === "password") return "1";
+    if (kind === "number") return "not-a-number";
+    if (kind === "url") return "notaurl";
+    return BREAK_TEST_VALUES.whitespaceOnly;
+  }
+
+  if (/first.?name/.test(label)) return "Deep";
+  if (/last.?name|surname/.test(label)) return `Tester${prettyToken}`;
+  if (/workspace|organization|company/.test(label)) return `Deep ${moduleName} ${prettyToken}`;
+  if (/full.?name|display.?name|name/.test(label)) return `Deep ${moduleName} ${prettyToken}`;
+  if (/user.?name|handle/.test(label)) return `deep_${compactToken}`;
+  if (/email/.test(label) || kind === "email") return `deep.${compactToken}@local.test`;
+  if (/password/.test(label) || kind === "password") return `Deep!${compactToken}A1`;
+  if (/phone|mobile|tel/.test(label)) return "+1234567890";
+  if (/title|subject/.test(label)) return `Deep ${moduleName} Title ${prettyToken}`;
+  if (/message|comment|description|note|bio|about|details/.test(label) || kind === "textarea" || kind === "richtext") {
+    return `Created by the deep browser testing agent for ${moduleName} (${prettyToken}).`;
+  }
+  if (/address/.test(label)) return "123 Test Street";
+  if (/city/.test(label)) return "Test City";
+  if (/state|province/.test(label)) return "Test State";
+  if (/zip|postal|pincode/.test(label)) return "12345";
+  if (/website|url/.test(label) || kind === "url") return "https://example.com";
+  if (kind === "number") return "1";
+  return `Deep ${moduleName} ${prettyToken}`;
+}
+
+function buildEntityRecord(moduleName, filledFields = []) {
+  const normalizedModule = String(moduleName || "module");
+  const record = {
+    module: normalizedModule,
+    entityType: /workspace|organization|tenant|team/i.test(normalizedModule)
+      ? "workspace"
+      : /user|member|people|employee|staff|invite/i.test(normalizedModule)
+        ? "user"
+        : "record",
+    fields: [],
+    primaryValue: null,
+    email: null,
+    username: null,
+    password: null,
+    title: null,
+    name: null,
+  };
+
+  for (const field of filledFields) {
+    const label = String(field?.label || "").toLowerCase();
+    const value = field?.value == null ? null : String(field.value);
+    if (!value) continue;
+    record.fields.push({ label: field.label, value, kind: field.kind });
+    if (!record.primaryValue && value.trim()) record.primaryValue = value;
+    if (!record.email && (/email/.test(label) || field.kind === "email")) record.email = value;
+    if (!record.username && /user.?name|handle|login/.test(label)) record.username = value;
+    if (!record.password && (/password/.test(label) || field.kind === "password")) record.password = value;
+    if (!record.title && /title|subject|workspace|organization|company/.test(label)) record.title = value;
+    if (!record.name && /name/.test(label)) record.name = value;
+  }
+
+  record.primaryValue = record.title || record.name || record.email || record.username || record.primaryValue;
+  if ((record.email || record.username) && record.password) {
+    record.entityType = "user";
+  }
+  return record;
+}
+
+function rememberCreatedEntity(sessionMemory, entityRecord) {
+  if (!sessionMemory || !entityRecord?.primaryValue) return;
+  const exists = sessionMemory.createdEntities.some((entity) =>
+    entity.primaryValue === entityRecord.primaryValue &&
+    entity.module === entityRecord.module
+  );
+  if (!exists) {
+    sessionMemory.createdEntities.push({
+      ...entityRecord,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  if ((entityRecord.email || entityRecord.username) && entityRecord.password) {
+    const loginKey = entityRecord.email || entityRecord.username;
+    const duplicate = sessionMemory.pendingCredentialChecks.some((item) => (item.email || item.username) === loginKey);
+    if (!duplicate) {
+      sessionMemory.pendingCredentialChecks.push({
+        label: entityRecord.primaryValue || loginKey,
+        email: entityRecord.email,
+        username: entityRecord.username,
+        password: entityRecord.password,
+      });
+    }
+  }
+}
+
+async function verifyCreatedEntityClosure({ step, page, entityRecord, slug }) {
+  if (!entityRecord?.primaryValue) return;
+  await step({
+    action: "ai_fill",
+    description: "search bar or search input",
+    value: entityRecord.primaryValue,
+    optional: true,
+  });
+  await page.waitForTimeout(500);
+  await step({ action: "screenshot", label: `${slug}_created_entity_search` });
+  await step({
+    action: "ai_assert",
+    description: `${entityRecord.primaryValue} or the newly created ${entityRecord.entityType} is visible in the current module`,
+    optional: true,
+  });
+  const openCreated = await step({
+    action: "ai_click",
+    description: `${entityRecord.primaryValue} row or card or first matching created ${entityRecord.entityType}`,
+    optional: true,
+  });
+  if (openCreated.status === "passed") {
+    await page.waitForTimeout(800);
+    await step({ action: "screenshot", label: `${slug}_created_entity_opened` });
+    await step({
+      action: "ai_assert",
+      description: `details or profile page for ${entityRecord.primaryValue} is visible`,
+      optional: true,
+    });
+    await forceCloseModal(page);
+  }
+}
+
+async function runCredentialClosureChecks({
+  browser,
+  sessionMemory,
+  runId,
+  resultOffset,
+  runController = null,
+}) {
+  const stepResults = [];
+  const pending = Array.isArray(sessionMemory?.pendingCredentialChecks)
+    ? sessionMemory.pendingCredentialChecks.slice(0, 3)
+    : [];
+
+  for (const credential of pending) {
+    if (runController) {
+      await runController.assertActive({ phase: "credential_check", identity: credential.email || credential.username });
+    }
+
+    const authContext = await createStealthContext(browser);
+    const authPage = await authContext.newPage();
+    authPage.on("dialog", async (dialog) => { try { await dialog.accept("yes"); } catch { /* ignore */ } });
+
+    const loginId = credential.email || credential.username;
+    const loginSteps = [
+      { action: "navigate", url: sessionMemory.auth.loginUrl, description: `Open login for created ${credential.label || "account"}` },
+      { action: "ai_fill", description: "email or username input field", value: loginId },
+      { action: "ai_fill", description: "password input field", value: credential.password },
+      { action: "ai_click", description: "login or sign in submit button" },
+      { action: "wait", ms: 2500, description: "Wait for credential-login redirect" },
+      { action: "screenshot", label: `credential_login_${String(credential.label || loginId).replace(/[^a-z0-9]+/gi, "_").toLowerCase()}` },
+      { action: "ai_assert", description: "logged in successfully or dashboard/home page visible", optional: true },
+    ];
+
+    try {
+      const results = await executeBrowserSteps(loginSteps, 18000, {
+        runId,
+        stopOnFailure: false,
+        _existingPage: authPage,
+        _existingContext: authContext,
+        _existingBrowser: browser,
+        _resultOffset: resultOffset + stepResults.length,
+        runController,
+      });
+      stepResults.push(...results);
+
+      const loginStillVisible = await authPage.evaluate(() => {
+        const visible = (el) => {
+          if (!(el instanceof Element)) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+        };
+        return visible(document.querySelector('input[type="password"], input[name*="password" i]'));
+      }).catch(() => false);
+
+      sessionMemory.credentialChecks.push({
+        label: credential.label,
+        email: credential.email || null,
+        username: credential.username || null,
+        status: loginStillVisible ? "failed" : "passed",
+        message: loginStillVisible
+          ? "Generated credentials could not complete a fresh login session."
+          : "Generated credentials completed a fresh login session.",
+      });
+    } finally {
+      await authContext.close().catch(() => {});
+    }
+  }
+
+  return stepResults;
+}
+
+async function collectVisiblePageForms(page) {
+  return page.evaluate(() => {
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      const tag = el.tagName.toLowerCase();
+      const escapeAttr = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const namedAttr = [
+        ["data-testid", el.getAttribute("data-testid")],
+        ["data-test", el.getAttribute("data-test")],
+        ["data-qa", el.getAttribute("data-qa")],
+      ].find(([, value]) => value);
+      if (namedAttr) return `${tag}[${namedAttr[0]}="${escapeAttr(namedAttr[1])}"]`;
+      const name = el.getAttribute("name");
+      if (name) return `${tag}[name="${escapeAttr(name)}"]`;
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) return `${tag}[aria-label="${escapeAttr(ariaLabel)}"]`;
+      const placeholder = el.getAttribute("placeholder");
+      if (placeholder && placeholder.length < 160) return `${tag}[placeholder="${escapeAttr(placeholder)}"]`;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+    const labelTextFor = (el, scope) => {
+      const parts = [];
+      const push = (value) => {
+        const text = normalize(value);
+        if (text && !parts.includes(text)) parts.push(text);
+      };
+      push(el.getAttribute?.("aria-label"));
+      push(el.getAttribute?.("placeholder"));
+      push(el.getAttribute?.("name"));
+      push(el.id);
+      const labelledBy = el.getAttribute?.("aria-labelledby");
+      if (labelledBy) {
+        for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+          push(scope.querySelector(`#${CSS.escape(id)}`)?.textContent);
+          push(document.getElementById(id)?.textContent);
+        }
+      }
+      if (el.id) {
+        const label = scope.querySelector(`label[for="${CSS.escape(el.id)}"]`) || document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        push(label?.textContent);
+      }
+      push(el.closest("label")?.textContent);
+      push(el.closest(".field, .form-group, .input-group, [role='group']")?.querySelector("label, span, strong, legend, p")?.textContent);
+      push(el.parentElement?.querySelector("label, span, strong, legend, p")?.textContent);
+      push(el.parentElement?.previousElementSibling?.textContent);
+      push(el.closest("div, section, article")?.querySelector("label, span, strong, legend, p")?.textContent);
+      return parts.join(" ");
+    };
+    const fieldFrom = (el, scope) => {
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute("type") || tag).toLowerCase();
+      let kind = "input";
+      if (type === "file") kind = "file";
+      else if (tag === "select") kind = "select";
+      else if (type === "checkbox") kind = "checkbox";
+      else if (type === "radio") kind = "radio";
+      else if (tag === "textarea") kind = "textarea";
+      else if (el.getAttribute("role") === "combobox" || /react-select/i.test(el.id || "") || el.getAttribute("aria-autocomplete") === "list") kind = "combobox";
+      else if (type === "date" || type === "datetime-local" || type === "time") kind = type;
+      else if (type === "number" || type === "range") kind = "number";
+      else if (el.isContentEditable || el.getAttribute("contenteditable") === "true") kind = "richtext";
+      const options = tag === "select"
+        ? [...el.options]
+            .filter((opt) => !opt.disabled)
+            .map((opt) => ({ value: opt.value, text: normalize(opt.textContent || opt.value) }))
+            .filter((opt) => opt.text)
+            .slice(0, 20)
+        : [];
+      return {
+        tag,
+        type,
+        kind,
+        selector: cssPath(el),
+        name: el.getAttribute("name") || null,
+        placeholder: el.getAttribute("placeholder") || null,
+        ariaLabel: el.getAttribute("aria-label") || null,
+        id: el.id || null,
+        label: labelTextFor(el, scope) || null,
+        required: Boolean(el.required || el.getAttribute("aria-required") === "true"),
+        options,
+      };
+    };
+    const buttonDetailsFor = (scope) =>
+      [...scope.querySelectorAll("button, [role='button'], input[type='submit']")]
+        .filter((btn) => visible(btn))
+        .map((btn) => ({
+          text: normalize(btn.innerText || btn.value || btn.getAttribute("aria-label") || btn.getAttribute("title") || ""),
+          selector: cssPath(btn),
+        }))
+        .filter((btn) => btn.text && btn.text.length < 80)
+        .slice(0, 10);
+    const fieldSelector = "input:not([type='hidden']):not([type='submit']), textarea, select, [role='combobox'], [contenteditable='true']";
+    const forms = [];
+    const seen = new Set();
+
+    for (const form of [...document.querySelectorAll("form")]) {
+      if (!visible(form) || form.closest("[role='dialog'], [aria-modal='true']")) continue;
+      const fieldSeen = new Set();
+      const fields = [...form.querySelectorAll(fieldSelector)]
+        .filter((el) => visible(el))
+        .map((el) => fieldFrom(el, form))
+        .filter((field) => field.selector && !fieldSeen.has(field.selector) && fieldSeen.add(field.selector));
+      const buttonDetails = buttonDetailsFor(form);
+      if (fields.length === 0 || buttonDetails.length === 0) continue;
+      const signature = fields.map((field) => field.selector).join("|");
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      forms.push({
+        scope: "page",
+        synthetic: false,
+        title: normalize(form.querySelector("h1,h2,h3,h4,legend,[class*='title'],[class*='heading']")?.textContent || ""),
+        fields,
+        buttons: buttonDetails.map((btn) => btn.text),
+        buttonDetails,
+      });
+    }
+
+    const submitPattern = /\b(save|update|submit|apply|run|generate|invite|create|send|confirm|continue|next|done|finish|start)\b/i;
+    const containerCandidates = [...document.querySelectorAll("section, article, aside, main, [class*='card'], [class*='panel'], [class*='form'], div")]
+      .filter((el) => visible(el) && !el.closest("form") && !el.closest("[role='dialog'], [aria-modal='true']"));
+
+    for (const container of containerCandidates.slice(0, 40)) {
+      const fieldSeen = new Set();
+      const fields = [...container.querySelectorAll(fieldSelector)]
+        .filter((el) => visible(el) && !el.closest("form") && !el.closest("[role='dialog'], [aria-modal='true']"))
+        .map((el) => fieldFrom(el, container))
+        .filter((field) => field.selector && !fieldSeen.has(field.selector) && fieldSeen.add(field.selector));
+      const buttonDetails = buttonDetailsFor(container).filter((btn) => submitPattern.test(btn.text));
+      if (fields.length < 2 || buttonDetails.length === 0) continue;
+      const signature = fields.map((field) => field.selector).join("|");
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      forms.push({
+        scope: "page",
+        synthetic: true,
+        title: normalize(container.querySelector("h1,h2,h3,h4,[class*='title'],[class*='heading']")?.textContent || ""),
+        fields,
+        buttons: buttonDetails.map((btn) => btn.text),
+        buttonDetails,
+      });
+      if (forms.length >= 8) break;
+    }
+
+    return forms.slice(0, 8);
+  }).catch(() => []);
+}
+
+async function collectSelectableControls(page) {
+  return page.evaluate(() => {
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+    };
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return null;
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && parts.length < 8) {
+        let part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += `#${CSS.escape(node.id)}`;
+          parts.unshift(part);
+          break;
+        }
+        const siblings = node.parentElement
+          ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(" > ");
+    };
+    const labelTextFor = (el) => {
+      const parts = [];
+      const push = (value) => {
+        const text = normalize(value);
+        if (text && !parts.includes(text)) parts.push(text);
+      };
+      push(el.getAttribute?.("aria-label"));
+      push(el.getAttribute?.("placeholder"));
+      push(el.getAttribute?.("name"));
+      push(el.id);
+      if (el.id) {
+        push(document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent);
+      }
+      push(el.closest("label")?.textContent);
+      push(el.closest(".field, .form-group, .input-group, [role='group']")?.querySelector("label, span, strong, legend, p")?.textContent);
+      push(el.parentElement?.querySelector("label, span, strong, legend, p")?.textContent);
+      push(el.parentElement?.previousElementSibling?.textContent);
+      push(el.closest("div, section, article")?.querySelector("label, span, strong, legend, p")?.textContent);
+      return parts.join(" ");
+    };
+
+    const raw = [
+      ...document.querySelectorAll("select"),
+      ...document.querySelectorAll("input[role='combobox']"),
+      ...document.querySelectorAll("[role='combobox']"),
+      ...document.querySelectorAll("input[id*='react-select'][id$='-input']"),
+      ...document.querySelectorAll("[class*='select__control'], [class*='rs__control'], [class*='react-select__control']"),
+    ];
+    const controls = [];
+    const seen = new Set();
+
+    for (const node of raw) {
+      if (!visible(node)) continue;
+      let target = node;
+      let kind = "combobox";
+      if (node.matches("select")) {
+        kind = "select";
+      } else if (node.matches("[class*='select__control'], [class*='rs__control'], [class*='react-select__control']")) {
+        target = node.querySelector("input[role='combobox'], input") || node;
+      }
+      const selector = cssPath(target);
+      if (!selector || seen.has(selector)) continue;
+      seen.add(selector);
+      const label = labelTextFor(target) || "select";
+      const options = kind === "select"
+        ? [...target.options]
+            .filter((opt) => !opt.disabled)
+            .map((opt) => ({ value: opt.value, text: normalize(opt.textContent || opt.value) }))
+            .filter((opt) => opt.text)
+            .slice(0, 20)
+        : [];
+      controls.push({ label, selector, kind, options });
+    }
+
+    return controls.slice(0, 15);
+  }).catch(() => []);
+}
+
+async function sampleSelectableOptions(page, control, timeoutMs = 10000) {
+  if (Array.isArray(control?.options) && control.options.length > 0) {
+    return control.options;
+  }
+  if (!control?.selector) return [];
+
+  try {
+    const loc = page.locator(control.selector).first();
+    await loc.scrollIntoViewIfNeeded({ timeout: Math.min(timeoutMs, 4000) }).catch(() => {});
+    await loc.click({ timeout: Math.min(timeoutMs, 5000) });
+    await page.waitForTimeout(300);
+    const options = await page.evaluate(() => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof Element)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+      };
+      return [
+        ...document.querySelectorAll("[role='option']"),
+        ...document.querySelectorAll("[id*='-option-']"),
+        ...document.querySelectorAll(".rs__option, [class*='select__option']"),
+      ]
+        .filter((el) => visible(el))
+        .map((el) => {
+          const text = normalize(el.textContent || "");
+          return text ? { value: text, text } : null;
+        })
+        .filter(Boolean)
+        .slice(0, 12);
+    }).catch(() => []);
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(200);
+    return options;
+  } catch {
+    await page.keyboard.press("Escape").catch(() => {});
+    return [];
+  }
+}
+
+async function fillFormField(step, field, scenario = "valid", context = {}) {
+  const kind = getFormFieldKind(field);
+  const label = getFormFieldLabel(field);
+  const value = buildFieldScenarioValue(field, scenario, context);
+  if (value === null || value === undefined) {
+    return { status: "skipped", reason: "no test value", kind, label, value: null, field };
+  }
+
+  let stepResult;
+  if (kind === "checkbox" || kind === "radio") {
+    stepResult = await step({ action: "ai_click", description: `${label} option`, selector: field.selector, optional: true });
+  } else if (kind === "file") {
+    stepResult = await step({ action: "upload_file", description: label, selector: field.selector, filePath: value, optional: true });
+  } else if (kind === "select" || kind === "combobox") {
+    stepResult = await step({ action: "select_option", description: label, selector: field.selector, value, optional: true });
+  } else {
+    stepResult = await step({ action: "ai_fill", description: `${label} field`, selector: field.selector, value, optional: true });
+  }
+
+  return {
+    ...(stepResult || { status: "skipped" }),
+    kind,
+    label,
+    value,
+    field,
+  };
+}
+
+async function exerciseFormScenario({
+  step,
+  page,
+  form,
+  scenario,
+  screenshotLabel,
+  successAssertion,
+  moduleName = "module",
+  slug = "module",
+  sessionMemory = null,
+}) {
+  const submitButton = chooseSubmitButton(form?.buttonDetails || form?.buttons || []);
+  if (!submitButton?.text) {
+    return { status: "skipped", reason: "no submit button" };
+  }
+
+  const fields = Array.isArray(form?.fields) ? form.fields.slice(0, 20) : [];
+  if (scenario === "empty") {
+    const clickResult = await step({ action: "ai_click", description: submitButton.text, selector: submitButton.selector, optional: true });
+    await page.waitForTimeout(700);
+    await step({ action: "screenshot", label: screenshotLabel });
+    await step({ action: "ai_assert", description: "validation errors or required field messages are visible", optional: true });
+    return clickResult;
+  }
+
+  let targetedMutation = false;
+  const filledFields = [];
+  for (const field of fields) {
+    const kind = getFormFieldKind(field);
+    let fieldScenario = "valid";
+    if (!targetedMutation && ["xss", "sql", "boundary", "invalid"].includes(scenario) && isTextLikeFormField(field)) {
+      fieldScenario = scenario;
+      targetedMutation = true;
+    } else if (!(field.required || ["valid", "boundary"].includes(scenario) || ["checkbox", "radio", "select", "combobox", "file"].includes(kind))) {
+      continue;
+    }
+
+    const filled = await fillFormField(step, field, fieldScenario, { moduleName, sessionMemory });
+    if (filled?.value != null) {
+      filledFields.push({
+        label: filled.label,
+        kind: filled.kind,
+        value: filled.value,
+      });
+    }
+  }
+
+  if (["xss", "sql", "boundary", "invalid"].includes(scenario) && !targetedMutation) {
+    return { status: "skipped", reason: "no suitable target field" };
+  }
+
+  const clickResult = await step({ action: "ai_click", description: submitButton.text, selector: submitButton.selector, optional: true });
+  await page.waitForTimeout(1100);
+  await step({ action: "screenshot", label: screenshotLabel });
+  if (scenario === "valid") {
+    await step({ action: "ai_assert", description: successAssertion || "success message shown or new item appears in list", optional: true });
+    const entityRecord = buildEntityRecord(moduleName, filledFields);
+    rememberCreatedEntity(sessionMemory, entityRecord);
+    await verifyCreatedEntityClosure({ step, page, entityRecord, slug });
+  } else if (scenario === "invalid") {
+    await step({ action: "ai_assert", description: "validation error or rejection message is shown and the page does not crash", optional: true });
+  } else {
+    await step({ action: "ai_assert", description: "no alert dialog appeared and no SQL, server, or unhandled error is visible", optional: true });
+  }
+  return clickResult;
+}
+
 // ─────────────────────────────────────────────────────────
 // ADAPTIVE DEEP MODULE TESTER
 // Observes the page at each step — fills forms from ACTUAL modal DOM, not pre-snapshot
 // ─────────────────────────────────────────────────────────
-async function executeDeepModuleTest(page, moduleName, { context, browser, runId, resultOffset, moduleTimeoutMs }) {
+async function executeDeepModuleTest(page, moduleName, {
+  context,
+  browser,
+  runId,
+  resultOffset,
+  moduleTimeoutMs,
+  expectedModuleUrl = null,
+  runController = null,
+  sessionMemory = null,
+  reconData = null,   // Phase 1 deep-recon output — buttons, tabs, tabContents, forms, tables
+}) {
   const allResults = [];
   const slug = moduleName.replace(/[^a-z0-9]/gi, "_").toLowerCase();
+  const actionTimeoutMs = normalizeActionTimeoutMs(moduleTimeoutMs, 18000);
+  const expectedPathKey = (() => {
+    try {
+      const pathname = new URL(expectedModuleUrl || page.url()).pathname;
+      return pathname.split("/").filter(Boolean)[0] || "root";
+    } catch {
+      return null;
+    }
+  })();
 
   // Run one step on the shared page and collect result
   async function step(s) {
-    const r = await executeBrowserSteps([s], Math.min(moduleTimeoutMs, 14000), {
+    if (runController) {
+      await runController.assertActive({
+        phase: "module_step",
+        moduleName,
+        stepIndex: resultOffset + allResults.length,
+      });
+    }
+
+    if (
+      expectedModuleUrl &&
+      !["navigate", "go_back", "open_tab", "switch_tab"].includes(s.action || "")
+    ) {
+      try {
+        const currentPathKey = new URL(page.url()).pathname.split("/").filter(Boolean)[0] || "root";
+        if (expectedPathKey && currentPathKey !== expectedPathKey) {
+          await page.goto(expectedModuleUrl, { timeout: Math.min(actionTimeoutMs, 20000), waitUntil: "domcontentloaded" });
+          await page.waitForTimeout(900);
+          await dismissOverlays(page).catch(() => {});
+        }
+      } catch {
+        // Best-effort context recovery only.
+      }
+    }
+
+    const r = await executeBrowserSteps([s], Math.min(actionTimeoutMs, 20000), {
       runId,
       stopOnFailure: false,
       _existingPage: page,
       _existingContext: context,
       _existingBrowser: browser,
       _resultOffset: resultOffset + allResults.length,
+      runController,
     });
     allResults.push(...r);
     return r[0] || { status: "skipped" };
@@ -2935,6 +5642,8 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
   await step({ action: "screenshot", label: `${slug}_initial` });
   const info = await extractPageInfoFull(page);
   const pageTabs = await discoverPageTabs(page);
+  const pageForms = await collectVisiblePageForms(page);
+  const selectableControls = await collectSelectableControls(page);
   await step({ action: "check_performance", description: `${moduleName} performance`, failOnSlow: false });
 
   // ── Detect module type for specialized handling ──
@@ -2942,15 +5651,101 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
   const isChatModule = /\bchat\b|message|inbox|conversation|support|helpdesk|ticket|dm\b/.test(moduleNameLower);
   const isReportModule = /report|analytic|statistic|insight|dashboard|metric|chart|graph/.test(moduleNameLower);
 
-  // ── 2. Tab / sub-section exploration ──
-  if (pageTabs.length > 1) {
-    for (const tab of pageTabs.slice(0, 4)) {
-      const r = await step({ action: "ai_click", description: `${tab.text} tab or section`, optional: true });
-      if (r.status === "passed") {
-        await page.waitForTimeout(600);
-        await step({ action: "screenshot", label: `${slug}_tab_${tab.text.replace(/\s+/g, "_").toLowerCase()}` });
+  // ── 2. Tab / sub-section exploration — ALL tabs, tested deeply ──
+  // Merge runtime-discovered tabs with any extra tabs found during Phase 1 recon
+  const reconTabContents = reconData?.tabContents || [];
+  const allTabNames = new Set([
+    ...pageTabs.map(t => t.text),
+    ...reconTabContents.map(t => t.tab),
+  ]);
+  const tabsToTest = [...allTabNames].filter(Boolean);
+
+  for (const tabName of tabsToTest) {
+    const tabSlug = tabName.replace(/\s+/g, "_").toLowerCase();
+    const r = await step({ action: "ai_click", description: `"${tabName}" tab`, optional: true });
+    if (r.status !== "passed") continue;
+    await page.waitForTimeout(800);
+    await step({ action: "screenshot", label: `${slug}_tab_${tabSlug}` });
+
+    // Detect forms and buttons now visible inside this tab
+    const tabPageForms = await collectVisiblePageForms(page).catch(() => []);
+
+    // Exercise any form visible inside this tab
+    if (tabPageForms.length > 0) {
+      const tabForm = tabPageForms[0];
+      await exerciseFormScenario({
+        step, page,
+        form: tabForm,
+        scenario: "empty",
+        screenshotLabel: `${slug}_tab_${tabSlug}_empty_validation`,
+        moduleName, slug, sessionMemory,
+      });
+      await forceCloseModal(page);
+      await exerciseFormScenario({
+        step, page,
+        form: tabForm,
+        scenario: "valid",
+        screenshotLabel: `${slug}_tab_${tabSlug}_valid_submit`,
+        successAssertion: "success message shown or item saved",
+        moduleName, slug, sessionMemory,
+      });
+      await forceCloseModal(page);
+    }
+
+    // Click every button inside this tab that opens a modal (from Phase 1 recon)
+    const reconTab = reconTabContents.find(t => t.tab === tabName);
+    for (const mb of (reconTab?.modalButtons || []).slice(0, 8)) {
+      const mbResult = await step({ action: "ai_click", description: `"${mb.text}" button inside "${tabName}" tab`, optional: true });
+      if (mbResult.status !== "passed") continue;
+      await page.waitForTimeout(1000);
+      const innerModal = await detectOpenModal(page).catch(() => ({ found: false, inputs: [], buttons: [] }));
+      if (innerModal.found && innerModal.inputs.length > 0) {
+        await step({ action: "screenshot", label: `${slug}_tab_${tabSlug}_${mb.text.replace(/\s+/g, "_").toLowerCase().slice(0, 20)}_modal` });
+        await exerciseFormScenario({
+          step, page,
+          form: { fields: innerModal.inputs, buttons: innerModal.buttons, buttonDetails: innerModal.buttonDetails },
+          scenario: "empty",
+          screenshotLabel: `${slug}_tab_${tabSlug}_${mb.text.replace(/\s+/g, "_").toLowerCase().slice(0, 20)}_empty`,
+          moduleName, slug, sessionMemory,
+        });
+        await forceCloseModal(page);
+        await step({ action: "ai_click", description: `"${mb.text}" button inside "${tabName}" tab`, optional: true });
+        await page.waitForTimeout(800);
+        const innerModal2 = await detectOpenModal(page).catch(() => ({ found: false, inputs: [], buttons: [] }));
+        if (innerModal2.found && innerModal2.inputs.length > 0) {
+          await exerciseFormScenario({
+            step, page,
+            form: { fields: innerModal2.inputs, buttons: innerModal2.buttons, buttonDetails: innerModal2.buttonDetails },
+            scenario: "valid",
+            screenshotLabel: `${slug}_tab_${tabSlug}_${mb.text.replace(/\s+/g, "_").toLowerCase().slice(0, 20)}_valid`,
+            successAssertion: "success or item created",
+            moduleName, slug, sessionMemory,
+          });
+        }
+        await forceCloseModal(page);
       }
     }
+
+    // Click non-modal buttons visible in this tab (in-page interactions)
+    if (!reconTab) {
+      const inPageBtns = await page.evaluate(() =>
+        [...document.querySelectorAll("button:not([disabled]), [role='button']:not([aria-disabled='true'])")]
+          .filter(b => {
+            const r = b.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.top > 100;
+          })
+          .map(b => (b.innerText || b.getAttribute("aria-label") || "").trim())
+          .filter(t => t.length > 1 && t.length < 40)
+          .slice(0, 5)
+      ).catch(() => []);
+      for (const btnText of inPageBtns) {
+        await step({ action: "ai_click", description: `"${btnText}" button`, optional: true });
+        await page.waitForTimeout(500);
+        await forceCloseModal(page);
+      }
+    }
+
+    await step({ action: "screenshot", label: `${slug}_tab_${tabSlug}_done` });
   }
 
   // ── 3. Module-type-specific deep tests ──
@@ -2989,7 +5784,7 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
     if (chatEntries.length > 0) {
       console.log(`[deepExplore] Found ${chatEntries.length} chat entries in ${moduleName}:`, chatEntries);
       // Test each chat entry (up to 3 to keep runtime reasonable)
-      for (const entry of chatEntries.slice(0, 3)) {
+      for (const entry of chatEntries.slice(0, 6)) {
         const clicked = await step({ action: "ai_click", description: `"${entry}" chat entry or conversation item`, optional: true });
         if (clicked.status === "passed") {
           await page.waitForTimeout(1000);
@@ -3034,6 +5829,21 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
       });
       await step({ action: "screenshot", label: `${slug}_after_conversation` });
     }
+
+    const huddleProbe = await step({
+      action: "ai_click",
+      description: "start huddle or join huddle button",
+      optional: true,
+    });
+    if (huddleProbe.status === "passed") {
+      await page.waitForTimeout(1200);
+      await step({ action: "screenshot", label: `${slug}_huddle_probe` });
+      await step({
+        action: "ai_assert",
+        description: "huddle UI opened, permission prompt appeared, or a clear realtime status is visible",
+        optional: true,
+      });
+    }
   } else if (isReportModule) {
     // Analytics/Reports: verify charts load, try filters
     await step({ action: "ai_assert", description: `${moduleName} charts or data visualizations have loaded` });
@@ -3049,14 +5859,209 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
 
   // ── 4. Search functionality ──
   if (info.hasSearch) {
-    const r = await step({ action: "ai_fill", description: "search bar or search input", value: "test", optional: true });
-    if (r.status === "passed") {
-      await page.waitForTimeout(900);
-      await step({ action: "screenshot", label: `${slug}_search_results` });
+    const searchScenarios = [
+      {
+        value: "test",
+        screenshot: `${slug}_search_results`,
+        assertion: "search results or filtered content are visible",
+      },
+      {
+        value: BREAK_TEST_VALUES.sqlBasic,
+        screenshot: `${slug}_search_injection_attempt`,
+        assertion: "page did not crash and no SQL or server error is visible",
+      },
+      {
+        value: BREAK_TEST_VALUES.xssImg,
+        screenshot: `${slug}_search_xss_attempt`,
+        assertion: "no alert dialog appeared and the page stayed stable",
+      },
+      {
+        value: BREAK_TEST_VALUES.longString,
+        screenshot: `${slug}_search_boundary_attempt`,
+        assertion: "search input handled the long query without freezing or breaking the layout",
+      },
+    ];
+    for (const scenario of searchScenarios) {
+      const searchResult = await step({
+        action: "ai_fill",
+        description: "search bar or search input",
+        value: scenario.value,
+        optional: true,
+      });
+      if (searchResult.status === "passed") {
+        await page.waitForTimeout(900);
+        await step({ action: "screenshot", label: scenario.screenshot });
+        await step({ action: "ai_assert", description: scenario.assertion, optional: true });
+      }
     }
     // Clear search to restore state
     await step({ action: "ai_fill", description: "search bar or search input", value: "", optional: true });
     await page.waitForTimeout(400);
+  }
+
+  if (info.hasTable) {
+    // ── Re-verify table is still visible on the live page before row testing ──
+    const tableStillVisible = await page.evaluate(() => {
+      const el = document.querySelector("table, [role='grid'], [role='table'], [class*='data-table'], [class*='DataGrid'], [class*='MuiDataGrid']");
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }).catch(() => false);
+
+    if (tableStillVisible) {
+    // ── Open first 3 rows to verify detail view works ──
+    for (let rowIndex = 0; rowIndex < 3; rowIndex++) {
+      const rowDesc = rowIndex === 0 ? "first" : rowIndex === 1 ? "second" : "third";
+      const rowUrlBefore = page.url();
+
+      // Guard: confirm table rows exist on live page before clicking
+      const hasRows = await page.evaluate(() => {
+        const rows = document.querySelectorAll(
+          "table tbody tr, [role='row']:not([role='columnheader']):not([role='rowgroup']), [class*='MuiDataGrid-row'], [class*='table-row']:not([class*='header'])"
+        );
+        return rows.length > 0;
+      }).catch(() => false);
+      if (!hasRows) break;
+
+      const openRow = await step({
+        action: "ai_click",
+        description: `${rowDesc} row or ${rowDesc} item or ${rowDesc} record in table or list`,
+        optional: true,
+      });
+      if (openRow.status === "passed") {
+        await page.waitForTimeout(900);
+        await step({ action: "screenshot", label: `${slug}_row_${rowIndex + 1}_opened` });
+        await step({ action: "ai_assert", description: "record details or drawer or modal opened", optional: true });
+        await forceCloseModal(page);
+        if (page.url() !== rowUrlBefore) {
+          await step({ action: "go_back", description: "Return to list view", optional: true });
+          // Wait for table to re-appear after back navigation (SPA may need time to hydrate)
+          await page.waitForTimeout(800);
+          const tableBack = await page.waitForSelector(
+            "table, [role='grid'], [role='table'], [class*='DataGrid'], [class*='MuiDataGrid']",
+            { timeout: 5000, state: "visible" }
+          ).then(() => true).catch(() => false);
+          if (!tableBack) break; // table didn't come back — stop row testing
+        }
+      } else {
+        break; // no more rows
+      }
+    }
+    } // end tableStillVisible
+
+    // ── Column sort — click each visible column header and verify order changes ──
+    const columnHeaders = await page.evaluate(() => {
+      const seen = new Set();
+      return [
+        ...document.querySelectorAll(
+          "th, [role='columnheader'], thead td, [class*='table-header'] > *, [class*='TableHead'] th, [class*='DataGrid-columnHeader']"
+        ),
+      ]
+        .filter(h => {
+          const r = h.getBoundingClientRect();
+          const t = (h.innerText || h.getAttribute("aria-label") || "").trim();
+          if (!t || t.length < 2 || seen.has(t.toLowerCase())) return false;
+          seen.add(t.toLowerCase());
+          return r.width > 0 && r.height > 0;
+        })
+        .map(h => (h.innerText || h.getAttribute("aria-label") || "").trim())
+        .slice(0, 8);
+    }).catch(() => []);
+
+    for (const headerText of columnHeaders) {
+      const sortResult = await step({
+        action: "ai_click",
+        description: `"${headerText}" column header to sort`,
+        optional: true,
+      });
+      if (sortResult.status === "passed") {
+        await page.waitForTimeout(600);
+        await step({ action: "screenshot", label: `${slug}_sort_${headerText.replace(/\s+/g, "_").toLowerCase().slice(0, 20)}` });
+        await step({ action: "ai_assert", description: "table data appears reordered or sort indicator visible", optional: true });
+        // Click again to test reverse sort
+        await step({ action: "ai_click", description: `"${headerText}" column header to reverse sort`, optional: true });
+        await page.waitForTimeout(400);
+        await step({ action: "screenshot", label: `${slug}_sort_${headerText.replace(/\s+/g, "_").toLowerCase().slice(0, 20)}_desc` });
+      }
+    }
+
+    // ── Pagination — navigate to next page if available ──
+    const hasPagination = await page.evaluate(() => {
+      const next = document.querySelector(
+        '[aria-label*="next" i], [title*="next page" i], [class*="next-page"], [data-testid*="next"], .MuiPaginationItem-root, [class*="pagination"] button, button[aria-label="Go to next page"]'
+      );
+      if (!next) return false;
+      const r = next.getBoundingClientRect();
+      const disabled = next.disabled || next.getAttribute("aria-disabled") === "true" || next.classList.contains("Mui-disabled");
+      return r.width > 0 && !disabled;
+    }).catch(() => false);
+
+    if (hasPagination) {
+      const pageUrlBefore = page.url();
+      const nextResult = await step({ action: "ai_click", description: "next page button or page 2 pagination", optional: true });
+      if (nextResult.status === "passed") {
+        await page.waitForTimeout(800);
+        await step({ action: "screenshot", label: `${slug}_page_2` });
+        await step({ action: "ai_assert", description: "different data loaded on page 2", optional: true });
+        // Go back to page 1
+        await step({ action: "ai_click", description: "previous page button or page 1 pagination", optional: true });
+        await page.waitForTimeout(600);
+        if (page.url() !== pageUrlBefore) {
+          await step({ action: "go_back", description: "Return to page 1", optional: true });
+        }
+      }
+    }
+  }
+
+  for (const control of selectableControls.slice(0, 12)) {
+    const sampledOptions = await sampleSelectableOptions(page, control, actionTimeoutMs);
+    const primary = pickOptionForField({ ...control, options: sampledOptions.length > 0 ? sampledOptions : control.options }, "valid");
+    const alternate = pickOptionForField({ ...control, options: sampledOptions.length > 0 ? sampledOptions : control.options }, "alternate");
+    const candidateValues = [primary, alternate].filter((opt, index, arr) =>
+      opt && arr.findIndex((item) => String(item.value || item.text) === String(opt.value || opt.text)) === index
+    );
+
+    for (const option of candidateValues.slice(0, 4)) {
+      const selectResult = await step({
+        action: "select_option",
+        description: control.label,
+        selector: control.selector,
+        value: option.value || option.text,
+        optional: true,
+      });
+      if (selectResult.status === "passed") {
+        await page.waitForTimeout(700);
+        await step({ action: "screenshot", label: `${slug}_select_${control.label.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}` });
+        await step({ action: "ai_assert", description: "page content updated after selecting an option", optional: true });
+      }
+    }
+  }
+
+  const uploadTargets = await page.evaluate(() =>
+    [...document.querySelectorAll('input[type="file"]')]
+      .filter((inp) => {
+        const rect = inp.getBoundingClientRect();
+        return rect.width > 0 || rect.height > 0 || inp.closest("label, form, [role='dialog']");
+      })
+      .slice(0, 2)
+      .map((inp) => inp.getAttribute("aria-label") || inp.name || inp.id || "file upload input")
+  ).catch(() => []);
+
+  if (uploadTargets.length > 0) {
+    const uploadFixturePath = ensureUploadFixtureFile();
+    for (const target of uploadTargets) {
+      const uploadResult = await step({
+        action: "upload_file",
+        description: target,
+        filePath: uploadFixturePath,
+        optional: true,
+      });
+      if (uploadResult.status === "passed") {
+        await page.waitForTimeout(700);
+        await step({ action: "screenshot", label: `${slug}_upload_${target.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}` });
+        await step({ action: "ai_assert", description: "uploaded file name or attachment preview is visible", optional: true });
+      }
+    }
   }
 
   // ── 5. CREATE flow — adaptive: detects actual modal fields after opening ──
@@ -3068,49 +6073,151 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
       await step({ action: "screenshot", label: `${slug}_create_opened` });
 
       if (modal.found && modal.inputs.length > 0) {
-        // Fill from ACTUAL fields in the opened modal/form
-        const TEST = {
-          name: "Deep Test Item",
-          email: "deeptest@example.com",
-          username: "deeptest_user",
-          password: "TestPassword123!",
-          phone: "+1234567890",
-          description: "Created by automated deep test",
-          title: "Test Entry",
-          message: "Hello from deep test agent",
-          number: "1",
-        };
-        for (const inp of modal.inputs.slice(0, 8)) {
-          const hint = (inp.placeholder || inp.ariaLabel || inp.name || inp.type || "").toLowerCase();
-          if (!hint || hint === "hidden") continue;
-          let val = TEST.name;
-          if (/email/.test(hint)) val = TEST.email;
-          else if (/password|pass/.test(hint)) val = TEST.password;
-          else if (/phone|mobile|tel/.test(hint)) val = TEST.phone;
-          else if (/description|note|bio|about|comment/.test(hint)) val = TEST.description;
-          else if (/title/.test(hint)) val = TEST.title;
-          else if (/message|text/.test(hint)) val = TEST.message;
-          else if (/username|user.?name/.test(hint)) val = TEST.username;
-          else if (/number|count|qty|amount/.test(hint)) val = TEST.number;
-          await step({ action: "ai_fill", description: `${hint} field`, value: val, optional: true });
+        await exerciseFormScenario({
+          step,
+          page,
+          form: { fields: modal.inputs, buttons: modal.buttons, buttonDetails: modal.buttonDetails },
+          scenario: "empty",
+          screenshotLabel: `${slug}_create_empty_validation`,
+          moduleName,
+          slug,
+          sessionMemory,
+        });
+        await forceCloseModal(page); // verified close
+
+        await step({ action: "ai_click", description: "create or add or new or invite button", optional: true });
+        await page.waitForTimeout(800);
+        const xssModal = await detectOpenModal(page);
+        if (xssModal.found && xssModal.inputs.length > 0) {
+          await exerciseFormScenario({
+            step,
+            page,
+            form: { fields: xssModal.inputs, buttons: xssModal.buttons, buttonDetails: xssModal.buttonDetails },
+            scenario: "xss",
+            screenshotLabel: `${slug}_create_xss_probe`,
+            moduleName,
+            slug,
+            sessionMemory,
+          });
+          await forceCloseModal(page); // verified close
         }
-        // Click the actual submit button text found in the modal
-        const submitText = modal.buttons.find(b => /^(save|create|submit|confirm|add|invite|ok|done|proceed)/i.test(b));
-        await step({ action: "ai_click", description: submitText || "save or create or submit button", optional: true });
-        await page.waitForTimeout(1800);
-        await step({ action: "screenshot", label: `${slug}_after_create` });
-        await step({ action: "ai_assert", description: "success message shown or new item appears in list", optional: true });
+
+        await step({ action: "ai_click", description: "create or add or new or invite button", optional: true });
+        await page.waitForTimeout(800);
+        const sqlModal = await detectOpenModal(page);
+        if (sqlModal.found && sqlModal.inputs.length > 0) {
+          await exerciseFormScenario({
+            step,
+            page,
+            form: { fields: sqlModal.inputs, buttons: sqlModal.buttons, buttonDetails: sqlModal.buttonDetails },
+            scenario: "sql",
+            screenshotLabel: `${slug}_create_sql_probe`,
+            moduleName,
+            slug,
+            sessionMemory,
+          });
+          await forceCloseModal(page); // verified close
+        }
+
+        await step({ action: "ai_click", description: "create or add or new or invite button", optional: true });
+        await page.waitForTimeout(800);
+        const validModal = await detectOpenModal(page);
+        if (validModal.found && validModal.inputs.length > 0) {
+          await exerciseFormScenario({
+            step,
+            page,
+            form: { fields: validModal.inputs, buttons: validModal.buttons, buttonDetails: validModal.buttonDetails },
+            scenario: "valid",
+            screenshotLabel: `${slug}_after_create`,
+            successAssertion: "success message shown or new item appears in list",
+            moduleName,
+            slug,
+            sessionMemory,
+          });
+        }
       } else {
-        // No modal detected — try generic fill + submit (for inline forms)
-        await step({ action: "ai_fill", description: "name or title input field", value: "Deep Test Item", optional: true });
-        await step({ action: "ai_click", description: "save or submit button", optional: true });
-        await page.waitForTimeout(1500);
-        await step({ action: "screenshot", label: `${slug}_after_create` });
+        const inlineCreateForm = pageForms[0];
+        if (inlineCreateForm) {
+          await exerciseFormScenario({
+            step,
+            page,
+            form: inlineCreateForm,
+            scenario: "valid",
+            screenshotLabel: `${slug}_after_create`,
+            successAssertion: "success message shown or settings saved successfully",
+            moduleName,
+            slug,
+            sessionMemory,
+          });
+        } else {
+          await step({ action: "ai_fill", description: "name or title input field", value: "Deep Test Item", optional: true });
+          await step({ action: "ai_click", description: "save or submit button", optional: true });
+          await page.waitForTimeout(1500);
+          await step({ action: "screenshot", label: `${slug}_after_create` });
+        }
       }
     }
   }
 
-  // ── 6. EDIT flow — click edit on first row, detect form, update a field ──
+  // ── 6. TEST ALL MODAL-OPENING BUTTONS from reconData (not just hasCreateBtn) ──
+  // Phase 1 recon discovered every button that opens a form — test each one fully.
+  const reconModalButtons = (reconData?.clickableButtons || []).filter(b => b.opensModal && b.modalFields?.length > 0);
+  // Skip buttons already tested by the create flow (avoid exact same "create/add/new/invite" re-run)
+  const createKeywords = /^(create|add|new|invite|register)/i;
+  const extraModalButtons = reconModalButtons.filter(b => !createKeywords.test((b.text || "").trim()));
+
+  for (const mb of extraModalButtons.slice(0, 12)) {
+    const mbSlug = mb.text.replace(/[^a-z0-9]+/gi, "_").toLowerCase().slice(0, 24);
+    const openResult = await step({ action: "ai_click", description: `"${mb.text}" button`, optional: true });
+    if (openResult.status !== "passed") continue;
+    await page.waitForTimeout(1000);
+    const openedModal = await detectOpenModal(page);
+    if (!openedModal.found) { await forceCloseModal(page); continue; }
+    await step({ action: "screenshot", label: `${slug}_btn_${mbSlug}_opened` });
+
+    // Empty validation
+    await exerciseFormScenario({
+      step, page,
+      form: { fields: openedModal.inputs, buttons: openedModal.buttons, buttonDetails: openedModal.buttonDetails },
+      scenario: "empty",
+      screenshotLabel: `${slug}_btn_${mbSlug}_empty`,
+      moduleName, slug, sessionMemory,
+    });
+    await forceCloseModal(page);
+
+    // XSS probe
+    await step({ action: "ai_click", description: `"${mb.text}" button`, optional: true });
+    await page.waitForTimeout(800);
+    const xssM = await detectOpenModal(page);
+    if (xssM.found && xssM.inputs.length > 0) {
+      await exerciseFormScenario({
+        step, page,
+        form: { fields: xssM.inputs, buttons: xssM.buttons, buttonDetails: xssM.buttonDetails },
+        scenario: "xss",
+        screenshotLabel: `${slug}_btn_${mbSlug}_xss`,
+        moduleName, slug, sessionMemory,
+      });
+    }
+    await forceCloseModal(page);
+
+    // Valid submit
+    await step({ action: "ai_click", description: `"${mb.text}" button`, optional: true });
+    await page.waitForTimeout(800);
+    const validM = await detectOpenModal(page);
+    if (validM.found && validM.inputs.length > 0) {
+      await exerciseFormScenario({
+        step, page,
+        form: { fields: validM.inputs, buttons: validM.buttons, buttonDetails: validM.buttonDetails },
+        scenario: "valid",
+        screenshotLabel: `${slug}_btn_${mbSlug}_valid`,
+        successAssertion: "success message shown or record appeared in list",
+        moduleName, slug, sessionMemory,
+      });
+    }
+    await forceCloseModal(page);
+  }
+
+  // ── 7. EDIT flow — boundary probe then valid save ──
   if (info.hasTable) {
     const editResult = await step({ action: "ai_click", description: "edit or pencil icon or modify button on first row or record", optional: true });
     if (editResult.status === "passed") {
@@ -3118,34 +6225,86 @@ async function executeDeepModuleTest(page, moduleName, { context, browser, runId
       const editModal = await detectOpenModal(page);
       await step({ action: "screenshot", label: `${slug}_edit_opened` });
       if (editModal.found && editModal.inputs.length > 0) {
-        const editInp = editModal.inputs[0];
-        const fieldDesc = editInp.placeholder || editInp.ariaLabel || editInp.name || "first field";
-        await step({ action: "ai_fill", description: `${fieldDesc} field`, value: "Updated Deep Test", optional: true });
-        const saveText = editModal.buttons.find(b => /^(save|update|confirm)/i.test(b));
-        await step({ action: "ai_click", description: saveText || "save or update button", optional: true });
-        await page.waitForTimeout(1200);
-        await step({ action: "screenshot", label: `${slug}_after_edit` });
-        await step({ action: "ai_assert", description: "changes saved successfully", optional: true });
+        await exerciseFormScenario({
+          step, page,
+          form: { fields: editModal.inputs, buttons: editModal.buttons, buttonDetails: editModal.buttonDetails },
+          scenario: "boundary",
+          screenshotLabel: `${slug}_edit_boundary_probe`,
+          moduleName, slug, sessionMemory,
+        });
+        await forceCloseModal(page);
+
+        await step({ action: "ai_click", description: "edit or pencil icon or modify button on first row or record", optional: true });
+        await page.waitForTimeout(800);
+        const confirmEditModal = await detectOpenModal(page);
+        if (confirmEditModal.found && confirmEditModal.inputs.length > 0) {
+          await exerciseFormScenario({
+            step, page,
+            form: { fields: confirmEditModal.inputs, buttons: confirmEditModal.buttons, buttonDetails: confirmEditModal.buttonDetails },
+            scenario: "valid",
+            screenshotLabel: `${slug}_after_edit`,
+            successAssertion: "changes saved successfully",
+            moduleName, slug, sessionMemory,
+          });
+        }
+        await forceCloseModal(page);
       }
     }
   }
 
-  // ── 7. VALIDATION test — submit empty form to check error messages ──
-  if (info.hasCreateBtn && info.hasForms) {
-    const createR = await step({ action: "ai_click", description: "create or add or new button", optional: true });
-    if (createR.status === "passed") {
-      await page.waitForTimeout(800);
-      // Submit without filling anything
-      await step({ action: "ai_click", description: "save or create or submit button", optional: true });
+  // ── 8. DELETE flow — only on entity we just created (safe; avoids deleting existing data) ──
+  const createdHere = (sessionMemory?.createdEntities || []).find(e => e.module === moduleName);
+  if (createdHere?.primaryValue) {
+    // Try to find and click the delete button on the row of the just-created entity
+    const deleteResult = await step({
+      action: "ai_click",
+      description: `delete or trash or remove icon on row or card containing "${createdHere.primaryValue}"`,
+      optional: true,
+    });
+    if (deleteResult.status === "passed") {
       await page.waitForTimeout(700);
-      await step({ action: "screenshot", label: `${slug}_validation_errors` });
-      await step({ action: "ai_assert", description: "validation errors or required field messages are visible", optional: true });
-      await page.keyboard.press("Escape").catch(() => {});
-      await page.waitForTimeout(400);
+      // Confirm dialog if shown
+      const confirmDel = await detectOpenModal(page);
+      if (confirmDel.found) {
+        await step({ action: "ai_click", description: "confirm or yes or delete button in confirmation dialog", optional: true });
+        await page.waitForTimeout(600);
+      }
+      await step({ action: "screenshot", label: `${slug}_after_delete` });
+      await step({ action: "ai_assert", description: `"${createdHere.primaryValue}" is no longer visible in the list or a deletion success message appeared`, optional: true });
     }
+  } else if (info.hasTable) {
+    // No entity we own — just verify delete button exists (don't click it)
+    await step({ action: "ai_assert", description: "delete or remove or trash button is visible on at least one row", optional: true });
   }
 
-  // ── 8. Final screenshot ──
+  // ── 9. VALIDATION test — submit page-level forms with boundary/invalid/valid scenarios ──
+  if (pageForms.length > 0) {
+    const primaryPageForm = pageForms[0];
+    await exerciseFormScenario({
+      step, page,
+      form: primaryPageForm,
+      scenario: "invalid",
+      screenshotLabel: `${slug}_page_form_invalid`,
+      moduleName, slug, sessionMemory,
+    });
+    await exerciseFormScenario({
+      step, page,
+      form: primaryPageForm,
+      scenario: "boundary",
+      screenshotLabel: `${slug}_page_form_boundary`,
+      moduleName, slug, sessionMemory,
+    });
+    await exerciseFormScenario({
+      step, page,
+      form: primaryPageForm,
+      scenario: "valid",
+      screenshotLabel: `${slug}_page_form_valid`,
+      successAssertion: "settings saved successfully or success feedback is visible",
+      moduleName, slug, sessionMemory,
+    });
+  }
+
+  // ── 10. Final screenshot ──
   await step({ action: "screenshot", label: `${slug}_final` });
 
   return allResults;
@@ -3177,6 +6336,25 @@ async function deepReconModule(page, moduleName) {
 
   try {
     // ── Base page info ──
+    // Scroll page to reveal lazy-loaded content + expand any accordions
+    await page.evaluate(() => {
+      // Scroll main content area down and back up
+      const main = document.querySelector("main, [role='main'], .main-content, [class*='content-area'], [class*='main-container']");
+      if (main) {
+        main.scrollTop = main.scrollHeight;
+        setTimeout(() => { main.scrollTop = 0; }, 200);
+      } else {
+        window.scrollTo(0, document.body.scrollHeight);
+        setTimeout(() => { window.scrollTo(0, 0); }, 200);
+      }
+      // Try to expand collapsed sections
+      document.querySelectorAll("[aria-expanded='false']").forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) { try { el.click(); } catch {} }
+      });
+    }).catch(() => {});
+    await page.waitForTimeout(500);
+
     const pageInfo = await extractPageInfoFull(page);
     recon.title = pageInfo.title;
     recon.visibleText = pageInfo.visibleText;
@@ -3219,7 +6397,7 @@ async function deepReconModule(page, moduleName) {
     // ── Explore tabs (click each, record content + nested buttons/modals) ──
     const tabs = await discoverPageTabs(page);
     recon.tabs = tabs.map(t => t.text);
-    for (const tab of tabs.slice(0, 8)) {
+    for (const tab of tabs.slice(0, 15)) {
       try {
         const tabLoc = page.locator(`[role="tab"]:has-text("${tab.text}"), .tab:has-text("${tab.text}"), button:has-text("${tab.text}")`).first();
         const tabVisible = await tabLoc.isVisible({ timeout: 1500 }).catch(() => false);
@@ -3241,8 +6419,8 @@ async function deepReconModule(page, moduleName) {
 
         // Discover modals triggered by buttons inside this tab (shallow — just record names)
         const tabModalButtons = [];
-        const SKIP = /^(sign.?out|log.?out|delete.?all|clear.?all|reset.?all|cancel.?all|close$)/i;
-        for (const btnText of tabBtns.slice(0, 6)) {
+        const SKIP = /^(sign.?out|log.?out|delete.?all|clear.?all|reset.?all|cancel.?all|close$|save$|submit$|confirm$|approve$|publish$|pay$|purchase$|checkout$|place order$|send$)/i;
+        for (const btnText of tabBtns.slice(0, 12)) {
           if (!btnText || SKIP.test(btnText)) continue;
           try {
             const bLoc = page.locator(`button:has-text("${btnText}"), [role="button"]:has-text("${btnText}")`).first();
@@ -3261,15 +6439,12 @@ async function deepReconModule(page, moduleName) {
                   type: i.type || "text",
                   required: i.required,
                 })),
-                modalActions: modal.buttons.slice(0, 4),
+                modalActions: modal.buttons.slice(0, 8),
               });
-              await page.keyboard.press("Escape").catch(() => {});
-              await page.waitForTimeout(400);
-              await dismissOverlays(page).catch(() => {});
+              await forceCloseModal(page); // verified multi-strategy close
             } else {
               // Re-click tab to restore state if button navigated or changed content
-              await page.keyboard.press("Escape").catch(() => {});
-              await page.waitForTimeout(300);
+              await forceCloseModal(page);
             }
           } catch { /* skip this button */ }
         }
@@ -3288,7 +6463,7 @@ async function deepReconModule(page, moduleName) {
 
     // ── Discover buttons and what they reveal ──
     // Get all visible buttons (skip dangerous ones)
-    const SKIP_PATTERN = /^(sign.?out|log.?out|delete.?all|clear.?all|remove.?all|reset.?all|cancel.?all|close$)/i;
+    const SKIP_PATTERN = /^(sign.?out|log.?out|delete.?all|clear.?all|remove.?all|reset.?all|cancel.?all|close$|save$|submit$|confirm$|approve$|publish$|pay$|purchase$|checkout$|place order$|send$)/i;
     const btnCandidates = await page.evaluate(() => {
       const seen = new Set();
       return [...document.querySelectorAll("button, [role='button'], [class*='btn']")]
@@ -3328,7 +6503,7 @@ async function deepReconModule(page, moduleName) {
               type: i.type || "text",
               required: i.required,
             })),
-            modalActions: modal.buttons.slice(0, 5),
+            modalActions: modal.buttons.slice(0, 10),
           });
           // Also capture dropdown options inside the modal
           const modalDropdowns = await page.evaluate(() =>
@@ -3341,10 +6516,8 @@ async function deepReconModule(page, moduleName) {
           if (modalDropdowns.length > 0) {
             recon.clickableButtons[recon.clickableButtons.length - 1].modalDropdowns = modalDropdowns;
           }
-          // Close modal
-          await page.keyboard.press("Escape").catch(() => {});
-          await page.waitForTimeout(500);
-          await dismissOverlays(page).catch(() => {});
+          // Close modal — verified multi-strategy close
+          await forceCloseModal(page);
         } else {
           const urlAfter = page.url();
           if (urlAfter !== urlBefore && urlAfter !== startUrl) {
@@ -3386,7 +6559,7 @@ async function generateModuleTestCases(moduleName, reconData) {
   const buttonDetails = clickableButtons.map(b => {
     if (b.opensModal && b.modalFields?.length > 0) {
       const fields = b.modalFields.map(f => `"${f.label}"(${f.type}${f.required ? ",required" : ""})`).join(", ");
-      const ddStr = b.modalDropdowns?.map(d => `dropdown "${d.label}":[${d.options.slice(0, 5).join("|")}]`).join("; ") || "";
+      const ddStr = b.modalDropdowns?.map(d => `dropdown "${d.label}":[${d.options.slice(0, 12).join("|")}]`).join("; ") || "";
       return `BUTTON "${b.text}" → opens modal "${b.modalTitle || "form"}" with fields:[${fields}]${ddStr ? " + " + ddStr : ""} actions:[${(b.modalActions || []).slice(0, 3).join(",")}]`;
     }
     if (b.navigatedTo) return `BUTTON "${b.text}" → navigates to ${b.navigatedTo} (page: "${b.pageTitle || ""}")`;
@@ -3403,7 +6576,7 @@ async function generateModuleTestCases(moduleName, reconData) {
   }).join("\n");
 
   const dropdownDetail = dropdowns.map(d =>
-    `SELECT "${d.label}": options [${d.options.slice(0, 10).join(" | ")}]`
+    `SELECT "${d.label}": options [${d.options.slice(0, 20).join(" | ")}]`
   ).join("\n");
 
   const tableDetail = tables.map(t =>
@@ -3413,60 +6586,70 @@ async function generateModuleTestCases(moduleName, reconData) {
   const pageFormDetail = forms.flatMap(f => f.fields || [])
     .map(f => `"${f.label}"(${f.type}${f.required ? ",required" : ""})`).join(", ");
 
-  const prompt = `You are a precision QA engineer generating exact, targeted test steps.
-You have already explored this module and know EXACTLY what UI elements exist.
-DO NOT be generic. Every step must target a REAL element you see below.
+  // ── Module abbreviation for test case IDs ──
+  const moduleAbbr = moduleName.replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 6) || "MOD";
+
+  const prompt = `You are a senior QA engineer. Your job is to generate STRUCTURED test cases with priorities and exact expected results.
+You have already explored "${moduleName}" and know exactly what UI elements exist.
+NEVER invent elements. Only reference the DISCOVERED elements below.
 
 MODULE: "${moduleName}"
 URL: "${url}"
 
-=== DISCOVERED UI ELEMENTS ===
-${buttonDetails || "(no buttons with modals found)"}
+=== DISCOVERED BUTTONS & MODALS ===
+${buttonDetails || "(none found)"}
 
 ${tabDetail ? "=== TABS ===\n" + tabDetail : ""}
-
 ${dropdownDetail ? "=== DROPDOWNS ===\n" + dropdownDetail : ""}
-
 ${tableDetail ? "=== TABLE ===\n" + tableDetail : ""}
-
 ${pageFormDetail ? "=== PAGE FORM FIELDS ===\n" + pageFormDetail : ""}
+Page visible text: "${visibleText.slice(0, 300)}"
 
-Page text sample: "${visibleText.slice(0, 150)}"
+Generate 15-25 structured test cases covering: happy path, validation, security, edge cases, UX.
 
-=== TEST REQUIREMENTS ===
-Generate 20-40 SPECIFIC test steps. For each modal-opening button:
-1. Happy path: open → fill ALL fields with valid data → click save → assert success
-2. Empty submit: open → click save without filling → assert validation errors appear
-3. XSS test: open → fill first text field with <script>alert("xss")</script> → save → assert no alert appeared
-4. SQL inject: open → fill first text field with ' OR '1'='1 → save → assert no database error
+PRIORITY RULES:
+- P0: Core feature works at all (login, create, save, load data)
+- P1: Important features (edit, delete, validation errors, permissions)
+- P2: Security tests (XSS, SQL injection, input sanitization)
+- P3: UX/edge cases (empty states, long inputs, special chars)
 
-For each TAB: click it → assert content loaded → screenshot
+SECURITY TESTS (always include for every module with forms):
+- XSS: fill text field with <script>alert("xss")</script> → expected: no alert fires, page stays stable
+- SQL injection: fill with ' OR '1'='1 → expected: no DB error, graceful handling
+- Long input: fill with 500-char string → expected: no crash, truncated or error shown
 
-For each in-page BUTTON (filter, sort, export, refresh): click it → screenshot → assert change happened
+Return ONLY a valid JSON array with this EXACT structure per test case:
+[
+  {
+    "id": "TC-${moduleAbbr}-001",
+    "title": "short human-readable title",
+    "priority": "P0",
+    "category": "happy_path",
+    "steps": [
+      { "action": "navigate", "url": "${url}", "description": "Open ${moduleName}" },
+      { "action": "ai_click", "description": "exact button name from discovered data", "optional": true },
+      { "action": "ai_fill", "description": "exact field name", "value": "test value" },
+      { "action": "screenshot", "label": "descriptive_label" }
+    ],
+    "expected": "Precise description of what should happen — specific enough to verify (e.g. 'Success toast appears with text \"Item created\"' or 'Validation error appears under Name field')",
+    "assertions": [
+      { "action": "ai_assert", "description": "specific condition to verify — matches the expected result", "optional": false }
+    ]
+  }
+]
 
-For each TABLE: if rows exist → click first row → observe what opens → close/back
+RULES:
+- "expected" must be SPECIFIC — not "success message shown" but "toast message 'Task created successfully' appears and item appears in list"
+- Every form must have: empty-submit test (P1), valid-submit test (P0), XSS test (P2), SQL test (P2)
+- Every table must have: sort-by-column test, open-row test
+- Mark speculative steps optional:true
+- Return ONLY JSON array, no markdown`;
 
-For SEARCH (if present): search for "test" → assert results appear. Then search ' OR '1'='1 → assert no SQL error
-
-For page-level DROPDOWNS: select each option → assert page responds correctly
-
-For NAVIGATION buttons: click → verify page loaded → go back
-
-IMPORTANT:
-- Use exact button/field names from the discovered elements above
-- After every XSS/injection fill, immediately add ai_assert checking "no alert dialog appeared and no error was thrown"
-- After every empty form submit, add ai_assert checking "required field validation error is shown"
-- Always add screenshot after significant actions
-
-Return ONLY valid JSON array. Actions: navigate, ai_click, ai_fill, ai_assert, screenshot, wait, press, go_back.`;
-
-  // ── Mandatory tab steps (appended regardless of LLM output) ──
-  // This guarantees EVERY discovered tab is explicitly visited in Phase 3
+  // ── Mandatory tab steps (always appended to guarantee tab coverage in Phase 3 fallback) ──
   const mandatoryTabSteps = tabs.flatMap(tabName => [
     { action: "ai_click", description: `"${tabName}" tab`, optional: true },
     { action: "wait", ms: 800 },
     { action: "screenshot", label: `${slug}_tab_${tabName.toLowerCase().replace(/\s+/g, "_")}` },
-    // If tab has modal buttons, test each one
     ...((tabContents.find(t => t.tab === tabName)?.modalButtons || []).slice(0, 3).flatMap(mb => {
       const saveBtn = (mb.modalActions || []).find(a => /^(save|create|submit|confirm|add|ok|done)/i.test(a)) || "save or submit button";
       const firstField = mb.modalFields?.[0];
@@ -3477,173 +6660,330 @@ Return ONLY valid JSON array. Actions: navigate, ai_click, ai_fill, ai_assert, s
           { action: "ai_fill", description: `"${firstField.label}" field`, value: "Test Value", optional: true },
           { action: "ai_click", description: saveBtn, optional: true },
           { action: "screenshot", label: `${slug}_tab_${tabName.slice(0,8)}_${mb.text.slice(0,10).replace(/\s/g,"_")}_happy` },
-          { action: "press", key: "Escape", description: "Close modal" },
-          { action: "wait", ms: 400 },
-          // Empty submit test
           { action: "ai_click", description: `"${mb.text}" button`, optional: true },
           { action: "wait", ms: 700 },
           { action: "ai_click", description: saveBtn, optional: true },
           { action: "ai_assert", description: "validation errors shown for empty required fields", optional: true },
-          { action: "press", key: "Escape", description: "Close modal" },
         ] : [
           { action: "ai_click", description: saveBtn, optional: true },
-          { action: "press", key: "Escape", description: "Close modal" },
         ]),
       ];
     })),
   ]);
 
   try {
-    const raw = await generateText({ prompt, maxTokens: 3000 });
-    const steps = parseJsonSafe(raw, null);
-    if (Array.isArray(steps) && steps.length >= 5) {
-      // Merge: LLM steps first, then inject any tab steps the LLM missed
-      const llmTabNames = new Set(
-        steps.filter(s => s.action === "ai_click" && s.description)
-          .map(s => s.description.replace(/['"]/g, "").toLowerCase())
-      );
-      const missingTabSteps = mandatoryTabSteps.filter((s) => {
-        if (s.action !== "ai_click" || !s.description) return true; // keep non-click steps
-        const tabMatch = tabs.find(t => s.description.includes(t));
-        if (!tabMatch) return true;
-        return !llmTabNames.has(tabMatch.toLowerCase());
-      });
-      const merged = [...steps, ...missingTabSteps];
-      console.log(`[generateTestCases] "${moduleName}": LLM=${steps.length} + mandatory_tabs=${missingTabSteps.length} = ${merged.length} total steps`);
-      return merged;
+    const raw = await generateText({ prompt, maxTokens: 4000 });
+    const testCases = parseJsonSafe(raw, null);
+    if (Array.isArray(testCases) && testCases.length >= 3 && testCases[0]?.steps) {
+      // Structured test cases — add mandatory tab coverage as extra raw steps appended
+      const extraSteps = mandatoryTabSteps;
+      console.log(`[generateTestCases] "${moduleName}": ${testCases.length} structured test cases generated`);
+      // Return structured format — Phase 3 adaptive code uses the steps array; report uses id/title/priority/expected
+      return testCases.map(tc => ({
+        ...tc,
+        // Ensure steps is a flat array of Playwright actions
+        steps: Array.isArray(tc.steps) ? tc.steps : [],
+        assertions: Array.isArray(tc.assertions) ? tc.assertions : [],
+      }));
+    }
+    // Fallback: LLM returned flat steps array instead of structured — wrap them
+    if (Array.isArray(testCases) && testCases.length >= 5 && testCases[0]?.action) {
+      console.log(`[generateTestCases] "${moduleName}": LLM returned flat steps (${testCases.length}), wrapping`);
+      const mergedSteps = [...testCases, ...mandatoryTabSteps];
+      return [{ id: `TC-${moduleAbbr}-FLAT`, title: `${moduleName} — full test`, priority: "P1", category: "adaptive", steps: mergedSteps, expected: "All features function without errors", assertions: [] }];
     }
   } catch { /* use fallback */ }
 
-  // ── Smart fallback based on discovered elements ──
-  const fallback = [
-    { action: "navigate", url, description: `Open ${moduleName}` },
-    { action: "screenshot", label: `${slug}_start` },
-  ];
+  // ── Smart fallback — return minimal structured test cases ──
+  const fallbackTestCases = [];
+  let tcNum = 1;
 
-  // Test each modal-opening button
-  for (const btn of modalButtons.slice(0, 4)) {
+  // Happy path per modal button
+  for (const btn of modalButtons.slice(0, 10)) {
     const firstField = btn.modalFields?.[0];
     const saveBtn = btn.modalActions?.find(a => /^(save|create|submit|confirm|add|ok|done)/i.test(a)) || "save or submit button";
-    // 1. Empty submit
-    fallback.push(
-      { action: "ai_click", description: `"${btn.text}" button`, optional: true },
-      { action: "wait", ms: 800 },
-      { action: "ai_click", description: saveBtn, optional: true },
-      { action: "screenshot", label: `${slug}_${btn.text.slice(0, 15).replace(/\s/g, "_")}_empty` },
-      { action: "ai_assert", description: "validation errors shown for empty required fields", optional: true },
-      { action: "press", key: "Escape", description: "Close modal" },
-      { action: "wait", ms: 400 }
-    );
-    // 2. XSS in first text field
-    if (firstField) {
-      fallback.push(
+    const btnSlug = btn.text.slice(0, 15).replace(/\s/g, "_");
+    fallbackTestCases.push({
+      id: `TC-${moduleAbbr}-${String(tcNum++).padStart(3, "0")}`,
+      title: `"${btn.text}" — valid submit`,
+      priority: "P0", category: "happy_path",
+      steps: [
+        { action: "navigate", url, description: `Open ${moduleName}` },
         { action: "ai_click", description: `"${btn.text}" button`, optional: true },
         { action: "wait", ms: 800 },
-        { action: "ai_fill", description: `"${firstField.label}" field`, value: BREAK_TEST_VALUES.xss, optional: true },
+        ...(firstField ? [{ action: "ai_fill", description: `"${firstField.label}" field`, value: "Test Value", optional: true }] : []),
         { action: "ai_click", description: saveBtn, optional: true },
-        { action: "ai_assert", description: "no XSS alert appeared and input was sanitized", optional: true },
-        { action: "press", key: "Escape", description: "Close modal" }
-      );
+        { action: "screenshot", label: `${slug}_${btnSlug}_happy` },
+      ],
+      expected: "Form submits successfully, success message or new item appears in list",
+      assertions: [{ action: "ai_assert", description: "success message or new item appeared after form submit", optional: true }],
+    });
+    fallbackTestCases.push({
+      id: `TC-${moduleAbbr}-${String(tcNum++).padStart(3, "0")}`,
+      title: `"${btn.text}" — empty submit validation`,
+      priority: "P1", category: "validation",
+      steps: [
+        { action: "navigate", url, description: `Open ${moduleName}` },
+        { action: "ai_click", description: `"${btn.text}" button`, optional: true },
+        { action: "wait", ms: 800 },
+        { action: "ai_click", description: saveBtn, optional: true },
+        { action: "screenshot", label: `${slug}_${btnSlug}_empty` },
+      ],
+      expected: "Validation errors appear on required fields — form is NOT submitted",
+      assertions: [{ action: "ai_assert", description: "validation error messages visible on required fields", optional: true }],
+    });
+    if (firstField) {
+      fallbackTestCases.push({
+        id: `TC-${moduleAbbr}-${String(tcNum++).padStart(3, "0")}`,
+        title: `"${btn.text}" — XSS injection`,
+        priority: "P2", category: "security",
+        steps: [
+          { action: "navigate", url, description: `Open ${moduleName}` },
+          { action: "ai_click", description: `"${btn.text}" button`, optional: true },
+          { action: "wait", ms: 800 },
+          { action: "ai_fill", description: `"${firstField.label}" field`, value: BREAK_TEST_VALUES.xss, optional: true },
+          { action: "ai_click", description: saveBtn, optional: true },
+          { action: "screenshot", label: `${slug}_${btnSlug}_xss` },
+        ],
+        expected: "XSS payload is sanitized — no alert dialog fires, no raw script renders",
+        assertions: [{ action: "ai_assert", description: "no JavaScript alert appeared and the page is still intact", optional: true }],
+      });
     }
   }
 
-  // Always test ALL discovered tabs (use mandatoryTabSteps which already covers them)
-  fallback.push(...mandatoryTabSteps);
-
-  // Search abuse
-  if (hasSearch) {
-    fallback.push(
-      { action: "ai_fill", description: "search input or search bar", value: "test", optional: true },
-      { action: "wait", ms: 500 },
-      { action: "screenshot", label: `${slug}_search_results` },
-      { action: "ai_fill", description: "search input or search bar", value: BREAK_TEST_VALUES.sqlBasic, optional: true },
-      { action: "ai_assert", description: "no SQL error or database error shown after injection", optional: true }
-    );
+  // Tab coverage
+  for (const tabName of tabs.slice(0, 12)) {
+    fallbackTestCases.push({
+      id: `TC-${moduleAbbr}-${String(tcNum++).padStart(3, "0")}`,
+      title: `Tab "${tabName}" — content loads`,
+      priority: "P1", category: "happy_path",
+      steps: [
+        { action: "navigate", url, description: `Open ${moduleName}` },
+        { action: "ai_click", description: `"${tabName}" tab`, optional: true },
+        { action: "wait", ms: 800 },
+        { action: "screenshot", label: `${slug}_tab_${tabName.toLowerCase().replace(/\s+/g, "_")}` },
+      ],
+      expected: `"${tabName}" tab content loads without blank screen or error`,
+      assertions: [{ action: "ai_assert", description: `"${tabName}" tab is active and its content is visible`, optional: true }],
+    });
   }
 
-  fallback.push({ action: "screenshot", label: `${slug}_end` });
-  return fallback;
+  // Search
+  if (hasSearch) {
+    fallbackTestCases.push({
+      id: `TC-${moduleAbbr}-${String(tcNum++).padStart(3, "0")}`,
+      title: "Search — SQL injection",
+      priority: "P2", category: "security",
+      steps: [
+        { action: "navigate", url, description: `Open ${moduleName}` },
+        { action: "ai_fill", description: "search input or search bar", value: BREAK_TEST_VALUES.sqlBasic, optional: true },
+        { action: "wait", ms: 500 },
+        { action: "screenshot", label: `${slug}_search_sql` },
+      ],
+      expected: "No database error, no server crash — graceful handling or empty results",
+      assertions: [{ action: "ai_assert", description: "no SQL error or server-side error is displayed", optional: true }],
+    });
+  }
+
+  return fallbackTestCases;
 }
 
 // ─────────────────────────────────────────────────────────
-// PHASE 3 HELPER: Generate full QA report after all tests run
+// ANALYZE ALL MODULE RESULTS — per test case, compare expected vs actual
+// Returns { moduleTestResults, allBugs }
 // ─────────────────────────────────────────────────────────
-async function generateFullQAReport(allStepResults, moduleResults) {
-  const defaultReport = {
-    overallHealthScore: 5,
-    verdict: "Testing completed. See module reports and bug list for details.",
-    bugsFound: [],
-    moduleReports: moduleResults.map(m => ({
-      module: m.name,
-      healthScore: m.status === "passed" ? 8 : 4,
-      summary: `${m.summary.passed} steps passed, ${m.summary.failed} steps failed out of ${m.summary.total} total.`,
-      testedFeatures: [],
-      issues: m.stepResults.filter(s => s.status === "failed").map(s => s.description).slice(0, 5),
-    })),
-    securityConcerns: [],
-    performanceIssues: [],
-    logicalInconsistencies: [],
-    coverageGaps: [],
-    topPriorityFixes: [],
-  };
+async function analyzeAllModuleResults(moduleResults, moduleTestPlans, allStepResults) {
+  const moduleTestResults = [];
+  const allBugs = [];
+  let bugCounter = 1;
 
-  try {
-    const totalSteps = allStepResults.length;
-    const totalPassed = allStepResults.filter(s => s.status === "passed").length;
-    const totalFailed = allStepResults.filter(s => s.status === "failed").length;
+  for (const moduleResult of moduleResults) {
+    const testPlan = moduleTestPlans.find(p => p.name === moduleResult.name);
+    const testCases = testPlan?.testCases || [];
+    const moduleStepResults = moduleResult.stepResults || [];
 
-    const failedSteps = allStepResults
-      .filter(s => s.status === "failed")
-      .map(s => `[${s.action}] "${s.description}": ${String(s.error || "").slice(0, 120)}`)
-      .slice(0, 50)
-      .join("\n");
+    const analyzedCases = [];
 
-    const moduleSummary = moduleResults
-      .map(m => `${m.name}: ${m.summary.passed}✓ ${m.summary.failed}✗`)
-      .join(", ");
+    // If we have structured test cases with expected results — analyze each
+    if (testCases.length > 0 && testCases[0]?.expected) {
+      // Map step results back to test cases by index ranges
+      // Each test case owns a slice of step results proportionally
+      const stepsPerCase = Math.ceil(moduleStepResults.length / testCases.length) || 1;
 
-    const prompt = `You are a senior QA engineer writing a comprehensive bug report after automated testing.
+      for (let i = 0; i < testCases.length; i++) {
+        const tc = testCases[i];
+        const tcSteps = moduleStepResults.slice(i * stepsPerCase, (i + 1) * stepsPerCase);
+        const pageText = tcSteps.map(s => s.description).join(" | ");
 
-TEST RUN SUMMARY:
-Total steps: ${totalSteps} | Passed: ${totalPassed} | Failed: ${totalFailed}
-Modules tested: ${moduleSummary}
+        const analysis = await analyzeTestCaseResult({
+          testCase: tc,
+          stepResults: tcSteps.length > 0 ? tcSteps : moduleStepResults,
+          pageText,
+        });
 
-FAILED STEPS (key evidence):
-${failedSteps || "No failures recorded"}
+        const tcResult = { ...tc, ...analysis };
+        analyzedCases.push(tcResult);
 
-Write a detailed, comprehensive QA report. Be specific. For each bug, describe exactly what failed.
-Identify if XSS, SQL injection, input validation, performance, or logic issues were found based on the failed steps.
-If XSS/injection steps PASSED (no error), that is a SECURITY CONCERN — note it.
-If a "validation errors visible" assertion failed after empty submit, that is a MEDIUM bug.
-If a step failed with a timeout/selector error, that is likely a UI bug or test infrastructure issue.
-
-Return ONLY valid JSON (no markdown fences):
-{
-  "overallHealthScore": <1-10 integer>,
-  "verdict": "<2-3 sentence overall assessment of application quality>",
-  "bugsFound": [
-    {"id":"BUG-001","severity":"critical|high|medium|low","title":"<short title>","module":"<module name>","description":"<detailed description>","stepsToReproduce":["step1","step2"],"expectedBehavior":"<what should happen>","actualBehavior":"<what happened>","impact":"<business/security impact>"}
-  ],
-  "moduleReports": [
-    {"module":"<name>","healthScore":<1-10>,"summary":"<1-2 sentences>","testedFeatures":["<feature1>"],"issues":["<issue1>"]}
-  ],
-  "securityConcerns": ["<concern1>"],
-  "performanceIssues": ["<issue1>"],
-  "logicalInconsistencies": ["<inconsistency1>"],
-  "coverageGaps": ["<gap1>"],
-  "topPriorityFixes": ["<fix1>"]
-}`;
-
-    const raw = await generateText({ prompt, maxTokens: 3000 });
-    const parsed = parseJsonSafe(raw, null);
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.bugsFound)) {
-      return { ...defaultReport, ...parsed };
+        if (analysis.isBug && analysis.bug) {
+          const moduleAbbr = moduleResult.name.replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 6);
+          allBugs.push({
+            id: `BUG-${moduleAbbr}-${String(bugCounter++).padStart(3, "0")}`,
+            testCaseId: tc.id,
+            severity: analysis.bug.severity || "Medium",
+            title: analysis.bug.title || tc.title,
+            module: moduleResult.name,
+            defectType: analysis.bug.defectType || "Functional Bug",
+            description: `${analysis.actualBehavior} Expected: ${tc.expected}`,
+            impact: analysis.bug.impact || "",
+            fix: analysis.bug.fix || "",
+            priority: tc.priority || "P1",
+          });
+        }
+      }
     }
-  } catch (err) {
-    console.warn("[browserAgent] generateFullQAReport error:", err.message);
+
+    // If no structured cases — analyze the module's step results as a whole
+    if (analyzedCases.length === 0) {
+      const modulePassRate = moduleStepResults.filter(s => s.status === "passed").length / Math.max(1, moduleStepResults.length);
+      analyzedCases.push({
+        id: `TC-${moduleResult.name.replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 6)}-001`,
+        title: `${moduleResult.name} — adaptive test run`,
+        priority: "P1",
+        status: moduleResult.status === "passed" ? "PASS" : "FAIL",
+        actualBehavior: `${moduleResult.summary.passed} of ${moduleResult.summary.total} steps passed.`,
+        expected: "All module features function correctly",
+        isBug: false, bug: null,
+      });
+    }
+
+    moduleTestResults.push({
+      name: moduleResult.name,
+      url: moduleResult.url,
+      status: moduleResult.status,
+      summary: moduleResult.summary,
+      testCaseResults: analyzedCases,
+    });
   }
 
-  return defaultReport;
+  return { moduleTestResults, allBugs };
+}
+
+// ─────────────────────────────────────────────────────────
+// GENERATE MARKDOWN QA REPORT — exact professional format
+// ─────────────────────────────────────────────────────────
+function generateMarkdownQAReport({ url, email, moduleTestResults, allBugs, testDate, appName }) {
+  const today = testDate || new Date().toISOString().split("T")[0];
+  const app = appName || (url ? new URL(url).hostname : "Application");
+
+  // ── Collect all test cases ──
+  const allCases = moduleTestResults.flatMap(m => m.testCaseResults || []);
+  const totalCases = allCases.length;
+  const passedCases = allCases.filter(tc => tc.status === "PASS").length;
+  const failedCases = allCases.filter(tc => tc.status !== "PASS").length;
+
+  // Priority breakdown
+  const byPriority = { P0: { total: 0, passed: 0, failed: 0 }, P1: { total: 0, passed: 0, failed: 0 }, P2: { total: 0, passed: 0, failed: 0 }, P3: { total: 0, passed: 0, failed: 0 } };
+  for (const tc of allCases) {
+    const p = tc.priority || "P1";
+    if (!byPriority[p]) byPriority[p] = { total: 0, passed: 0, failed: 0 };
+    byPriority[p].total++;
+    if (tc.status === "PASS") byPriority[p].passed++;
+    else byPriority[p].failed++;
+  }
+
+  const overallStatus = allBugs.some(b => b.severity === "Critical") ? "❌ FAIL — Critical bugs found"
+    : allBugs.length > 0 ? `❌ FAIL — ${allBugs.length} defect${allBugs.length === 1 ? "" : "s"} found`
+    : "✅ PASS";
+
+  const bugSummaryLine = allBugs.length > 0
+    ? `${allBugs.filter(b => b.severity === "Critical").length} Critical, ${allBugs.filter(b => b.severity === "High").length} High, ${allBugs.filter(b => b.severity === "Medium").length} Medium, ${allBugs.filter(b => b.severity === "Low").length} Low`
+    : "No defects found";
+
+  const severityEmoji = { Critical: "🔴", High: "🟠", Medium: "🟡", Low: "🟢" };
+
+  let md = `# ${app} — QA Test Report\n`;
+  md += `**Application:** ${app} (${url || ""})\n`;
+  md += `**Tester:** Automated QA Agent (via Playwright)\n`;
+  md += `**Test Date:** ${today}\n`;
+  if (email) md += `**Credentials Used:** ${email}\n`;
+  md += `\n---\n\n`;
+
+  // Executive Summary
+  md += `## Executive Summary\n\n`;
+  md += `| Priority | Total | Passed | Failed / Bug |\n`;
+  md += `|----------|-------|--------|--------------|\n`;
+  for (const [p, stats] of Object.entries(byPriority)) {
+    if (stats.total > 0) md += `| ${p} | ${stats.total} | ${stats.passed} | ${stats.failed} |\n`;
+  }
+  md += `| **Total** | **${totalCases}** | **${passedCases}** | **${failedCases}** |\n`;
+  md += `\n**Overall Status: ${overallStatus}**\n`;
+  if (allBugs.length > 0) md += `**Defects:** ${bugSummaryLine}\n`;
+  md += `\n---\n\n`;
+
+  // Test Results by Module
+  md += `## Test Results by Module\n\n`;
+  for (const moduleResult of moduleTestResults) {
+    const mPassed = (moduleResult.testCaseResults || []).filter(tc => tc.status === "PASS").length;
+    const mTotal = (moduleResult.testCaseResults || []).length;
+    const mStatus = mPassed === mTotal ? "✅" : "❌";
+    md += `### ${mStatus} ${moduleResult.name}\n\n`;
+
+    for (const tc of (moduleResult.testCaseResults || [])) {
+      const statusIcon = tc.status === "PASS" ? "✅ PASS" : tc.status === "BUG" ? "❌ BUG" : "❌ FAIL";
+      md += `#### ${tc.id || "TC-???"} · ${tc.title || "Untitled"}\n`;
+      md += `- **Status:** ${statusIcon}\n`;
+      if (tc.priority) md += `- **Priority:** ${tc.priority}\n`;
+      if (tc.expected) md += `- **Expected:** ${tc.expected}\n`;
+      if (tc.actualBehavior) md += `- **Actual:** ${tc.actualBehavior}\n`;
+      if (tc.isBug && tc.bug) {
+        md += `- **Bug Severity:** ${severityEmoji[tc.bug.severity] || "🟡"} ${tc.bug.severity}\n`;
+        md += `- **Defect Type:** ${tc.bug.defectType}\n`;
+        md += `- **Impact:** ${tc.bug.impact}\n`;
+        md += `- **Fix:** ${tc.bug.fix}\n`;
+      }
+      md += `\n`;
+    }
+    md += `---\n\n`;
+  }
+
+  // Defect Summary
+  if (allBugs.length > 0) {
+    md += `## Defect Summary\n\n`;
+    md += `| ID | Description | Severity | Priority | Module | Status |\n`;
+    md += `|----|-------------|----------|----------|--------|--------|\n`;
+    for (const bug of allBugs) {
+      md += `| ${bug.id} | ${bug.title} | ${severityEmoji[bug.severity] || "🟡"} ${bug.severity} | ${bug.priority} | ${bug.module} | Open |\n`;
+    }
+    md += `\n---\n\n`;
+
+    // Detailed bug reports
+    md += `## Detailed Defect Reports\n\n`;
+    for (const bug of allBugs) {
+      md += `### ${bug.id} — ${bug.title}\n`;
+      md += `- **Severity:** ${severityEmoji[bug.severity] || "🟡"} ${bug.severity}\n`;
+      md += `- **Module:** ${bug.module}\n`;
+      md += `- **Defect Type:** ${bug.defectType}\n`;
+      md += `- **Description:** ${bug.description}\n`;
+      md += `- **Impact:** ${bug.impact}\n`;
+      md += `- **Fix Recommendation:** ${bug.fix}\n`;
+      md += `\n`;
+    }
+    md += `---\n\n`;
+  }
+
+  // Test Environment
+  md += `## Test Environment\n\n`;
+  md += `| Item | Value |\n`;
+  md += `|------|-------|\n`;
+  md += `| URL | ${url || "N/A"} |\n`;
+  md += `| Browser | Chromium (Playwright) |\n`;
+  md += `| Test Date | ${today} |\n`;
+  md += `| Tester | Automated QA Agent |\n`;
+  md += `| Test Type | Automated Deep Exploration |\n\n`;
+
+  md += `*Report generated by QA Agent — ${today}*\n`;
+
+  return md;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -3680,13 +7020,27 @@ export async function runDeepExploration({
   );
   if (onRunCreated) onRunCreated(run.id);
 
+  const runController = createRunController(run.id);
+  const actionTimeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
   const allStepResults = [];
   const moduleReconData = [];   // Phase 1 output: what we observed
   const moduleTestPlans = [];   // Phase 2 output: LLM-generated test cases
   const moduleResults = [];     // Phase 3 output: execution results
+  const sessionMemory = {
+    seed: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    createdEntities: [],
+    pendingCredentialChecks: [],
+    credentialChecks: [],
+    auth: {
+      loginUrl: url,
+      initialEmail: email || null,
+    },
+  };
 
   const browser = await createStealthBrowser();
   let context, page;
+  let cancelledError = null;
+  let fatalError = null;
 
   try {
     context = await createStealthContext(browser);
@@ -3714,7 +7068,7 @@ export async function runDeepExploration({
       );
     }
 
-    const loginResults = await executeBrowserSteps(loginSteps, Math.min(timeoutMs, 60000), {
+    const loginResults = await executeBrowserSteps(loginSteps, actionTimeoutMs, {
       runId: run.id,
       stopOnFailure: false,
       liveScreen: true,
@@ -3723,6 +7077,7 @@ export async function runDeepExploration({
       _existingContext: context,
       _existingBrowser: browser,
       _resultOffset: 0,
+      runController,
     });
     allStepResults.push(...loginResults);
 
@@ -3736,18 +7091,91 @@ export async function runDeepExploration({
     try { await page.waitForLoadState("networkidle", { timeout: 10000 }); } catch { /* ok */ }
     await page.waitForTimeout(2000);
 
+    if (email && password) {
+      const postLoginNavItems = await discoverAllNavigationItems(page);
+      const loginStillVisible = await page.evaluate(() => {
+        const isVisible = (el) => {
+          if (!(el instanceof Element)) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+        };
+        const passwordInput = document.querySelector('input[type="password"], input[name*="password" i], input[placeholder*="password" i], input[aria-label*="password" i]');
+        const emailLikeInput = document.querySelector('input[type="email"], input[name*="email" i], input[name*="user" i], input[autocomplete="username"], input[placeholder*="email" i], input[placeholder*="user" i], input[aria-label*="email" i], input[aria-label*="user" i]');
+        return isVisible(passwordInput) || isVisible(emailLikeInput);
+      }).catch(() => false);
+      if (loginStillVisible && (/\/login\b/i.test(page.url()) || postLoginNavItems.length < 2)) {
+        throw new Error("Login likely failed — still on login screen after credential submit");
+      }
+    }
+
     // Step 1b: Discover all navigation items
     await updateCurrentScreen(run.id, await takeScreenshot(page), "Phase 1: Discovering all modules in navigation…");
     await page.waitForTimeout(2500);
     await dismissOverlays(page).catch(() => {});
 
+    // ── Try to open any collapsed sidebar/drawer before nav scan ──
+    // MUI Drawer items are in DOM even when closed but getBoundingClientRect() = 0
+    // Strategy: (1) scan all <a href> in DOM (hrefItems), (2) click hamburger if sidebar not visible
+    const sidebarVisible = await page.evaluate(() => {
+      const sidebar = document.querySelector(
+        "aside, nav, [class*='sidebar'], [class*='Sidebar'], [class*='drawer'], [class*='Drawer'], [role='navigation']"
+      );
+      if (!sidebar) return false;
+      const r = sidebar.getBoundingClientRect();
+      return r.width > 50;
+    }).catch(() => false);
+
+    if (!sidebarVisible) {
+      // Try clicking any hamburger/menu button to reveal sidebar
+      const opened = await page.evaluate(() => {
+        const btn = [
+          document.querySelector('[aria-label*="menu" i]:not([aria-haspopup])'),
+          document.querySelector('[aria-label*="open" i][role="button"]'),
+          ...[...document.querySelectorAll("header button, [class*='AppBar'] button")]
+            .filter(b => {
+              const t = (b.innerText || b.getAttribute("aria-label") || "").trim();
+              return t.length < 4 && b.getBoundingClientRect().width > 0;
+            }),
+        ].filter(Boolean)[0];
+        if (btn) { btn.click(); return true; }
+        return false;
+      }).catch(() => false);
+      if (opened) await page.waitForTimeout(800).catch(() => {});
+    }
+
     let navItems = await discoverAllNavigationItems(page);
+
+    // Scroll sidebar down to discover items hidden below the fold
+    await page.evaluate(() => {
+      const sidebar = document.querySelector(
+        "aside, nav, [class*='sidebar'], [class*='Sidebar'], [class*='drawer'], [class*='Drawer'], [role='navigation']"
+      );
+      if (sidebar) {
+        sidebar.scrollTop = sidebar.scrollHeight / 2;
+      }
+    }).catch(() => {});
+    await page.waitForTimeout(800);
+    const moreNavItems = await discoverAllNavigationItems(page);
+    // Merge unique items
+    const navSeen = new Set(navItems.map(n => n.text.toLowerCase()));
+    for (const item of moreNavItems) {
+      if (!navSeen.has(item.text.toLowerCase())) {
+        navItems.push(item);
+        navSeen.add(item.text.toLowerCase());
+      }
+    }
+
+    // Scroll back to top
+    await page.evaluate(() => {
+      const sidebar = document.querySelector(
+        "aside, nav, [class*='sidebar'], [class*='Sidebar'], [class*='drawer'], [class*='Drawer'], [role='navigation']"
+      );
+      if (sidebar) sidebar.scrollTop = 0;
+    }).catch(() => {});
+    await page.waitForTimeout(400);
+
     if (navItems.length < 3) {
-      await page.evaluate(() => {
-        const sidebar = document.querySelector("aside, nav, [class*='sidebar'], [class*='side-bar'], [role='navigation']");
-        if (sidebar) sidebar.scrollTop = 0;
-      }).catch(() => {});
-      await page.waitForTimeout(1000);
       navItems = await discoverAllNavigationItems(page);
     }
     if (navItems.length === 0) {
@@ -3781,25 +7209,8 @@ export async function runDeepExploration({
       try {
         await updateCurrentScreen(run.id, await takeScreenshot(page), `Phase 1: Observing "${navItem.text}" module…`);
 
-        const navigated = await (async () => {
-          try {
-            if (navItem.href && /^https?:\/\//.test(navItem.href)) {
-              await page.goto(navItem.href, { timeout: 15000, waitUntil: "domcontentloaded" });
-            } else if (navItem.href && navItem.href.startsWith("/")) {
-              const origin = new URL(page.url()).origin;
-              await page.goto(origin + navItem.href, { timeout: 15000, waitUntil: "domcontentloaded" });
-            } else {
-              const loc = page.getByText(navItem.text, { exact: false }).first();
-              const vis = await loc.isVisible({ timeout: 3000 }).catch(() => false);
-              if (vis) await loc.click({ timeout: 5000 });
-              else return false;
-            }
-            await page.waitForTimeout(1500);
-            try { await page.waitForLoadState("networkidle", { timeout: 5000 }); } catch { /* ok */ }
-            await dismissOverlays(page).catch(() => {});
-            return true;
-          } catch { return false; }
-        })();
+        await runController.assertActive({ phase: "recon", moduleName: navItem.text });
+        const navigated = await navigateToDiscoveredModule(page, navItem, url);
 
         if (!navigated) {
           console.log(`[deepExplore] Could not navigate to "${navItem.text}", skipping`);
@@ -3825,6 +7236,7 @@ export async function runDeepExploration({
         moduleReconData.push({ ...deepRecon, screenshot: reconShot });
         console.log(`[deepExplore] Deep recon OK: "${navItem.text}" — ${deepRecon.clickableButtons.filter(b => b.opensModal).length} modals, ${deepRecon.tabs.length} tabs`);
       } catch (err) {
+        if (isRunCancelledError(err)) throw err;
         console.warn(`[deepExplore] Recon failed for "${navItem.text}":`, err.message);
       }
     }
@@ -3848,10 +7260,17 @@ export async function runDeepExploration({
         moduleTestPlans.push({
           name: recon.name,
           url: recon.url,
-          testCases: [
-            { action: "navigate", url: recon.url, description: `Open ${recon.name}` },
-            { action: "screenshot", label: `${recon.name.toLowerCase().replace(/\s+/g, "_")}_fallback` },
-          ],
+          testCases: [{
+            id: `TC-${recon.name.replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 6)}-001`,
+            title: `${recon.name} — basic load`,
+            priority: "P0", category: "happy_path",
+            steps: [
+              { action: "navigate", url: recon.url, description: `Open ${recon.name}` },
+              { action: "screenshot", label: `${recon.name.toLowerCase().replace(/\s+/g, "_")}_fallback` },
+            ],
+            expected: `${recon.name} loads without errors`,
+            assertions: [{ action: "ai_assert", description: "page loaded with visible content", optional: true }],
+          }],
         });
       }
     }
@@ -3859,36 +7278,63 @@ export async function runDeepExploration({
     // ═══════════════════════════════════════════════════════
     // PHASE 3: EXECUTE ALL TEST PLANS AGGRESSIVELY
     // ═══════════════════════════════════════════════════════
-    console.log(`[deepExplore] Phase 3: Executing test plans for ${moduleTestPlans.length} modules`);
+    console.log(`[deepExplore] Phase 3: Executing adaptive deep tests for ${moduleReconData.length} modules`);
 
-    for (const plan of moduleTestPlans) {
+    for (const recon of moduleReconData) {
+      await runController.assertActive({ phase: "module_execute", moduleName: recon.name });
       const moduleOffset = allStepResults.length;
-      await updateCurrentScreen(run.id, await takeScreenshot(page), `Phase 3: Testing "${plan.name}" — ${plan.testCases.length} test cases…`);
+      await updateCurrentScreen(run.id, await takeScreenshot(page), `Phase 3: Testing "${recon.name}" with adaptive DOM coverage`);
 
       let moduleStepResults = [];
       try {
-        // Allocate time proportionally — each module gets at least 60s, at most 180s
-        const remainingTime = timeoutMs - 120000; // reserve 2 min for finalization
-        const perModuleMs = Math.min(
-          Math.max(Math.floor(remainingTime / Math.max(moduleTestPlans.length, 1)), 60000),
-          180000
-        );
-        moduleStepResults = await executeBrowserSteps(plan.testCases, perModuleMs, {
+        const navigated = await navigateToDiscoveredModule(page, recon, url);
+        if (!navigated) {
+          throw new Error(`Could not navigate back to module "${recon.name}"`);
+        }
+        const expectedModuleUrl = page.url();
+
+        moduleStepResults = await executeDeepModuleTest(page, recon.name, {
+          context,
+          browser,
           runId: run.id,
-          stopOnFailure: false,
-          liveScreen: true,
-          autoScreenshot: true,
-          _existingPage: page,
-          _existingContext: context,
-          _existingBrowser: browser,
-          _resultOffset: moduleOffset,
+          resultOffset: moduleOffset,
+          moduleTimeoutMs: actionTimeoutMs,
+          expectedModuleUrl,
+          runController,
+          sessionMemory,
+          reconData: recon,   // pass Phase 1 discovery — buttons, tabs, tabContents, forms
         });
+
+        const hardFailure = moduleStepResults.length < 4 || moduleStepResults.every((s) => s.status !== "passed");
+        if (hardFailure) {
+          const fallbackPlan = moduleTestPlans.find((candidate) => candidate.name === recon.name);
+          if (fallbackPlan?.testCases?.length) {
+            console.warn(`[deepExplore] Adaptive pass weak for "${recon.name}" - running generated fallback plan`);
+            // Extract raw Playwright steps from structured test cases
+            const fallbackSteps = fallbackPlan.testCases.flatMap(tc =>
+              Array.isArray(tc.steps) ? [...tc.steps, ...(tc.assertions || [])] : (tc.action ? [tc] : [])
+            );
+            const fallbackResults = await executeBrowserSteps(fallbackSteps, actionTimeoutMs, {
+              runId: run.id,
+              stopOnFailure: false,
+              liveScreen: true,
+              autoScreenshot: true,
+              _existingPage: page,
+              _existingContext: context,
+              _existingBrowser: browser,
+              _resultOffset: moduleOffset + moduleStepResults.length,
+              runController,
+            });
+            moduleStepResults.push(...fallbackResults);
+          }
+        }
       } catch (err) {
-        console.warn(`[deepExplore] Phase 3 execution failed for "${plan.name}":`, err.message);
+        if (isRunCancelledError(err)) throw err;
+        console.warn(`[deepExplore] Phase 3 execution failed for "${recon.name}":`, err.message);
         moduleStepResults = [{
           stepIndex: moduleOffset,
           action: "error",
-          description: `Execution error in ${plan.name}: ${err.message}`,
+          description: `Execution error in ${recon.name}: ${err.message}`,
           status: "failed",
           error: err.message,
           screenshot: null,
@@ -3904,38 +7350,181 @@ export async function runDeepExploration({
       const mPassed = moduleStepResults.filter(s => s.status === "passed").length;
       const mFailed = moduleStepResults.filter(s => s.status === "failed").length;
       moduleResults.push({
-        name: plan.name,
-        url: plan.url,
+        name: recon.name,
+        url: recon.url,
         status: mFailed > 0 ? "failed" : "passed",
         stepResults: moduleStepResults,
-        testCasesGenerated: plan.testCases.length,
+        testCasesGenerated: moduleTestPlans.find((candidate) => candidate.name === recon.name)?.testCases?.length || 0,
         summary: { total: moduleStepResults.length, passed: mPassed, failed: mFailed },
       });
-      console.log(`[deepExplore] Module "${plan.name}": ${mPassed}✓ ${mFailed}✗`);
+      console.log(`[deepExplore] Module "${recon.name}": ${mPassed}✓ ${mFailed}✗`);
     }
 
+    // ═══════════════════════════════════════════════════════
+    // PHASE 3.5: CASCADING VERIFICATION
+    // For every entity created during testing, navigate to related modules
+    // and verify that the entity's effect is visible there too.
+    // Example: create a Task → check Calendar module shows it; create a User → check Team module lists them.
+    // ═══════════════════════════════════════════════════════
+    const createdEntities = sessionMemory?.createdEntities || [];
+    if (createdEntities.length > 0 && moduleReconData.length > 1) {
+      await updateCurrentScreen(run.id, await takeScreenshot(page), `Phase 3.5: Cascading verification — checking ${createdEntities.length} created entities across ${moduleReconData.length} modules…`);
+      console.log(`[deepExplore] Phase 3.5: Cascading check for ${createdEntities.length} entities`);
+
+      for (const entity of createdEntities.slice(0, 5)) {
+        if (!entity.primaryValue) continue;
+
+        // Find related modules — heuristic: any module whose name shares keywords with the entity type
+        const entityType = (entity.entityType || entity.module || "").toLowerCase();
+        const relatedModules = moduleReconData.filter(m => {
+          if (m.name === entity.module) return false; // skip source module
+          const mName = m.name.toLowerCase();
+          // Common cascading relationships
+          if (/task|project/.test(entityType) && /calendar|timeline|gantt|board|sprint|backlog/.test(mName)) return true;
+          if (/user|member|team|employee/.test(entityType) && /team|group|department|user|member|people/.test(mName)) return true;
+          if (/role|permission/.test(entityType) && /user|member|access/.test(mName)) return true;
+          if (/project/.test(entityType) && /task|report|dashboard/.test(mName)) return true;
+          if (/invoice|order/.test(entityType) && /report|finance|account/.test(mName)) return true;
+          return false;
+        });
+
+        for (const relModule of relatedModules.slice(0, 2)) {
+          try {
+            await runController.assertActive({ phase: "cascading", entity: entity.primaryValue, relatedModule: relModule.name });
+            const navigated = await navigateToDiscoveredModule(page, relModule, url);
+            if (!navigated) continue;
+            await page.waitForTimeout(1200);
+            await dismissOverlays(page).catch(() => {});
+
+            const cascadeOffset = allStepResults.length;
+            const cascadeResults = await executeBrowserSteps([
+              { action: "screenshot", label: `cascade_${entity.module}_to_${relModule.name.replace(/\s+/g, "_").toLowerCase()}` },
+              {
+                action: "ai_assert",
+                description: `"${entity.primaryValue}" is visible or reflected in ${relModule.name} after being created in ${entity.module}`,
+                optional: true,
+              },
+            ], actionTimeoutMs, {
+              runId: run.id,
+              stopOnFailure: false,
+              _existingPage: page,
+              _existingContext: context,
+              _existingBrowser: browser,
+              _resultOffset: cascadeOffset,
+              runController,
+            });
+            allStepResults.push(...cascadeResults);
+            await updateRunLive(run.id, allStepResults);
+            console.log(`[deepExplore] Cascade: "${entity.primaryValue}" checked in "${relModule.name}"`);
+          } catch (err) {
+            if (isRunCancelledError(err)) throw err;
+            console.warn(`[deepExplore] Cascade check failed: "${entity.primaryValue}" in "${relModule.name}":`, err.message);
+          }
+        }
+      }
+    }
+
+    if (sessionMemory.pendingCredentialChecks.length > 0) {
+      await updateCurrentScreen(run.id, await takeScreenshot(page), "Phase 4: Verifying generated credentials in fresh sessions…");
+      const credentialResults = await runCredentialClosureChecks({
+        browser,
+        sessionMemory,
+        runId: run.id,
+        resultOffset: allStepResults.length,
+        runController,
+      });
+      allStepResults.push(...credentialResults);
+      await updateRunLive(run.id, allStepResults);
+    }
+
+  } catch (err) {
+    if (isRunCancelledError(err)) {
+      cancelledError = err;
+    } else {
+      fatalError = err;
+    }
   } finally {
     await browser.close();
   }
 
-  // Generate comprehensive QA report
-  await updateCurrentScreen(run.id, null, "Generating comprehensive QA bug report…");
+  if (cancelledError) {
+    const passed = allStepResults.filter((step) => step.status === "passed").length;
+    const failed = allStepResults.filter((step) => step.status === "failed").length;
+    const skipped = allStepResults.filter((step) => step.status === "skipped").length;
+    const output = {
+      instructions: raw,
+      discoveredModules: moduleResults.map((moduleResult) => moduleResult.name),
+      modules: moduleResults.map((moduleResult) => ({
+        ...moduleResult,
+        stepResults: moduleResult.stepResults.map((step) => ({ ...step, screenshot: step.screenshot ? true : null })),
+      })),
+      stepResults: allStepResults,
+      createdEntities: sessionMemory.createdEntities,
+      credentialChecks: sessionMemory.credentialChecks,
+      cancelControl: {
+        message: cancelledError.message,
+        details: cancelledError.details || null,
+      },
+      summary: {
+        total: allStepResults.length,
+        passed,
+        failed,
+        skipped,
+        modules: moduleResults.length,
+        cancelled: true,
+      },
+    };
+    await pool.query(
+      `UPDATE testing_agent_runs SET status='cancelled', output_json=$2, finished_at=NOW() WHERE id=$1`,
+      [run.id, safeJsonStringify(output)]
+    );
+    return {
+      runId: run.id,
+      status: "cancelled",
+      summary: output.summary,
+      discoveredModules: output.discoveredModules,
+    };
+  }
+
+  if (fatalError) {
+    await pool.query(
+      `UPDATE testing_agent_runs SET status='failed', output_json=$2, finished_at=NOW() WHERE id=$1`,
+      [run.id, safeJsonStringify({ error: fatalError.message, instructions: raw, stepResults: allStepResults })]
+    );
+    throw fatalError;
+  }
+
+  // ── Generate comprehensive QA report ──
+  await updateCurrentScreen(run.id, null, "Analyzing test results and generating QA report…");
   const passed = allStepResults.filter(s => s.status === "passed").length;
   const failed = allStepResults.filter(s => s.status === "failed").length;
   const skipped = allStepResults.filter(s => s.status === "skipped").length;
   const finalStatus = failed > 0 ? "failed" : "passed";
+  const diagnosticsSummary = summarizeRunDiagnostics(allStepResults);
 
-  const qaReport = await generateFullQAReport(allStepResults, moduleResults);
+  // Per-test-case analysis: compare expected vs actual, extract real bugs
+  const { moduleTestResults, allBugs } = await analyzeAllModuleResults(moduleResults, moduleTestPlans, allStepResults);
 
-  // Backward-compatible insights object derived from the QA report
+  // Structured markdown report in the exact professional QA format
+  const appName = (() => { try { return new URL(url).hostname; } catch { return "Application"; } })();
+  const markdownReport = generateMarkdownQAReport({
+    url, email, appName,
+    moduleTestResults,
+    allBugs,
+    testDate: new Date().toISOString().split("T")[0],
+  });
+
+  // Backward-compatible insights object
   const insights = {
-    verdict: qaReport.verdict,
-    whatWorked: qaReport.moduleReports.filter(m => m.healthScore >= 7).map(m => m.module).slice(0, 5),
-    whatFailed: qaReport.bugsFound.slice(0, 5).map(b => b.title),
-    rootCause: qaReport.bugsFound[0]?.description || null,
-    recommendations: qaReport.topPriorityFixes.slice(0, 4),
-    nextTestsToRun: qaReport.coverageGaps.slice(0, 4),
-    performanceNote: qaReport.performanceIssues.length > 0 ? qaReport.performanceIssues[0] : null,
+    verdict: allBugs.length === 0
+      ? "All tests passed — no defects found."
+      : `${allBugs.length} defect${allBugs.length === 1 ? "" : "s"} found: ${allBugs.filter(b => b.severity === "Critical").length} critical, ${allBugs.filter(b => b.severity === "High").length} high.`,
+    whatWorked: moduleTestResults.filter(m => m.testCaseResults?.every(tc => tc.status === "PASS")).map(m => m.name).slice(0, 5),
+    whatFailed: allBugs.slice(0, 5).map(b => b.title),
+    rootCause: allBugs[0]?.description || null,
+    recommendations: allBugs.slice(0, 4).map(b => b.fix).filter(Boolean),
+    nextTestsToRun: [],
+    performanceNote: null,
   };
 
   const output = {
@@ -3948,7 +7537,7 @@ export async function runDeepExploration({
         totalTabsFound: moduleReconData.reduce((n, r) => n + (r.tabs || []).length, 0),
         totalButtonsFound: moduleReconData.reduce((n, r) => n + (r.clickableButtons || []).length, 0),
       },
-      plan: { modulesPlanned: moduleTestPlans.length, totalTestCases: moduleTestPlans.reduce((s, p) => s + p.testCases.length, 0) },
+      plan: { modulesPlanned: moduleTestPlans.length, totalTestCases: moduleTestPlans.reduce((s, p) => s + (p.testCases || []).length, 0) },
       execute: { modulesExecuted: moduleResults.length },
     },
     discoveredModules: moduleResults.map(m => m.name),
@@ -3956,8 +7545,13 @@ export async function runDeepExploration({
       ...m,
       stepResults: m.stepResults.map(s => ({ ...s, screenshot: s.screenshot ? true : null })),
     })),
+    moduleTestResults,
     stepResults: allStepResults,
-    qaReport,
+    diagnostics: diagnosticsSummary,
+    createdEntities: sessionMemory.createdEntities,
+    credentialChecks: sessionMemory.credentialChecks,
+    allBugs,
+    markdownReport,
     insights,
     summary: {
       total: allStepResults.length,
@@ -3965,29 +7559,34 @@ export async function runDeepExploration({
       failed,
       skipped,
       modules: moduleResults.length,
-      bugsFound: qaReport.bugsFound.length,
-      securityIssues: qaReport.securityConcerns.length,
-      overallHealthScore: qaReport.overallHealthScore,
+      bugsFound: allBugs.length,
+      criticalBugs: allBugs.filter(b => b.severity === "Critical").length,
+      highBugs: allBugs.filter(b => b.severity === "High").length,
+      runtimePageErrors: diagnosticsSummary.pageErrors,
+      runtimeConsoleErrors: diagnosticsSummary.consoleErrors,
+      runtimeRequestFailures: diagnosticsSummary.requestFailures,
+      runtimeHttpFailures: diagnosticsSummary.responseFailures,
     },
   };
 
   await pool.query(
     `UPDATE testing_agent_runs SET status=$2, output_json=$3, finished_at=NOW() WHERE id=$1`,
-    [run.id, finalStatus, JSON.stringify(output)]
+    [run.id, finalStatus, safeJsonStringify(output)]
   );
 
   return {
     runId: run.id,
     status: finalStatus,
     summary: output.summary,
-    qaReport,
+    allBugs,
+    markdownReport,
     insights,
     discoveredModules: output.discoveredModules,
     modules: moduleResults.map(m => ({
       name: m.name,
       status: m.status,
       summary: m.summary,
-      testCasesGenerated: m.testCasesGenerated,
+      testCasesGenerated: (moduleTestPlans.find(p => p.name === m.name)?.testCases || []).length,
     })),
   };
 }
@@ -4050,7 +7649,7 @@ export async function runBrowserAgent({
         instructions: raw,
         triggeredBy,
         triggerSource,
-        timeoutMs: Math.max(timeoutMs, 300000), // at least 5 min for deep exploration
+        timeoutMs,
         onRunCreated,
       });
     }
@@ -4080,17 +7679,51 @@ export async function runBrowserAgent({
        (workspace_id, project_id, task_id, trigger_source, mode, status, generated_cases, commands, output_json, created_by)
      VALUES ($1,$2,$3,$4,'browser','running','[]'::jsonb,$5::jsonb,'{"stepResults":[]}'::jsonb,$6)
      RETURNING *`,
-    [workspaceId, projectId, taskId, triggerSource, JSON.stringify(parsedSteps), triggeredBy || null]
+    [workspaceId, projectId, taskId, triggerSource, safeJsonStringify(parsedSteps), triggeredBy || null]
   );
   if (onRunCreated) onRunCreated(run.id);
+  const runController = createRunController(run.id);
+  const actionTimeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
 
   let stepResults;
   try {
-    stepResults = await executeBrowserSteps(parsedSteps, timeoutMs, { runId: run.id, stopOnFailure: false });
+    stepResults = await executeBrowserSteps(parsedSteps, actionTimeoutMs, {
+      runId: run.id,
+      stopOnFailure: false,
+      runController,
+    });
   } catch (err) {
+    if (isRunCancelledError(err)) {
+      const output = {
+        instructions: raw,
+        parsedSteps,
+        stepResults: Array.isArray(stepResults) ? stepResults : [],
+        cancelControl: {
+          message: err.message,
+          details: err.details || null,
+        },
+        summary: {
+          total: Array.isArray(stepResults) ? stepResults.length : 0,
+          passed: Array.isArray(stepResults) ? stepResults.filter((step) => step.status === "passed").length : 0,
+          failed: Array.isArray(stepResults) ? stepResults.filter((step) => step.status === "failed").length : 0,
+          skipped: Array.isArray(stepResults) ? stepResults.filter((step) => step.status === "skipped").length : 0,
+          cancelled: true,
+        },
+      };
+      await pool.query(
+        `UPDATE testing_agent_runs SET status='cancelled', output_json=$2, finished_at=NOW() WHERE id=$1`,
+        [run.id, safeJsonStringify(output)]
+      );
+      return {
+        runId: run.id,
+        status: "cancelled",
+        summary: output.summary,
+        parsedSteps,
+      };
+    }
     await pool.query(
       `UPDATE testing_agent_runs SET status='failed', output_json=$2, finished_at=NOW() WHERE id=$1`,
-      [run.id, JSON.stringify({ error: err.message, instructions: raw })]
+      [run.id, safeJsonStringify({ error: err.message, instructions: raw })]
     );
     throw err;
   }
@@ -4105,7 +7738,7 @@ export async function runBrowserAgent({
 
   await pool.query(
     `UPDATE testing_agent_runs SET status=$2, output_json=$3, finished_at=NOW() WHERE id=$1`,
-    [run.id, finalStatus, JSON.stringify(output)]
+    [run.id, finalStatus, safeJsonStringify(output)]
   );
 
   return {

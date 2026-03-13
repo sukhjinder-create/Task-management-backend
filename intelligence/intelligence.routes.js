@@ -9,9 +9,10 @@ import {
   getCoachingEffectiveness,
   getUserTrend,
   getUserProjectPerformance,
-} from "./intelligence.controller.js";
-import {
-  getWorkspaceHealth
+  getWorkspaceHealth,
+  getProjectsHealth,
+  getTeamComparison,
+  getWorkspaceDashboard,
 } from "./intelligence.controller.js";
 
 
@@ -86,6 +87,27 @@ router.get(
 router.get(
   "/workspace/health",
   getWorkspaceHealth
+);
+
+router.get(
+  "/projects/health",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getProjectsHealth
+);
+
+router.get(
+  "/team/comparison",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getTeamComparison
+);
+
+router.get(
+  "/workspace/dashboard",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getWorkspaceDashboard
 );
 
 export default router;

@@ -32,7 +32,7 @@ const storage = multer.diskStorage({
 // Limit each file to 20 MB (description HTML is handled by express.json limit)
 const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB for chat attachments
 });
 
 /**
@@ -47,12 +47,33 @@ router.post("/richtext", upload.single("file"), (req, res) => {
     return res.status(400).json({ error: "No file uploaded" });
   }
 
-  // This matches: app.use("/uploads", express.static("uploads"))
   const publicUrl = `/uploads/${file.filename}`;
 
   return res.json({
     url: publicUrl,
     original_name: file.originalname,
+  });
+});
+
+/**
+ * POST /upload/chat-attachment
+ * Accepts any file type (image, video, audio, pdf, zip, etc.)
+ * field name: "file"
+ * Returns: { url, name, size, type }
+ */
+router.post("/chat-attachment", upload.single("file"), (req, res) => {
+  const file = req.file;
+  if (!file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
+
+  const publicUrl = `/uploads/${file.filename}`;
+
+  return res.json({
+    url: publicUrl,
+    name: file.originalname,
+    size: file.size,
+    type: file.mimetype,
   });
 });
 

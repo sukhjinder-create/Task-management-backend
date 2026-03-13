@@ -1,4 +1,8 @@
 import express from "express";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
 import pool from "../db.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
@@ -8,7 +12,27 @@ import {
   updateUserService,
   deleteUserService,
 } from "../services/user.service.js";
-import { getUserById } from "../repositories/user.repository.js";
+import { getUserById, updateAvatarUrl } from "../repositories/user.repository.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const uploadDir = path.join(__dirname, "..", "uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+const avatarUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadDir),
+    filename: (req, file, cb) => {
+      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      cb(null, "avatar-" + unique + path.extname(file.originalname));
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) cb(null, true);
+    else cb(new Error("Only image files are allowed"));
+  },
+});
 
 const router = express.Router();
 
@@ -22,6 +46,23 @@ const router = express.Router();
  */
 router.use(authMiddleware);
 router.use(requireWorkspaceForUser);
+
+/**
+ * 🔹 POST /users/me/avatar – upload profile photo
+ */
+router.post("/me/avatar", avatarUpload.single("avatar"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const avatarUrl = `/uploads/${req.file.filename}`;
+    const updated = await updateAvatarUrl(req.user.id, avatarUrl);
+
+    res.json({ avatar_url: updated.avatar_url });
+  } catch (err) {
+    console.error("Error uploading avatar:", err);
+    res.status(500).json({ error: err.message || "Failed to upload avatar" });
+  }
+});
 
 /**
  * 🔹 GET /users/me – current logged-in user (workspace scoped)
@@ -134,6 +175,7 @@ router.get("/", async (req, res) => {
       username: u.username,
       email: u.email,
       role: u.role,
+      avatar_url: u.avatar_url || null,
     }));
 
     res.json(safeUsers);
@@ -160,6 +202,10 @@ router.post("/", async (req, res) => {
 
     if (!["admin", "manager", "user"].includes(role)) {
       return res.status(400).json({ error: "Invalid role" });
+    }
+
+    if (role === "manager" && (!Array.isArray(projects) || projects.length === 0)) {
+      return res.status(400).json({ error: "At least one project must be assigned when creating a manager" });
     }
 
     const user = await createUserService({
@@ -202,6 +248,10 @@ router.put("/:id", async (req, res) => {
 
     if (role && !["admin", "manager", "user"].includes(role)) {
       return res.status(400).json({ error: "Invalid role" });
+    }
+
+    if (role === "manager" && (!Array.isArray(projects) || projects.length === 0)) {
+      return res.status(400).json({ error: "At least one project must be assigned to a manager" });
     }
 
     // ✅ FIX: pass workspaceId

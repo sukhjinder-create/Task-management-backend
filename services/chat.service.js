@@ -438,6 +438,7 @@ export async function createChatMessage({
   parentId = null,
   encryptedJson = null,
   fallbackText = null,
+  attachments = [],
   workspaceId,
 }) {
   if (!channelKey) throw new Error("channelKey required");
@@ -458,6 +459,8 @@ const baseText =
   fallbackText?.trim() ||
   (typeof textHtml === "string" ? textHtml.trim() : "");
 
+const safeAttachments = Array.isArray(attachments) ? attachments : [];
+
   // ⛔ side-effects MUST NOT run inside DB transaction
   let postCommit = null;
 
@@ -475,7 +478,8 @@ const baseText =
     encrypted_json,
     workspace_id,
     created_at,
-    parent_id
+    parent_id,
+    attachments
   )
   VALUES (
     gen_random_uuid(),
@@ -486,7 +490,8 @@ const baseText =
     $5,
     $6::uuid,
     now(),
-    $7
+    $7,
+    $8::jsonb
   )
   RETURNING *
   `,
@@ -500,6 +505,7 @@ const baseText =
     : JSON.stringify({ message: baseText }), // legacy fallback
     workspaceId,     // 🔥 MUST ALWAYS BE NON-NULL
     parentId,
+    JSON.stringify(safeAttachments),
   ]
 );
 

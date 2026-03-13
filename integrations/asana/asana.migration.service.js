@@ -1,10 +1,51 @@
 import pool from "../../db.js";
 import axios from "axios";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import taskRepository from "../../repositories/task.repository.js";
 import { fetchAsanaProjectTasks } from "./asana.viewer.service.js";
 import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
 import { EVENT_TYPES } from "../../events/eventTypes.js";
 import { getSystemActorId } from "../../events/systemActor.service.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const UPLOAD_DIR = path.join(__dirname, "..", "..", "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+async function migrateAsanaAttachments(token, asanaTaskGid, internalTaskId, workspaceId, uploadedBy) {
+  try {
+    const res = await axios.get("https://app.asana.com/api/1.0/attachments", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { parent: asanaTaskGid, opt_fields: "gid,name,download_url,size,mime_type" },
+    });
+
+    const attachments = res.data?.data || [];
+
+    for (const att of attachments) {
+      if (!att.download_url) continue;
+      try {
+        const ext = path.extname(att.name) || "";
+        const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+        const filePath = path.join(UPLOAD_DIR, filename);
+
+        const fileRes = await axios.get(att.download_url, { responseType: "arraybuffer", timeout: 30000 });
+        fs.writeFileSync(filePath, Buffer.from(fileRes.data));
+
+        await pool.query(
+          `INSERT INTO task_attachments (task_id, url, original_name, mime_type, file_size, uploaded_by, workspace_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [internalTaskId, `/uploads/${filename}`, att.name, att.mime_type || null, att.size || null, uploadedBy, workspaceId]
+        );
+      } catch (e) {
+        console.warn(`Asana attachment download failed (${att.name}):`, e.message);
+      }
+    }
+  } catch (e) {
+    console.warn(`Asana attachments fetch failed for task ${asanaTaskGid}:`, e.message);
+  }
+}
 
 /* =====================================================
    ASSIGNEE MAPPING
@@ -144,6 +185,9 @@ export async function migrateAsanaProject({
       `,
       [workspaceId, asanaTask.gid, createdTask.id]
     );
+
+    /* ---- attachments ---- */
+    await migrateAsanaAttachments(token, asanaTask.gid, createdTask.id, workspaceId, systemActorId);
 
     /* =====================================================
    SUBTASK IMPORT (CORRECT HIERARCHY)

@@ -16,9 +16,9 @@ export function startAutopilotCron() {
   console.log("🤖 Starting Autopilot cron jobs...");
 
   // ============================================
-  // JOB 1: Run autopilot analysis every 30 minutes
+  // JOB 1: Run autopilot analysis every 4 hours
   // ============================================
-  cron.schedule("*/30 * * * *", async () => {
+  cron.schedule("0 */4 * * *", async () => {
     console.log("\n🤖 [CRON] Running autopilot analysis...");
 
     try {
@@ -74,6 +74,6 @@ export function startAutopilotCron() {
   });
 
   console.log("✅ Autopilot cron jobs started");
-  console.log("  - Analysis: Every 30 minutes");
+  console.log("  - Analysis: Every 4 hours");
   console.log("  - Auto-approvals: Every 15 minutes");
 }

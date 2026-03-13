@@ -1,6 +1,13 @@
 // autopilot/autopilot.engine.js
 import pool from "../db.js";
 import { generateText } from "../intelligence/llm/llmClient.js";
+import {
+  createChannel,
+  getChannelByKey,
+  ensureChannelMember,
+  createChatMessage,
+} from "../services/chat.service.js";
+import { ensureSystemUser } from "../services/ai.system.service.js";
 
 /**
  * 🤖 AI AUTOPILOT ENGINE
@@ -41,6 +48,8 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
   if (settings.auto_generate_standup) {
     modulePromises.push(generateStandupSummary(workspaceId, projectId, settings));
   }
+  // Always analyse overdue tasks
+  modulePromises.push(analyzeOverdueTasks(workspaceId, projectId, settings));
 
   const moduleResults = await Promise.all(modulePromises);
   const actions = moduleResults.flat().filter(Boolean);
@@ -107,48 +116,87 @@ async function analyzeUnassignedTasks(workspaceId, projectId, settings) {
   for (const u of allUsers) {
     userMap.set(u.id, u.username || u.email || "unknown");
   }
-  const availableUser = workloads.find(w =>
-    w.active_tasks < settings.max_tasks_per_user &&
-    w.overdue_tasks === 0
-  );
-  const leastBusyUser = workloads.length > 0 ? workloads[0] : null;
-  const fallbackUser = allUsers.length > 0 ? allUsers[0] : null;
+
+  // Build workload map for O(1) lookup
+  const workloadMap = new Map();
+  for (const w of workloads) workloadMap.set(w.user_id, w);
+
+  // Priority score: higher = more urgent assignment
+  const priorityScore = { critical: 4, urgent: 3, high: 2, medium: 1, low: 0 };
+
+  // Get per-project completion history for users (to find domain experts)
+  const projectIds = [...new Set(unassignedTasks.map(t => t.project_id).filter(Boolean))];
+  const historyMap = new Map(); // key: `${userId}_${projectId}` → completed count
+  if (projectIds.length > 0) {
+    const { rows: histRows } = await pool.query(`
+      SELECT assigned_to AS user_id, project_id, COUNT(*) AS cnt
+      FROM tasks
+      WHERE workspace_id = $1
+        AND project_id = ANY($2)
+        AND status = 'completed'
+        AND assigned_to IS NOT NULL
+      GROUP BY assigned_to, project_id
+    `, [workspaceId, projectIds]);
+    for (const r of histRows) {
+      historyMap.set(`${r.user_id}_${r.project_id}`, Number(r.cnt));
+    }
+  }
 
   for (const task of unassignedTasks) {
-    // Find best user for this task
-    let bestUser = null;
-    let reason = '';
+    const taskPriority = priorityScore[task.priority] ?? 1;
 
-    if (availableUser) {
-      bestUser = availableUser.user_id;
-      reason = `User has ${availableUser.active_tasks} active tasks (below ${settings.max_tasks_per_user} threshold), no overdue tasks, and avg completion time of ${Math.round(availableUser.avg_completion_days || 0)} days.`;
-    } else if (leastBusyUser) {
-      // Strategy 2: Find user with least tasks even if over threshold
-      bestUser = leastBusyUser.user_id;
-      reason = `All users are at capacity. Assigning to least busy user with ${leastBusyUser.active_tasks} active tasks.`;
-    } else if (fallbackUser) {
-      // Strategy 3: Random assignment if no workload data
-      bestUser = fallbackUser.id;
-      reason = `No workload history available. Assigning to team member for initial distribution.`;
+    // Score each user: capacity + project history
+    let bestUser = null;
+    let bestScore = -Infinity;
+    let bestReason = '';
+
+    const candidateUsers = workloads.length > 0
+      ? workloads.map(w => ({ id: w.user_id, activeTasks: w.active_tasks, overdueTasks: w.overdue_tasks, avgDays: w.avg_completion_days || 0 }))
+      : allUsers.map(u => ({ id: u.id, activeTasks: 0, overdueTasks: 0, avgDays: 0 }));
+
+    for (const candidate of candidateUsers) {
+      if (candidate.activeTasks >= settings.max_tasks_per_user * 1.5) continue; // hard cap
+      const capacityScore = (settings.max_tasks_per_user - candidate.activeTasks) * 2;
+      const overduepenalty = candidate.overdueTasks * -3;
+      const historyBonus = (historyMap.get(`${candidate.id}_${task.project_id}`) || 0) * 1.5;
+      const velocityBonus = candidate.avgDays > 0 ? Math.max(0, 10 - candidate.avgDays) : 0;
+      const score = capacityScore + overduepenalty + historyBonus + velocityBonus;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestUser = candidate.id;
+        const isExpert = historyBonus > 0;
+        bestReason = isExpert
+          ? `Assigned based on project history (${Math.round(historyBonus / 1.5)} prior completions), ${candidate.activeTasks} active tasks, avg ${Math.round(candidate.avgDays)} days completion.`
+          : `Lowest workload: ${candidate.activeTasks} active tasks, no overdue issues, avg ${Math.round(candidate.avgDays)} days.`;
+      }
+    }
+
+    // Fallback if all over hard cap
+    if (!bestUser && allUsers.length > 0) {
+      bestUser = allUsers[0].id;
+      bestReason = 'All users at capacity. Assigning to first available team member.';
     }
 
     if (bestUser) {
+      const confidence = bestScore > 5 ? 0.88 : bestScore > 0 ? 0.70 : 0.50;
       actions.push({
         type: 'reassign',
         taskId: task.id,
         projectId: task.project_id,
-        reason: `Unassigned task detected. ${reason}`,
+        reason: `Unassigned ${task.priority || 'medium'}-priority task detected. ${bestReason}`,
         currentState: {
           task: task.task,
           assigned_to: null,
           status: task.status,
           due_date: task.due_date,
+          priority: task.priority,
         },
         proposedChanges: {
           assigned_to: bestUser,
           assigned_to_username: userMap.get(bestUser) || "unknown",
         },
-        confidence: availableUser ? 0.85 : (workloads.length > 0 ? 0.65 : 0.50),
+        confidence,
       });
     }
   }
@@ -306,92 +354,187 @@ async function analyzeBlockers(workspaceId, projectId, settings) {
 }
 
 /**
+ * Analyze overdue tasks and propose immediate handling
+ */
+async function analyzeOverdueTasks(workspaceId, projectId, settings) {
+  const query = projectId
+    ? `SELECT t.*,
+        EXTRACT(DAY FROM (NOW() - t.due_date)) as days_overdue,
+        u.username as assigned_username
+      FROM tasks t
+      LEFT JOIN users u ON u.id = t.assigned_to
+      WHERE t.workspace_id = $1
+        AND t.project_id = $2
+        AND t.status NOT IN ('completed', 'cancelled')
+        AND t.due_date IS NOT NULL
+        AND t.due_date < NOW()
+      ORDER BY t.due_date ASC
+      LIMIT 15`
+    : `SELECT t.*,
+        EXTRACT(DAY FROM (NOW() - t.due_date)) as days_overdue,
+        u.username as assigned_username
+      FROM tasks t
+      LEFT JOIN users u ON u.id = t.assigned_to
+      WHERE t.workspace_id = $1
+        AND t.status NOT IN ('completed', 'cancelled')
+        AND t.due_date IS NOT NULL
+        AND t.due_date < NOW()
+      ORDER BY t.due_date ASC
+      LIMIT 15`;
+
+  const params = projectId ? [workspaceId, projectId] : [workspaceId];
+  const { rows: overdueTasks } = await pool.query(query, params);
+
+  const actions = [];
+
+  for (const task of overdueTasks) {
+    const daysOverdue = Math.round(parseFloat(task.days_overdue));
+    const severity = daysOverdue > 7 ? 'critical' : daysOverdue > 3 ? 'high' : 'medium';
+    const suggestedExtension = Math.ceil(daysOverdue * 1.5);
+    const newDueDate = new Date();
+    newDueDate.setDate(newDueDate.getDate() + Math.max(suggestedExtension, 2));
+
+    actions.push({
+      type: 'handle_overdue',
+      taskId: task.id,
+      projectId: task.project_id,
+      reason: `Task is ${daysOverdue} day(s) overdue (severity: ${severity}). Immediate action required to unblock progress.`,
+      currentState: {
+        task: task.task,
+        status: task.status,
+        due_date: task.due_date,
+        assigned_to: task.assigned_username || 'Unassigned',
+        days_overdue: daysOverdue,
+        severity,
+      },
+      proposedChanges: {
+        action: 'reschedule_and_escalate',
+        new_due_date: newDueDate.toISOString().split('T')[0],
+        extension_days: Math.max(suggestedExtension, 2),
+        escalate_to_role: 'manager',
+        suggested_actions: [
+          `Reschedule due date by ${Math.max(suggestedExtension, 2)} days`,
+          'Check with assignee for blockers',
+          daysOverdue > 7 ? 'Reassign if no response within 24 hours' : 'Send reminder notification',
+        ],
+      },
+      confidence: severity === 'critical' ? 0.92 : 0.80,
+    });
+  }
+
+  return actions;
+}
+
+/**
  * Generate AI-powered daily standup summary
+ * When projectId is null, generates one standup per project in the workspace
  */
 async function generateStandupSummary(workspaceId, projectId, settings) {
-  const scopeParams = projectId ? [workspaceId, projectId] : [workspaceId];
+  // Determine which projects to summarise
+  let projects = [];
+  if (projectId) {
+    projects = [{ id: projectId, name: null }];
+  } else {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT t.project_id AS id, p.name
+      FROM tasks t
+      JOIN projects p ON p.id = t.project_id
+      WHERE t.workspace_id = $1
+        AND t.status NOT IN ('completed', 'cancelled')
+        AND t.updated_at > NOW() - INTERVAL '7 days'
+      LIMIT 8
+    `, [workspaceId]);
+    projects = rows;
+  }
 
-  // Get yesterday's activity in parallel for lower latency.
-  const completedQuery = pool.query(`
-    SELECT t.task, u.username, t.completed_at
-    FROM tasks t
-    LEFT JOIN users u ON u.id = t.assigned_to
-    WHERE t.workspace_id = $1
-      ${projectId ? 'AND t.project_id = $2' : ''}
-      AND t.status = 'completed'
-      AND t.completed_at > NOW() - INTERVAL '24 hours'
-    ORDER BY t.completed_at DESC
-    LIMIT 10
-  `, scopeParams);
+  if (projects.length === 0) return [];
 
-  const newTasksQuery = pool.query(`
-    SELECT t.task, u.username as assigned_to, t.created_at
-    FROM tasks t
-    LEFT JOIN users u ON u.id = t.assigned_to
-    WHERE t.workspace_id = $1
-      ${projectId ? 'AND t.project_id = $2' : ''}
-      AND t.created_at > NOW() - INTERVAL '24 hours'
-    ORDER BY t.created_at DESC
-    LIMIT 10
-  `, scopeParams);
+  const allActions = [];
 
-  const overdueQuery = pool.query(`
-    SELECT t.task, u.username as assigned_to, t.due_date
-    FROM tasks t
-    LEFT JOIN users u ON u.id = t.assigned_to
-    WHERE t.workspace_id = $1
-      ${projectId ? 'AND t.project_id = $2' : ''}
-      AND t.status NOT IN ('completed', 'cancelled')
-      AND t.due_date < NOW()
-    LIMIT 5
-  `, scopeParams);
+  for (const project of projects) {
+    const scopeParams = [workspaceId, project.id];
 
-  const [
-    { rows: completedTasks },
-    { rows: newTasks },
-    { rows: overdueTasks },
-  ] = await Promise.all([completedQuery, newTasksQuery, overdueQuery]);
+    const [
+      { rows: completedTasks },
+      { rows: newTasks },
+      { rows: overdueTasks },
+    ] = await Promise.all([
+      pool.query(`
+        SELECT t.task, u.username, t.completed_at
+        FROM tasks t
+        LEFT JOIN users u ON u.id = t.assigned_to
+        WHERE t.workspace_id = $1 AND t.project_id = $2
+          AND t.status = 'completed'
+          AND t.completed_at > NOW() - INTERVAL '24 hours'
+        ORDER BY t.completed_at DESC LIMIT 10
+      `, scopeParams),
+      pool.query(`
+        SELECT t.task, u.username as assigned_to, t.created_at
+        FROM tasks t
+        LEFT JOIN users u ON u.id = t.assigned_to
+        WHERE t.workspace_id = $1 AND t.project_id = $2
+          AND t.created_at > NOW() - INTERVAL '24 hours'
+        ORDER BY t.created_at DESC LIMIT 10
+      `, scopeParams),
+      pool.query(`
+        SELECT t.task, u.username as assigned_to, t.due_date
+        FROM tasks t
+        LEFT JOIN users u ON u.id = t.assigned_to
+        WHERE t.workspace_id = $1 AND t.project_id = $2
+          AND t.status NOT IN ('completed', 'cancelled')
+          AND t.due_date < NOW()
+        LIMIT 5
+      `, scopeParams),
+    ]);
 
-  // Generate AI summary
-  const prompt = `Generate a concise daily standup summary (max 150 words):
+    // Skip projects with zero activity in last 24 hours
+    if (completedTasks.length === 0 && newTasks.length === 0 && overdueTasks.length === 0) {
+      continue;
+    }
+
+    const projectLabel = project.name || `Project ${project.id}`;
+    const prompt = `Generate a concise daily standup summary for project "${projectLabel}" (max 150 words):
 
 COMPLETED YESTERDAY (${completedTasks.length}):
-${completedTasks.map(t => `- ${t.task} (by ${t.username || 'unknown'})`).join('\n')}
+${completedTasks.map(t => `- ${t.task} (by ${t.username || 'unknown'})`).join('\n') || 'None'}
 
 NEW TASKS (${newTasks.length}):
-${newTasks.map(t => `- ${t.task} (assigned to ${t.assigned_to || 'unassigned'})`).join('\n')}
+${newTasks.map(t => `- ${t.task} (assigned to ${t.assigned_to || 'unassigned'})`).join('\n') || 'None'}
 
 OVERDUE (${overdueTasks.length}):
-${overdueTasks.map(t => `- ${t.task} (${t.assigned_to || 'unassigned'})`).join('\n')}
+${overdueTasks.map(t => `- ${t.task} (${t.assigned_to || 'unassigned'})`).join('\n') || 'None'}
 
 Provide:
 1. Key accomplishments
 2. Today's focus areas
 3. Blockers/risks to highlight`;
 
-  try {
-    const summary = await generateText({ prompt });
-
-    return [{
-      type: 'create_standup',
-      taskId: null,
-      projectId,
-      reason: 'Daily automated standup summary generated',
-      currentState: {
-        completed_count: completedTasks.length,
-        new_count: newTasks.length,
-        overdue_count: overdueTasks.length,
-      },
-      proposedChanges: {
-        summary: summary.trim(),
-        delivery_method: 'notification', // or 'chat', 'email'
-      },
-      confidence: 0.90,
-    }];
-  } catch (err) {
-    console.error('Failed to generate standup summary:', err);
-    return [];
+    try {
+      const summary = await generateText({ prompt });
+      allActions.push({
+        type: 'create_standup',
+        taskId: null,
+        projectId: project.id,
+        reason: `Daily standup for project: ${projectLabel}`,
+        currentState: {
+          project_name: projectLabel,
+          completed_count: completedTasks.length,
+          new_count: newTasks.length,
+          overdue_count: overdueTasks.length,
+        },
+        proposedChanges: {
+          summary: summary.trim(),
+          project_name: projectLabel,
+          delivery_channel: 'daily-standups',
+        },
+        confidence: 0.90,
+      });
+    } catch (err) {
+      console.error(`Failed to generate standup for project ${project.id}:`, err);
+    }
   }
+
+  return allActions;
 }
 
 /* =====================================================
@@ -431,6 +574,7 @@ async function createAutopilotAction({
     adjust_deadline: 6,
     escalate: 12,
     create_standup: 20,
+    handle_overdue: 12,
   };
   const dedupeHours = dedupeHoursByType[actionType] || 6;
 
@@ -532,6 +676,9 @@ export async function executeAutopilotAction(actionId, approvedBy = null) {
         break;
       case 'create_standup':
         await executeStandupCreation(action);
+        break;
+      case 'handle_overdue':
+        await executeOverdueHandling(action);
         break;
       default:
         throw new Error(`Unknown action type: ${action.action_type}`);
@@ -674,12 +821,74 @@ async function executeEscalation(action) {
 
 async function executeStandupCreation(action) {
   const changes = action.proposed_changes;
+  const workspaceId = action.workspace_id;
+  const projectName = changes.project_name || 'Workspace';
+  const channelKey = 'daily-standups';
+  const channelName = 'daily-standups';
 
-  // Post to workspace general channel or send notifications
-  console.log('Standup summary:', changes.summary);
+  try {
+    // Get or create the AI system user
+    const aiUser = await ensureSystemUser(workspaceId);
 
-  // Could post to chat, send emails, or create notification
-  // Implementation depends on delivery method in proposed_changes
+    // Get or create the daily-standups channel
+    let channel = await getChannelByKey(channelKey, workspaceId);
+    if (!channel) {
+      channel = await createChannel({
+        key: channelKey,
+        name: channelName,
+        type: 'channel',
+        createdBy: aiUser.id,
+        isPrivate: false,
+        workspaceId,
+      });
+      console.log(`Created #daily-standups channel for workspace ${workspaceId}`);
+    }
+
+    // Ensure AI user is a member
+    await ensureChannelMember(channel.id, aiUser.id);
+
+    // Format and post the standup message
+    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const messageText = `<strong>📋 ${projectName} — Daily Standup</strong><br/><em>${today}</em><br/><br/>${changes.summary.replace(/\n/g, '<br/>')}`;
+
+    await createChatMessage({
+      channelKey,
+      userId: aiUser.id,
+      textHtml: messageText,
+      fallbackText: `${projectName} Daily Standup — ${today}\n\n${changes.summary}`,
+      workspaceId,
+    });
+
+    console.log(`Standup posted to #daily-standups for project: ${projectName}`);
+  } catch (err) {
+    console.error('Failed to post standup to channel:', err);
+    throw err;
+  }
+}
+
+async function executeOverdueHandling(action) {
+  const changes = action.proposed_changes;
+
+  // Update the due date to the new proposed date
+  const { rowCount } = await pool.query(`
+    UPDATE tasks
+    SET due_date = $1, updated_at = NOW()
+    WHERE id = $2
+      AND status NOT IN ('completed', 'cancelled')
+  `, [changes.new_due_date, action.task_id]);
+
+  if (rowCount === 0) {
+    throw new Error('Overdue task already completed/cancelled; handling skipped.');
+  }
+
+  // Escalate: notify managers
+  await pool.query(`
+    INSERT INTO notifications (user_id, type, message, task_id, project_id, created_at)
+    SELECT u.id, 'task_overdue_escalated', $1, $2, $3, NOW()
+    FROM users u
+    WHERE u.workspace_id = $4
+      AND u.role IN ('manager', 'admin')
+  `, [action.reason, action.task_id, action.project_id, action.workspace_id]);
 }
 
 function actionKey(action) {

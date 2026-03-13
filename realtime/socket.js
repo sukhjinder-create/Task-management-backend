@@ -425,9 +425,10 @@ socket.emit("chat:history", {
   /* -----------------------------------------------------
      CHAT: MESSAGE
   ----------------------------------------------------- */
- socket.on("chat:message", async ({ channelId, text, tempId, parentId }) => {
+ socket.on("chat:message", async ({ channelId, text, tempId, parentId, attachments }) => {
   if (socket.disconnected || socket._isCleanedUp) return;
-  if (!channelId || !text?.trim()) return;
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  if (!channelId || (!text?.trim() && !hasAttachments)) return;
 
   const workspaceId = socket.workspaceId;
   const cleanText = text.trim();
@@ -479,6 +480,7 @@ socket.emit("chat:history", {
       userId,
       textHtml: cleanText,
       parentId: parentId || null,
+      attachments: Array.isArray(attachments) ? attachments : [],
       workspaceId,
     });
 
@@ -771,6 +773,49 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       });
     }
   );
+
+  /* -----------------------------------------------------
+     HUDDLE MEDIA STATE BROADCASTS
+  ----------------------------------------------------- */
+  socket.on("huddle:mute", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, userId, username };
+    socket.to(legacyRoomName(channelId)).emit("huddle:mute", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:mute", out);
+  });
+
+  socket.on("huddle:unmute", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, userId, username };
+    socket.to(legacyRoomName(channelId)).emit("huddle:unmute", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:unmute", out);
+  });
+
+  socket.on("huddle:screen-start", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, userId, username };
+    socket.to(legacyRoomName(channelId)).emit("huddle:screen-start", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:screen-start", out);
+  });
+
+  socket.on("huddle:screen-stop", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, userId, username };
+    socket.to(legacyRoomName(channelId)).emit("huddle:screen-stop", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:screen-stop", out);
+  });
+
+  socket.on("huddle:mute-all", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, byUserId: userId };
+    socket.to(legacyRoomName(channelId)).emit("huddle:muted", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:muted", out);
+  });
 
   /* -----------------------------------------------------
      PRESENCE

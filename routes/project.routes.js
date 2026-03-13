@@ -31,11 +31,18 @@ router.post("/", allowRoles("admin", "manager"), async (req, res) => {
 });
 
 /**
- * LIST PROJECTS (workspace scoped)
+ * LIST PROJECTS
+ * admin   → all workspace projects
+ * manager → only projects in their assigned projects array
+ * user    → only projects where they have assigned tasks
  */
 router.get("/", async (req, res) => {
   try {
-    const projects = await projectService.list(req.workspaceId);
+    const projects = await projectService.list(
+      req.workspaceId,
+      req.user.role,
+      req.user.id
+    );
     res.json(projects);
   } catch (err) {
     res.status(400).json({ error: err.message });

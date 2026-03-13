@@ -80,14 +80,19 @@ class ProjectService {
 
   /**
    * LIST PROJECTS
-   * workspaceId comes from auth + workspace middleware
+   * Pass role + userId for role-based scoping.
+   * admin  → all workspace projects
+   * manager → projects in user's projects array
+   * user   → projects with assigned tasks only
    */
-  async list(workspaceId) {
-    // Workspace-aware repository
+  async list(workspaceId, role, userId) {
+    if (role && userId && role !== "admin") {
+      return projectRepository.getProjectsByRole(workspaceId, userId, role);
+    }
+    // Admin or no context → all projects
     try {
       return await projectRepository.getProjects(workspaceId);
     } catch (err) {
-      // Legacy fallback (no workspace support)
       try {
         return await projectRepository.getProjects();
       } catch (legacyErr) {

@@ -90,12 +90,21 @@ export async function getUserById(id) {
       role,
       projects,
       workspace_id,
+      avatar_url,
       created_at,
       updated_at
     FROM users
     WHERE id = $1
   `;
   const { rows } = await pool.query(q, [id]);
+  return rows[0] || null;
+}
+
+export async function updateAvatarUrl(id, avatarUrl) {
+  const { rows } = await pool.query(
+    `UPDATE users SET avatar_url = $1 WHERE id = $2 RETURNING id, avatar_url`,
+    [avatarUrl, id]
+  );
   return rows[0] || null;
 }
 
@@ -153,13 +162,14 @@ export async function getAllUsersByWorkspaceRepo(workspaceId) {
   }
 
   const q = `
-    SELECT 
+    SELECT
       u.id,
       u.username,
       u.email,
       u.role,
       u.projects,
       u.workspace_id,
+      u.avatar_url,
       u.created_at,
       k.public_key
     FROM users u

@@ -36,13 +36,15 @@ async function resolveScope({ workspaceId, userId, role }) {
   }
 
   if (role === "manager") {
+    // Use the projects array stored on the manager's user record
     const { rows } = await pool.query(
       `
-      SELECT id, name, added_by
-      FROM projects
-      WHERE workspace_id = $1
-        AND added_by = $2
-      ORDER BY created_at DESC
+      SELECT p.id, p.name, p.added_by
+      FROM projects p
+      INNER JOIN users u ON u.id = $2
+      WHERE p.workspace_id = $1
+        AND p.id = ANY(u.projects)
+      ORDER BY p.created_at DESC
       `,
       [workspaceId, userId]
     );
@@ -439,7 +441,18 @@ export async function getDashboardOverview({ workspaceId, userId, role }) {
     trend,
     topOverdue: overdueRows,
     projectHealth,
-    healthScore: Number(healthRows[0]?.health_score || 70),
+    // If no health record exists, compute from task completion + overdue ratio
+    healthScore: healthRows[0]?.health_score != null
+      ? Number(healthRows[0].health_score)
+      : (() => {
+          const total = Number(summaryRows[0]?.total_tasks || 0);
+          const completed = Number(summaryRows[0]?.completed_tasks || 0);
+          const overdue = Number(summaryRows[0]?.overdue_tasks || 0);
+          if (total === 0) return null;
+          const completionRate = completed / total;
+          const overdueRatio = overdue / total;
+          return Math.max(0, Math.round(completionRate * 60 + (1 - overdueRatio) * 40));
+        })(),
     executiveSummary,
   };
 }

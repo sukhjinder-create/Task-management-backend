@@ -1,7 +1,27 @@
 import pool from "../db.js";
 import express from "express";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+
+// Multer setup for task attachments
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const uploadDir = path.join(__dirname, "..", "uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const taskAttachmentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadDir),
+    filename: (req, file, cb) => {
+      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      cb(null, unique + path.extname(file.originalname));
+    },
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+});
 import {
   createTask,
   getTasksByProjectForUser,
@@ -363,6 +383,88 @@ router.delete("/:id", async (req, res) => {
   } catch (err) {
     console.error("Error deleting task:", err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * ===========================
+ *    TASK ATTACHMENT ROUTES
+ * ===========================
+ */
+
+/**
+ * GET /tasks/:taskId/attachments
+ * Returns all attachments for a task
+ */
+router.get("/:taskId/attachments", async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { rows } = await pool.query(
+      `SELECT id, url, original_name, mime_type, file_size, uploaded_by, created_at
+       FROM task_attachments
+       WHERE task_id = $1 AND workspace_id = $2
+       ORDER BY created_at ASC`,
+      [taskId, req.workspaceId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Error loading attachments:", err);
+    res.status(500).json({ error: "Failed to load attachments" });
+  }
+});
+
+/**
+ * POST /tasks/:taskId/attachments
+ * Upload a file and attach it to a task
+ */
+router.post(
+  "/:taskId/attachments",
+  taskAttachmentUpload.single("file"),
+  async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const file = req.file;
+      if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+      const publicUrl = `/uploads/${file.filename}`;
+
+      const { rows } = await pool.query(
+        `INSERT INTO task_attachments
+         (task_id, url, original_name, mime_type, file_size, uploaded_by, workspace_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          taskId,
+          publicUrl,
+          file.originalname,
+          file.mimetype,
+          file.size,
+          req.user.id,
+          req.workspaceId,
+        ]
+      );
+
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      console.error("Error uploading attachment:", err);
+      res.status(500).json({ error: "Failed to upload attachment" });
+    }
+  }
+);
+
+/**
+ * DELETE /tasks/:taskId/attachments/:attachmentId
+ */
+router.delete("/:taskId/attachments/:attachmentId", async (req, res) => {
+  try {
+    const { attachmentId } = req.params;
+    await pool.query(
+      `DELETE FROM task_attachments WHERE id = $1 AND workspace_id = $2`,
+      [attachmentId, req.workspaceId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete attachment" });
   }
 });
 

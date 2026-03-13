@@ -87,10 +87,11 @@ await pool.query(`
 
 export async function getCommentsByTask(taskId) {
   const query = `
-  SELECT 
+  SELECT
     c.*,
     u.username,
-    u.email
+    u.email,
+    u.avatar_url
   FROM comments c
   LEFT JOIN users u ON u.id = c.added_by
   WHERE c.task_id = $1

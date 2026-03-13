@@ -1,10 +1,60 @@
 import pool from "../../db.js";
+import axios from "axios";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import taskRepository from "../../repositories/task.repository.js";
 import { fetchYouTrackProjectTasks } from "./youtrack.viewer.service.js";
 import youtrackAdapter from "./youtrack.adapter.js";
 import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
 import { EVENT_TYPES } from "../../events/eventTypes.js";
 import { getSystemActorId } from "../../events/systemActor.service.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const UPLOAD_DIR = path.join(__dirname, "..", "..", "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+async function migrateYouTrackAttachments(baseUrl, token, ytIssueId, internalTaskId, workspaceId, uploadedBy) {
+  try {
+    const res = await axios.get(
+      `${baseUrl}/api/issues/${ytIssueId}/attachments`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { fields: "id,name,url,size,mimeType" },
+      }
+    );
+
+    const attachments = Array.isArray(res.data) ? res.data : [];
+
+    for (const att of attachments) {
+      if (!att.url) continue;
+      try {
+        const downloadUrl = att.url.startsWith("http") ? att.url : `${baseUrl}${att.url}`;
+        const ext = path.extname(att.name) || "";
+        const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+        const filePath = path.join(UPLOAD_DIR, filename);
+
+        const fileRes = await axios.get(downloadUrl, {
+          headers: { Authorization: `Bearer ${token}` },
+          responseType: "arraybuffer",
+          timeout: 30000,
+        });
+        fs.writeFileSync(filePath, Buffer.from(fileRes.data));
+
+        await pool.query(
+          `INSERT INTO task_attachments (task_id, url, original_name, mime_type, file_size, uploaded_by, workspace_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [internalTaskId, `/uploads/${filename}`, att.name, att.mimeType || null, att.size || null, uploadedBy, workspaceId]
+        );
+      } catch (e) {
+        console.warn(`YouTrack attachment download failed (${att.name}):`, e.message);
+      }
+    }
+  } catch (e) {
+    console.warn(`YouTrack attachments fetch failed for issue ${ytIssueId}:`, e.message);
+  }
+}
 
 async function mapYouTrackAssignee(workspaceId, assigneeText) {
   const value = String(assigneeText || "").trim();
@@ -62,6 +112,15 @@ export async function migrateYouTrackProject({
   projectId,
   triggeredBy,
 }) {
+  // Fetch config once for attachment downloads
+  const configRow = await pool.query(
+    `SELECT config FROM workspace_integrations WHERE workspace_id=$1 AND provider='youtrack' LIMIT 1`,
+    [workspaceId]
+  );
+  const ytConfig = configRow.rows[0]?.config || {};
+  const ytBaseUrl = ytConfig.base_url || "";
+  const ytToken = ytConfig.token || "";
+
   const { key: projectKey, label } = await resolveYouTrackProject(
     workspaceId,
     projectId
@@ -129,6 +188,11 @@ export async function migrateYouTrackProject({
       `,
       [workspaceId, externalTaskId, createdTask.id]
     );
+
+    /* ---- attachments ---- */
+    if (ytBaseUrl && ytToken) {
+      await migrateYouTrackAttachments(ytBaseUrl, ytToken, externalTaskId, createdTask.id, workspaceId, systemActorId);
+    }
 
     await emitWorkspaceEvent({
       workspaceId,

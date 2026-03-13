@@ -3,6 +3,17 @@ import fs from "fs";
 import path from "path";
 import pool from "../db.js";
 import { generateText } from "../intelligence/llm/llmClient.js";
+import {
+  createRunController,
+  isRunCancelledError,
+  requestTestingRunStop,
+  RunCancelledError,
+  safeJsonStringify,
+} from "./testingRunControl.service.js";
+import {
+  buildPdfBufferFromReport,
+  buildRunReportDocument,
+} from "./testingRunReport.service.js";
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -62,7 +73,7 @@ async function updateRunLive(runId, partialOutput) {
       `UPDATE testing_agent_runs
        SET output_json = jsonb_set(COALESCE(output_json,'{}'), '{commandOutputs}', $2::jsonb)
        WHERE id = $1`,
-      [runId, JSON.stringify(partialOutput)]
+      [runId, safeJsonStringify(partialOutput)]
     );
   } catch (err) {
     console.warn("[testingAgent] Live update failed:", err.message);
@@ -397,7 +408,7 @@ function inferDefaultCommands(gitContext) {
 }
 
 // onProgress(liveStdout) is called every ~20 lines with accumulated output so far
-function executeCommand(command, timeoutSec, cwd = null, onProgress = null) {
+function executeCommand(command, timeoutSec, cwd = null, onProgress = null, runController = null) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const child = spawn(command, {
@@ -410,12 +421,40 @@ function executeCommand(command, timeoutSec, cwd = null, onProgress = null) {
     let stdout = "";
     let stderr = "";
     let killed = false;
+    let cancelled = false;
     let lineCount = 0;
+    let settled = false;
+    let polling = false;
 
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGTERM");
-    }, Math.max(10, Number(timeoutSec || 900)) * 1000);
+    const stopChild = () => {
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+    };
+
+    const timeoutValue = Number(timeoutSec || 0);
+    const timer = timeoutValue > 0
+      ? setTimeout(() => {
+          killed = true;
+          stopChild();
+        }, Math.max(10, timeoutValue) * 1000)
+      : null;
+
+    const cancelInterval = runController
+      ? setInterval(async () => {
+          if (settled || polling) return;
+          polling = true;
+          try {
+            await runController.assertActive({ phase: "command", command });
+          } catch (error) {
+            if (isRunCancelledError(error)) {
+              cancelled = true;
+              stderr += `\n[testingAgent] ${error.message}`;
+              stopChild();
+            }
+          } finally {
+            polling = false;
+          }
+        }, 1000)
+      : null;
 
     child.stdout?.on("data", (d) => {
       stdout += d.toString();
@@ -429,12 +468,15 @@ function executeCommand(command, timeoutSec, cwd = null, onProgress = null) {
     });
 
     child.on("close", (code) => {
-      clearTimeout(timer);
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (cancelInterval) clearInterval(cancelInterval);
       resolve({
         command,
         exitCode: Number(code ?? -1),
-        passed: !killed && Number(code ?? 1) === 0,
+        passed: !killed && !cancelled && Number(code ?? 1) === 0,
         timedOut: killed,
+        cancelled,
         durationMs: Date.now() - startedAt,
         stdout: truncateText(stdout),
         stderr: truncateText(stderr),
@@ -454,12 +496,15 @@ function isTransientFailure(output) {
 }
 
 // EXECUTE WITH RETRY — retries once on transient failures
-async function executeCommandWithRetry(command, timeoutSec, cwd, onProgress = null) {
-  const result = await executeCommand(command, timeoutSec, cwd, onProgress);
+async function executeCommandWithRetry(command, timeoutSec, cwd, onProgress = null, runController = null) {
+  const result = await executeCommand(command, timeoutSec, cwd, onProgress, runController);
+  if (result.cancelled) {
+    return result;
+  }
   if (!result.passed && isTransientFailure(result)) {
     console.warn(`[testingAgent] Retrying "${command}" after transient failure`);
     await new Promise((r) => setTimeout(r, 2000)); // 2s backoff
-    const retry = await executeCommand(command, timeoutSec, cwd, onProgress);
+    const retry = await executeCommand(command, timeoutSec, cwd, onProgress, runController);
     return { ...retry, retried: true, firstAttemptError: result.stderr?.slice(0, 200) };
   }
   return result;
@@ -517,20 +562,168 @@ function readJsonFileSafe(filePath) {
   }
 }
 
+function listRepoFiles(repoPath, { maxDepth = 4, maxEntries = 400 } = {}) {
+  const files = [];
+
+  function walk(currentPath, depth) {
+    if (files.length >= maxEntries || depth > maxDepth || !isDirectory(currentPath)) return;
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(currentPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (files.length >= maxEntries) break;
+      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist" || entry.name === "build") continue;
+      const absPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        walk(absPath, depth + 1);
+      } else if (entry.isFile()) {
+        files.push(path.relative(repoPath, absPath).replace(/\\/g, "/"));
+      }
+    }
+  }
+
+  walk(repoPath, 0);
+  return files;
+}
+
+function dedupeCommands(commands = [], max = 8) {
+  const seen = new Set();
+  const out = [];
+  for (const cmd of commands) {
+    const clean = String(cmd || "").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function collectRepoSignals(repoPath) {
+  const signals = {
+    packageJson: null,
+    rootFiles: [],
+    testDirs: [],
+    testFiles: [],
+    configFiles: [],
+    sourceDirs: [],
+  };
+
+  try {
+    const pkgPath = path.join(repoPath, "package.json");
+    if (fileExists(pkgPath)) signals.packageJson = readJsonFileSafe(pkgPath);
+    signals.rootFiles = fs.readdirSync(repoPath).slice(0, 60);
+  } catch { /* ignore */ }
+
+  const files = listRepoFiles(repoPath);
+  signals.testDirs = Array.from(new Set(
+    files
+      .filter((f) => /(^|\/)(__tests__|test|tests|spec|specs)(\/|$)/i.test(f))
+      .map((f) => f.split("/").slice(0, 2).join("/"))
+  )).slice(0, 20);
+  signals.testFiles = files.filter((f) => /\.(test|spec)\.[jt]sx?$|(^|\/)tests?\/.+\.(py|go|java|rb|php|cs)$/i.test(f)).slice(0, 80);
+  signals.configFiles = files.filter((f) =>
+    /(^|\/)(playwright\.config|vitest\.config|jest\.config|cypress\.config|pytest\.ini|pyproject\.toml|go\.mod|pom\.xml|build\.gradle|gradlew\.bat)/i.test(f)
+  ).slice(0, 30);
+  signals.sourceDirs = Array.from(new Set(
+    files
+      .filter((f) => /^(src|app|api|server|services|routes|controllers|tests?)\//i.test(f))
+      .map((f) => f.split("/")[0])
+  )).slice(0, 12);
+
+  return signals;
+}
+
+function buildNodeRecommendedCommands(repoPath, pkg = {}) {
+  const scripts = pkg?.scripts || {};
+  const commands = [];
+
+  const scriptPriority = [
+    "test:ci",
+    "test:unit",
+    "test:integration",
+    "test:e2e",
+    "test:api",
+    "test",
+  ];
+
+  for (const scriptName of scriptPriority) {
+    if (!scripts[scriptName]) continue;
+    commands.push(scriptName === "test" ? "npm test -- --runInBand" : `npm run ${scriptName}`);
+  }
+
+  if (fileExists(path.join(repoPath, "playwright.config.js")) || fileExists(path.join(repoPath, "playwright.config.ts"))) {
+    commands.push("npx playwright test --reporter=line");
+  }
+  if (fileExists(path.join(repoPath, "vitest.config.js")) || fileExists(path.join(repoPath, "vitest.config.ts"))) {
+    commands.push("npx vitest run");
+  }
+  if (fileExists(path.join(repoPath, "jest.config.js")) || fileExists(path.join(repoPath, "jest.config.ts"))) {
+    commands.push("npx jest --runInBand");
+  }
+
+  return dedupeCommands(commands, 6);
+}
+
+function buildDeterministicRepoTestPlan(repoPath, task, framework, signals = collectRepoSignals(repoPath)) {
+  const taskTokens = tokenize(`${task?.task || ""} ${task?.description || ""}`);
+  const focusAreas = [];
+  const commands = [];
+
+  if (framework === "node") {
+    commands.push(...buildNodeRecommendedCommands(repoPath, signals.packageJson || {}));
+    if (signals.testFiles.some((f) => /playwright|e2e|cypress/i.test(f))) focusAreas.push("e2e");
+    if (signals.testFiles.some((f) => /api|integration/i.test(f))) focusAreas.push("integration");
+    if (signals.testFiles.some((f) => /unit|spec|test/i.test(f))) focusAreas.push("unit");
+  } else if (framework === "python") {
+    if (signals.testDirs.some((d) => /tests\/unit|test\/unit/i.test(d))) commands.push("pytest tests/unit -q");
+    commands.push("pytest -q");
+    if (fileExists(path.join(repoPath, "bandit.yml")) || signals.rootFiles.includes("requirements.txt")) commands.push("bandit -r . -ll");
+    focusAreas.push("pytest");
+  } else if (framework === "go") {
+    commands.push("go test ./...");
+    focusAreas.push("go test");
+  } else if (framework === "maven") {
+    commands.push("mvn -q test");
+    focusAreas.push("maven");
+  } else if (framework === "gradle") {
+    commands.push("gradlew.bat test");
+    focusAreas.push("gradle");
+  }
+
+  const matchedFiles = signals.testFiles.filter((file) =>
+    taskTokens.some((token) => token.length >= 4 && file.toLowerCase().includes(token))
+  ).slice(0, 6);
+  if (matchedFiles.length > 0) {
+    focusAreas.push(...matchedFiles);
+  } else if (signals.testDirs.length > 0) {
+    focusAreas.push(...signals.testDirs.slice(0, 4));
+  } else if (signals.sourceDirs.length > 0) {
+    focusAreas.push(...signals.sourceDirs.slice(0, 4));
+  }
+
+  return {
+    commands: dedupeCommands(commands, 6),
+    rationale: "Deterministic plan derived from package scripts, test/config files, and repo structure",
+    focusAreas: Array.from(new Set(focusAreas)).slice(0, 8),
+    signals,
+  };
+}
+
 function detectFramework(repoPath) {
   if (!isDirectory(repoPath)) return { framework: "unknown", recommendedCommands: [] };
 
   const packageJsonPath = path.join(repoPath, "package.json");
   if (fileExists(packageJsonPath)) {
     const pkg = readJsonFileSafe(packageJsonPath);
-    const scripts = pkg?.scripts || {};
-    const hasTestScript = Boolean(scripts.test);
-    const hasVitest = Boolean(scripts.vitest || scripts["test:unit"]);
-    const hasPlaywright = Boolean(scripts["test:e2e"]);
-    const commands = [];
-    if (hasTestScript) commands.push("npm test -- --runInBand");
-    if (hasVitest) commands.push("npm run test:unit");
-    if (hasPlaywright) commands.push("npm run test:e2e");
+    const commands = buildNodeRecommendedCommands(repoPath, pkg || {});
     return {
       framework: "node",
       recommendedCommands: commands.length ? commands : ["npm test -- --runInBand"],
@@ -789,9 +982,9 @@ async function createRun({
       triggerSource || "manual",
       mode || "run",
       status,
-      JSON.stringify(generatedCases),
-      JSON.stringify(commands),
-      JSON.stringify({}),
+      safeJsonStringify(generatedCases),
+      safeJsonStringify(commands),
+      safeJsonStringify({}),
       createdBy || null,
     ]
   );
@@ -809,9 +1002,48 @@ async function finishRun(runId, { status, outputJson }) {
     WHERE id = $1
     RETURNING *
     `,
-    [runId, status, JSON.stringify(outputJson || {})]
+    [runId, status, safeJsonStringify(outputJson || {})]
   );
   return rows[0];
+}
+
+function normalizeRunRow(row) {
+  return {
+    ...row,
+    generated_cases: parseJsonMaybe(row.generated_cases, []),
+    commands: parseJsonMaybe(row.commands, []),
+    output_json: parseJsonMaybe(row.output_json, {}),
+  };
+}
+
+async function maybeAttachReportDocument(row) {
+  const normalized = normalizeRunRow(row);
+  const status = String(normalized.status || "").toLowerCase();
+  if (["running", "pending", "cancel_requested"].includes(status)) {
+    return normalized;
+  }
+  // If a professional markdownReport exists but the cached reportDocument was built
+  // before we used it (title is the old generic title), regenerate so the PDF and
+  // report endpoint serve the proper QA report.
+  const hasMarkdownReport = typeof normalized.output_json?.markdownReport === "string" && normalized.output_json.markdownReport.length > 100;
+  const cachedDoc = normalized.output_json?.reportDocument;
+  const cachedUsesMarkdown = cachedDoc?.title === "QA Test Report";
+  if (cachedDoc && (!hasMarkdownReport || cachedUsesMarkdown)) {
+    return normalized;
+  }
+  const reportDocument = buildRunReportDocument(normalized);
+  const outputJson = {
+    ...normalized.output_json,
+    reportDocument,
+  };
+  await pool.query(
+    `UPDATE testing_agent_runs SET output_json = $2 WHERE id = $1`,
+    [normalized.id, safeJsonStringify(outputJson)]
+  ).catch(() => {});
+  return {
+    ...normalized,
+    output_json: outputJson,
+  };
 }
 
 export async function generateTaskTestCases({
@@ -938,35 +1170,69 @@ export async function runTaskTests({
     commands: finalCommands,
     status: "running",
   });
+  const runController = createRunController(run.id);
 
   // Execute commands with live updates + streaming + retry + per-command AI analysis
   const commandOutputs = [];
-  for (const cmd of finalCommands) {
-    const output = await executeCommandWithRetry(
-      cmd,
-      settings.max_runtime_seconds,
-      executionContext.repoPath,
-      async (liveStdout) => {
-        // Stream stdout to DB as lines arrive (~every 20 lines)
-        await updateRunLive(run.id, [
-          ...commandOutputs,
-          { command: cmd, status: "running", stdout: liveStdout, stderr: "", passed: false, timedOut: false, durationMs: 0 },
-        ]);
-      }
-    );
-
-    // AI failure analysis for failed commands
-    if (!output.passed) {
-      output.aiAnalysis = await aiAnalyzeCliFailure(
-        cmd, output.stdout, output.stderr, executionContext.framework
+  try {
+    for (const cmd of finalCommands) {
+      await runController.assertActive({ phase: "command_start", command: cmd });
+      const output = await executeCommandWithRetry(
+        cmd,
+        settings.max_runtime_seconds,
+        executionContext.repoPath,
+        async (liveStdout) => {
+          await updateRunLive(run.id, [
+            ...commandOutputs,
+            { command: cmd, status: "running", stdout: liveStdout, stderr: "", passed: false, timedOut: false, cancelled: false, durationMs: 0 },
+          ]);
+        },
+        runController
       );
+
+      if (output.cancelled) {
+        throw new RunCancelledError("Run stopped by user", { command: cmd });
+      }
+
+      if (!output.passed) {
+        output.aiAnalysis = await aiAnalyzeCliFailure(
+          cmd, output.stdout, output.stderr, executionContext.framework
+        );
+      }
+
+      commandOutputs.push(output);
+      await updateRunLive(run.id, commandOutputs);
+
+      if (stopOnFirstFailure && !output.passed) break;
     }
-
-    commandOutputs.push(output);
-    // Live update after each command (frontend can poll and see progress)
-    await updateRunLive(run.id, commandOutputs);
-
-    if (stopOnFirstFailure && !output.passed) break;
+  } catch (error) {
+    if (isRunCancelledError(error)) {
+      const outputJson = {
+        gitContext,
+        executionContext,
+        commandOutputs,
+        generatedCases,
+        summary: {
+          commandCount: finalCommands.length,
+          executedCount: commandOutputs.length,
+          passed: false,
+          cancelled: true,
+          failureReason: error.message,
+        },
+      };
+      await finishRun(run.id, {
+        status: "cancelled",
+        outputJson,
+      });
+      return {
+        runId: run.id,
+        status: "cancelled",
+        generatedCases,
+        commands: finalCommands,
+        output: outputJson,
+      };
+    }
+    throw error;
   }
 
   const passed = commandOutputs.length > 0 && commandOutputs.every((c) => c.passed);
@@ -1020,7 +1286,175 @@ export async function runTaskTests({
 // API TESTING — LLM generates HTTP test scenarios, executes them,
 // validates responses, provides AI analysis
 // ─────────────────────────────────────────────────────────
+function parseOpenApiSpec(openApiSpec) {
+  if (!openApiSpec) return null;
+  if (typeof openApiSpec === "object") return openApiSpec;
+  try {
+    return JSON.parse(String(openApiSpec));
+  } catch {
+    return null;
+  }
+}
+
+function sampleValueFromSchema(schema, depth = 0) {
+  if (!schema || depth > 3) return "sample";
+  if (schema.example !== undefined) return schema.example;
+  if (schema.default !== undefined) return schema.default;
+  if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
+  if (schema.format === "uuid") return "00000000-0000-0000-0000-000000000001";
+  if (schema.format === "email") return "qa@example.com";
+  if (schema.type === "integer" || schema.type === "number") return 1;
+  if (schema.type === "boolean") return true;
+  if (schema.type === "array") return [sampleValueFromSchema(schema.items || {}, depth + 1)];
+  if (schema.type === "object" || schema.properties) {
+    const out = {};
+    for (const [key, value] of Object.entries(schema.properties || {}).slice(0, 6)) {
+      out[key] = sampleValueFromSchema(value, depth + 1);
+    }
+    return out;
+  }
+  return "sample";
+}
+
+function resolveSchemaRef(spec, schema) {
+  if (!schema?.$ref || !spec?.components?.schemas) return schema;
+  const refName = String(schema.$ref).split("/").pop();
+  return spec.components.schemas?.[refName] || schema;
+}
+
+function extractJsonSchema(content = {}, spec = null) {
+  const schema =
+    content?.["application/json"]?.schema ||
+    content?.["application/*+json"]?.schema ||
+    null;
+  return resolveSchemaRef(spec, schema);
+}
+
+function extractResponseFieldNames(operation, spec) {
+  const responses = operation?.responses || {};
+  const successKey = Object.keys(responses).find((key) => /^2\d\d$/.test(key)) || Object.keys(responses)[0];
+  if (!successKey) return [];
+  const schema = extractJsonSchema(responses[successKey]?.content || {}, spec);
+  const resolved = resolveSchemaRef(spec, schema);
+  return Object.keys(resolved?.properties || {}).slice(0, 8);
+}
+
+function buildRequestBody(operation, spec) {
+  const schema = extractJsonSchema(operation?.requestBody?.content || {}, spec);
+  const resolved = resolveSchemaRef(spec, schema);
+  if (!resolved) return null;
+  return sampleValueFromSchema(resolved);
+}
+
+function buildApiPlanFromOpenApi(task, openApiSpec) {
+  const spec = parseOpenApiSpec(openApiSpec);
+  if (!spec?.paths || typeof spec.paths !== "object") return null;
+
+  const taskTokens = tokenize(`${task?.task || ""} ${task?.description || ""}`);
+  const operations = [];
+
+  for (const [rawPath, pathItem] of Object.entries(spec.paths)) {
+    for (const method of ["get", "post", "put", "patch", "delete"]) {
+      if (!pathItem?.[method]) continue;
+      const operation = pathItem[method];
+      const text = `${rawPath} ${operation.summary || ""} ${operation.description || ""}`.toLowerCase();
+      const score = taskTokens.reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0);
+      operations.push({ path: rawPath, method: method.toUpperCase(), operation, score });
+    }
+  }
+
+  const selected = operations
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+    .slice(0, 6);
+
+  if (selected.length === 0) return null;
+
+  const plan = [];
+  let index = 1;
+  const nextId = () => `AT-${String(index++).padStart(3, "0")}`;
+
+  for (const item of selected) {
+    const expectedFields = extractResponseFieldNames(item.operation, spec);
+    const requestBody = buildRequestBody(item.operation, spec);
+    const successStatus = Number(
+      Object.keys(item.operation?.responses || {}).find((key) => /^2\d\d$/.test(key)) ||
+      (item.method === "POST" ? 201 : 200)
+    );
+    const validationStatus = Number(
+      Object.keys(item.operation?.responses || {}).find((key) => /^(400|422)$/.test(key)) || 400
+    );
+    const unauthorizedStatus = Number(
+      Object.keys(item.operation?.responses || {}).find((key) => /^(401|403)$/.test(key)) || 401
+    );
+    const securityEnabled = Boolean(
+      (Array.isArray(item.operation?.security) && item.operation.security.length) ||
+      (Array.isArray(spec.security) && spec.security.length)
+    );
+
+    plan.push({
+      id: nextId(),
+      name: `${item.method} ${item.path} happy path`,
+      method: item.method,
+      path: item.path.replace(/\{[^}]+\}/g, "1"),
+      headers: {},
+      body: requestBody,
+      expectedStatus: successStatus,
+      expectedFields,
+      description: item.operation.summary || `Validate ${item.method} ${item.path}`,
+    });
+
+    if (requestBody && ["POST", "PUT", "PATCH"].includes(item.method)) {
+      plan.push({
+        id: nextId(),
+        name: `${item.method} ${item.path} validation`,
+        method: item.method,
+        path: item.path.replace(/\{[^}]+\}/g, "1"),
+        headers: {},
+        body: {},
+        expectedStatus: validationStatus,
+        expectedFields: [],
+        description: "Reject invalid or incomplete payload",
+      });
+    }
+
+    if (/\{[^}]+\}/.test(item.path)) {
+      plan.push({
+        id: nextId(),
+        name: `${item.method} ${item.path} not found`,
+        method: item.method,
+        path: item.path.replace(/\{[^}]+\}/g, "999999"),
+        headers: {},
+        body: requestBody,
+        expectedStatus: 404,
+        expectedFields: [],
+        description: "Unknown resource should return not found",
+      });
+    }
+
+    if (securityEnabled) {
+      plan.push({
+        id: nextId(),
+        name: `${item.method} ${item.path} unauthorized`,
+        method: item.method,
+        path: item.path.replace(/\{[^}]+\}/g, "1"),
+        headers: { Authorization: "" },
+        body: requestBody,
+        expectedStatus: unauthorizedStatus,
+        expectedFields: [],
+        description: "Protected endpoint should reject missing auth",
+      });
+    }
+  }
+
+  return plan.slice(0, 12);
+}
+
 async function generateApiTestPlan(task, baseUrl, openApiSpec = null) {
+  const deterministicPlan = buildApiPlanFromOpenApi(task, openApiSpec);
+  if (Array.isArray(deterministicPlan) && deterministicPlan.length > 0) {
+    return deterministicPlan;
+  }
+
   const taskTitle = task?.task || "";
   const specContext = openApiSpec ? `API Spec (partial): ${JSON.stringify(openApiSpec).slice(0, 800)}` : "";
   const prompt = `QA engineer. Generate 6-10 HTTP API test scenarios for this task.
@@ -1161,16 +1595,43 @@ export async function runApiTests({
     commands: testPlan.map((s) => `${s.method} ${baseUrl}${s.path}`),
     status: "running",
   });
+  const runController = createRunController(run.id);
 
   const stepResults = [];
-  for (const step of testPlan) {
-    const result = await executeApiStep(step, baseUrl, authToken);
-    stepResults.push(result);
-    // Live update
-    await pool.query(
-      `UPDATE testing_agent_runs SET output_json = jsonb_set(COALESCE(output_json,'{}'), '{stepResults}', $2::jsonb) WHERE id = $1`,
-      [run.id, JSON.stringify(stepResults)]
-    ).catch(() => {});
+  try {
+    for (const step of testPlan) {
+      await runController.assertActive({ phase: "api_step", name: step.name });
+      const result = await executeApiStep(step, baseUrl, authToken);
+      stepResults.push(result);
+      await pool.query(
+        `UPDATE testing_agent_runs SET output_json = jsonb_set(COALESCE(output_json,'{}'), '{stepResults}', $2::jsonb) WHERE id = $1`,
+        [run.id, safeJsonStringify(stepResults)]
+      ).catch(() => {});
+    }
+  } catch (error) {
+    if (isRunCancelledError(error)) {
+      const outputJson = {
+        baseUrl,
+        testPlan,
+        stepResults,
+        summary: {
+          total: stepResults.length,
+          passed: stepResults.filter((step) => step.status === "passed").length,
+          failed: stepResults.filter((step) => step.status === "failed").length,
+          cancelled: true,
+        },
+      };
+      await finishRun(run.id, { status: "cancelled", outputJson });
+      return {
+        runId: run.id,
+        status: "cancelled",
+        baseUrl,
+        testPlan,
+        stepResults,
+        summary: outputJson.summary,
+      };
+    }
+    throw error;
   }
 
   const passed = stepResults.filter((s) => s.status === "passed").length;
@@ -1280,23 +1741,8 @@ export async function generateAndSaveTestFile({
 // Parallel to browser's autoDiscoverAndTest
 // ─────────────────────────────────────────────────────────
 async function discoverRepoTestPlan(repoPath, task, framework) {
-  // Collect repo signals: file tree, config files, existing test patterns
-  const signals = {};
-  try {
-    const pkgPath = path.join(repoPath, "package.json");
-    if (fileExists(pkgPath)) signals.packageJson = readJsonFileSafe(pkgPath);
-    for (const cf of ["pytest.ini", "jest.config.js", "jest.config.ts", "vitest.config.ts", ".eslintrc.js", "go.mod", "pom.xml"]) {
-      if (fileExists(path.join(repoPath, cf))) signals[cf] = true;
-    }
-    // Sample directory listing
-    try {
-      signals.rootFiles = fs.readdirSync(repoPath).slice(0, 40);
-    } catch { /* ok */ }
-    // Find existing test directories
-    const testDirs = ["__tests__", "test", "tests", "spec", "specs", "__ai_tests__"]
-      .filter((d) => isDirectory(path.join(repoPath, d)));
-    signals.testDirs = testDirs;
-  } catch { /* ignore */ }
+  const deterministicPlan = buildDeterministicRepoTestPlan(repoPath, task, framework);
+  const signals = deterministicPlan.signals || collectRepoSignals(repoPath);
 
   const taskTitle = task?.task || "";
   const prompt = `You are a QA engineer auto-discovering tests for a codebase.
@@ -1305,9 +1751,11 @@ TASK: "${taskTitle}"
 REPO PATH: ${repoPath}
 FRAMEWORK: ${framework}
 REPO SIGNALS: ${JSON.stringify(signals).slice(0, 600)}
+DETERMINISTIC BASE COMMANDS: ${deterministicPlan.commands.join(", ") || "none"}
 
 Generate a test execution plan: 3-6 specific commands to run in this repo.
 Consider: existing test scripts, framework conventions, what files to target.
+Prefer refining the deterministic base commands instead of inventing new tooling.
 
 Return ONLY this JSON:
 {
@@ -1319,14 +1767,21 @@ Return ONLY this JSON:
   try {
     const raw = await generateText({ prompt, maxTokens: 600 });
     const plan = parseJsonSafe(raw, null);
-    if (plan?.commands && Array.isArray(plan.commands) && plan.commands.length > 0) return plan;
+    if (plan?.commands && Array.isArray(plan.commands) && plan.commands.length > 0) {
+      return {
+        commands: dedupeCommands([...deterministicPlan.commands, ...plan.commands], 6),
+        rationale: plan.rationale || deterministicPlan.rationale,
+        focusAreas: Array.from(new Set([...(deterministicPlan.focusAreas || []), ...(Array.isArray(plan.focusAreas) ? plan.focusAreas : [])])).slice(0, 8),
+        signals,
+      };
+    }
   } catch { /* fallback */ }
 
-  const { recommendedCommands } = detectFramework(repoPath);
   return {
-    commands: recommendedCommands.length ? recommendedCommands : ["npm test -- --runInBand"],
-    rationale: "Framework-detected default commands",
-    focusAreas: [],
+    commands: deterministicPlan.commands.length ? deterministicPlan.commands : ["npm test -- --runInBand"],
+    rationale: deterministicPlan.rationale,
+    focusAreas: deterministicPlan.focusAreas || [],
+    signals,
   };
 }
 
@@ -1364,24 +1819,57 @@ export async function autoDiscoverCliTests({
     commands: discoveredPlan.commands,
     status: "running",
   });
+  const runController = createRunController(run.id);
 
   // Phase 2: Execute discovered commands with live updates + retry
   const commandOutputs = [];
-  for (const cmd of discoveredPlan.commands) {
-    const output = await executeCommandWithRetry(
-      cmd, settings.max_runtime_seconds, executionContext.repoPath,
-      async (liveStdout) => {
-        await updateRunLive(run.id, [
-          ...commandOutputs,
-          { command: cmd, status: "running", stdout: liveStdout, stderr: "", passed: false, timedOut: false, durationMs: 0 },
-        ]);
+  try {
+    for (const cmd of discoveredPlan.commands) {
+      await runController.assertActive({ phase: "command_start", command: cmd });
+      const output = await executeCommandWithRetry(
+        cmd, settings.max_runtime_seconds, executionContext.repoPath,
+        async (liveStdout) => {
+          await updateRunLive(run.id, [
+            ...commandOutputs,
+            { command: cmd, status: "running", stdout: liveStdout, stderr: "", passed: false, timedOut: false, cancelled: false, durationMs: 0 },
+          ]);
+        },
+        runController
+      );
+      if (output.cancelled) {
+        throw new RunCancelledError("Run stopped by user", { command: cmd });
       }
-    );
-    if (!output.passed) {
-      output.aiAnalysis = await aiAnalyzeCliFailure(cmd, output.stdout, output.stderr, executionContext.framework);
+      if (!output.passed) {
+        output.aiAnalysis = await aiAnalyzeCliFailure(cmd, output.stdout, output.stderr, executionContext.framework);
+      }
+      commandOutputs.push(output);
+      await updateRunLive(run.id, commandOutputs);
     }
-    commandOutputs.push(output);
-    await updateRunLive(run.id, commandOutputs);
+  } catch (error) {
+    if (isRunCancelledError(error)) {
+      const outputJson = {
+        discoveredPlan,
+        gitContext,
+        generatedCases,
+        commandOutputs,
+        summary: {
+          commandCount: discoveredPlan.commands.length,
+          executedCount: commandOutputs.length,
+          passed: false,
+          cancelled: true,
+          failureReason: error.message,
+        },
+      };
+      await finishRun(run.id, { status: "cancelled", outputJson });
+      return {
+        runId: run.id,
+        status: "cancelled",
+        discoveredPlan,
+        generatedCases,
+        summary: outputJson.summary,
+      };
+    }
+    throw error;
   }
 
   const passed = commandOutputs.every((c) => c.passed);
@@ -1518,23 +2006,63 @@ export async function runCliMultiScenario({
       commands: cmds,
       status: "running",
     });
+    const runController = createRunController(run.id);
 
     const commandOutputs = [];
-    for (const cmd of cmds) {
-      const output = await executeCommandWithRetry(
-        cmd, settings.max_runtime_seconds, executionContext.repoPath,
-        async (liveStdout) => {
-          await updateRunLive(run.id, [
-            ...commandOutputs,
-            { command: cmd, status: "running", stdout: liveStdout, stderr: "", passed: false, timedOut: false, durationMs: 0 },
-          ]);
+    try {
+      for (const cmd of cmds) {
+        await runController.assertActive({ phase: "command_start", command: cmd });
+        const output = await executeCommandWithRetry(
+          cmd, settings.max_runtime_seconds, executionContext.repoPath,
+          async (liveStdout) => {
+            await updateRunLive(run.id, [
+              ...commandOutputs,
+              { command: cmd, status: "running", stdout: liveStdout, stderr: "", passed: false, timedOut: false, cancelled: false, durationMs: 0 },
+            ]);
+          },
+          runController
+        );
+        if (output.cancelled) {
+          throw new RunCancelledError("Run stopped by user", { command: cmd });
         }
-      );
-      if (!output.passed) {
-        output.aiAnalysis = await aiAnalyzeCliFailure(cmd, output.stdout, output.stderr, executionContext.framework);
+        if (!output.passed) {
+          output.aiAnalysis = await aiAnalyzeCliFailure(cmd, output.stdout, output.stderr, executionContext.framework);
+        }
+        commandOutputs.push(output);
+        await updateRunLive(run.id, commandOutputs);
       }
-      commandOutputs.push(output);
-      await updateRunLive(run.id, commandOutputs);
+    } catch (error) {
+      if (isRunCancelledError(error)) {
+        await finishRun(run.id, {
+          status: "cancelled",
+          outputJson: {
+            scenarioType: type,
+            scenarioLabel: LABELS[type],
+            commandOutputs,
+            generatedCases,
+            summary: {
+              total: commandOutputs.length,
+              passed: commandOutputs.filter((command) => command.passed).length,
+              failed: commandOutputs.filter((command) => !command.passed).length,
+              cancelled: true,
+            },
+          },
+        });
+        scenarioResults.push({
+          runId: run.id,
+          type,
+          label: LABELS[type],
+          status: "cancelled",
+          commands: cmds,
+          summary: {
+            total: commandOutputs.length,
+            passed: commandOutputs.filter((command) => command.passed).length,
+            failed: commandOutputs.filter((command) => !command.passed).length,
+          },
+        });
+        break;
+      }
+      throw error;
     }
 
     const passed = commandOutputs.every((c) => c.passed);
@@ -1623,9 +2151,27 @@ export async function listTestingAgentRuns({
   const { rows } = await pool.query(
     `
     SELECT
-      r.*,
-      t.task AS task_name,
-      p.name AS project_name
+      r.id,
+      r.workspace_id,
+      r.project_id,
+      r.task_id,
+      r.trigger_source,
+      r.mode,
+      r.status,
+      r.created_at,
+      r.finished_at,
+      r.created_by,
+      r.commands,
+      jsonb_array_length(COALESCE(r.generated_cases, '[]'::jsonb)) AS generated_cases_count,
+      -- Extract lightweight summary fields from JSONB without loading full blob
+      r.output_json->'summary'             AS summary,
+      r.output_json->'insights'            AS insights,
+      r.output_json->>'markdownReport'     AS markdown_report_preview,
+      r.output_json->'allBugs'             AS all_bugs,
+      r.output_json->'discoveredModules'   AS discovered_modules,
+      r.output_json->'phases'              AS phases,
+      t.task  AS task_name,
+      p.name  AS project_name
     FROM testing_agent_runs r
     INNER JOIN tasks t ON t.id = r.task_id
     INNER JOIN projects p ON p.id = r.project_id
@@ -1638,10 +2184,26 @@ export async function listTestingAgentRuns({
   );
 
   const items = rows.map((r) => ({
-    ...r,
-    generated_cases: parseJsonMaybe(r.generated_cases, []),
+    id: r.id,
+    workspace_id: r.workspace_id,
+    project_id: r.project_id,
+    task_id: r.task_id,
+    trigger_source: r.trigger_source,
+    mode: r.mode,
+    status: r.status,
+    created_at: r.created_at,
+    finished_at: r.finished_at,
+    created_by: r.created_by,
+    task_name: r.task_name,
+    project_name: r.project_name,
     commands: parseJsonMaybe(r.commands, []),
-    output_json: parseJsonMaybe(r.output_json, {}),
+    generated_cases_count: Number(r.generated_cases_count || 0),
+    summary: parseJsonMaybe(r.summary, null),
+    insights: parseJsonMaybe(r.insights, null),
+    allBugs: parseJsonMaybe(r.all_bugs, []),
+    discoveredModules: parseJsonMaybe(r.discovered_modules, []),
+    phases: parseJsonMaybe(r.phases, null),
+    // markdownReport excluded from list — only in detail endpoint
   }));
 
   const totalPages = Math.max(Math.ceil(total / safeLimit), 1);
@@ -1675,12 +2237,56 @@ export async function getTestingAgentRunById({ workspaceId, runId }) {
     [workspaceId, runId]
   );
   if (!rows[0]) return null;
-  const r = rows[0];
+  return maybeAttachReportDocument(rows[0]);
+}
+
+export async function stopTestingAgentRun({
+  workspaceId,
+  runId,
+  actorId = null,
+  reason = "Stopped by user",
+}) {
+  return requestTestingRunStop({ workspaceId, runId, actorId, reason });
+}
+
+export async function getTestingAgentRunReport({
+  workspaceId,
+  runId,
+}) {
+  const run = await getTestingAgentRunById({ workspaceId, runId });
+  if (!run) return null;
+  const reportDocument = run.output_json?.reportDocument || buildRunReportDocument(run);
   return {
-    ...r,
-    generated_cases: parseJsonMaybe(r.generated_cases, []),
-    commands: parseJsonMaybe(r.commands, []),
-    output_json: parseJsonMaybe(r.output_json, {}),
+    runId: run.id,
+    status: run.status,
+    mode: run.mode,
+    taskName: run.task_name || null,
+    projectName: run.project_name || null,
+    reportDocument,
+  };
+}
+
+export async function getTestingAgentRunReportPdf({
+  workspaceId,
+  runId,
+}) {
+  const report = await getTestingAgentRunReport({ workspaceId, runId });
+  if (!report) return null;
+  const filename = `testing-agent-report-${runId}.pdf`;
+  const pdf = buildPdfBufferFromReport(report.reportDocument, {
+    title: report.reportDocument?.title || "Testing Agent Execution Report",
+    metadata: [
+      `Run ID: ${runId}`,
+      `Mode: ${report.mode}`,
+      `Status: ${report.status}`,
+      `Task: ${report.taskName || "-"}`,
+      `Project: ${report.projectName || "-"}`,
+    ],
+  });
+  return {
+    filename,
+    buffer: pdf,
+    reportDocument: report.reportDocument,
   };
 }
 

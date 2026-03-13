@@ -55,6 +55,7 @@ router.post("/", async (req, res) => {
       tempId = null,
       parentId = null,
       fallbackText = null,
+      attachments = [],
     } = req.body;
 
     const userId = req.user.id;
@@ -108,6 +109,7 @@ router.post("/", async (req, res) => {
       encryptedJson,
       fallbackText: fallbackText || null,
       parentId: parentId || null,
+      attachments: Array.isArray(attachments) ? attachments : [],
     });
 
     // emit via socket

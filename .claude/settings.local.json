@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(PGPASSWORD=\"f3X9aT7zM1pQ8nR6wK2j\" psql:*)"
+      "Bash(PGPASSWORD=\"f3X9aT7zM1pQ8nR6wK2j\" psql:*)",
+      "Bash(xargs grep -l \"task\\\\|Task\")",
+      "Bash(grep -n \"CREATE TABLE.*chat_huddles\\\\|ALTER TABLE.*chat_huddles\" '/c/Users/Sukhjinder Singh/Desktop/task_m/Task-management-be/migrations/'*.sql)",
+      "Bash(node -e \":*)"
     ]
   }
 }
