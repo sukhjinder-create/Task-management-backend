@@ -62,6 +62,92 @@ class IntelligenceService {
 
   const metrics = rows[0] || {};
 
+  // 🔹 Overdue task names (top 3)
+  let overdueRows = [];
+  try {
+    const { rows: _o } = await pool.query(
+      `
+      SELECT title, due_date, priority
+      FROM tasks
+      WHERE workspace_id = $1
+        AND assigned_to = $2
+        AND status != 'completed'
+        AND due_date IS NOT NULL
+        AND due_date < NOW()
+        AND (project_id IS NULL OR project_id NOT IN (
+          SELECT (metadata->>'projectId')::uuid
+          FROM migration_imports
+          WHERE workspace_id = $1
+            AND source IN ('asana', 'youtrack')
+            AND metadata->>'projectId' IS NOT NULL
+            AND metadata->>'projectId' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        ))
+      ORDER BY due_date ASC
+      LIMIT 3
+      `,
+      [workspaceId, userId]
+    );
+    overdueRows = _o;
+  } catch (_) { /* degrade gracefully */ }
+
+  // 🔹 Slowest open tasks (in progress, >3 days old)
+  let slowRows = [];
+  try {
+    const { rows: _s } = await pool.query(
+      `
+      SELECT title,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400)::int AS days_open
+      FROM tasks
+      WHERE workspace_id = $1
+        AND assigned_to = $2
+        AND status IN ('in-progress', 'in_progress')
+        AND created_at < NOW() - INTERVAL '3 days'
+        AND (project_id IS NULL OR project_id NOT IN (
+          SELECT (metadata->>'projectId')::uuid
+          FROM migration_imports
+          WHERE workspace_id = $1
+            AND source IN ('asana', 'youtrack')
+            AND metadata->>'projectId' IS NOT NULL
+            AND metadata->>'projectId' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        ))
+      ORDER BY days_open DESC
+      LIMIT 3
+      `,
+      [workspaceId, userId]
+    );
+    slowRows = _s;
+  } catch (_) { /* degrade gracefully */ }
+
+  // 🔹 Last late completion task names (top 2)
+  let lateRows = [];
+  try {
+    const { rows: _l } = await pool.query(
+      `
+      SELECT title,
+        FLOOR(EXTRACT(EPOCH FROM (completed_at - due_date)) / 86400)::int AS days_late
+      FROM tasks
+      WHERE workspace_id = $1
+        AND assigned_to = $2
+        AND status = 'completed'
+        AND completed_at IS NOT NULL
+        AND due_date IS NOT NULL
+        AND completed_at > due_date
+        AND (project_id IS NULL OR project_id NOT IN (
+          SELECT (metadata->>'projectId')::uuid
+          FROM migration_imports
+          WHERE workspace_id = $1
+            AND source IN ('asana', 'youtrack')
+            AND metadata->>'projectId' IS NOT NULL
+            AND metadata->>'projectId' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        ))
+      ORDER BY completed_at DESC
+      LIMIT 2
+      `,
+      [workspaceId, userId]
+    );
+    lateRows = _l;
+  } catch (_) { /* degrade gracefully */ }
+
   // 🔥 External execution contribution
 const executionMetrics =
   await getExecutionMetrics(workspaceId, month);
@@ -136,35 +222,84 @@ const executionDiscipline =
 
   const dynamicCoaching = [];
 
-if (executionDiscipline < 60) {
-  dynamicCoaching.push(
-    "Increase task completion consistency. Focus on closing existing tasks before taking new assignments."
-  );
-}
+  const avgDays = avgTime > 0 ? (avgTime / 86400).toFixed(1) : null;
+  const openTasks = total - completed;
 
-if (timelinessIndex < 70) {
-  dynamicCoaching.push(
-    "Improve deadline discipline. Review due dates daily and prioritize tasks nearing deadlines."
-  );
-}
+  // Helper: format task names as a quoted list
+  const nameList = (rows) =>
+    rows.map(r => `"${r.title}"`).join(", ");
 
-if (workloadStress > 60) {
-  dynamicCoaching.push(
-    "High workload stress detected. Rebalance assignments or escalate workload constraints."
-  );
-}
+  if (executionDiscipline < 60) {
+    if (total > 0) {
+      const overdueNames = overdueRows.length > 0
+        ? ` Start with: ${nameList(overdueRows)}.`
+        : "";
+      dynamicCoaching.push(
+        `Only ${completed} of ${total} tasks completed this month (${Math.round(executionDiscipline)}% rate). You have ${openTasks} open task${openTasks !== 1 ? "s" : ""} — close existing work before picking up new assignments.${overdueNames}`
+      );
+    } else {
+      dynamicCoaching.push("No tasks completed yet this month. Pick up the highest-priority assigned task and move it to done before starting anything else.");
+    }
+  }
 
-if (velocityScore < 50) {
-  dynamicCoaching.push(
-    "Task completion velocity is slow. Break tasks into smaller milestones to improve flow."
-  );
-}
+  if (timelinessIndex < 70) {
+    if (late > 0 && lateRows.length > 0) {
+      const lateExamples = lateRows
+        .map(r => `"${r.title}" (${r.days_late}d late)`)
+        .join(", ");
+      dynamicCoaching.push(
+        `${late} of your ${completed} completed task${completed !== 1 ? "s were" : " was"} delivered late this month. Most recent: ${lateExamples}. Set a due-date reminder 48h in advance to break this pattern.`
+      );
+    } else if (late > 0) {
+      dynamicCoaching.push(
+        `${late} of your ${completed} completed task${completed !== 1 ? "s were" : " was"} delivered late (${Math.round(100 - timelinessIndex)}% late rate). Add 48-hour reminders to all upcoming due dates.`
+      );
+    } else {
+      dynamicCoaching.push("Deadline adherence is trending low. Review all open tasks with due dates and flag any that are at risk of slipping today.");
+    }
+  }
 
-if (riskProbability > 70) {
-  dynamicCoaching.push(
-    "High performance risk detected. Immediate intervention and structured weekly review recommended."
-  );
-}
+  if (workloadStress > 60) {
+    if (overdueRows.length > 0) {
+      const urgentList = overdueRows
+        .map(r => {
+          const daysAgo = Math.round((Date.now() - new Date(r.due_date)) / 86400000);
+          return `"${r.title}" (${daysAgo}d overdue${r.priority ? `, ${r.priority}` : ""})`;
+        })
+        .join(", ");
+      dynamicCoaching.push(
+        `${overdue} task${overdue !== 1 ? "s are" : " is"} currently overdue (${Math.round(workloadStress)}% workload stress). Immediately action: ${urgentList}. Escalate to your manager anything blocked by a dependency.`
+      );
+    } else {
+      dynamicCoaching.push(
+        `Workload stress is at ${Math.round(workloadStress)}% — ${overdue} task${overdue !== 1 ? "s" : ""} overdue. Flag capacity constraints to your manager before accepting any new assignments.`
+      );
+    }
+  }
+
+  if (velocityScore < 50 && avgDays) {
+    if (slowRows.length > 0) {
+      const slowList = slowRows
+        .map(r => `"${r.title}" (${r.days_open}d in progress)`)
+        .join(", ");
+      dynamicCoaching.push(
+        `Average completion time is ${avgDays} days — too slow. Longest open tasks: ${slowList}. Break each into sub-tasks of 1–2 days max to unblock progress.`
+      );
+    } else {
+      dynamicCoaching.push(
+        `Average task completion time is ${avgDays} days. Break large tasks into sub-tasks of 1–2 days each to improve throughput and hit due dates.`
+      );
+    }
+  }
+
+  if (riskProbability > 70) {
+    const focusList = overdueRows.length > 0
+      ? ` This week: close ${nameList(overdueRows.slice(0, 2))}.`
+      : ` Focus: close ${Math.min(openTasks, 3)} task${openTasks !== 1 ? "s" : ""} before end of week.`;
+    dynamicCoaching.push(
+      `Performance risk is at ${Math.round(riskProbability)}% (High zone). Schedule a 1:1 with your manager to surface blockers.${focusList}`
+    );
+  }
 
   return {
   score: record.score,

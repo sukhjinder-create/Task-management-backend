@@ -182,26 +182,21 @@ export async function runAutopilot(workspaceId, projectId = null) {
 }
 
 export async function getAutopilotStats(workspaceId, projectId = null) {
-  const query = projectId
-    ? `SELECT
-        COUNT(*) FILTER (WHERE status = 'pending') as pending_count,
-        COUNT(*) FILTER (WHERE status = 'executed') as executed_count,
-        COUNT(*) FILTER (WHERE status = 'rejected') as rejected_count,
-        COUNT(*) FILTER (WHERE status = 'auto_approved') as auto_approved_count,
-        AVG(confidence_score) as avg_confidence
-       FROM autopilot_actions
-       WHERE workspace_id = $1 AND project_id = $2`
-    : `SELECT
-        COUNT(*) FILTER (WHERE status = 'pending') as pending_count,
-        COUNT(*) FILTER (WHERE status = 'executed') as executed_count,
-        COUNT(*) FILTER (WHERE status = 'rejected') as rejected_count,
-        COUNT(*) FILTER (WHERE status = 'auto_approved') as auto_approved_count,
-        AVG(confidence_score) as avg_confidence
-       FROM autopilot_actions
-       WHERE workspace_id = $1`;
-
+  const base = projectId
+    ? `WHERE workspace_id = $1 AND project_id = $2`
+    : `WHERE workspace_id = $1`;
   const params = projectId ? [workspaceId, projectId] : [workspaceId];
-  const { rows } = await pool.query(query, params);
+
+  const { rows } = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'pending')                                        AS pending_count,
+      COUNT(*) FILTER (WHERE status = 'executed'     AND created_at > NOW() - INTERVAL '7 days') AS executed_count,
+      COUNT(*) FILTER (WHERE status = 'rejected'     AND created_at > NOW() - INTERVAL '7 days') AS rejected_count,
+      COUNT(*) FILTER (WHERE status = 'auto_approved'AND created_at > NOW() - INTERVAL '7 days') AS auto_approved_count,
+      AVG(confidence_score) FILTER (WHERE           created_at > NOW() - INTERVAL '7 days')      AS avg_confidence
+    FROM autopilot_actions
+    ${base}
+  `, params);
 
   return rows[0];
 }
