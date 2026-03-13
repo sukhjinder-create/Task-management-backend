@@ -9,11 +9,8 @@ export async function fetchYouTrackProjects(workspaceId) {
 
 export async function fetchYouTrackProjectTasks(
   workspaceId,
-  projectId
+  projectId,
+  options = {}
 ) {
-    console.log("VIEWER workspaceId:", workspaceId);
-  return await youtrackAdapter.listTasks(
-    workspaceId,
-    projectId
-  );
+  return await youtrackAdapter.listTasksPaginated(workspaceId, projectId, options);
 }

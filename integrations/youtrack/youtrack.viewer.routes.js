@@ -20,17 +20,27 @@ router.get("/projects", async (req, res) => {
 });
 
 router.get("/projects/:projectId/tasks", async (req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
 
-  res.set("Cache-Control", "no-store");
-  res.set("Pragma", "no-cache");
-  res.set("Expires", "0");
+    const { page, limit, search } = req.query;
+    const result = await fetchYouTrackProjectTasks(
+      req.workspaceId,
+      req.params.projectId,
+      {
+        page: Number(page) || 1,
+        limit: Number(limit) || 25,
+        search: search || "",
+      }
+    );
 
-  const data = await fetchYouTrackProjectTasks(
-    req.workspaceId,
-    req.params.projectId
-  );
-
-  res.status(200).json({ data });
+    res.status(200).json(result);
+  } catch (err) {
+    console.error("YouTrack tasks error:", err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data?.error_description || err.message });
+  }
 });
 
 router.patch("/tasks/:taskId/status", async (req, res) => {

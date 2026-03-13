@@ -78,6 +78,8 @@ import {
   gitAutomationRoutes,
   gitAutomationWebhookRoutes,
 } from "./integrations/git/git.automation.routes.js";
+import slackMigrationRoutes from "./integrations/slack/slack.migration.routes.js";
+import migrationHistoryRoutes from "./routes/migrationHistory.routes.js";
 
 
 
@@ -132,6 +134,22 @@ app.use(
   authMiddleware,
   requireWorkspaceForUser,
   youtrackViewerRoutes
+);
+
+// Slack migration
+app.use(
+  "/integrations/slack",
+  authMiddleware,
+  requireWorkspaceForUser,
+  slackMigrationRoutes
+);
+
+// Migration history (all sources)
+app.use(
+  "/migration-history",
+  authMiddleware,
+  requireWorkspaceForUser,
+  migrationHistoryRoutes
 );
 
 // NEW universal adapter routes (SAFE ADDITION)

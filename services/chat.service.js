@@ -730,7 +730,7 @@ if (!aiUser?.userId) {
 ------------------------------------------------------- */
 export async function getRecentMessagesResolved(
   channelKey,
-  limit = 100,
+  _limit = null,
   workspaceId
 ) {
   if (!workspaceId) return [];
@@ -747,9 +747,8 @@ export async function getRecentMessagesResolved(
       WHERE m.channel_key = $1
         AND m.workspace_id = $2
       ORDER BY m.created_at ASC
-      LIMIT $3
       `,
-      [channelKey, workspaceId, Number(limit)]
+      [channelKey, workspaceId]
     );
 
     return res.rows.map(mapMessageRow);
@@ -760,7 +759,7 @@ export async function getRecentMessagesResolved(
 
 export async function getRecentMessagesByChannelKey(
   channelKey,
-  limit = 100,
+  _limit = null,
   workspaceId
 ) {
   if (!workspaceId) return [];
@@ -771,7 +770,7 @@ export async function getRecentMessagesByChannelKey(
     const channel = await getChannelByKey(channelKey, workspaceId);
     if (!channel) return [];
 
-    // 2️⃣ Load messages safely (UUID-based, correct LIMIT binding)
+    // 2️⃣ Load all messages — no limit
     const res = await client.query(
   `
   SELECT
@@ -782,13 +781,8 @@ LEFT JOIN users u ON u.id = m.user_id
   WHERE m.channel_key = $1
     AND m.workspace_id = $2
   ORDER BY m.created_at ASC
-  LIMIT $3
   `,
-  [
-    channelKey,     // ✅ TEXT
-    workspaceId,
-    Number(limit),
-  ]
+  [channelKey, workspaceId]
 );
 
     return res.rows.map(mapMessageRow);

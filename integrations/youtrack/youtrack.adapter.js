@@ -114,6 +114,7 @@ async function listProjects(workspaceId) {
     projectMap.set(p.shortName, {
       id: p.id,
       key: p.shortName,
+      shortName: p.shortName,
       name: p.name,
     });
   }
@@ -126,7 +127,66 @@ async function listProjects(workspaceId) {
 }
 
 /* ===============================
-   LIST TASKS (ISSUES)
+   SHARED ISSUE MAPPER
+=============================== */
+function mapIssue(issue) {
+  let assignee = "—";
+  let state = "Open";
+  for (const field of issue.customFields || []) {
+    if (field.name === "Assignee" && field.value) {
+      assignee = field.value.fullName || field.value.login || "—";
+    }
+    if (field.name === "State" && field.value) {
+      state = field.value.name || "Open";
+    }
+  }
+  return {
+    id: issue.idReadable,
+    name: issue.summary,
+    title: issue.summary,
+    completed: !!issue.resolved,
+    status: state,
+    assignee,
+    modified_at: issue.updated,
+    lastModified: issue.updated,
+    description: issue.description || "",
+    createdAt: issue.created,
+    updatedAt: issue.updated,
+    provider: "youtrack",
+  };
+}
+
+/* ===============================
+   LIST TASKS — paginated viewer
+=============================== */
+async function listTasksPaginated(workspaceId, projectKey, { page = 1, limit = 25, search = "" } = {}) {
+  const config = await getConfig(workspaceId);
+  const { base_url, token } = config;
+
+  const skip = (page - 1) * limit;
+  const query = search
+    ? `project: {${projectKey}} ${search}`
+    : `project: {${projectKey}}`;
+
+  const res = await axios.get(`${base_url}/api/issues`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    params: {
+      query,
+      fields: "id,idReadable,summary,resolved,description,created,updated,customFields(name,value(name,fullName,login))",
+      $top: limit + 1, // fetch one extra to detect hasMore
+      $skip: skip,
+    },
+  });
+
+  const raw = res.data || [];
+  const hasMore = raw.length > limit;
+  const issues = hasMore ? raw.slice(0, limit) : raw;
+
+  return { data: issues.map(mapIssue), hasMore, page };
+}
+
+/* ===============================
+   LIST TASKS — full fetch for migration
 =============================== */
 async function listTasks(workspaceId, projectKey) {
   const config = await getConfig(workspaceId);
@@ -145,7 +205,7 @@ async function listTasks(workspaceId, projectKey) {
           Accept: "application/json",
         },
         params: {
-          query: `project: ${projectKey}`,
+          query: `project: {${projectKey}}`,
           fields:
             "id,idReadable,summary,resolved,description,created,updated,customFields(name,value(name,fullName,login))",
           $top: pageSize,
@@ -303,5 +363,6 @@ export default {
   connectWorkspace,
   listProjects,
   listTasks,
+  listTasksPaginated,
   updateTaskStatus
 };

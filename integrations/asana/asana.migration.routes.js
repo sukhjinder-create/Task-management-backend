@@ -12,10 +12,12 @@ router.post(
       const userId = req.user.id;
       const { projectId } = req.params;
 
+      const { mode = "skip" } = req.body;
       const result = await migrateAsanaProject({
         workspaceId,
         projectId,
-        triggeredBy: userId
+        triggeredBy: userId,
+        mode,
       });
 
       res.json(result);

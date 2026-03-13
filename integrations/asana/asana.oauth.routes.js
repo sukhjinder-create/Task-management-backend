@@ -111,7 +111,7 @@ router.get("/callback", async (req, res) => {
     console.log("✅ Asana connected successfully");
 
     return res.redirect(
-      process.env.FRONTEND_BASE_URL + "/integrations"
+      (process.env.FRONTEND_BASE_URL || "http://localhost:5173") + "/admin/migrations?source=asana&connected=true"
     );
 
   } catch (err) {

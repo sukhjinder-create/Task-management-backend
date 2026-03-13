@@ -9,6 +9,7 @@ import youtrackAdapter from "./youtrack.adapter.js";
 import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
 import { EVENT_TYPES } from "../../events/eventTypes.js";
 import { getSystemActorId } from "../../events/systemActor.service.js";
+import { recordMigrationImport } from "../../services/migrationHistory.service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -111,7 +112,29 @@ export async function migrateYouTrackProject({
   workspaceId,
   projectId,
   triggeredBy,
+  mode = "skip", // "skip" | "replace"
 }) {
+  /* ---------- REPLACE: delete previously imported project ---------- */
+  if (mode === "replace") {
+    const prev = await pool.query(
+      `SELECT metadata FROM migration_imports
+       WHERE workspace_id=$1 AND source='youtrack'
+         AND (metadata->>'youtrackProjectId')=$2
+       ORDER BY created_at DESC LIMIT 1`,
+      [workspaceId, projectId]
+    );
+    if (prev.rows.length) {
+      const prevProjectId = prev.rows[0].metadata?.projectId;
+      if (prevProjectId) {
+        await pool.query(`DELETE FROM tasks WHERE project_id=$1`, [prevProjectId]);
+        await pool.query(`DELETE FROM projects WHERE id=$1 AND workspace_id=$2`, [prevProjectId, workspaceId]);
+        await pool.query(
+          `DELETE FROM migration_imports WHERE workspace_id=$1 AND source='youtrack' AND (metadata->>'youtrackProjectId')=$2`,
+          [workspaceId, projectId]
+        );
+      }
+    }
+  }
   // Fetch config once for attachment downloads
   const configRow = await pool.query(
     `SELECT config FROM workspace_integrations WHERE workspace_id=$1 AND provider='youtrack' LIMIT 1`,
@@ -151,19 +174,14 @@ export async function migrateYouTrackProject({
     const externalTaskId = String(task.externalId || task.id || "").trim();
     if (!externalTaskId) continue;
 
-    const existing = await pool.query(
-      `
-      SELECT 1
-      FROM integration_task_mappings
-      WHERE workspace_id = $1
-        AND provider = 'youtrack'
-        AND external_task_id = $2
-      LIMIT 1
-      `,
-      [workspaceId, externalTaskId]
-    );
-
-    if (existing.rows.length) continue;
+    if (mode === "skip") {
+      const existing = await pool.query(
+        `SELECT 1 FROM integration_task_mappings
+         WHERE workspace_id=$1 AND provider='youtrack' AND external_task_id=$2 LIMIT 1`,
+        [workspaceId, externalTaskId]
+      );
+      if (existing.rows.length) continue;
+    }
 
     const assignedUserId = await mapYouTrackAssignee(workspaceId, task.assignee);
 
@@ -210,9 +228,19 @@ export async function migrateYouTrackProject({
     importedCount++;
   }
 
+  const importRecord = await recordMigrationImport({
+    workspaceId,
+    source: "youtrack",
+    stats: { importedTasks: importedCount },
+    metadata: { projectId: newProjectId, youtrackProjectId: projectId },
+    triggeredBy,
+  });
+
   return {
     success: true,
     importedTasks: importedCount,
     projectId: newProjectId,
+    importId: importRecord.id,
+    importNumber: importRecord.import_number,
   };
 }

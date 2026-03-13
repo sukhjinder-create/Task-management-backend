@@ -49,6 +49,13 @@ class IntelligenceService {
     FROM tasks
     WHERE workspace_id = $1
       AND assigned_to = $2
+      AND project_id NOT IN (
+        SELECT (metadata->>'projectId')::uuid
+        FROM migration_imports
+        WHERE workspace_id = $1
+          AND source IN ('asana', 'youtrack')
+          AND metadata->>'projectId' IS NOT NULL
+      )
     `,
     [workspaceId, userId]
   );

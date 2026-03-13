@@ -426,23 +426,28 @@ async function analyzeOverdueTasks(workspaceId, projectId, settings) {
 }
 
 /**
- * Generate AI-powered daily standup summary
- * When projectId is null, generates one standup per project in the workspace
+ * Generate AI-powered daily standup summary — project-specific, with state transitions
+ * and time-in-state analysis drawn from task_activity_logs.
+ * When projectId is null, generates one standup per active project in the workspace.
  */
 async function generateStandupSummary(workspaceId, projectId, settings) {
   // Determine which projects to summarise
   let projects = [];
   if (projectId) {
-    projects = [{ id: projectId, name: null }];
+    const { rows } = await pool.query(
+      `SELECT id, name FROM projects WHERE id = $1 AND workspace_id = $2`,
+      [projectId, workspaceId]
+    );
+    projects = rows.length ? rows : [{ id: projectId, name: null }];
   } else {
     const { rows } = await pool.query(`
       SELECT DISTINCT t.project_id AS id, p.name
-      FROM tasks t
+      FROM task_activity_logs al
+      JOIN tasks t ON t.id = al.task_id
       JOIN projects p ON p.id = t.project_id
-      WHERE t.workspace_id = $1
-        AND t.status NOT IN ('completed', 'cancelled')
-        AND t.updated_at > NOW() - INTERVAL '7 days'
-      LIMIT 8
+      WHERE al.workspace_id = $1
+        AND al.created_at > NOW() - INTERVAL '24 hours'
+      LIMIT 10
     `, [workspaceId]);
     projects = rows;
   }
@@ -453,64 +458,174 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
 
   for (const project of projects) {
     const scopeParams = [workspaceId, project.id];
-
-    const [
-      { rows: completedTasks },
-      { rows: newTasks },
-      { rows: overdueTasks },
-    ] = await Promise.all([
-      pool.query(`
-        SELECT t.task, u.username, t.completed_at
-        FROM tasks t
-        LEFT JOIN users u ON u.id = t.assigned_to
-        WHERE t.workspace_id = $1 AND t.project_id = $2
-          AND t.status = 'completed'
-          AND t.completed_at > NOW() - INTERVAL '24 hours'
-        ORDER BY t.completed_at DESC LIMIT 10
-      `, scopeParams),
-      pool.query(`
-        SELECT t.task, u.username as assigned_to, t.created_at
-        FROM tasks t
-        LEFT JOIN users u ON u.id = t.assigned_to
-        WHERE t.workspace_id = $1 AND t.project_id = $2
-          AND t.created_at > NOW() - INTERVAL '24 hours'
-        ORDER BY t.created_at DESC LIMIT 10
-      `, scopeParams),
-      pool.query(`
-        SELECT t.task, u.username as assigned_to, t.due_date
-        FROM tasks t
-        LEFT JOIN users u ON u.id = t.assigned_to
-        WHERE t.workspace_id = $1 AND t.project_id = $2
-          AND t.status NOT IN ('completed', 'cancelled')
-          AND t.due_date < NOW()
-        LIMIT 5
-      `, scopeParams),
-    ]);
-
-    // Skip projects with zero activity in last 24 hours
-    if (completedTasks.length === 0 && newTasks.length === 0 && overdueTasks.length === 0) {
-      continue;
-    }
-
     const projectLabel = project.name || `Project ${project.id}`;
-    const prompt = `Generate a concise daily standup summary for project "${projectLabel}" (max 150 words):
-
-COMPLETED YESTERDAY (${completedTasks.length}):
-${completedTasks.map(t => `- ${t.task} (by ${t.username || 'unknown'})`).join('\n') || 'None'}
-
-NEW TASKS (${newTasks.length}):
-${newTasks.map(t => `- ${t.task} (assigned to ${t.assigned_to || 'unassigned'})`).join('\n') || 'None'}
-
-OVERDUE (${overdueTasks.length}):
-${overdueTasks.map(t => `- ${t.task} (${t.assigned_to || 'unassigned'})`).join('\n') || 'None'}
-
-Provide:
-1. Key accomplishments
-2. Today's focus areas
-3. Blockers/risks to highlight`;
 
     try {
+      const [
+        { rows: statusChanges },
+        { rows: newTasks },
+        { rows: overdueTasks },
+        { rows: healthRows },
+      ] = await Promise.all([
+
+        // Status transitions in last 24h with time-in-previous-state
+        pool.query(`
+          SELECT
+            al.task_id,
+            t.task AS task_name,
+            t.priority,
+            al.old_value->>'status' AS from_status,
+            al.new_value->>'status' AS to_status,
+            u.username AS actor_name,
+            al.created_at AS changed_at,
+            GREATEST(0, ROUND(
+              EXTRACT(EPOCH FROM (al.created_at - COALESCE(prev_log.created_at, t.created_at))) / 3600
+            )) AS hours_in_prev_state
+          FROM task_activity_logs al
+          JOIN tasks t ON t.id = al.task_id
+          LEFT JOIN users u ON u.id = al.actor_id
+          LEFT JOIN LATERAL (
+            SELECT created_at FROM task_activity_logs
+            WHERE task_id = al.task_id
+              AND action_type = 'STATUS_CHANGED'
+              AND created_at < al.created_at
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) prev_log ON true
+          WHERE al.workspace_id = $1
+            AND t.project_id = $2
+            AND al.action_type = 'STATUS_CHANGED'
+            AND al.created_at > NOW() - INTERVAL '24 hours'
+          ORDER BY al.created_at DESC
+          LIMIT 40
+        `, scopeParams),
+
+        // New tasks created in last 24h
+        pool.query(`
+          SELECT t.task AS task_name, t.priority, t.status,
+            u.username AS assigned_to, t.due_date
+          FROM tasks t
+          LEFT JOIN users u ON u.id = t.assigned_to
+          WHERE t.workspace_id = $1 AND t.project_id = $2
+            AND t.created_at > NOW() - INTERVAL '24 hours'
+          ORDER BY t.created_at DESC
+          LIMIT 15
+        `, scopeParams),
+
+        // Currently overdue tasks
+        pool.query(`
+          SELECT t.task AS task_name, t.priority, t.status,
+            u.username AS assigned_to,
+            ROUND(EXTRACT(DAY FROM (NOW() - t.due_date))) AS days_overdue
+          FROM tasks t
+          LEFT JOIN users u ON u.id = t.assigned_to
+          WHERE t.workspace_id = $1 AND t.project_id = $2
+            AND t.status NOT IN ('completed', 'cancelled')
+            AND t.due_date IS NOT NULL
+            AND t.due_date < NOW()
+          ORDER BY t.due_date ASC
+          LIMIT 10
+        `, scopeParams),
+
+        // Project health snapshot
+        pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled')) AS active_count,
+            COUNT(*) FILTER (WHERE status = 'completed') AS completed_total,
+            COUNT(*) FILTER (WHERE status = 'in_progress') AS in_progress_count,
+            COUNT(*) FILTER (WHERE status = 'review') AS in_review_count,
+            COUNT(*) FILTER (WHERE status = 'todo') AS todo_count,
+            COUNT(*) FILTER (WHERE due_date < NOW() AND status NOT IN ('completed','cancelled')) AS overdue_count
+          FROM tasks
+          WHERE workspace_id = $1 AND project_id = $2
+        `, scopeParams),
+      ]);
+
+      // Skip projects with zero activity
+      if (statusChanges.length === 0 && newTasks.length === 0) continue;
+
+      const health = healthRows[0] || {};
+
+      // Build per-person activity map from status changes
+      const personMap = {};
+      for (const sc of statusChanges) {
+        const name = sc.actor_name || 'Unknown';
+        if (!personMap[name]) personMap[name] = [];
+        const hrs = Number(sc.hours_in_prev_state);
+        const timeStr = hrs >= 48
+          ? `${Math.round(hrs / 24)}d in ${sc.from_status}`
+          : hrs >= 1 ? `${hrs}h in ${sc.from_status}`
+          : `< 1h in ${sc.from_status}`;
+        personMap[name].push(
+          `"${sc.task_name}" [${sc.priority || 'normal'}]: ${sc.from_status} → ${sc.to_status} (${timeStr})`
+        );
+      }
+
+      // Identify stuck tasks (was in a state > 24h before being moved today)
+      const stuckMoves = statusChanges.filter(sc => Number(sc.hours_in_prev_state) >= 24);
+
+      // Format prompt sections
+      const transitionLines = statusChanges.map(sc => {
+        const hrs = Number(sc.hours_in_prev_state);
+        const timeStr = hrs >= 48 ? `${Math.round(hrs / 24)} days` : hrs >= 1 ? `${hrs} hrs` : '< 1 hr';
+        return `  • ${sc.actor_name || 'Unknown'} moved "${sc.task_name}" [${sc.priority || 'normal'}]: ${sc.from_status} → ${sc.to_status} (was in ${sc.from_status} for ${timeStr})`;
+      }).join('\n');
+
+      const personLines = Object.entries(personMap)
+        .map(([name, items]) => `  ${name}:\n${items.map(i => `    - ${i}`).join('\n')}`)
+        .join('\n');
+
+      const overdueLines = overdueTasks
+        .map(t => `  • "${t.task_name}" — ${t.days_overdue} days overdue, assigned to ${t.assigned_to || 'nobody'} [${t.priority || 'normal'} priority, status: ${t.status}]`)
+        .join('\n');
+
+      const newTaskLines = newTasks
+        .map(t => `  • "${t.task_name}" [${t.priority || 'normal'}] → assigned to ${t.assigned_to || 'unassigned'}, status: ${t.status}`)
+        .join('\n');
+
+      const stuckNote = stuckMoves.length > 0
+        ? `\nNOTE — ${stuckMoves.length} task(s) were stuck for 24+ hours before being moved today:\n${stuckMoves.map(sc => `  • "${sc.task_name}" was in "${sc.from_status}" for ${Number(sc.hours_in_prev_state) >= 48 ? Math.round(Number(sc.hours_in_prev_state)/24)+'d' : Number(sc.hours_in_prev_state)+'h'} before ${sc.actor_name || 'someone'} moved it to "${sc.to_status}"`).join('\n')}`
+        : '';
+
+      const prompt = `You are generating a professional project standup report for the engineering team.
+
+PROJECT: ${projectLabel}
+HEALTH SNAPSHOT: ${health.active_count || 0} active | ${health.in_progress_count || 0} in progress | ${health.in_review_count || 0} in review | ${health.todo_count || 0} todo | ${health.overdue_count || 0} overdue | ${health.completed_total || 0} completed total
+
+TASK STATE TRANSITIONS — LAST 24 HOURS (${statusChanges.length}):
+${transitionLines || '  None recorded'}
+${stuckNote}
+
+PER-PERSON ACTIVITY:
+${personLines || '  No individual activity recorded'}
+
+NEW TASKS ADDED TODAY (${newTasks.length}):
+${newTaskLines || '  None'}
+
+CURRENTLY OVERDUE (${overdueTasks.length}):
+${overdueLines || '  None'}
+
+Write a professional standup report with these exact sections:
+
+## Project Health
+One or two sentences on overall project state. Mention momentum if things are moving, or flag if things are quiet.
+
+## Task Movements
+List every state change. Call out clearly: who moved what, from which state, to which state. If a task sat in a state for more than 24 hours before being moved, flag it as "was stuck." Be specific with task names.
+
+## Team Activity
+Per-person summary. For each person who was active, write one focused line: what they worked on and what they achieved.
+
+## Blockers & Risks
+List overdue tasks with days overdue and owner. Note any tasks that appear stuck. Be direct — do not soften this section.
+
+## Focus for Today
+Based on current state, what should the team prioritize? Be specific to this project. 2-4 bullet points.
+
+Rules: Be specific and name tasks. Use task names exactly as given. No filler phrases. Keep the tone professional and direct. Output clean markdown.`;
+
       const summary = await generateText({ prompt });
+
       allActions.push({
         type: 'create_standup',
         taskId: null,
@@ -518,16 +633,18 @@ Provide:
         reason: `Daily standup for project: ${projectLabel}`,
         currentState: {
           project_name: projectLabel,
-          completed_count: completedTasks.length,
-          new_count: newTasks.length,
+          status_changes: statusChanges.length,
+          stuck_tasks: stuckMoves.length,
+          new_tasks: newTasks.length,
           overdue_count: overdueTasks.length,
+          active_count: Number(health.active_count || 0),
         },
         proposedChanges: {
           summary: summary.trim(),
           project_name: projectLabel,
           delivery_channel: 'daily-standups',
         },
-        confidence: 0.90,
+        confidence: 0.92,
       });
     } catch (err) {
       console.error(`Failed to generate standup for project ${project.id}:`, err);
@@ -819,12 +936,29 @@ async function executeEscalation(action) {
   );
 }
 
+/** Convert markdown standup output to clean HTML for the chat channel */
+function standupMarkdownToHtml(md) {
+  if (!md) return '';
+  return md
+    // ## Heading → bold section header
+    .replace(/^## (.+)$/gm, '<br/><strong>$1</strong>')
+    // **bold**
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    // Bullet points (- or •)
+    .replace(/^[\-•] (.+)$/gm, '&nbsp;&nbsp;• $1')
+    // Numbered list
+    .replace(/^\d+\. (.+)$/gm, '&nbsp;&nbsp;$1')
+    // Blank lines → paragraph break
+    .replace(/\n{2,}/g, '<br/><br/>')
+    // Single newlines → <br/>
+    .replace(/\n/g, '<br/>');
+}
+
 async function executeStandupCreation(action) {
   const changes = action.proposed_changes;
   const workspaceId = action.workspace_id;
   const projectName = changes.project_name || 'Workspace';
   const channelKey = 'daily-standups';
-  const channelName = 'daily-standups';
 
   try {
     // Get or create the AI system user
@@ -835,7 +969,7 @@ async function executeStandupCreation(action) {
     if (!channel) {
       channel = await createChannel({
         key: channelKey,
-        name: channelName,
+        name: 'daily-standups',
         type: 'channel',
         createdBy: aiUser.id,
         isPrivate: false,
@@ -848,8 +982,11 @@ async function executeStandupCreation(action) {
     await ensureChannelMember(channel.id, aiUser.id);
 
     // Format and post the standup message
-    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const messageText = `<strong>📋 ${projectName} — Daily Standup</strong><br/><em>${today}</em><br/><br/>${changes.summary.replace(/\n/g, '<br/>')}`;
+    const today = new Date().toLocaleDateString('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+    const bodyHtml = standupMarkdownToHtml(changes.summary);
+    const messageText = `<strong>📋 ${projectName} — Daily Standup</strong><br/><em>${today}</em><br/><br/>${bodyHtml}`;
 
     await createChatMessage({
       channelKey,

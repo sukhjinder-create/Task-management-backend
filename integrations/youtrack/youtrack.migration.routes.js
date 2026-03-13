@@ -9,10 +9,12 @@ router.post("/youtrack/projects/:projectId/migrate", async (req, res) => {
     const userId = req.user.id;
     const { projectId } = req.params;
 
+    const { mode = "skip" } = req.body;
     const result = await migrateYouTrackProject({
       workspaceId,
       projectId,
       triggeredBy: userId,
+      mode,
     });
 
     res.json(result);
