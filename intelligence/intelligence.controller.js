@@ -142,7 +142,7 @@ let forecastReasoning = forecast.reasoning || null;
 
 const leaderboardResult = await pool.query(
 `
-SELECT 
+SELECT
   u.id AS userId,
   u.username,
   wms.score
@@ -150,6 +150,8 @@ FROM workspace_monthly_scores wms
 JOIN users u ON u.id = wms.user_id
 WHERE wms.workspace_id = $1
   AND wms.month = $2
+  AND (u.is_system IS NULL OR u.is_system = false)
+  AND u.role != 'system'
   ${projectFilter}
 ORDER BY wms.score DESC
 LIMIT 5

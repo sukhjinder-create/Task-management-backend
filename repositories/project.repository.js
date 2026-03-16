@@ -1,19 +1,59 @@
 import pool from "../db.js"; // ✅ correct path
 
 class ProjectRepository {
+  /**
+   * Generate a YouTrack-style project code from the project name.
+   *
+   * Multi-word  → initials of each word, up to 5 chars
+   *   "Task Management" → "TM"
+   *   "Backend API Service" → "BAS"
+   *
+   * Single word → first letter + consonants (strip vowels after first char), up to 5 chars
+   *   "Adrian"   → "ADR"
+   *   "Mobile"   → "MBL"
+   *   "Frontend" → "FRNT"
+   *   "Backend"  → "BCKN"
+   */
+  _generateCode(name) {
+    const words = name.trim().replace(/[^a-zA-Z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+
+    if (words.length > 1) {
+      // Multi-word: take first letter of each word
+      return words.slice(0, 5).map(w => w[0].toUpperCase()).join("");
+    }
+
+    // Single word: first letter + consonants from the rest, max 5 chars total
+    const word = words[0].toUpperCase();
+    const first = word[0];
+    const rest = word.slice(1).replace(/[AEIOU]/g, ""); // strip vowels
+    return (first + rest).slice(0, 5);
+  }
+
   async createProject(data) {
+    const workspaceId = data.workspaceId || "GLOBAL";
+
+    // Auto-generate a unique project_code
+    let baseCode = data.project_code?.trim().toUpperCase() || this._generateCode(data.name || "PROJ");
+    let code = baseCode;
+    let attempt = 1;
+
+    while (true) {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM projects WHERE project_code = $1 AND workspace_id = $2 LIMIT 1`,
+        [code, workspaceId]
+      );
+      if (rows.length === 0) break;
+      attempt++;
+      code = `${baseCode}${attempt}`;
+    }
+
     const query = `
-      INSERT INTO projects (name, added_by, workspace_id)
-      VALUES ($1, $2, $3)
+      INSERT INTO projects (name, added_by, workspace_id, project_code)
+      VALUES ($1, $2, $3, $4)
       RETURNING *;
     `;
 
-    const values = [
-      data.name,
-      data.added_by,
-      data.workspaceId || "GLOBAL",
-    ];
-
+    const values = [data.name, data.added_by, workspaceId, code];
     const result = await pool.query(query, values);
     return result.rows[0];
   }

@@ -175,6 +175,8 @@ export async function getAllUsersByWorkspaceRepo(workspaceId) {
     FROM users u
     LEFT JOIN user_keys k ON k.user_id = u.id
     WHERE u.workspace_id = $1
+      AND (u.is_system IS NULL OR u.is_system = false)
+      AND u.role != 'system'
     ORDER BY u.created_at DESC
   `;
 

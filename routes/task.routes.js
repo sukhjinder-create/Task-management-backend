@@ -229,6 +229,9 @@ router.post("/:projectId", async (req, res) => {
       due_date,
       description,
       priority,
+      story_points,
+      task_type,
+      is_blocked,
     } = req.body;
 
     const created = await createTask({
@@ -239,6 +242,9 @@ router.post("/:projectId", async (req, res) => {
       due_date,
       description,
       priority,
+      story_points: story_points != null ? parseInt(story_points) : null,
+      task_type: task_type || "task",
+      is_blocked: Boolean(is_blocked),
       added_by: req.user.id,
       workspaceId: req.workspaceId, // 🔐 enforced
     });
@@ -270,6 +276,9 @@ router.post("/", async (req, res) => {
       due_date,
       description,
       priority,
+      story_points,
+      task_type,
+      is_blocked,
     } = req.body;
 
     if (!isValidUuid(project_id)) {
@@ -284,6 +293,9 @@ router.post("/", async (req, res) => {
       due_date,
       description,
       priority,
+      story_points: story_points != null ? parseInt(story_points) : null,
+      task_type: task_type || "task",
+      is_blocked: Boolean(is_blocked),
       added_by: req.user.id,
       workspaceId: req.workspaceId, // 🔐 enforced
     });

@@ -24,13 +24,13 @@ router.get(
   requirePlanFeature("reports"),
   async (req, res) => {
     try {
-      const { projects, users, status, priority } = req.query;
+      const { projects, users, status, priority, sprints } = req.query;
       const from = parseDate(req.query.from);
       const to = parseDate(req.query.to);
 
-      const whereClauses = [];
-      const values = [];
-      let idx = 1;
+      const whereClauses = [`t.workspace_id = $1`];
+      const values = [req.workspaceId];
+      let idx = 2;
 
       if (projects) {
         const projectIds = projects.split(",").map((s) => s.trim()).filter(Boolean);
@@ -45,6 +45,14 @@ router.get(
         if (userIds.length > 0) {
           whereClauses.push(`t.assigned_to = ANY($${idx++})`);
           values.push(userIds);
+        }
+      }
+
+      if (sprints) {
+        const sprintIds = sprints.split(",").map((s) => s.trim()).filter(Boolean);
+        if (sprintIds.length > 0) {
+          whereClauses.push(`t.sprint_id = ANY($${idx++})`);
+          values.push(sprintIds);
         }
       }
 
@@ -67,86 +75,96 @@ router.get(
         values.push(priority);
       }
 
-      const whereSql =
-        whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+      const whereSql = `WHERE ${whereClauses.join(" AND ")}`;
 
       const byStatusRes = await pool.query(
-        `
-        SELECT t.status, COUNT(*)::int AS count
-        FROM tasks t
-        ${whereSql}
-        GROUP BY t.status
-        ORDER BY t.status
-        `,
+        `SELECT t.status, COUNT(*)::int AS count
+         FROM tasks t
+         ${whereSql}
+         GROUP BY t.status
+         ORDER BY t.status`,
         values
       );
 
       const byUserRes = await pool.query(
-        `
-        SELECT u.id,
-               u.username,
-               u.email,
-               COUNT(t.*)::int AS task_count
-        FROM tasks t
-        LEFT JOIN users u ON u.id = t.assigned_to
-        ${whereSql}
-        GROUP BY u.id, u.username, u.email
-        ORDER BY task_count DESC NULLS LAST
-        `,
+        `SELECT u.id, u.username, u.email,
+                COUNT(t.*)::int AS task_count
+         FROM tasks t
+         LEFT JOIN users u ON u.id = t.assigned_to
+         ${whereSql}
+         GROUP BY u.id, u.username, u.email
+         ORDER BY task_count DESC NULLS LAST`,
         values
       );
 
       const byProjectRes = await pool.query(
-        `
-        SELECT p.id,
-               p.name,
-               COUNT(t.*)::int AS task_count
-        FROM tasks t
-        LEFT JOIN projects p ON p.id = t.project_id
-        ${whereSql}
-        GROUP BY p.id, p.name
-        ORDER BY task_count DESC NULLS LAST
-        `,
+        `SELECT p.id, p.name,
+                COUNT(t.*)::int AS task_count
+         FROM tasks t
+         LEFT JOIN projects p ON p.id = t.project_id
+         ${whereSql}
+         GROUP BY p.id, p.name
+         ORDER BY task_count DESC NULLS LAST`,
+        values
+      );
+
+      const bySprintRes = await pool.query(
+        `SELECT s.id, s.name, s.status AS sprint_status,
+                COUNT(t.*)::int AS task_count,
+                COUNT(t.*) FILTER (WHERE t.status = 'completed')::int AS completed_count
+         FROM tasks t
+         LEFT JOIN sprints s ON s.id = t.sprint_id
+         ${whereSql}
+         GROUP BY s.id, s.name, s.status
+         ORDER BY task_count DESC NULLS LAST`,
         values
       );
 
       const summaryRes = await pool.query(
-        `
-        SELECT
-          COUNT(*)::int AS total,
-          COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
-          COUNT(*) FILTER (
-            WHERE status != 'completed'
-              AND due_date IS NOT NULL
-              AND due_date::date < NOW()::date
-          )::int AS overdue
-        FROM tasks t
-        ${whereSql}
-        `,
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE t.status = 'completed')::int AS completed,
+           COUNT(*) FILTER (WHERE t.status = 'in-progress')::int AS in_progress,
+           COUNT(*) FILTER (
+             WHERE t.status != 'completed'
+               AND t.due_date IS NOT NULL
+               AND t.due_date::date < NOW()::date
+           )::int AS overdue
+         FROM tasks t
+         ${whereSql}`,
         values
       );
 
       const tasksRes = await pool.query(
-        `
-        SELECT
-          t.*,
-          p.name  AS project_name,
-          u.username,
-          u.email
-        FROM tasks t
-        LEFT JOIN projects p ON p.id = t.project_id
-        LEFT JOIN users u    ON u.id = t.assigned_to
-        ${whereSql}
-        ORDER BY t.created_at DESC
-        `,
+        `SELECT
+           t.*,
+           p.name AS project_name,
+           p.project_code,
+           u.username,
+           u.email,
+           s.name AS sprint_name,
+           CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+                THEN p.project_code || '-' || t.ticket_number
+                ELSE NULL
+           END AS display_id
+         FROM tasks t
+         LEFT JOIN projects p ON p.id = t.project_id
+         LEFT JOIN users u    ON u.id = t.assigned_to
+         LEFT JOIN sprints s  ON s.id = t.sprint_id
+         ${whereSql}
+         ORDER BY
+           CASE WHEN t.status != 'completed' AND t.due_date IS NOT NULL AND t.due_date::date < NOW()::date THEN 0 ELSE 1 END,
+           t.due_date ASC NULLS LAST,
+           t.created_at DESC`,
         values
       );
 
       res.json({
-        summary: summaryRes.rows[0] || { total: 0, completed: 0, overdue: 0 },
+        summary: summaryRes.rows[0] || { total: 0, completed: 0, in_progress: 0, overdue: 0 },
         byStatus: byStatusRes.rows,
         byUser: byUserRes.rows,
         byProject: byProjectRes.rows,
+        bySprint: bySprintRes.rows,
         tasks: tasksRes.rows,
       });
     } catch (err) {

@@ -11,6 +11,7 @@ import axios from "axios";  // Add axios to your imports
 
 // ---------------- ROUTES (UNCHANGED) ----------------
 import projectRoutes from "./routes/project.routes.js";
+import sprintRoutes from "./routes/sprint.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import workspaceRoutes from "./routes/workspace.routes.js";
 import taskRoutes from "./routes/task.routes.js";
@@ -182,6 +183,7 @@ app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, testingAgentR
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
+app.use("/", authMiddleware, requireWorkspaceForUser, sprintRoutes);
 app.use("/comments", authMiddleware, requireWorkspaceForUser, commentRoutes);
 app.use("/subtasks", authMiddleware, requireWorkspaceForUser, subtaskRoutes);
 app.use("/project-statuses", authMiddleware, requireWorkspaceForUser, projectStatusRoutes);

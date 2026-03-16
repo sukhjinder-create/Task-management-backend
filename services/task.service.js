@@ -45,8 +45,11 @@ export async function getTaskById(id) {
     SELECT
       t.*,
       COALESCE(st.total_subtasks, 0)     AS subtasks_total,
-      COALESCE(st.completed_subtasks, 0) AS subtasks_completed
+      COALESCE(st.completed_subtasks, 0) AS subtasks_completed,
+      CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+           THEN p.project_code || '-' || t.ticket_number END AS display_id
     FROM tasks t
+    LEFT JOIN projects p ON p.id = t.project_id
     LEFT JOIN (
       SELECT
         task_id,
@@ -208,8 +211,14 @@ export async function getTasksByProjectForUser(projectId, user, filters = {}) {
     SELECT
       t.*,
       COALESCE(st.total_subtasks, 0)     AS subtasks_total,
-      COALESCE(st.completed_subtasks, 0) AS subtasks_completed
+      COALESCE(st.completed_subtasks, 0) AS subtasks_completed,
+      CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+           THEN p.project_code || '-' || t.ticket_number END AS display_id,
+      sp.name AS sprint_name,
+      sp.status AS sprint_status
     FROM tasks t
+    LEFT JOIN projects p ON p.id = t.project_id
+    LEFT JOIN sprints sp ON sp.id = t.sprint_id
     LEFT JOIN (
       SELECT
         task_id,
@@ -275,19 +284,34 @@ export async function updateTaskAsAdminOrManager(id, data) {
     data.priority !== undefined
       ? data.priority
       : existing.priority || "medium";
+  // sprint_id: undefined = don't change, null = move to backlog, uuid = assign to sprint
+  const newSprintId =
+    data.sprint_id !== undefined ? (data.sprint_id || null) : existing.sprint_id;
+  const newTaskType =
+    data.task_type !== undefined ? data.task_type : (existing.task_type || "task");
+  const newStoryPoints =
+    data.story_points !== undefined
+      ? (data.story_points != null ? parseInt(data.story_points) : null)
+      : existing.story_points ?? null;
+  const newIsBlocked =
+    data.is_blocked !== undefined ? Boolean(data.is_blocked) : (existing.is_blocked || false);
 
   // 🔹 1️⃣ Perform Update
   await pool.query(
     `
     UPDATE tasks
-    SET task = $1,
-        status = $2,
-        assigned_to = $3,
-        due_date = $4,
-        description = $5,
-        priority = $6,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = $7
+    SET task         = $1,
+        status       = $2,
+        assigned_to  = $3,
+        due_date     = $4,
+        description  = $5,
+        priority     = $6,
+        sprint_id    = $7,
+        task_type    = $8,
+        story_points = $9,
+        is_blocked   = $10,
+        updated_at   = CURRENT_TIMESTAMP
+    WHERE id = $11
     `,
     [
       newTaskText,
@@ -296,6 +320,10 @@ export async function updateTaskAsAdminOrManager(id, data) {
       newDueDate,
       newDescription,
       newPriority,
+      newSprintId,
+      newTaskType,
+      newStoryPoints,
+      newIsBlocked,
       id,
     ]
   );
