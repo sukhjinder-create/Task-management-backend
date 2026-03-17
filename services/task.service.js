@@ -9,6 +9,31 @@ import {
 } from "../repositories/task.repository.js";
 import projectRepository from "../repositories/project.repository.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
+import { getWatchers } from "./watchers.service.js";
+
+/**
+ * Returns IDs of all workspace admins + managers assigned to this project.
+ * Used to give supervisors real-time visibility on their team's task activity.
+ */
+async function getSupervisors(workspaceId, projectId) {
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT id FROM users
+      WHERE workspace_id = $1
+        AND (is_system IS NOT TRUE)
+        AND (
+          role = 'admin'
+          OR (role = 'manager' AND $2 = ANY(projects))
+        )
+      `,
+      [workspaceId, projectId]
+    );
+    return rows.map((r) => r.id);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * NOTE: make sure you have this in DB:
@@ -180,14 +205,45 @@ emitWorkspaceIntelligenceUpdate(workspaceId, {
   taskId: created.id,
 });
 
-  if (created.assigned_to) {
-    await notifyUser({
-      user_id: created.assigned_to,
-      type: "task_assigned",
-      message: `You have been assigned a new task: "${created.task}"`,
-      task_id: created.id,
-      project_id: created.project_id,
-    });
+  try {
+    const notified = new Set([added_by]);
+
+    // Notify the assignee
+    if (created.assigned_to && !notified.has(created.assigned_to)) {
+      await notifyUser({
+        user_id:    created.assigned_to,
+        type:       "task_assigned",
+        message:    `You have been assigned a new task: "${created.task}"`,
+        task_id:    created.id,
+        project_id: created.project_id,
+        workspaceId,
+      });
+      notified.add(created.assigned_to);
+    }
+
+    // Notify project managers about the new task
+    const { rows: managers } = await pool.query(
+      `SELECT id FROM users
+       WHERE workspace_id = $1
+         AND role = 'manager'
+         AND $2 = ANY(projects)
+         AND (is_system IS NOT TRUE)`,
+      [workspaceId, created.project_id]
+    );
+    for (const { id: mgId } of managers) {
+      if (notified.has(mgId)) continue;
+      await notifyUser({
+        user_id:    mgId,
+        type:       "task_assigned",
+        message:    `New task created: "${created.task}"`,
+        task_id:    created.id,
+        project_id: created.project_id,
+        workspaceId,
+      });
+      notified.add(mgId);
+    }
+  } catch (notifErr) {
+    console.error("[notifications] createTask failed:", notifErr.message);
   }
 
   return {
@@ -399,6 +455,120 @@ export async function updateTaskAsAdminOrManager(id, data) {
     ]);
   }
 
+  // ─── NOTIFICATIONS ───────────────────────────────────────────────
+  try {
+    const actor    = data.updated_by || null;
+    const wsId     = data.workspaceId;
+    const taskName = updatedTask.task;
+
+    // 1. Assignee changed
+    if (existing.assigned_to !== updatedTask.assigned_to) {
+      // Notify the new assignee
+      if (updatedTask.assigned_to) {
+        await notifyUser({
+          user_id:    updatedTask.assigned_to,
+          type:       "task_assigned",
+          message:    `You have been assigned to task "${taskName}"`,
+          task_id:    updatedTask.id,
+          project_id: updatedTask.project_id,
+          workspaceId: wsId,
+        });
+      }
+      // Notify the old assignee they were unassigned
+      if (existing.assigned_to && existing.assigned_to !== actor) {
+        await notifyUser({
+          user_id:    existing.assigned_to,
+          type:       "task_updated",
+          message:    `Task "${taskName}" has been reassigned`,
+          task_id:    updatedTask.id,
+          project_id: updatedTask.project_id,
+          workspaceId: wsId,
+        });
+      }
+    }
+
+    // 2. Status changed — notify assignee (if not self-change)
+    if (existing.status !== updatedTask.status && updatedTask.assigned_to && updatedTask.assigned_to !== actor) {
+      await notifyUser({
+        user_id:    updatedTask.assigned_to,
+        type:       "task_updated",
+        message:    `Task "${taskName}" status changed to "${updatedTask.status}"`,
+        task_id:    updatedTask.id,
+        project_id: updatedTask.project_id,
+        workspaceId: wsId,
+      });
+    }
+
+    // 3. Priority changed — notify assignee (if not self-change)
+    if (existing.priority !== updatedTask.priority && updatedTask.assigned_to && updatedTask.assigned_to !== actor) {
+      await notifyUser({
+        user_id:    updatedTask.assigned_to,
+        type:       "task_updated",
+        message:    `Task "${taskName}" priority changed to "${updatedTask.priority}"`,
+        task_id:    updatedTask.id,
+        project_id: updatedTask.project_id,
+        workspaceId: wsId,
+      });
+    }
+
+    // 4. Due date changed — notify assignee (if not self-change)
+    const oldDue = existing.due_date ? String(existing.due_date).slice(0, 10) : null;
+    const newDue = updatedTask.due_date ? String(updatedTask.due_date).slice(0, 10) : null;
+    if (oldDue !== newDue && updatedTask.assigned_to && updatedTask.assigned_to !== actor) {
+      await notifyUser({
+        user_id:    updatedTask.assigned_to,
+        type:       "task_updated",
+        message:    newDue
+          ? `Due date for task "${taskName}" changed to ${newDue}`
+          : `Due date removed from task "${taskName}"`,
+        task_id:    updatedTask.id,
+        project_id: updatedTask.project_id,
+        workspaceId: wsId,
+      });
+    }
+
+    // 5. Notify watchers on any meaningful change (except the actor)
+    const hasChange =
+      existing.status      !== updatedTask.status     ||
+      existing.priority    !== updatedTask.priority   ||
+      existing.assigned_to !== updatedTask.assigned_to ||
+      oldDue               !== newDue;
+
+    if (hasChange) {
+      const watchers = await getWatchers({ taskId: updatedTask.id });
+      for (const w of watchers) {
+        if (w.user_id === actor || w.user_id === updatedTask.assigned_to) continue;
+        await notifyUser({
+          user_id:    w.user_id,
+          type:       "task_updated",
+          message:    `Task "${taskName}" was updated`,
+          task_id:    updatedTask.id,
+          project_id: updatedTask.project_id,
+          workspaceId: wsId,
+        });
+      }
+    }
+
+    // 6. Notify admins + project managers when task status → completed
+    if (existing.status !== updatedTask.status && updatedTask.status === "completed") {
+      const supervisors = await getSupervisors(wsId, updatedTask.project_id);
+      for (const supId of supervisors) {
+        if (supId === actor) continue;
+        await notifyUser({
+          user_id:    supId,
+          type:       "task_updated",
+          message:    `Task "${taskName}" was marked as completed`,
+          task_id:    updatedTask.id,
+          project_id: updatedTask.project_id,
+          workspaceId: wsId,
+        });
+      }
+    }
+  } catch (notifErr) {
+    console.error("[notifications] updateTaskAsAdminOrManager failed:", notifErr.message);
+  }
+  // ─────────────────────────────────────────────────────────────────
+
   return updatedTask;
 }
 
@@ -485,10 +655,46 @@ import("../intelligence/manualScoring.service.js")
 
 emitWorkspaceIntelligenceUpdate(workspaceId, {
   type: "task-status-changed",
-  status: updatedTask.status, // ⭐ REQUIRED
+  status: updatedTask.status,
   projectId: updatedTask.project_id,
   taskId: updatedTask.id,
 });
+
+// ─── NOTIFICATIONS ───────────────────────────────────────────────
+try {
+  // Notify watchers (not the user themselves)
+  const watchers = await getWatchers({ taskId: updatedTask.id });
+  for (const w of watchers) {
+    if (w.user_id === userId) continue;
+    await notifyUser({
+      user_id:     w.user_id,
+      type:        "task_updated",
+      message:     `Task "${updatedTask.task}" status changed to "${newStatus}"`,
+      task_id:     updatedTask.id,
+      project_id:  updatedTask.project_id,
+      workspaceId,
+    });
+  }
+
+  // Notify admins + project managers when task is completed
+  if (newStatus === "completed") {
+    const supervisors = await getSupervisors(workspaceId, updatedTask.project_id);
+    for (const supId of supervisors) {
+      if (supId === userId) continue; // don't notify the person who completed it
+      await notifyUser({
+        user_id:    supId,
+        type:       "task_updated",
+        message:    `Task "${updatedTask.task}" was marked as completed`,
+        task_id:    updatedTask.id,
+        project_id: updatedTask.project_id,
+        workspaceId,
+      });
+    }
+  }
+} catch (notifErr) {
+  console.error("[notifications] updateTaskStatusAsUser failed:", notifErr.message);
+}
+// ─────────────────────────────────────────────────────────────────
 
 return updatedTask;
 }
@@ -518,20 +724,40 @@ await pool.query(`
 
   await pool.query(`DELETE FROM tasks WHERE id = $1`, [id]);
 
-  if (existing.assigned_to) {
-    await notifyUser({
-      user_id: existing.assigned_to,
-      type: "task_deleted",
-      message: `Task "${existing.task}" was deleted`,
-      // Task row is already deleted, so keep notification FK-safe.
-      task_id: null,
-      project_id: existing.project_id,
-    });
-    emitWorkspaceIntelligenceUpdate(workspaceId, {
-  type: "task-deleted",
-  projectId: existing.project_id,
-  taskId: existing.id,
-});
+  emitWorkspaceIntelligenceUpdate(workspaceId, {
+    type: "task-deleted",
+    projectId: existing.project_id,
+    taskId: existing.id,
+  });
+
+  try {
+    // Notify the assignee
+    if (existing.assigned_to) {
+      await notifyUser({
+        user_id:    existing.assigned_to,
+        type:       "task_deleted",
+        message:    `Task "${existing.task}" was deleted`,
+        task_id:    null, // already deleted — FK-safe
+        project_id: existing.project_id,
+        workspaceId,
+      });
+    }
+
+    // Notify admins + project managers (skip if they are also the assignee)
+    const supervisors = await getSupervisors(workspaceId, existing.project_id);
+    for (const supId of supervisors) {
+      if (supId === existing.assigned_to) continue;
+      await notifyUser({
+        user_id:    supId,
+        type:       "task_deleted",
+        message:    `Task "${existing.task}" was deleted`,
+        task_id:    null,
+        project_id: existing.project_id,
+        workspaceId,
+      });
+    }
+  } catch (notifErr) {
+    console.error("[notifications] deleteTask failed:", notifErr.message);
   }
 }
 

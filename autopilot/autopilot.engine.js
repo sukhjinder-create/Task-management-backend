@@ -66,8 +66,9 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
       currentState: action.currentState,
       proposedChanges: action.proposedChanges,
       confidenceScore: action.confidence,
-      requireApproval: settings.require_approval,
-      autoApproveAfterHours: settings.auto_approve_after_hours,
+      // Standups are informational — always bypass approval and post immediately
+      requireApproval: action.type === 'create_standup' ? false : settings.require_approval,
+      autoApproveAfterHours: action.type === 'create_standup' ? 0 : settings.auto_approve_after_hours,
     });
   });
 
@@ -461,11 +462,24 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
     const projectLabel = project.name || `Project ${project.id}`;
 
     try {
+      // Active sprint for this project (if any)
+      const { rows: sprintRows } = await pool.query(`
+        SELECT id, name, goal, start_date, end_date,
+          GREATEST(0, CEIL(EXTRACT(EPOCH FROM (end_date - NOW())) / 86400)) AS days_remaining
+        FROM sprints
+        WHERE project_id = $1 AND workspace_id = $2 AND status = 'active'
+        ORDER BY start_date DESC
+        LIMIT 1
+      `, [project.id, workspaceId]);
+
+      const activeSprint = sprintRows[0] || null;
+
       const [
         { rows: statusChanges },
         { rows: newTasks },
         { rows: overdueTasks },
         { rows: healthRows },
+        { rows: sprintTaskRows },
       ] = await Promise.all([
 
         // Status transitions in last 24h with time-in-previous-state
@@ -474,6 +488,8 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
             al.task_id,
             t.task AS task_name,
             t.priority,
+            t.story_points,
+            t.task_type,
             al.old_value->>'status' AS from_status,
             al.new_value->>'status' AS to_status,
             u.username AS actor_name,
@@ -502,8 +518,8 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
 
         // New tasks created in last 24h
         pool.query(`
-          SELECT t.task AS task_name, t.priority, t.status,
-            u.username AS assigned_to, t.due_date
+          SELECT t.task AS task_name, t.priority, t.status, t.task_type,
+            t.story_points, u.username AS assigned_to, t.due_date
           FROM tasks t
           LEFT JOIN users u ON u.id = t.assigned_to
           WHERE t.workspace_id = $1 AND t.project_id = $2
@@ -514,8 +530,8 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
 
         // Currently overdue tasks
         pool.query(`
-          SELECT t.task AS task_name, t.priority, t.status,
-            u.username AS assigned_to,
+          SELECT t.task AS task_name, t.priority, t.status, t.task_type,
+            t.story_points, u.username AS assigned_to,
             ROUND(EXTRACT(DAY FROM (NOW() - t.due_date))) AS days_overdue
           FROM tasks t
           LEFT JOIN users u ON u.id = t.assigned_to
@@ -539,14 +555,30 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
           FROM tasks
           WHERE workspace_id = $1 AND project_id = $2
         `, scopeParams),
+
+        // Sprint task breakdown (only if active sprint exists)
+        activeSprint
+          ? pool.query(`
+              SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'completed') AS done,
+                COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled') AND due_date < NOW()) AS overdue,
+                COALESCE(SUM(story_points) FILTER (WHERE status = 'completed'), 0) AS points_done,
+                COALESCE(SUM(story_points), 0) AS points_total,
+                COUNT(*) FILTER (WHERE status IN ('in_progress','review')) AS in_flight
+              FROM tasks
+              WHERE workspace_id = $1 AND project_id = $2 AND sprint_id = $3
+            `, [workspaceId, project.id, activeSprint.id])
+          : Promise.resolve({ rows: [{}] }),
       ]);
 
       // Skip projects with zero activity
       if (statusChanges.length === 0 && newTasks.length === 0) continue;
 
       const health = healthRows[0] || {};
+      const sprintStats = sprintTaskRows[0] || {};
 
-      // Build per-person activity map from status changes
+      // Build per-person activity map
       const personMap = {};
       for (const sc of statusChanges) {
         const name = sc.actor_name || 'Unknown';
@@ -556,19 +588,31 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
           ? `${Math.round(hrs / 24)}d in ${sc.from_status}`
           : hrs >= 1 ? `${hrs}h in ${sc.from_status}`
           : `< 1h in ${sc.from_status}`;
+        const pts = sc.story_points ? ` [${sc.story_points}pts]` : '';
         personMap[name].push(
-          `"${sc.task_name}" [${sc.priority || 'normal'}]: ${sc.from_status} → ${sc.to_status} (${timeStr})`
+          `"${sc.task_name}"${pts} ${sc.from_status} → ${sc.to_status} (${timeStr})`
         );
       }
 
-      // Identify stuck tasks (was in a state > 24h before being moved today)
       const stuckMoves = statusChanges.filter(sc => Number(sc.hours_in_prev_state) >= 24);
 
-      // Format prompt sections
+      // ── Structured prompt data ──────────────────────────────
+      const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+      const sprintBlock = activeSprint ? `
+ACTIVE SPRINT: "${activeSprint.name}"
+  Goal: ${activeSprint.goal || 'No goal set'}
+  Timeline: ${new Date(activeSprint.start_date).toLocaleDateString()} → ${new Date(activeSprint.end_date).toLocaleDateString()} (${activeSprint.days_remaining} day(s) remaining)
+  Progress: ${sprintStats.done || 0}/${sprintStats.total || 0} tasks done | ${sprintStats.in_flight || 0} in flight | ${sprintStats.overdue || 0} overdue
+  Points: ${sprintStats.points_done || 0}/${sprintStats.points_total || 0} story points completed` : `SPRINT: No active sprint`;
+
       const transitionLines = statusChanges.map(sc => {
         const hrs = Number(sc.hours_in_prev_state);
-        const timeStr = hrs >= 48 ? `${Math.round(hrs / 24)} days` : hrs >= 1 ? `${hrs} hrs` : '< 1 hr';
-        return `  • ${sc.actor_name || 'Unknown'} moved "${sc.task_name}" [${sc.priority || 'normal'}]: ${sc.from_status} → ${sc.to_status} (was in ${sc.from_status} for ${timeStr})`;
+        const timeStr = hrs >= 48 ? `${Math.round(hrs / 24)}d` : hrs >= 1 ? `${hrs}h` : '<1h';
+        const stuck = hrs >= 24 ? ' ⚠ WAS STUCK' : '';
+        const pts = sc.story_points ? ` [${sc.story_points}pts]` : '';
+        const type = sc.task_type ? ` (${sc.task_type})` : '';
+        return `  - ${sc.actor_name || 'Unknown'}: "${sc.task_name}"${pts}${type} | ${sc.from_status} → ${sc.to_status} | time in prev state: ${timeStr}${stuck}`;
       }).join('\n');
 
       const personLines = Object.entries(personMap)
@@ -576,53 +620,89 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
         .join('\n');
 
       const overdueLines = overdueTasks
-        .map(t => `  • "${t.task_name}" — ${t.days_overdue} days overdue, assigned to ${t.assigned_to || 'nobody'} [${t.priority || 'normal'} priority, status: ${t.status}]`)
-        .join('\n');
+        .map(t => {
+          const pts = t.story_points ? ` [${t.story_points}pts]` : '';
+          const type = t.task_type ? ` (${t.task_type})` : '';
+          return `  - "${t.task_name}"${pts}${type} | ${t.days_overdue}d overdue | owner: ${t.assigned_to || 'unassigned'} | priority: ${t.priority || 'normal'}`;
+        }).join('\n');
 
       const newTaskLines = newTasks
-        .map(t => `  • "${t.task_name}" [${t.priority || 'normal'}] → assigned to ${t.assigned_to || 'unassigned'}, status: ${t.status}`)
-        .join('\n');
+        .map(t => {
+          const pts = t.story_points ? ` [${t.story_points}pts]` : '';
+          const type = t.task_type ? ` (${t.task_type})` : '';
+          return `  - "${t.task_name}"${pts}${type} | assigned to: ${t.assigned_to || 'unassigned'} | priority: ${t.priority || 'normal'}`;
+        }).join('\n');
 
-      const stuckNote = stuckMoves.length > 0
-        ? `\nNOTE — ${stuckMoves.length} task(s) were stuck for 24+ hours before being moved today:\n${stuckMoves.map(sc => `  • "${sc.task_name}" was in "${sc.from_status}" for ${Number(sc.hours_in_prev_state) >= 48 ? Math.round(Number(sc.hours_in_prev_state)/24)+'d' : Number(sc.hours_in_prev_state)+'h'} before ${sc.actor_name || 'someone'} moved it to "${sc.to_status}"`).join('\n')}`
-        : '';
-
-      const prompt = `You are generating a professional project standup report for the engineering team.
+      const prompt = `You are writing a daily standup report for an engineering team. Today is ${today}.
 
 PROJECT: ${projectLabel}
-HEALTH SNAPSHOT: ${health.active_count || 0} active | ${health.in_progress_count || 0} in progress | ${health.in_review_count || 0} in review | ${health.todo_count || 0} todo | ${health.overdue_count || 0} overdue | ${health.completed_total || 0} completed total
+${sprintBlock}
 
-TASK STATE TRANSITIONS — LAST 24 HOURS (${statusChanges.length}):
-${transitionLines || '  None recorded'}
-${stuckNote}
+PROJECT HEALTH: ${health.active_count || 0} active | ${health.in_progress_count || 0} in-progress | ${health.in_review_count || 0} in-review | ${health.todo_count || 0} todo | ${health.overdue_count || 0} overdue
+
+TASK MOVEMENTS LAST 24H (${statusChanges.length} changes):
+${transitionLines || '  - None'}
 
 PER-PERSON ACTIVITY:
-${personLines || '  No individual activity recorded'}
+${personLines || '  - No activity recorded'}
 
-NEW TASKS ADDED TODAY (${newTasks.length}):
-${newTaskLines || '  None'}
+NEW TASKS CREATED TODAY (${newTasks.length}):
+${newTaskLines || '  - None'}
 
 CURRENTLY OVERDUE (${overdueTasks.length}):
-${overdueLines || '  None'}
+${overdueLines || '  - None'}
 
-Write a professional standup report with these exact sections:
+---
+Generate a structured daily standup report. You MUST follow this EXACT format — no deviations, no paragraphs, only the sections below:
 
-## Project Health
-One or two sentences on overall project state. Mention momentum if things are moving, or flag if things are quiet.
+---
+# 📋 Daily Standup — ${projectLabel}
+**${today}**
 
-## Task Movements
-List every state change. Call out clearly: who moved what, from which state, to which state. If a task sat in a state for more than 24 hours before being moved, flag it as "was stuck." Be specific with task names.
+${activeSprint ? `> 🏃 **Sprint:** "${activeSprint.name}" · ${activeSprint.days_remaining}d remaining · ${sprintStats.points_done || 0}/${sprintStats.points_total || 0} pts done` : '> ℹ️ No active sprint'}
 
-## Team Activity
-Per-person summary. For each person who was active, write one focused line: what they worked on and what they achieved.
+---
 
-## Blockers & Risks
-List overdue tasks with days overdue and owner. Note any tasks that appear stuck. Be direct — do not soften this section.
+## 🟢 Yesterday's Progress
+- List each completed or advanced task as a bullet
+- Format: **"Task Name"** — moved from X → Y by @Person [Xpts if available]
+- If nothing happened, write: *No task movements recorded*
 
-## Focus for Today
-Based on current state, what should the team prioritize? Be specific to this project. 2-4 bullet points.
+## 🔄 In Progress
+- List tasks currently in-flight (in_progress or review status)
+- Format: **"Task Name"** — @Owner · [Xpts] · status: in-progress/review
+- If none, write: *No tasks currently in progress*
 
-Rules: Be specific and name tasks. Use task names exactly as given. No filler phrases. Keep the tone professional and direct. Output clean markdown.`;
+## 👥 Team Activity
+- One bullet per person who was active
+- Format: **@Name** — what they moved/completed (be specific with task names)
+- If no activity, write: *No individual activity recorded*
+
+## 🆕 Newly Added
+- List new tasks added today
+- Format: **"Task Name"** · Type · Assigned to @Owner · Priority: X
+- If none, write: *No new tasks today*
+
+## 🚨 Blockers & Overdue
+- List every overdue task as a bullet
+- Format: **"Task Name"** — ⏰ Xd overdue · Owner: @Name · Priority: X
+- Tasks stuck >24h before being moved: flag with ⚠️
+- If none, write: ✅ *No blockers or overdue tasks*
+
+## 🎯 Focus for Today
+- 3-5 specific action bullets based on current sprint goal and project state
+- Each bullet starts with an action verb (Complete, Review, Unblock, Prioritize, etc.)
+- Be specific to THIS project — mention actual task names or areas
+
+---
+
+RULES:
+- Use ONLY bullet points. No paragraphs whatsoever.
+- Bold task names always. Bold @mentions.
+- Include story points where available (e.g. [3pts])
+- Use task names EXACTLY as given in the data
+- Be direct. No filler. No "the team did a great job" type phrases.
+- Output valid markdown only.`;
 
       const summary = await generateText({ prompt });
 
@@ -630,7 +710,7 @@ Rules: Be specific and name tasks. Use task names exactly as given. No filler ph
         type: 'create_standup',
         taskId: null,
         projectId: project.id,
-        reason: `Daily standup for project: ${projectLabel}`,
+        reason: `Daily standup for project: ${projectLabel}${activeSprint ? ` (Sprint: ${activeSprint.name})` : ''}`,
         currentState: {
           project_name: projectLabel,
           status_changes: statusChanges.length,
@@ -638,6 +718,10 @@ Rules: Be specific and name tasks. Use task names exactly as given. No filler ph
           new_tasks: newTasks.length,
           overdue_count: overdueTasks.length,
           active_count: Number(health.active_count || 0),
+          sprint_name: activeSprint?.name || null,
+          sprint_days_remaining: activeSprint ? Number(activeSprint.days_remaining) : null,
+          sprint_points_done: activeSprint ? Number(sprintStats.points_done || 0) : null,
+          sprint_points_total: activeSprint ? Number(sprintStats.points_total || 0) : null,
         },
         proposedChanges: {
           summary: summary.trim(),
@@ -939,19 +1023,72 @@ async function executeEscalation(action) {
 /** Convert markdown standup output to clean HTML for the chat channel */
 function standupMarkdownToHtml(md) {
   if (!md) return '';
-  return md
-    // ## Heading → bold section header
-    .replace(/^## (.+)$/gm, '<br/><strong>$1</strong>')
+
+  const lines = md.split('\n');
+  const html = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, ''); // strip CRLF
+
+    // Skip empty lines — section headers provide their own spacing
+    if (line.trim() === '') continue;
+
+    // # H1 title
+    if (/^# (.+)$/.test(line)) {
+      html.push(`<strong>${applyInlineFormatting(line.replace(/^# /, ''))}</strong><br/>`);
+      continue;
+    }
+
+    // ## H2 section header → one blank line before, bold
+    if (/^## (.+)$/.test(line)) {
+      html.push(`<br/><strong>${applyInlineFormatting(line.replace(/^## /, ''))}</strong><br/>`);
+      continue;
+    }
+
+    // --- horizontal rule
+    if (/^---+$/.test(line.trim())) {
+      html.push('<hr style="border:none;border-top:1px solid #e5e7eb;margin:2px 0"/>');
+      continue;
+    }
+
+    // > blockquote (sprint info)
+    if (/^> (.+)$/.test(line)) {
+      const text = applyInlineFormatting(line.replace(/^> /, ''));
+      html.push(`<span style="padding:1px 6px;border-left:3px solid #6366f1;color:#6b7280;font-size:0.92em">${text}</span><br/>`);
+      continue;
+    }
+
+    // - bullet or • bullet
+    if (/^[\-•] (.+)$/.test(line)) {
+      const text = applyInlineFormatting(line.replace(/^[\-•] /, ''));
+      html.push(`&nbsp;&nbsp;• ${text}<br/>`);
+      continue;
+    }
+
+    // Numbered list
+    if (/^\d+\. (.+)$/.test(line)) {
+      const text = applyInlineFormatting(line.replace(/^\d+\. /, ''));
+      html.push(`&nbsp;&nbsp;${text}<br/>`);
+      continue;
+    }
+
+    // Regular text
+    html.push(`${applyInlineFormatting(line)}<br/>`);
+  }
+
+  return html.join('');
+}
+
+function applyInlineFormatting(text) {
+  return text
     // **bold**
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    // Bullet points (- or •)
-    .replace(/^[\-•] (.+)$/gm, '&nbsp;&nbsp;• $1')
-    // Numbered list
-    .replace(/^\d+\. (.+)$/gm, '&nbsp;&nbsp;$1')
-    // Blank lines → paragraph break
-    .replace(/\n{2,}/g, '<br/><br/>')
-    // Single newlines → <br/>
-    .replace(/\n/g, '<br/>');
+    // *italic*
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    // `code`
+    .replace(/`([^`]+)`/g, '<code style="background:#f3f4f6;padding:1px 4px;border-radius:3px">$1</code>')
+    // @mention
+    .replace(/@(\w+)/g, '<strong style="color:#6366f1">@$1</strong>');
 }
 
 async function executeStandupCreation(action) {

@@ -11,7 +11,7 @@ export async function ensureSystemUser(workspaceId, client = null) {
 
   try {
     const email = `ai+${workspaceId}@example.com`;
-    const username = `AI_System_${workspaceId}`;
+    const username = `Autopilot`;
 
     // 1️⃣ Find existing AI user
     let { rows } = await db.query(
@@ -49,6 +49,13 @@ export async function ensureSystemUser(workspaceId, client = null) {
       );
 
       aiUser = res.rows[0];
+    } else if (aiUser.username !== username) {
+      // Migrate old "AI_System_<uuid>" display name to clean "Autopilot"
+      await db.query(
+        `UPDATE users SET username = $1 WHERE id = $2`,
+        [username, aiUser.id]
+      );
+      aiUser = { ...aiUser, username };
     }
 
     // 3️⃣ Ensure mapping ALWAYS exists

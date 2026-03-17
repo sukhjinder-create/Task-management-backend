@@ -498,8 +498,8 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
   [
     channelKey,
     userId,
-    baseText,
-    normalizedFallback,
+    textHtml || baseText,   // $3 → text_html: prefer HTML param, fall back to baseText
+    baseText,               // $4 → fallback_text: always plain text
     encryptedJson
     ? JSON.stringify(encryptedJson)   // ✅ KEEP REAL ENCRYPTED DATA
     : JSON.stringify({ message: baseText }), // legacy fallback

@@ -181,19 +181,42 @@ export async function runAutopilot(workspaceId, projectId = null) {
   return await runAutopilotAnalysis({ workspaceId, projectId });
 }
 
-export async function getAutopilotStats(workspaceId, projectId = null) {
-  const base = projectId
-    ? `WHERE workspace_id = $1 AND project_id = $2`
-    : `WHERE workspace_id = $1`;
-  const params = projectId ? [workspaceId, projectId] : [workspaceId];
+export async function getAutopilotStats(workspaceId, projectId = null, fromDate = null, toDate = null) {
+  const params = [workspaceId];
+  let idx = 2;
+
+  const baseConditions = ["workspace_id = $1"];
+  if (projectId) {
+    baseConditions.push(`project_id = $${idx++}`);
+    params.push(projectId);
+  }
+
+  // Date range for non-pending stats
+  // If no range supplied, default to last 7 days
+  let rangeCondition;
+  if (fromDate && toDate) {
+    rangeCondition = `created_at >= $${idx++}::timestamptz AND created_at <= $${idx++}::timestamptz`;
+    params.push(fromDate, toDate);
+  } else if (fromDate) {
+    rangeCondition = `created_at >= $${idx++}::timestamptz`;
+    params.push(fromDate);
+  } else if (toDate) {
+    rangeCondition = `created_at <= $${idx++}::timestamptz`;
+    params.push(toDate);
+  } else {
+    rangeCondition = `TRUE`; // no date filter = all time
+  }
+
+  const base = `WHERE ${baseConditions.join(" AND ")}`;
 
   const { rows } = await pool.query(`
     SELECT
-      COUNT(*) FILTER (WHERE status = 'pending')                                        AS pending_count,
-      COUNT(*) FILTER (WHERE status = 'executed'     AND created_at > NOW() - INTERVAL '7 days') AS executed_count,
-      COUNT(*) FILTER (WHERE status = 'rejected'     AND created_at > NOW() - INTERVAL '7 days') AS rejected_count,
-      COUNT(*) FILTER (WHERE status = 'auto_approved'AND created_at > NOW() - INTERVAL '7 days') AS auto_approved_count,
-      AVG(confidence_score) FILTER (WHERE           created_at > NOW() - INTERVAL '7 days')      AS avg_confidence
+      COUNT(*) FILTER (WHERE status = 'pending')                                AS pending_count,
+      COUNT(*) FILTER (WHERE status = 'executed'      AND ${rangeCondition})   AS executed_count,
+      COUNT(*) FILTER (WHERE status = 'rejected'      AND ${rangeCondition})   AS rejected_count,
+      COUNT(*) FILTER (WHERE status = 'auto_approved' AND ${rangeCondition})   AS auto_approved_count,
+      AVG(confidence_score) FILTER (WHERE                 ${rangeCondition})   AS avg_confidence,
+      COUNT(*) FILTER (WHERE                              ${rangeCondition})   AS total_in_range
     FROM autopilot_actions
     ${base}
   `, params);

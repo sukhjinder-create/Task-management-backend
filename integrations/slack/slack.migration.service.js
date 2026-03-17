@@ -1,7 +1,7 @@
 import axios from "axios";
 import pool from "../../db.js";
-import bcrypt from "bcrypt";
-import { getUserByEmail, createUserRepo, addUserToWorkspaceRepo } from "../../repositories/user.repository.js";
+import { getUserByEmail, addUserToWorkspaceRepo } from "../../repositories/user.repository.js";
+import { createImportedUser } from "../../services/user.service.js";
 import { getChannelByKey, createChannel } from "../../services/chat.service.js";
 import { finalizeMigrationImport } from "../../services/migrationHistory.service.js";
 
@@ -223,21 +223,21 @@ export async function migrateSlackWorkspace({
           userMap[su.id] = { internalId: existing.id, username: existing.username };
           result.usersLinked++;
         } else {
-          const randomPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-          const password_hash = await bcrypt.hash(randomPassword, 10);
+          const avatarUrl = su.profile?.image_512 || su.profile?.image_192 || null;
 
+          // Retry loop handles duplicate username collisions
           let username = displayName;
-          let newUser = null;
+          let newUser  = null;
           for (let attempt = 0; attempt < 5; attempt++) {
             try {
-              newUser = await createUserRepo({
+              newUser = await createImportedUser({
                 username,
                 email,
-                password_hash,
-                role: "member",
-                added_by: triggeredBy,
-                projects: [],
+                role:         "user",
+                added_by:     triggeredBy,
+                projects:     [],
                 workspace_id: workspaceId,
+                avatar_url:   avatarUrl,
               });
               break;
             } catch (e) {
@@ -249,15 +249,6 @@ export async function migrateSlackWorkspace({
             }
           }
           if (!newUser) throw new Error(`Could not create user ${email} after 5 attempts`);
-
-          await addUserToWorkspaceRepo(newUser.id, workspaceId);
-
-          const avatarUrl = su.profile?.image_512 || su.profile?.image_192 || null;
-          if (avatarUrl) {
-            try {
-              await pool.query(`UPDATE users SET avatar_url = $1 WHERE id = $2`, [avatarUrl, newUser.id]);
-            } catch (_) { /* non-fatal */ }
-          }
 
           userMap[su.id] = { internalId: newUser.id, username };
           createdUserIds.push(newUser.id);

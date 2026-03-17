@@ -1,4 +1,9 @@
 import pool from "../db.js";
+import { notifyUser } from "./notification.service.js";
+
+const HEALTH_WARN_THRESHOLD    = 50; // 🔴 critical
+const HEALTH_CAUTION_THRESHOLD = 65; // 🟡 caution
+
 export async function recomputeWorkspaceHealth(workspaceId) {
   try {
 
@@ -88,6 +93,35 @@ export async function recomputeWorkspaceHealth(workspaceId) {
       workspaceId,
       `→ ${healthScore}%`
     );
+
+    // ── Notify admins if health is in warning/critical zone ──────
+    if (healthScore < HEALTH_CAUTION_THRESHOLD) {
+      try {
+        const { rows: admins } = await pool.query(
+          `SELECT id FROM users
+           WHERE workspace_id = $1
+             AND role = 'admin'
+             AND (is_system IS NOT TRUE)`,
+          [workspaceId]
+        );
+
+        const isCritical = healthScore < HEALTH_WARN_THRESHOLD;
+        const emoji   = isCritical ? "🔴" : "🟡";
+        const level   = isCritical ? "Critical" : "Caution";
+        const message = `${emoji} Workspace health ${level}: score dropped to ${healthScore}% — review overdue tasks and task completion rate`;
+
+        for (const { id: adminId } of admins) {
+          await notifyUser({
+            user_id:     adminId,
+            type:        "workspace_warning",
+            message,
+            workspaceId,
+          });
+        }
+      } catch (notifErr) {
+        console.error("[notifications] workspace health warning failed:", notifErr.message);
+      }
+    }
 
     return result.rows[0].health_score;
 

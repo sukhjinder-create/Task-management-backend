@@ -1,9 +1,11 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import axios from "axios";
 import {
   getUserByEmail,
   getUserById,
 } from "../repositories/user.repository.js";
+import { verifyMagicToken } from "./magicLink.service.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
@@ -110,4 +112,62 @@ export async function getCurrentUser(userId) {
   const user = await getUserById(userId);
   if (!user) throw new Error("User not found");
   return user;
+}
+
+/**
+ * LOGIN WITH MAGIC LINK TOKEN
+ * Used by imported users (Slack, Asana, YouTrack, etc.)
+ */
+export async function loginWithMagicToken(token) {
+  const user     = await verifyMagicToken(token);
+  const safeUser = normalizeUserRow(user);
+  const jwt      = generateToken(safeUser);
+  return { token: jwt, user: safeUser };
+}
+
+/**
+ * LOGIN WITH GOOGLE SSO
+ * Exchanges OAuth2 code for Google user info, finds user by email.
+ * Option 1 (invite-only): user must already exist in DB.
+ */
+export async function loginWithGoogle(code) {
+  const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
+  const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+  const GOOGLE_CALLBACK_URL  = process.env.GOOGLE_CALLBACK_URL;
+
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_CALLBACK_URL) {
+    throw new Error("Google SSO is not configured on this server");
+  }
+
+  // Exchange authorization code for access token
+  const tokenRes = await axios.post(
+    "https://oauth2.googleapis.com/token",
+    {
+      code,
+      client_id:     GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      redirect_uri:  GOOGLE_CALLBACK_URL,
+      grant_type:    "authorization_code",
+    },
+    { headers: { "Content-Type": "application/json" } }
+  );
+
+  // Fetch Google user profile
+  const profileRes = await axios.get(
+    "https://www.googleapis.com/oauth2/v3/userinfo",
+    { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
+  );
+
+  const googleEmail = profileRes.data.email;
+  if (!googleEmail) throw new Error("Could not retrieve email from Google");
+
+  // Must already exist (invite-only model)
+  const user = await getUserByEmail(googleEmail);
+  if (!user) {
+    throw new Error("No account found for this Google email. Contact your admin.");
+  }
+
+  const safeUser = normalizeUserRow(user);
+  const jwtToken = generateToken(safeUser);
+  return { token: jwtToken, user: safeUser };
 }

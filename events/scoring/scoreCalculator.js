@@ -1,59 +1,78 @@
 import { SCORE_WEIGHTS, validateWeights } from "./scoreWeights.js";
 
 /**
- * Deterministic score calculator.
- * Input = normalized metrics (0–1 range).
- * Output = final score + breakdown.
+ * Deterministic two-sub-score calculator.
  *
- * NO DB.
- * NO EVENTS.
- * NO AI.
+ * Attendance score  (0–100) × 40%
+ * Productivity score (0–100) × 60%
+ * ──────────────────────────────────
+ * Overall score     (0–100)
+ *
+ * NO DB. NO EVENTS. NO AI.
  */
 export function calculateScore(metrics) {
   validateWeights();
 
-  /**
-   * Expected metrics shape:
-   * {
-   *   attendanceRatio: 0–1,
-   *   taskCompletionRatio: 0–1,
-   *   timelinessRatio: 0–1,
-   *   stabilityRatio: 0–1,
-   *   collaborationRatio: 0–1
-   * }
-   */
-
+  const W = SCORE_WEIGHTS;
   const clamp = (v) => Math.max(0, Math.min(1, v ?? 0));
 
-  const normalized = {
-    attendance: clamp(metrics.attendanceRatio),
-    taskCompletion: clamp(metrics.taskCompletionRatio),
-    timeliness: clamp(metrics.timelinessRatio),
-    stability: clamp(metrics.stabilityRatio),
-    collaboration: clamp(metrics.collaborationRatio),
+  /* ── ATTENDANCE SUB-SCORE (0–100) ────────────────────────── */
+  const attNorm = {
+    presence:     clamp(metrics.attendancePresenceRatio),
+    hourQuality:  clamp(metrics.attendanceHourQualityRatio),
+    activeRatio:  clamp(metrics.attendanceActiveTimeRatio),
+    consistency:  clamp(metrics.attendanceConsistencyRatio),
   };
 
-  const breakdown = {
-    attendance: Math.round(normalized.attendance * SCORE_WEIGHTS.attendance),
-    taskCompletion: Math.round(
-      normalized.taskCompletion * SCORE_WEIGHTS.taskCompletion
-    ),
-    timeliness: Math.round(
-      normalized.timeliness * SCORE_WEIGHTS.timeliness
-    ),
-    stability: Math.round(
-      normalized.stability * SCORE_WEIGHTS.stability
-    ),
-    collaboration: Math.round(
-      normalized.collaboration * SCORE_WEIGHTS.collaboration
-    ),
+  const attendanceBreakdown = {
+    presence:    Math.round(attNorm.presence    * W.attendancePresence),
+    hourQuality: Math.round(attNorm.hourQuality * W.attendanceHourQuality),
+    activeRatio: Math.round(attNorm.activeRatio * W.attendanceActiveRatio),
+    consistency: Math.round(attNorm.consistency * W.attendanceConsistency),
   };
 
-  const finalScore = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  const attendanceScore = Object.values(attendanceBreakdown).reduce((a, b) => a + b, 0);
+
+  /* ── PRODUCTIVITY SUB-SCORE (0–100) ──────────────────────── */
+  const prodNorm = {
+    taskCompletion:      clamp(metrics.taskCompletionRatio),
+    timeliness:          clamp(metrics.timelinessRatio),
+    storyPoints:         clamp(metrics.storyPointVelocityRatio),
+    estimation:          clamp(metrics.estimationAccuracyRatio),
+    collaboration:       clamp(metrics.collaborationRatio),
+    blockerResolution:   clamp(metrics.blockerResolutionRatio),
+  };
+
+  const productivityBreakdown = {
+    taskCompletion:    Math.round(prodNorm.taskCompletion    * W.productivityTaskCompletion),
+    timeliness:        Math.round(prodNorm.timeliness        * W.productivityTimeliness),
+    storyPoints:       Math.round(prodNorm.storyPoints       * W.productivityStoryPoints),
+    estimation:        Math.round(prodNorm.estimation        * W.productivityEstimation),
+    collaboration:     Math.round(prodNorm.collaboration     * W.productivityCollaboration),
+    blockerResolution: Math.round(prodNorm.blockerResolution * W.productivityBlockerResolution),
+  };
+
+  const productivityScore = Object.values(productivityBreakdown).reduce((a, b) => a + b, 0);
+
+  /* ── OVERALL SCORE ───────────────────────────────────────── */
+  const finalScore = Math.round(
+    (attendanceScore   * W.attendanceWeight   / 100) +
+    (productivityScore * W.productivityWeight / 100)
+  );
 
   return {
     score: finalScore,
-    breakdown,
-    normalizedMetrics: normalized,
+    attendanceScore,
+    productivityScore,
+    breakdown: {
+      // Top-level sub-scores
+      attendanceScore,
+      productivityScore,
+      // Attendance detail
+      ...attendanceBreakdown,
+      // Productivity detail
+      ...productivityBreakdown,
+    },
+    normalizedMetrics: { ...attNorm, ...prodNorm },
   };
 }

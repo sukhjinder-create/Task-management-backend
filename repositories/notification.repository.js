@@ -56,12 +56,10 @@ export async function getNotificationsByUser(
 
   const values = [userId];
 
-  // ✅ WORKSPACE FILTER (SAFE)
+  // Filter by workspace when provided; otherwise return all for this user
   if (workspaceId) {
     query += ` AND workspace_id = $2`;
     values.push(workspaceId);
-  } else {
-    query += ` AND workspace_id IS NULL`;
   }
 
   if (unreadOnly) {
@@ -74,52 +72,17 @@ export async function getNotificationsByUser(
   return rows;
 }
 
-export async function markNotificationRead(
-  id,
-  userId,
-  workspaceId = null // ✅ default NULL
-) {
-  let query = `
-    UPDATE notifications
-    SET is_read = TRUE
-    WHERE id = $1
-      AND user_id = $2
-  `;
-
-  const values = [id, userId];
-
-  if (workspaceId) {
-    query += ` AND workspace_id = $3`;
-    values.push(workspaceId);
-  } else {
-    query += ` AND workspace_id IS NULL`;
-  }
-
-  query += " RETURNING *;";
-
-  const { rows } = await pool.query(query, values);
+export async function markNotificationRead(id, userId) {
+  const { rows } = await pool.query(
+    `UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2 RETURNING *`,
+    [id, userId]
+  );
   return rows[0];
 }
 
-export async function markAllNotificationsRead(
-  userId,
-  workspaceId = null // ✅ default NULL
-) {
-  let query = `
-    UPDATE notifications
-    SET is_read = TRUE
-    WHERE user_id = $1
-      AND is_read = FALSE
-  `;
-
-  const values = [userId];
-
-  if (workspaceId) {
-    query += ` AND workspace_id = $2`;
-    values.push(workspaceId);
-  } else {
-    query += ` AND workspace_id IS NULL`;
-  }
-
-  await pool.query(query, values);
+export async function markAllNotificationsRead(userId) {
+  await pool.query(
+    `UPDATE notifications SET is_read = TRUE WHERE user_id = $1 AND is_read = FALSE`,
+    [userId]
+  );
 }

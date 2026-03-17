@@ -19,67 +19,116 @@ export async function createComment({ task_id, comment_text, user, workspaceId }
   const comment = rows[0];
   const task = await getTaskById(task_id);
 
-await pool.query(`
-  INSERT INTO task_activity_logs
-  (task_id, workspace_id, actor_id, action_type, old_value, new_value)
-  VALUES ($1,$2,$3,$4,$5,$6)
-`, [
-  task_id,
-  workspaceId,    // ✅ CORRECT
-  user.id,
-  "COMMENT_ADDED",
-  null,
-  null
-]);
+  await pool.query(`
+    INSERT INTO task_activity_logs
+    (task_id, workspace_id, actor_id, action_type, old_value, new_value)
+    VALUES ($1,$2,$3,$4,$5,$6)
+  `, [task_id, workspaceId, user.id, "COMMENT_ADDED", null, null]);
 
   try {
-    // 🔔 Notify assignee (existing behaviour) + include comment_id
-    if (task.assigned_to) {
+    // Track all IDs already notified so we never send duplicates
+    const alreadyNotified = new Set([user.id]); // commenter never notifies themselves
+
+    // ── 1. Assignee ──────────────────────────────────────────────
+    if (task.assigned_to && !alreadyNotified.has(task.assigned_to)) {
       await notifyUser({
-        user_id: task.assigned_to,
-        type: "comment_added",
-        message: `New comment on task "${task.task}" by ${user.username}`,
-        task_id: task.id,
+        user_id:    task.assigned_to,
+        type:       "comment_added",
+        message:    `${user.username} commented on task "${task.task}"`,
+        task_id:    task.id,
         project_id: task.project_id,
         comment_id: comment.id,
+        workspaceId,
       });
+      alreadyNotified.add(task.assigned_to);
     }
 
-    // 🔔 NEW: @mentions → notify mentioned users
-    // Matches @username, @user.name, @user_name, @user-name
+    // ── 2. Task creator (added_by) ────────────────────────────────
+    if (task.added_by && !alreadyNotified.has(task.added_by)) {
+      await notifyUser({
+        user_id:    task.added_by,
+        type:       "comment_added",
+        message:    `${user.username} commented on your task "${task.task}"`,
+        task_id:    task.id,
+        project_id: task.project_id,
+        comment_id: comment.id,
+        workspaceId,
+      });
+      alreadyNotified.add(task.added_by);
+    }
+
+    // ── 3. Previous commenters on this task ("conversation participants") ──
+    const { rows: prevCommenters } = await pool.query(
+      `SELECT DISTINCT added_by FROM comments
+       WHERE task_id = $1 AND added_by != $2 AND id != $3`,
+      [task_id, user.id, comment.id]
+    );
+    for (const { added_by } of prevCommenters) {
+      if (alreadyNotified.has(added_by)) continue;
+      await notifyUser({
+        user_id:    added_by,
+        type:       "comment_reply",
+        message:    `${user.username} also commented on task "${task.task}"`,
+        task_id:    task.id,
+        project_id: task.project_id,
+        comment_id: comment.id,
+        workspaceId,
+      });
+      alreadyNotified.add(added_by);
+    }
+
+    // ── 4. Project managers assigned to this project ──────────────
+    const { rows: managers } = await pool.query(
+      `SELECT id FROM users
+       WHERE workspace_id = $1
+         AND role = 'manager'
+         AND $2 = ANY(projects)
+         AND (is_system IS NOT TRUE)`,
+      [workspaceId, task.project_id]
+    );
+    for (const { id: mgId } of managers) {
+      if (alreadyNotified.has(mgId)) continue;
+      await notifyUser({
+        user_id:    mgId,
+        type:       "comment_added",
+        message:    `${user.username} commented on task "${task.task}"`,
+        task_id:    task.id,
+        project_id: task.project_id,
+        comment_id: comment.id,
+        workspaceId,
+      });
+      alreadyNotified.add(mgId);
+    }
+
+    // ── 5. @mentions ──────────────────────────────────────────────
     const mentionRegex = /@([a-zA-Z0-9_.-]+)/g;
     const mentionedUsernames = new Set();
-
     let match;
     while ((match = mentionRegex.exec(comment_text)) !== null) {
-      if (match[1]) {
-        mentionedUsernames.add(match[1]);
-      }
+      if (match[1]) mentionedUsernames.add(match[1]);
     }
 
     for (const username of mentionedUsernames) {
       try {
         const mentionedUser = await getUserByUsername(username);
         if (!mentionedUser) continue;
-
+        if (alreadyNotified.has(mentionedUser.id)) continue;
         await notifyUser({
-          user_id: mentionedUser.id,
-          type: "comment_mention",
-          message: `${user.username} mentioned you in a comment on task "${task.task}"`,
-          task_id: task.id,
+          user_id:    mentionedUser.id,
+          type:       "comment_mention",
+          message:    `${user.username} mentioned you in a comment on task "${task.task}"`,
+          task_id:    task.id,
           project_id: task.project_id,
           comment_id: comment.id,
+          workspaceId,
         });
+        alreadyNotified.add(mentionedUser.id);
       } catch (err) {
-        console.error(
-          "Failed to notify mentioned user:",
-          username,
-          err.message
-        );
+        console.error("Failed to notify mentioned user:", username, err.message);
       }
     }
   } catch (err) {
-    console.error("Failed to notify on comment:", err.message);
+    console.error("[notifications] createComment failed:", err.message);
   }
 
   return comment;

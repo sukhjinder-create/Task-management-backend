@@ -152,4 +152,93 @@ router.get("/sprints", async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------
+   GET /sprints/:id/burndown
+   Burndown chart data for a sprint
+------------------------------------------------------- */
+router.get("/sprints/:id/burndown", async (req, res) => {
+  try {
+    const { rows: sprint } = await pool.query(
+      `SELECT * FROM sprints WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+    if (!sprint[0]) return res.status(404).json({ error: "Sprint not found" });
+
+    const { rows: tasks } = await pool.query(
+      `SELECT
+         t.id, t.status, t.story_points,
+         t.updated_at,
+         (SELECT created_at FROM task_activity_logs
+          WHERE task_id = t.id AND new_value = 'completed'
+          ORDER BY created_at ASC LIMIT 1) AS completed_at
+       FROM tasks t
+       WHERE t.sprint_id = $1 AND t.workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+
+    const totalPoints = tasks.reduce((s, t) => s + (t.story_points || 1), 0);
+    const totalTasks  = tasks.length;
+
+    // Build daily burndown from start_date to end_date (or today)
+    const start = sprint[0].start_date ? new Date(sprint[0].start_date) : new Date();
+    const end   = sprint[0].end_date   ? new Date(sprint[0].end_date)   : new Date();
+    const today = new Date();
+    const chartEnd = end < today ? end : today;
+
+    const days = [];
+    for (let d = new Date(start); d <= chartEnd; d.setDate(d.getDate() + 1)) {
+      const dayStr = d.toISOString().slice(0, 10);
+      const completedByDay = tasks.filter(t => t.completed_at && t.completed_at <= new Date(dayStr + "T23:59:59Z"));
+      const burnedPoints = completedByDay.reduce((s, t) => s + (t.story_points || 1), 0);
+      const burnedTasks  = completedByDay.length;
+      days.push({
+        date: dayStr,
+        remaining_points: totalPoints - burnedPoints,
+        remaining_tasks:  totalTasks  - burnedTasks,
+        completed_points: burnedPoints,
+        completed_tasks:  burnedTasks,
+      });
+    }
+
+    // Ideal burndown line
+    const dayCount = days.length;
+    const ideal = days.map((d, i) => ({
+      date: d.date,
+      ideal_points: Math.round(totalPoints * (1 - i / Math.max(dayCount - 1, 1))),
+      ideal_tasks:  Math.round(totalTasks  * (1 - i / Math.max(dayCount - 1, 1))),
+    }));
+
+    res.json({ sprint: sprint[0], days, ideal, totalPoints, totalTasks });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/* -------------------------------------------------------
+   GET /sprints/:id/velocity
+   Velocity chart: completed points per sprint in a project
+------------------------------------------------------- */
+router.get("/projects/:projectId/velocity", async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         s.id, s.name, s.start_date, s.end_date, s.status,
+         COALESCE(SUM(t.story_points) FILTER (WHERE t.status = 'completed'), 0)::int AS completed_points,
+         COUNT(t.id) FILTER (WHERE t.status = 'completed')::int AS completed_tasks,
+         COALESCE(SUM(t.story_points), 0)::int AS total_points,
+         COUNT(t.id)::int AS total_tasks
+       FROM sprints s
+       LEFT JOIN tasks t ON t.sprint_id = s.id AND t.workspace_id = $2
+       WHERE s.project_id = $1 AND s.workspace_id = $2
+         AND s.status = 'completed'
+       GROUP BY s.id
+       ORDER BY s.end_date ASC NULLS LAST`,
+      [req.params.projectId, req.workspaceId]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 export default router;

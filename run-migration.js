@@ -15,6 +15,10 @@ const migrations = [
     file: "./migrations/20260316_backfill_ticket_numbers.sql",
     label: "backfill ticket_number for existing tasks",
   },
+  {
+    file: "./migrations/20260317_youtrack_features.sql",
+    label: "tags, issue links, time tracking, watchers, votes, templates, saved filters, multiple assignees, WIP limits",
+  },
 ];
 
 for (const { file, label } of migrations) {

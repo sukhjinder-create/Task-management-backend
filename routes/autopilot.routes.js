@@ -268,8 +268,13 @@ router.post("/run", allowRoles("admin", "manager"), async (req, res) => {
  */
 router.get("/stats", allowRoles("admin", "manager"), async (req, res) => {
   try {
-    const { projectId } = req.query;
-    const stats = await getAutopilotStats(req.workspaceId, projectId);
+    const { projectId, fromDate, toDate } = req.query;
+    const stats = await getAutopilotStats(
+      req.workspaceId,
+      projectId || null,
+      fromDate || null,
+      toDate ? `${toDate}T23:59:59.999Z` : null,
+    );
 
     res.json({
       success: true,
@@ -279,6 +284,7 @@ router.get("/stats", allowRoles("admin", "manager"), async (req, res) => {
         rejected: parseInt(stats.rejected_count) || 0,
         autoApproved: parseInt(stats.auto_approved_count) || 0,
         avgConfidence: parseFloat(stats.avg_confidence) || 0,
+        totalInRange: parseInt(stats.total_in_range) || 0,
       },
     });
   } catch (err) {

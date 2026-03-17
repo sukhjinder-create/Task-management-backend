@@ -65,7 +65,7 @@ for (const proj of projectRows) {
 
   const { rows: projectTasks } = await pool.query(
     `
-    SELECT status, due_date
+    SELECT status, due_date, story_points, task_type, progress
     FROM tasks
     WHERE assigned_to = $1
       AND project_id = $2

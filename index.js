@@ -81,6 +81,13 @@ import {
 } from "./integrations/git/git.automation.routes.js";
 import slackMigrationRoutes from "./integrations/slack/slack.migration.routes.js";
 import migrationHistoryRoutes from "./routes/migrationHistory.routes.js";
+import tagsRoutes from "./routes/tags.routes.js";
+import taskLinksRoutes from "./routes/taskLinks.routes.js";
+import timeTrackingRoutes from "./routes/timeTracking.routes.js";
+import watchersRoutes from "./routes/watchers.routes.js";
+import votesRoutes from "./routes/votes.routes.js";
+import issueTemplatesRoutes from "./routes/issueTemplates.routes.js";
+import savedFiltersRoutes from "./routes/savedFilters.routes.js";
 
 
 
@@ -209,6 +216,15 @@ app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
 app.use("/admin/attendance", adminAttendanceRoutes);
 app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
 app.use("/admin/attendance", adminAttendanceExportRoutes);
+
+// ── YouTrack parity features ──────────────────────────
+app.use("/tags",            authMiddleware, requireWorkspaceForUser, tagsRoutes);
+app.use("/task-links",      authMiddleware, requireWorkspaceForUser, taskLinksRoutes);
+app.use("/time-tracking",   authMiddleware, requireWorkspaceForUser, timeTrackingRoutes);
+app.use("/watchers",        authMiddleware, requireWorkspaceForUser, watchersRoutes);
+app.use("/votes",           authMiddleware, requireWorkspaceForUser, votesRoutes);
+app.use("/issue-templates", authMiddleware, requireWorkspaceForUser, issueTemplatesRoutes);
+app.use("/saved-filters",   authMiddleware, requireWorkspaceForUser, savedFiltersRoutes);
 
 app.use("/integration-debug", integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);

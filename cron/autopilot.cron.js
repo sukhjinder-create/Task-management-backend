@@ -3,6 +3,39 @@ import cron from "node-cron";
 import pool from "../db.js";
 import { runAutopilotAnalysis } from "../autopilot/autopilot.engine.js";
 import { processAutoApprovals } from "../services/autopilot.service.js";
+import { notifyUser } from "../services/notification.service.js";
+
+async function notifyAdminsOfAutopilotRun(workspaceId, result) {
+  try {
+    const { rows: admins } = await pool.query(
+      `SELECT id FROM users
+       WHERE workspace_id = $1
+         AND role = 'admin'
+         AND (is_system IS NOT TRUE)`,
+      [workspaceId]
+    );
+
+    const { actionsCreated = 0, pendingApproval = 0, autoApproved = 0 } = result || {};
+    if (actionsCreated === 0) return; // no noise when nothing happened
+
+    const parts = [];
+    if (pendingApproval > 0) parts.push(`${pendingApproval} awaiting your approval`);
+    if (autoApproved > 0)    parts.push(`${autoApproved} auto-approved`);
+    const detail = parts.length ? ` (${parts.join(', ')})` : '';
+    const message = `Autopilot ran: ${actionsCreated} action${actionsCreated !== 1 ? 's' : ''} generated${detail}`;
+
+    for (const { id: adminId } of admins) {
+      await notifyUser({
+        user_id:     adminId,
+        type:        "autopilot_summary",
+        message,
+        workspaceId,
+      });
+    }
+  } catch (err) {
+    console.error("[notifications] autopilot summary failed:", err.message);
+  }
+}
 
 /**
  * 🤖 AUTOPILOT CRON JOBS
@@ -41,6 +74,8 @@ export function startAutopilotCron() {
           console.log(
             `✅ Workspace ${ws.workspace_id}: ${result.actionsCreated} actions created`
           );
+
+          await notifyAdminsOfAutopilotRun(ws.workspace_id, result);
         } catch (err) {
           console.error(
             `❌ Failed to run autopilot for workspace ${ws.workspace_id}:`,
