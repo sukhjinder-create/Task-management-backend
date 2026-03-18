@@ -104,7 +104,21 @@ app.use((req, res, next) => {
 // ---------------- MIDDLEWARE ----------------
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: (origin, callback) => {
+      // Allow web dev server, Electron, Capacitor (Android/iOS), and direct API calls
+      const allowed = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost",
+        "capacitor://localhost",
+        "ionic://localhost",
+      ];
+      if (!origin || allowed.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, true); // allow all origins in dev — restrict in production
+      }
+    },
     credentials: true,
     methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allowedHeaders: [
@@ -263,7 +277,7 @@ const PORT = process.env.PORT || 3000;
 
 initSocket(server, process.env.FRONTEND_BASE_URL);
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
 

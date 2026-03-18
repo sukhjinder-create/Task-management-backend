@@ -34,6 +34,7 @@ function normalizeUserRow(user) {
     username: user.username,
     email: user.email,
     role,
+    avatar_url: user.avatar_url || null,
     projects: user.projects || [],
     workspaceId: role === "superadmin" ? WORKSPACE_GLOBAL : workspaceId,
     workspace_id: role === "superadmin" ? WORKSPACE_GLOBAL : workspaceId,

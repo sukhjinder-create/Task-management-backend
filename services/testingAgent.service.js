@@ -14,6 +14,7 @@ import {
   buildPdfBufferFromReport,
   buildRunReportDocument,
 } from "./testingRunReport.service.js";
+import { getTaskLinks } from "./taskLinks.service.js";
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -164,30 +165,139 @@ function tokenize(text = "") {
     .filter((t) => t.length >= 3);
 }
 
+function uniqueStrings(values = [], max = 12) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function toStringArray(value, max = 8) {
+  if (Array.isArray(value)) return uniqueStrings(value, max);
+  if (isNonEmptyString(value)) return uniqueStrings([value], max);
+  return [];
+}
+
+function splitIntoSignals(text = "", max = 10) {
+  return uniqueStrings(
+    String(text || "")
+      .split(/\r?\n|[.?!]\s+|;+/)
+      .map((part) => part.replace(/^[-*•\d.\s]+/, "").trim())
+      .filter((part) => part.length >= 8),
+    max
+  );
+}
+
 async function getTaskContext(workspaceId, taskId) {
-  const { rows } = await pool.query(
+  const taskPromise = pool.query(
     `
     SELECT
-      t.id,
-      t.task,
-      t.description,
-      t.status,
-      t.priority,
-      t.project_id,
-      t.ticket_number,
+      t.*,
+      COALESCE(st.total_subtasks, 0) AS subtasks_total,
+      COALESCE(st.completed_subtasks, 0) AS subtasks_completed,
       p.name AS project_name,
       p.project_code,
-      u.username AS assignee_username
+      u.username AS assignee_username,
+      creator.username AS creator_username,
+      CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+           THEN p.project_code || '-' || t.ticket_number END AS display_id
     FROM tasks t
     INNER JOIN projects p ON p.id = t.project_id
     LEFT JOIN users u ON u.id = t.assigned_to
+    LEFT JOIN users creator ON creator.id = t.added_by
+    LEFT JOIN (
+      SELECT
+        task_id,
+        COUNT(*) AS total_subtasks,
+        COUNT(*) FILTER (WHERE status = 'completed') AS completed_subtasks
+      FROM subtasks
+      GROUP BY task_id
+    ) st ON st.task_id = t.id
     WHERE t.id = $1
       AND t.workspace_id = $2
     LIMIT 1
     `,
     [taskId, workspaceId]
   );
-  return rows[0] || null;
+
+  const subtasksPromise = pool.query(
+    `
+    SELECT
+      id,
+      COALESCE(title, subtask) AS title,
+      status,
+      priority,
+      due_date,
+      created_at
+    FROM subtasks
+    WHERE task_id = $1
+    ORDER BY created_at ASC
+    LIMIT 20
+    `,
+    [taskId]
+  );
+
+  const commentsPromise = pool.query(
+    `
+    SELECT
+      c.id,
+      c.comment_text,
+      c.created_at,
+      u.username AS author_username
+    FROM comments c
+    LEFT JOIN users u ON u.id = c.added_by
+    WHERE c.task_id = $1
+      AND c.workspace_id = $2
+    ORDER BY c.created_at DESC
+    LIMIT 8
+    `,
+    [taskId, workspaceId]
+  );
+
+  const activityPromise = pool.query(
+    `
+    SELECT
+      l.action_type,
+      l.old_value,
+      l.new_value,
+      l.created_at,
+      actor.username AS actor_username
+    FROM task_activity_logs l
+    LEFT JOIN users actor ON actor.id = l.actor_id
+    WHERE l.task_id = $1
+      AND l.workspace_id = $2
+    ORDER BY l.created_at DESC
+    LIMIT 12
+    `,
+    [taskId, workspaceId]
+  );
+
+  const [taskRes, subtasksRes, commentsRes, activityRes, linkedTasks] = await Promise.all([
+    taskPromise,
+    subtasksPromise,
+    commentsPromise,
+    activityPromise,
+    getTaskLinks({ taskId }).catch(() => []),
+  ]);
+
+  const task = taskRes.rows[0];
+  if (!task) return null;
+
+  return {
+    ...task,
+    subtasks: subtasksRes.rows || [],
+    recentComments: commentsRes.rows || [],
+    recentActivity: activityRes.rows || [],
+    linkedTasks: Array.isArray(linkedTasks) ? linkedTasks : [],
+  };
 }
 
 function parseJsonMaybe(value, fallback) {
@@ -198,6 +308,141 @@ function parseJsonMaybe(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function summarizeActivityLog(log = {}) {
+  const action = String(log?.action_type || "TASK_UPDATED")
+    .replace(/_/g, " ")
+    .toLowerCase();
+  const actor = isNonEmptyString(log?.actor_username) ? `${log.actor_username} ` : "";
+  const oldValue = parseJsonMaybe(log?.old_value, {});
+  const newValue = parseJsonMaybe(log?.new_value, {});
+  const details = [];
+
+  if (newValue?.status && oldValue?.status !== newValue.status) {
+    details.push(`status ${oldValue?.status || "unset"} -> ${newValue.status}`);
+  }
+  if (newValue?.priority && oldValue?.priority !== newValue.priority) {
+    details.push(`priority ${oldValue?.priority || "unset"} -> ${newValue.priority}`);
+  }
+  if (newValue?.assigned_to && oldValue?.assigned_to !== newValue.assigned_to) {
+    details.push("assignee changed");
+  }
+
+  return details.length > 0
+    ? `${actor}${action}: ${details.join(", ")}`
+    : `${actor}${action}`;
+}
+
+function inferImpactFromFile(relPath = "", content = "") {
+  const lower = `${relPath}\n${content}`.toLowerCase();
+  const areas = [];
+  const nextChecks = [];
+  const add = (area, check) => {
+    if (area) areas.push(area);
+    if (check) nextChecks.push(check);
+  };
+
+  if (/route|controller|api|endpoint/.test(lower)) {
+    add("API contract", "verify status codes, validation responses, and payload shape");
+  }
+  if (/service|handler|usecase|domain/.test(lower)) {
+    add("Business rules", "verify side effects, derived values, and downstream state transitions");
+  }
+  if (/repo|repository|model|schema|migration|sql|db/.test(lower)) {
+    add("Persistence", "verify data writes, reads, constraints, and rollback safety");
+  }
+  if (/auth|permission|role|access|token|session/.test(lower)) {
+    add("Authorization", "verify allowed roles succeed and forbidden users are blocked");
+  }
+  if (/vote|ballot|poll/.test(lower)) {
+    add("Voting flow", "verify counters, duplicate-vote protection, and aggregate refresh");
+  }
+  if (/sprint|backlog|board|kanban/.test(lower)) {
+    add("Sprint planning", "verify sprint totals, backlog movement, and carry-over rules");
+  }
+  if (/youtrack|jira|asana|adapter|webhook|integration|sync/.test(lower)) {
+    add("External integration", "verify payload mapping, retries, and duplicate prevention");
+  }
+  if (/queue|job|cron|worker|schedule/.test(lower)) {
+    add("Background execution", "verify delayed effects, retry safety, and idempotency");
+  }
+  if (/socket|realtime|event|emit/.test(lower)) {
+    add("Realtime updates", "verify broadcasts, refresh events, and live counters");
+  }
+  if (/notify|notification|email|mail|sms/.test(lower)) {
+    add("Notifications", "verify trigger conditions and delivery payload content");
+  }
+  if (/upload|attachment|file/.test(lower)) {
+    add("File handling", "verify validation, storage, and access control for uploaded files");
+  }
+  if (/page|component|screen|view|modal|dialog/.test(lower)) {
+    add("UI flow", "verify visible state changes, validation messages, and navigation continuity");
+  }
+
+  if (areas.length === 0) {
+    add(path.basename(relPath || "changed module"), "verify the direct behavior and its nearest regression surface");
+  }
+
+  return {
+    path: relPath,
+    label: relPath ? relPath.split(/[\\/]/).slice(-2).join("/") : "task context",
+    areas: uniqueStrings(areas, 4),
+    nextChecks: uniqueStrings(nextChecks, 4),
+  };
+}
+
+function buildTaskTestingBrief({ task, gitContext, fileContents = {} }) {
+  const changedFiles = Array.isArray(gitContext?.changedFiles) ? gitContext.changedFiles.slice(0, 12) : [];
+  const changedFileImpacts = changedFiles.map((file) => inferImpactFromFile(file, fileContents[file] || ""));
+  const acceptanceSignals = uniqueStrings([
+    ...splitIntoSignals(task?.description, 8),
+    ...(task?.subtasks || []).map((item) => item?.title || item?.subtask).filter(Boolean),
+  ], 10);
+  const commentSignals = uniqueStrings(
+    (task?.recentComments || []).map((comment) =>
+      `${comment?.author_username || "comment"}: ${String(comment?.comment_text || "").slice(0, 140)}`
+    ),
+    4
+  );
+  const linkedRisks = uniqueStrings(
+    (task?.linkedTasks || []).map((link) => {
+      const label = link?.linked_display_id || link?.linked_task_title || "linked task";
+      return `${String(link?.link_type || "relates_to").replace(/_/g, " ")} -> ${label} (${link?.linked_status || "unknown"})`;
+    }),
+    6
+  );
+  const activityNotes = uniqueStrings((task?.recentActivity || []).map(summarizeActivityLog), 6);
+  const impactedAreas = uniqueStrings(changedFileImpacts.flatMap((item) => item.areas), 10);
+  const followUpChecks = uniqueStrings([
+    ...changedFileImpacts.flatMap((item) => item.nextChecks),
+    ...linkedRisks.map((risk) => `check linked workflow impact: ${risk}`),
+  ], 10);
+  const repoSignals = uniqueStrings(
+    changedFileImpacts.map((item) => `${item.label}: ${(item.areas || []).join(", ") || "module change"}`),
+    8
+  );
+
+  const suggestedLevels = [];
+  if (impactedAreas.some((area) => /api|business|persistence|integration|background|realtime/i.test(area))) {
+    suggestedLevels.push("integration");
+  }
+  if (impactedAreas.some((area) => /ui flow/i.test(area))) suggestedLevels.push("e2e");
+  if (impactedAreas.some((area) => /authorization/i.test(area))) suggestedLevels.push("security");
+  if (impactedAreas.some((area) => /persistence|business/i.test(area))) suggestedLevels.push("regression");
+  if (suggestedLevels.length === 0) suggestedLevels.push("integration", "regression");
+
+  return {
+    acceptanceSignals,
+    commentSignals,
+    linkedRisks,
+    activityNotes,
+    impactedAreas,
+    followUpChecks,
+    repoSignals,
+    changedFileImpacts,
+    suggestedLevels: uniqueStrings(suggestedLevels, 6),
+  };
 }
 
 async function getGitContextForTask(workspaceId, task) {
@@ -246,104 +491,319 @@ async function getGitContextForTask(workspaceId, task) {
   };
 }
 
+function normalizeGeneratedCase(rawCase = {}, index = 0, fallback = {}) {
+  const allowedLevels = new Set([
+    "unit",
+    "integration",
+    "api",
+    "ui",
+    "e2e",
+    "edge",
+    "security",
+    "performance",
+    "regression",
+    "functional",
+    "basic",
+  ]);
+  const rawLevel = String(rawCase?.level || fallback?.level || "integration").toLowerCase();
+  const rawSteps = toStringArray(rawCase?.steps, 8);
+  const rawExpected = toStringArray(rawCase?.expected, 6);
+
+  return {
+    ...rawCase,
+    id: `TC-${String(index + 1).padStart(3, "0")}`,
+    level: allowedLevels.has(rawLevel) ? rawLevel : String(fallback?.level || "integration").toLowerCase(),
+    title: String(rawCase?.title || fallback?.title || `Test case ${index + 1}`).trim(),
+    objective: String(
+      rawCase?.objective ||
+      rawCase?.whyThisMatters ||
+      fallback?.objective ||
+      `Validate behavior for ${fallback?.title || "the task"}`
+    ).trim(),
+    preconditions: toStringArray(rawCase?.preconditions || fallback?.preconditions, 4),
+    steps: rawSteps.length > 0 ? rawSteps : toStringArray(fallback?.steps, 8),
+    expected: rawExpected.length > 0 ? rawExpected : toStringArray(fallback?.expected, 6),
+    affectedAreas: toStringArray(rawCase?.affectedAreas || fallback?.affectedAreas, 6),
+    followUpChecks: toStringArray(rawCase?.followUpChecks || fallback?.followUpChecks, 5),
+    codeSnippet: isNonEmptyString(rawCase?.codeSnippet) ? String(rawCase.codeSnippet).trim() : String(fallback?.codeSnippet || ""),
+  };
+}
+
 async function buildTestCasesWithLLM({ task, gitContext, fileContents = {}, framework = "unknown" }) {
   const taskTitle = task?.task || "";
-  const taskDesc = (task?.description || "").slice(0, 300);
-  const changedFiles = Array.isArray(gitContext?.changedFiles) ? gitContext.changedFiles.slice(0, 12).join(", ") : "";
-  const codeSnippets = Object.entries(fileContents).slice(0, 2)
-    .map(([f, c]) => `// ${f}\n${c.slice(0, 500)}`).join("\n\n");
+  const fallbackCases = buildTestCasesFallback({ task, gitContext, fileContents });
+  const brief = buildTaskTestingBrief({ task, gitContext, fileContents });
+  const changedFiles = Array.isArray(gitContext?.changedFiles) ? gitContext.changedFiles.slice(0, 12) : [];
+  const codeSnippets = Object.entries(fileContents)
+    .slice(0, 3)
+    .map(([file, content]) => `// ${file}\n${String(content || "").slice(0, 700)}`)
+    .join("\n\n");
 
-  const prompt = `You are a senior QA engineer. Generate 8-12 specific, runnable test cases for this task.
+  const prompt = `You are a principal QA engineer writing release-quality tests for a real product change.
+Think like a human tester who understands the feature, the side effects, and what must be checked next after every action.
 
-TASK: "${taskTitle}"
-${taskDesc ? `DESC: "${taskDesc}"` : ""}
-${changedFiles ? `CHANGED FILES: ${changedFiles}` : ""}
-${codeSnippets ? `CODE CONTEXT:\n${codeSnippets}` : ""}
+TASK:
+- Title: "${taskTitle}"
+${task?.display_id ? `- Ticket: "${task.display_id}"` : ""}
+${task?.description ? `- Description: "${String(task.description).slice(0, 700)}"` : ""}
+${task?.status ? `- Current status: ${task.status}` : ""}
+${task?.priority ? `- Priority: ${task.priority}` : ""}
+${task?.assignee_username ? `- Assignee: ${task.assignee_username}` : ""}
+
+ACCEPTANCE SIGNALS:
+${brief.acceptanceSignals.map((item) => `- ${item}`).join("\n") || "- infer from task title and code context"}
+
+CHANGED FILE IMPACT:
+${brief.repoSignals.map((item) => `- ${item}`).join("\n") || "- no linked git change detected"}
+
+RELATED RISKS:
+${brief.linkedRisks.map((item) => `- ${item}`).join("\n") || "- none"}
+
+RECENT ACTIVITY:
+${brief.activityNotes.map((item) => `- ${item}`).join("\n") || "- none"}
+
+RECENT COMMENTS:
+${brief.commentSignals.map((item) => `- ${item}`).join("\n") || "- none"}
+
 FRAMEWORK: ${framework}
+CHANGED FILES: ${changedFiles.join(", ") || "none"}
+${codeSnippets ? `CODE CONTEXT:\n${codeSnippets}` : ""}
 
-Generate test cases covering ALL these levels (use as many as relevant):
-- unit: individual function/method behavior
-- integration: how components interact
-- e2e: end-to-end user flow
-- edge: boundary values, empty inputs, overflow, null handling
-- security: auth bypass, injection, sensitive data exposure
-- performance: response time, load handling
-- regression: ensure existing behavior still works
+Generate 8-12 concrete test cases that a strong human tester would actually run.
+Each case must explain:
+1. the exact behavior being exercised,
+2. the immediate effect that proves the action worked,
+3. the downstream or adjacent area that must be checked next because this change can ripple there.
 
-Each test case MUST include:
-- "codeSnippet": actual runnable test code in ${framework} syntax (not pseudocode, real assertions)
-
-Return ONLY this JSON array (no markdown):
-[{"id":"TC-001","level":"unit","title":"...specific to task...","objective":"...","steps":["...","..."],"expected":["..."],"codeSnippet":"// actual test code here"},...]
+Return ONLY this JSON array:
+[{
+  "id":"TC-001",
+  "level":"unit|integration|api|ui|e2e|edge|security|performance|regression",
+  "title":"specific human-readable test title",
+  "objective":"why this test matters for the task",
+  "preconditions":["specific setup state"],
+  "steps":["specific action with data","immediate verification","next downstream check"],
+  "expected":["specific observable result","specific side effect or regression proof"],
+  "affectedAreas":["module, endpoint, workflow, or file area"],
+  "followUpChecks":["what to verify next and why"],
+  "codeSnippet":"runnable ${framework} test code with real assertions, or empty string if code would be misleading"
+}]
 
 Rules:
+- No placeholders or generic titles.
+- Use task language, changed files, comments, activity, and related risks when relevant.
+- Every state-changing case must include the immediate effect and the next thing to validate.
+- Cover happy path, validation/negative path, regression, and security/permissions/data integrity when relevant.
+- If integrations, jobs, notifications, or realtime updates are implicated, include downstream side-effect checks.
+- Return ONLY the JSON array.
 - titles/steps MUST be specific to "${taskTitle}" — no generic placeholders
-- codeSnippet must use the right assertion syntax for ${framework} (expect/assert/etc.)
-- Cover happy path, error cases, and edge cases
-- Return ONLY the JSON array`;
+
+`;
 
   try {
-    const raw = await generateText({ prompt, maxTokens: 3000 });
+    const raw = await generateText({ prompt, maxTokens: 3400 });
     const cases = parseJsonSafe(raw, null);
     if (Array.isArray(cases) && cases.length > 0) {
-      return cases.slice(0, 15).map((c, i) => ({
-        ...c,
-        id: `TC-${String(i + 1).padStart(3, "0")}`,
-      }));
+      return cases.slice(0, 15).map((item, index) =>
+        normalizeGeneratedCase(item, index, fallbackCases[index] || fallbackCases[0] || {})
+      );
     }
   } catch (err) {
     console.error("Enhanced LLM test case generation failed:", err.message);
   }
 
-  return buildTestCasesFallback({ task, gitContext });
+  return fallbackCases;
 }
 
-function buildTestCasesFallback({ task, gitContext }) {
-  const taskText = `${task?.task || ""} ${task?.description || ""}`;
-  const tokens = new Set(tokenize(taskText));
-  const files = Array.isArray(gitContext?.changedFiles) ? gitContext.changedFiles : [];
-  const hasApi = files.some((f) => /api|route|controller|service/i.test(f));
-  const hasUi = files.some((f) => /src\/pages|src\/components|ui|view/i.test(f));
-  const hasAuth = tokens.has("auth") || tokens.has("login") || tokens.has("password");
-  const hasPayment = tokens.has("payment") || tokens.has("invoice") || tokens.has("billing");
-
+function buildTestCasesFallback({ task, gitContext, fileContents = {} }) {
+  const brief = buildTaskTestingBrief({ task, gitContext, fileContents });
+  const primarySignal = brief.acceptanceSignals[0] || task?.task || "core workflow";
+  const secondarySignal = brief.acceptanceSignals[1] || primarySignal;
+  const primaryAreas = brief.impactedAreas.slice(0, 3);
+  const leadImpact = brief.changedFileImpacts[0];
+  const leadFollowUp = brief.followUpChecks[0] || "check the closest downstream workflow for regressions";
+  const impactText = brief.impactedAreas.join(" ").toLowerCase();
   const cases = [];
   let idx = 1;
-  const add = (level, title, objective, steps, expected) =>
-    cases.push({ id: `TC-${String(idx++).padStart(3, "0")}`, level, title, objective, steps, expected });
 
-  add("basic", `Happy path: ${task.task}`,
-    `Validate primary behavior for "${task.task}".`,
-    ["Set up valid initial state", "Perform the main action", "Verify the expected outcome"],
-    ["No errors thrown", "Expected result is correct", "State is persisted properly"]
-  );
-  add("functional", "Input validation",
-    "Ensure invalid and boundary inputs are rejected gracefully.",
-    ["Submit empty/invalid input", "Submit boundary values", "Submit unexpected data types"],
-    ["Invalid input is rejected with clear error", "No crash on boundary values"]
-  );
-  if (hasApi) add("integration", "API contract", "Verify endpoint contract and side effects.",
-    ["Call with valid payload", "Call with missing required fields", "Check DB state after call"],
-    ["Correct HTTP status and response shape", "No unhandled exceptions", "Data integrity preserved"]
-  );
-  if (hasUi) add("ui", "UI interaction", "Validate UI states, feedback, and error messages.",
-    ["Trigger the UI action", "Trigger a recoverable error state", "Check responsive layout"],
-    ["Correct UI state shown", "Error messages are clear", "No broken layout"]
-  );
-  if (hasAuth) add("edge", "Auth edge cases", "Ensure auth-sensitive paths are secure.",
-    ["Try unauthenticated access", "Try with expired token", "Try with insufficient role"],
-    ["Access denied where expected", "No sensitive data leaked"]
-  );
-  if (hasPayment) add("edge", "Payment idempotency", "Ensure payment operations are safe against retries.",
-    ["Trigger duplicate payment request", "Simulate partial failure mid-flow"],
-    ["No duplicate charges", "System recovers to consistent state"]
-  );
-  add("regression", "Regression guard", "Ensure existing behavior around this area stays stable.",
-    ["Run related module tests", "Execute cross-module workflow involving this change"],
-    ["No regression in related modules", "No new warnings in logs"]
-  );
+  const add = ({
+    level,
+    title,
+    objective,
+    steps,
+    expected,
+    preconditions = [],
+    affectedAreas = [],
+    followUpChecks = [],
+    codeSnippet = "",
+  }) => {
+    cases.push({
+      id: `TC-${String(idx++).padStart(3, "0")}`,
+      level,
+      title,
+      objective,
+      preconditions: uniqueStrings(preconditions, 4),
+      steps: uniqueStrings(steps, 8),
+      expected: uniqueStrings(expected, 6),
+      affectedAreas: uniqueStrings(affectedAreas, 6),
+      followUpChecks: uniqueStrings(followUpChecks, 5),
+      codeSnippet,
+    });
+  };
 
-  return cases.slice(0, 20);
+  add({
+    level: brief.suggestedLevels.includes("e2e") ? "e2e" : "integration",
+    title: `${task?.task || "Task"} — primary flow reaches the intended outcome`,
+    objective: `Prove the main behavior for "${task?.task || "the task"}" works and the next dependent surface stays correct.`,
+    preconditions: [
+      task?.display_id ? `Task context available for ${task.display_id}` : "Required fixtures and permissions are set up",
+    ],
+    steps: [
+      `Prepare the state needed to exercise: ${primarySignal}`,
+      `Perform the main user or system action for "${task?.task || "the task"}" with valid data`,
+      `Verify the immediate success state tied to "${primarySignal}"`,
+      leadFollowUp,
+    ],
+    expected: [
+      `${primarySignal} succeeds without errors`,
+      "Persisted state and visible outputs remain aligned after the change",
+    ],
+    affectedAreas: primaryAreas,
+    followUpChecks: brief.followUpChecks.slice(0, 2),
+  });
+
+  add({
+    level: "edge",
+    title: `${task?.task || "Task"} — invalid and empty inputs fail safely`,
+    objective: `Validate that "${secondarySignal}" rejects incomplete or malformed input without corrupting state.`,
+    steps: [
+      `Attempt "${task?.task || "the workflow"}" with empty required data`,
+      "Repeat with malformed, boundary, or whitespace-only values",
+      "Verify the error is specific and no partial state is persisted",
+      leadFollowUp,
+    ],
+    expected: [
+      "Validation feedback is explicit and user-safe",
+      "No inconsistent data or silent partial success is introduced",
+    ],
+    affectedAreas: primaryAreas,
+    followUpChecks: [
+      "confirm lists, detail views, and aggregates did not change after invalid attempts",
+    ],
+  });
+
+  if (/authorization|auth/.test(impactText) || /\bauth\b|\blogin\b|\brole\b|\bpermission\b/i.test(`${task?.task || ""} ${task?.description || ""}`)) {
+    add({
+      level: "security",
+      title: `${task?.task || "Task"} — permissions and sensitive paths remain enforced`,
+      objective: "Ensure the change does not open unauthorized access or leak sensitive data.",
+      steps: [
+        "Repeat the primary action with missing authentication",
+        "Repeat with an authenticated user lacking the required role or scope",
+        "Verify forbidden paths return the correct denial behavior and no protected data appears",
+        "Confirm allowed roles still succeed on the intended flow",
+      ],
+      expected: [
+        "Unauthorized or under-privileged access is denied consistently",
+        "Authorized users can still complete the intended workflow",
+      ],
+      affectedAreas: uniqueStrings([...primaryAreas, "Authorization"], 5),
+      followUpChecks: [
+        "check related endpoints/screens for the same permission boundary",
+      ],
+    });
+  }
+
+  if (/api contract|business rules|persistence/.test(impactText)) {
+    add({
+      level: /api contract/.test(impactText) ? "api" : "integration",
+      title: `${task?.task || "Task"} — persisted data and contract stay consistent`,
+      objective: `Verify changes in ${leadImpact?.label || "the changed code"} preserve API/database consistency.`,
+      steps: [
+        "Trigger the behavior with a valid payload or command",
+        "Verify the immediate response, status, and returned fields",
+        "Read back the affected entity from its source of truth",
+        "Confirm dependent summaries, counts, or linked records reflect the same state",
+      ],
+      expected: [
+        "Returned data matches persisted data",
+        "No duplicate, partial, or stale state remains after the operation",
+      ],
+      affectedAreas: uniqueStrings([...primaryAreas, ...(leadImpact?.areas || [])], 6),
+      followUpChecks: uniqueStrings([
+        "re-run the read path and adjacent workflow to ensure the update is visible everywhere",
+        ...brief.followUpChecks,
+      ], 3),
+    });
+  }
+
+  if (/external integration|background execution|realtime updates|notifications/.test(impactText)) {
+    add({
+      level: "integration",
+      title: `${task?.task || "Task"} — downstream side effects trigger exactly once`,
+      objective: "Validate the change reaches external or asynchronous systems without duplicates or missing events.",
+      steps: [
+        `Execute the action that should trigger the side effect in ${leadImpact?.label || "the changed area"}`,
+        "Verify the immediate local success state",
+        "Check the downstream event, notification, sync, or background outcome",
+        "Repeat the action or retry path to confirm idempotency and duplicate prevention",
+      ],
+      expected: [
+        "Required side effects are emitted with correct payloads",
+        "Retries or repeated submissions do not create duplicate outcomes",
+      ],
+      affectedAreas: uniqueStrings([...primaryAreas, "downstream integrations"], 6),
+      followUpChecks: uniqueStrings([
+        ...brief.followUpChecks,
+        "inspect retries, webhooks, queues, or realtime updates for duplicate or missing events",
+      ], 4),
+    });
+  }
+
+  if (/ui flow/.test(impactText)) {
+    add({
+      level: "ui",
+      title: `${task?.task || "Task"} — visible state stays in sync after user actions`,
+      objective: "Ensure the UI reflects the true backend state after create/update/delete style interactions.",
+      steps: [
+        "Open the changed screen or module and perform the primary interaction",
+        "Verify inline feedback, button state, and navigation flow immediately after the action",
+        "Refresh or revisit the related list/detail view",
+        "Confirm the same state is shown consistently after reload or navigation",
+      ],
+      expected: [
+        "The immediate visual feedback matches the actual saved state",
+        "Reloaded or adjacent screens show the same updated data",
+      ],
+      affectedAreas: uniqueStrings([...primaryAreas, "UI flow"], 5),
+      followUpChecks: [
+        "check adjacent list/detail/summary surfaces for stale or missing UI updates",
+      ],
+    });
+  }
+
+  add({
+    level: "regression",
+    title: `${task?.task || "Task"} — related workflows remain stable`,
+    objective: "Guard the nearest linked or adjacent workflows most likely to break from this change.",
+    steps: [
+      `Run the nearest related workflow touching ${primaryAreas.join(", ") || "the affected module"}`,
+      "Exercise the task from a second entry point if one exists",
+      "Verify linked tasks, summaries, and previously working paths still behave correctly",
+      "Inspect logs or diagnostics for new warnings, retries, or hidden failures",
+    ],
+    expected: [
+      "No behavioral regression appears in adjacent workflows",
+      "Operational signals remain clean after the run",
+    ],
+    affectedAreas: uniqueStrings([...primaryAreas, ...brief.linkedRisks], 6),
+    followUpChecks: uniqueStrings([
+      ...brief.followUpChecks,
+      "confirm the closest linked workflow still completes successfully",
+    ], 4),
+  });
+
+  return cases.slice(0, 12);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -362,7 +822,12 @@ async function generateTestCode({ task, cases, framework, fileContents = {} }) {
     gradle: { ext: "Test.java", runner: "JUnit", import: "import org.junit.jupiter.api.Test;" },
   };
   const tmpl = frameworkTemplates[framework] || frameworkTemplates.node;
-  const casesSummary = cases.slice(0, 6).map((c) => `- ${c.title}: ${c.objective}`).join("\n");
+  const casesSummary = cases.slice(0, 6).map((c) => {
+    const followUp = Array.isArray(c?.followUpChecks) && c.followUpChecks.length > 0
+      ? ` Follow-up: ${c.followUpChecks.join("; ")}.`
+      : "";
+    return `- ${c.title}: ${c.objective}.${followUp}`;
+  }).join("\n");
   const existingCode = codeSnippets ? `\nEXISTING CODE:\n${codeSnippets}` : "";
 
   const prompt = `Write a complete, runnable ${tmpl.runner} test file for:
@@ -1456,11 +1921,16 @@ async function generateApiTestPlan(task, baseUrl, openApiSpec = null) {
   }
 
   const taskTitle = task?.task || "";
+  const brief = buildTaskTestingBrief({ task, gitContext: { changedFiles: [] }, fileContents: {} });
   const specContext = openApiSpec ? `API Spec (partial): ${JSON.stringify(openApiSpec).slice(0, 800)}` : "";
   const prompt = `QA engineer. Generate 6-10 HTTP API test scenarios for this task.
 
 TASK: "${taskTitle}"
 BASE URL: ${baseUrl}
+ACCEPTANCE SIGNALS:
+${brief.acceptanceSignals.map((item) => `- ${item}`).join("\n") || "- infer from task title"}
+RELATED RISKS:
+${brief.linkedRisks.map((item) => `- ${item}`).join("\n") || "- none"}
 ${specContext}
 
 Return ONLY this JSON array:
@@ -1471,6 +1941,7 @@ Rules:
 - body should be a JSON object (or null for GET)
 - expectedFields: top-level fields expected in JSON response
 - paths must be realistic for "${taskTitle}"
+- include follow-through checks for side effects or linked workflows when the task suggests them
 Return ONLY the JSON array.`;
 
   try {
@@ -1745,16 +2216,21 @@ async function discoverRepoTestPlan(repoPath, task, framework) {
   const signals = deterministicPlan.signals || collectRepoSignals(repoPath);
 
   const taskTitle = task?.task || "";
+  const brief = buildTaskTestingBrief({ task, gitContext: { changedFiles: [] }, fileContents: {} });
   const prompt = `You are a QA engineer auto-discovering tests for a codebase.
 
 TASK: "${taskTitle}"
 REPO PATH: ${repoPath}
+ACCEPTANCE SIGNALS: ${brief.acceptanceSignals.join(" | ") || "infer from task title"}
+RELATED RISKS: ${brief.linkedRisks.join(" | ") || "none"}
+ACCEPTANCE SIGNALS: ${brief.acceptanceSignals.join(" | ") || "infer from task title"}
+RELATED RISKS: ${brief.linkedRisks.join(" | ") || "none"}
 FRAMEWORK: ${framework}
 REPO SIGNALS: ${JSON.stringify(signals).slice(0, 600)}
 DETERMINISTIC BASE COMMANDS: ${deterministicPlan.commands.join(", ") || "none"}
 
 Generate a test execution plan: 3-6 specific commands to run in this repo.
-Consider: existing test scripts, framework conventions, what files to target.
+Consider: existing test scripts, framework conventions, what files to target, and what downstream areas the task can affect.
 Prefer refining the deterministic base commands instead of inventing new tooling.
 
 Return ONLY this JSON:
@@ -1910,6 +2386,7 @@ async function generateMultiScenarioCommands(task, executionContext) {
   const baseCommands = executionContext.commands;
   const fw = executionContext.framework;
   const repoPath = executionContext.repoPath;
+  const brief = buildTaskTestingBrief({ task, gitContext: { changedFiles: [] }, fileContents: {} });
 
   // Build scenario-specific command variants
   const prompt = `QA architect. Generate 4 CLI test scenarios for this feature.

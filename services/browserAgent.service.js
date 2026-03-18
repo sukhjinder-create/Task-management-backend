@@ -89,6 +89,155 @@ function normalizeActionTimeoutMs(value, fallback = 20000) {
   return Math.max(parsed, 1000);
 }
 
+function uniqueTextList(values = [], max = 20) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const text = clipText(value, 160);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function isVerificationStep(step = {}) {
+  return [
+    "screenshot",
+    "ai_assert",
+    "assert_text",
+    "assert_visible",
+    "assert_url",
+    "wait_for_response",
+    "check_performance",
+  ].includes(String(step?.action || ""));
+}
+
+function isStateChangingStep(step = {}) {
+  return [
+    "navigate",
+    "click",
+    "ai_click",
+    "fill",
+    "ai_fill",
+    "select_option",
+    "press",
+    "key_chord",
+    "upload_file",
+    "execute_js",
+    "complete_flow",
+    "conversation_loop",
+  ].includes(String(step?.action || ""));
+}
+
+function inferVerificationDescription(step = {}, pageContext = null) {
+  const description = String(step?.description || step?.label || step?.action || "").toLowerCase();
+  if (step?.action === "navigate") {
+    return "page loaded with visible content and no blocking error state";
+  }
+  if (/login|sign in|log in/.test(description)) {
+    return "login succeeds and the authenticated landing page is visible";
+  }
+  if (/save|create|submit|invite|add|update|confirm|finish|done|run|generate/.test(description)) {
+    if (pageContext?.hasTable || pageContext?.hasSearch) {
+      return "success feedback appears and related list, table, or summary data refreshes";
+    }
+    return "the action succeeds and the updated state is visible without errors";
+  }
+  if (/delete|remove|archive/.test(description)) {
+    return "the target item disappears or changes state and any counters update";
+  }
+  if (/tab|section|module|menu|navigation/.test(description)) {
+    return "the newly selected section shows its own content and no error state";
+  }
+  if ((step?.action === "ai_fill" || step?.action === "fill") && /search|filter/.test(description)) {
+    return "search or filter results update to match the entered value";
+  }
+  return "the page state changes as expected and no visible error message appears";
+}
+
+function enrichBrowserPlanWithVerification(steps = [], pageContext = null, fallbackUrl = null) {
+  const rawSteps = Array.isArray(steps) ? steps.filter(Boolean) : [];
+  const out = [];
+  const inferredUrl = rawSteps.find((step) => step?.action === "navigate" && step?.url)?.url || fallbackUrl || pageContext?.pageUrl || null;
+
+  for (let i = 0; i < rawSteps.length; i++) {
+    const step = { ...rawSteps[i] };
+    if (out.length === 0 && step.action !== "navigate" && inferredUrl) {
+      out.push({ action: "navigate", url: inferredUrl, description: "Open application" });
+    }
+    if (step.action === "navigate" && !step.url && inferredUrl) {
+      step.url = inferredUrl;
+    }
+
+    out.push(step);
+
+    const upcoming = rawSteps.slice(i + 1, i + 3);
+    const hasVerificationNearby = upcoming.some(isVerificationStep);
+
+    if (step.action === "navigate" && !upcoming.some((candidate) => candidate?.action === "check_performance")) {
+      out.push({ action: "check_performance", description: "Capture page load performance", failOnSlow: false });
+    }
+
+    if (isStateChangingStep(step) && !hasVerificationNearby) {
+      const labelSeed = String(step.description || step.label || step.action || "step")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 32) || "step";
+      out.push({ action: "screenshot", label: `after_${labelSeed}` });
+      out.push({ action: "ai_assert", description: inferVerificationDescription(step, pageContext) });
+    }
+  }
+
+  return out.slice(0, 25);
+}
+
+function hasExplicitBrowserActionIntent(text = "") {
+  return /\b(click|fill|type|enter|press|select|choose|hover|scroll|drag|drop|upload|assert|screenshot|wait|open\s+tab|switch\s+tab)\b/i.test(String(text || ""));
+}
+
+function isPrecisionUrlTestIntent(instructions = "") {
+  const raw = String(instructions || "").trim();
+  const urlMatch = raw.match(/https?:\/\/[^\s,'"]+/);
+  if (!urlMatch) return false;
+
+  const remainder = raw.replace(urlMatch[0], " ").replace(/\s+/g, " ").trim();
+  if (!remainder) return true;
+  if (hasExplicitBrowserActionIntent(remainder)) return false;
+
+  const hasQaIntent = /\b(test|qa|audit|scan|explore|check|inspect|verify|probe|break|stress|fuzz|failure|negative|edge|precision|regression|bug|bugs)\b/i.test(remainder);
+  const tokenCount = remainder.split(/\s+/).filter(Boolean).length;
+  return hasQaIntent || tokenCount <= 8;
+}
+
+function buildSyntheticBrowserStepResult({
+  stepIndex = 0,
+  action = "precision_sweep",
+  description = "Aggressive failure-mode sweep",
+  status = "failed",
+  error = null,
+}) {
+  return {
+    stepIndex,
+    action,
+    description,
+    selector: null,
+    value: null,
+    status,
+    error,
+    aiAnalysis: null,
+    healed: false,
+    usedSelector: null,
+    screenshot: null,
+    metrics: null,
+    durationMs: 0,
+  };
+}
+
 async function waitWithCancellation(page, ms = 0, runController = null) {
   const total = Math.max(0, Number(ms || 0));
   if (!total) return;
@@ -1437,6 +1586,58 @@ async function updateCurrentScreen(runId, screenshot, caption = "") {
   } catch { /* silent */ }
 }
 
+function isFatalPageCopy(text = "") {
+  const value = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!value) return false;
+  return [
+    /\boops\b.{0,40}\b404\b/,
+    /\b404\b.{0,50}\b(page not found|not found)\b/,
+    /\b(page not found|not found)\b.{0,20}\b404\b/,
+    /\binternal server error\b/,
+    /\bservice unavailable\b/,
+    /\baccess denied\b/,
+    /\bforbidden\b/,
+    /\bthis site can'?t be reached\b/,
+    /\berr_[a-z_]+\b/,
+    /\b502 bad gateway\b/,
+    /\b503 service unavailable\b/,
+  ].some((pattern) => pattern.test(value));
+}
+
+async function detectFatalPageState(page, response = null) {
+  try {
+    const status = typeof response?.status === "function" ? response.status() : null;
+    if (Number.isFinite(status) && status >= 400) {
+      return {
+        fatal: true,
+        reason: `Main document returned HTTP ${status}`,
+      };
+    }
+
+    const snapshot = await page.evaluate(() => ({
+      title: document.title || "",
+      heading: document.querySelector("h1, [role='heading']")?.textContent || "",
+      bodyText: document.body?.innerText?.slice(0, 1200) || "",
+    })).catch(() => ({ title: "", heading: "", bodyText: "" }));
+
+    const title = clipText(snapshot.title, 160);
+    const heading = clipText(snapshot.heading, 160);
+    const bodyText = clipText(snapshot.bodyText, 500);
+    const combined = [title, heading, bodyText].filter(Boolean).join("\n");
+
+    if (isFatalPageCopy(combined)) {
+      return {
+        fatal: true,
+        reason: heading || title || "Fatal error page detected",
+      };
+    }
+  } catch {
+    // Best-effort only.
+  }
+
+  return { fatal: false, reason: null };
+}
+
 // Break-it test payloads for aggressive security/edge testing
 const BREAK_TEST_VALUES = {
   xss: '<script>alert("XSS")</script>',
@@ -2196,8 +2397,11 @@ OR if a real bug:
 // ─────────────────────────────────────────────────────────
 async function parseInstructionsToSteps(instructions, pageContext = null) {
   const today = new Date().toISOString().split("T")[0];
-  const pageHint = pageContext
+  const legacyPageHint = pageContext
     ? `\nREAL PAGE ELEMENTS (scanned from the actual page — ONLY create steps for these, NEVER invent modules or links not listed here):\nClickable/Nav: [${pageContext.navList || "none"}]\nInput fields: [${pageContext.inputList || "none"}]\nIf the instruction says "test all modules", only test the modules that appear in the Clickable/Nav list above.\n`
+    : "";
+  const pageHint = pageContext
+    ? `\n${summarizePageContextForPrompt(pageContext)}\nIf the instruction says "test all modules", only test the modules that appear in the grounded Clickable/Nav list above.\n`
     : "";
   const prompt = `You are a browser automation assistant. Convert ANY human web instruction into Playwright automation steps.
 
@@ -2391,14 +2595,17 @@ EXAMPLE 7 — Test login form thoroughly (happy path + edge cases):
 
 Return ONLY the JSON array.`;
 
+  const defaultUrl = String(instructions || "").match(/https?:\/\/[^\s,'"]+/)?.[0] || pageContext?.pageUrl || null;
   try {
     const raw = await generateText({ prompt, maxTokens: 3000 });
     const steps = parseJsonSafe(raw, null);
-    if (Array.isArray(steps) && steps.length > 0) return steps.slice(0, 25);
+    if (Array.isArray(steps) && steps.length > 0) {
+      return enrichBrowserPlanWithVerification(steps.slice(0, 25), pageContext, defaultUrl);
+    }
   } catch (err) {
     console.error("[browserAgent] LLM step parse failed:", err.message);
   }
-  return fallbackParseInstructions(instructions);
+  return enrichBrowserPlanWithVerification(fallbackParseInstructions(instructions), pageContext, defaultUrl);
 }
 
 function fallbackParseInstructions(instructions) {
@@ -2452,6 +2659,8 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
   timeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
   const _ownsBrowser = !_existingPage;
   let liveScreenInterval = null;
+  let liveStepCaption = "Starting...";
+  let abortRemainingSteps = false;
   const browser = _existingBrowser || await createStealthBrowser();
   const results = [];
   const activeRunController = runController || (runId ? createRunController(runId) : null);
@@ -2484,9 +2693,7 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
         try {
           const shot = await takeScreenshot(activePage);
           if (shot) {
-            const caption = results.length > 0
-              ? `Step ${results.length + 1} — ${results[results.length - 1]?.description || ""}`.slice(0, 80)
-              : "Starting…";
+            const caption = clipText(liveStepCaption, 120);
             await updateCurrentScreen(runId, shot, caption);
           }
         } catch { /* ignore */ }
@@ -2494,8 +2701,31 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
     }
 
     for (let i = 0; i < expandedSteps.length; i++) {
+      if (abortRemainingSteps) break;
       if (activeRunController) {
         await activeRunController.assertActive({ stepIndex: i + _resultOffset });
+      }
+      const page = activePage;
+      const preStepFatalPageState = await detectFatalPageState(page).catch(() => ({ fatal: false, reason: null }));
+      if (preStepFatalPageState.fatal && expandedSteps[i]?.action !== "navigate") {
+        const haltResult = buildSyntheticBrowserStepResult({
+          stepIndex: i + _resultOffset,
+          action: expandedSteps[i]?.action || "fatal_page",
+          description: expandedSteps[i]?.description || expandedSteps[i]?.label || expandedSteps[i]?.action || "fatal page state",
+          error: preStepFatalPageState.reason || "Fatal page state detected before executing the step",
+        });
+        try { haltResult.screenshot = await takeScreenshot(page); } catch { /* ignore */ }
+        haltResult.currentUrl = clipText(page.url(), 220);
+        haltResult.aiAnalysis = await aiAnalyzeFailure(expandedSteps[i] || {}, haltResult.error);
+        results.push(haltResult);
+        liveStepCaption = `Execution halted: ${haltResult.error}`;
+        if (runId) {
+          await updateRunLive(runId, results);
+          if (haltResult.screenshot && haltResult.screenshot !== true) {
+            await updateCurrentScreen(runId, haltResult.screenshot, clipText(liveStepCaption, 120)).catch(() => {});
+          }
+        }
+        break;
       }
       // Interpolate ${varName} references in value/url/expected fields from extracted variables
       const rawStep = expandedSteps[i];
@@ -2521,9 +2751,9 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
         metrics: null,
         durationMs: 0,
       };
+      liveStepCaption = `Executing step ${result.stepIndex + 1}: ${result.description}`;
 
       // Always work on the active tab (multi-tab support)
-      const page = activePage;
       const pageDiagnostics = ensurePageDiagnostics(page);
       const diagnosticsSnapshot = snapshotPageDiagnostics(pageDiagnostics);
 
@@ -2582,7 +2812,7 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
       try {
         switch (step.action) {
           case "navigate": {
-            await page.goto(step.url, { timeout: timeoutMs, waitUntil: "domcontentloaded" });
+            const response = await page.goto(step.url, { timeout: timeoutMs, waitUntil: "domcontentloaded" });
             await page.waitForTimeout(1500);
             try { await page.waitForLoadState("networkidle", { timeout: 6000 }); } catch { /* ok */ }
 
@@ -2591,7 +2821,7 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
             while (consentAttempts < 3) {
               const curUrl = page.url();
               const onConsentPage = curUrl.includes("consent.") || curUrl.includes("accounts.google") ||
-                curUrl.includes("/consent") || curUrl.includes("signin") || curUrl.includes("login");
+                curUrl.includes("/consent");
               if (!onConsentPage) break;
               await forceAcceptConsent(page);
               try { await page.waitForNavigation({ timeout: 4000, waitUntil: "domcontentloaded" }); } catch { /* ok */ }
@@ -2604,6 +2834,11 @@ async function executeBrowserSteps(steps, timeoutMs = 120000, {
             // Second attempt in case overlay appeared after initial load
             await page.waitForTimeout(500);
             await dismissOverlays(page);
+
+            const fatalPageState = await detectFatalPageState(page, response);
+            if (fatalPageState.fatal) {
+              throw new Error(fatalPageState.reason);
+            }
 
             result.screenshot = await takeScreenshot(page);
             result.metrics = await capturePerformanceMetrics(page);
@@ -3921,6 +4156,29 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
         }
       }
 
+      const fatalPageState = await detectFatalPageState(activePage).catch(() => ({ fatal: false, reason: null }));
+      if (fatalPageState.fatal) {
+        if (result.status !== "failed") {
+          result.status = "failed";
+          result.error = fatalPageState.reason;
+          if (!result.screenshot) {
+            try { result.screenshot = await takeScreenshot(activePage); } catch { /* ignore */ }
+          }
+          result.aiAnalysis = await aiAnalyzeFailure(step, result.error);
+        } else if (!result.error) {
+          result.error = fatalPageState.reason;
+        }
+        abortRemainingSteps = true;
+        liveStepCaption = `Execution halted: ${fatalPageState.reason}`;
+      } else {
+        const statusLabel = result.status === "passed"
+          ? "Completed"
+          : result.status === "skipped"
+            ? "Skipped"
+            : "Failed";
+        liveStepCaption = `${statusLabel} step ${result.stepIndex + 1}: ${result.description}`;
+      }
+
       result.durationMs = Date.now() - t0;
       result.currentUrl = clipText(activePage.url(), 220);
       const diagnosticsDelta = collectPageDiagnosticsDelta(pageDiagnostics, diagnosticsSnapshot);
@@ -3933,6 +4191,10 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
       }
       results.push(result);
       if (runId) await updateRunLive(runId, results);
+      if (runId && result.screenshot && result.screenshot !== true) {
+        await updateCurrentScreen(runId, result.screenshot, clipText(liveStepCaption, 120)).catch(() => {});
+      }
+      if (abortRemainingSteps) break;
       if (stopOnFailure && result.status === "failed") break;
     }
   } finally {
@@ -3947,49 +4209,32 @@ If the task is stuck or unclear, action should be "screenshot" to capture state.
 // AUTO-DISCOVER: paste URL → AI explores → runs its own test
 // ─────────────────────────────────────────────────────────
 async function generateAutoDiscoveryPlan(url, pageInfo) {
-  const navElements = pageInfo.elements.filter(el =>
-    ["a", "button"].includes(el.tag) || el.role === "button" || el.role === "link"
-  ).slice(0, 25);
-  const inputElements = pageInfo.elements.filter(el =>
-    ["input", "textarea", "select"].includes(el.tag)
-  ).slice(0, 10);
-  const navList = navElements.map(el => el.text || el.ariaLabel || el.id || el.tag).filter(Boolean).join(", ");
-  const inputList = inputElements.map(el => el.placeholder || el.ariaLabel || el.name || el.type || el.tag).filter(Boolean).join(", ");
-
-  const prompt = `You are a QA engineer. Create a browser test plan for this page.
+  const prompt = `You are a senior QA engineer creating a browser test plan from live DOM reconnaissance.
 URL: ${url}
-Title: "${pageInfo.title}"
-Page text snippet: "${pageInfo.visibleText.slice(0, 400)}"
-Clickable elements found on page: [${navList || "none"}]
-Input elements found on page: [${inputList || "none"}]
+${summarizePageContextForPrompt(pageInfo)}
 
 CRITICAL RULES:
-- ONLY create ai_click steps for elements that ACTUALLY APPEAR in the "Clickable elements" list above
-- ONLY create ai_fill steps for elements that ACTUALLY APPEAR in the "Input elements" list above
-- Do NOT invent navigation items, modules, or links that are not in the lists above
-- Start with navigate to the exact URL, then check_performance, then screenshot
-- If login form visible (email/password inputs), fill and submit it
-- After actions, take screenshots to capture state changes
-- ai_click description must match text from the Clickable elements list
-- ai_fill description must match a field from the Input elements list
-- Mark ai_click navigation/exploration steps with "optional": true so they are skipped gracefully if not present
+- ONLY create ai_click or ai_fill steps for elements grounded in the page context above
+- Do NOT invent navigation items, forms, fields, tabs, or actions that are not grounded in the scan
+- Start with navigate to the exact URL, then validate load/performance
+- Every state-changing action must be followed by proof of effect (screenshot and/or ai_assert)
+- If forms exist, include both validation and successful submission checks only when grounded by visible fields/actions
+- If tabs or navigation items exist, verify that content changes after clicking them
+- If search, filters, tables, or lists exist, verify that results refresh after interaction
+- Mark exploration clicks optional:true when the element may not appear for every user/session
 - Generate 6-12 steps total
 
 Return ONLY the JSON array, no markdown.`;
 
-  const raw = await generateText({ prompt, maxTokens: 1500 });
-  const steps = parseJsonSafe(raw, null);
-  if (Array.isArray(steps) && steps.length >= 3) return steps.slice(0, 20);
+  try {
+    const raw = await generateText({ prompt, maxTokens: 1800 });
+    const steps = parseJsonSafe(raw, null);
+    if (Array.isArray(steps) && steps.length >= 3) {
+      return enrichBrowserPlanWithVerification(steps.slice(0, 20), pageInfo, url);
+    }
+  } catch { /* fall back */ }
 
-  let hostname = url;
-  try { hostname = new URL(url).hostname; } catch { /* use url */ }
-  return [
-    { action: "navigate", url, description: "Open application" },
-    { action: "check_performance", description: "Page load performance" },
-    { action: "screenshot", label: "Initial state" },
-    { action: "assert_url", expected: hostname, description: "Verify correct domain" },
-    { action: "ai_assert", description: "page has loaded with visible content" },
-  ];
+  return buildDeterministicBrowserPlan(url, pageInfo);
 }
 
 export async function autoDiscoverAndTest({
@@ -4000,6 +4245,8 @@ export async function autoDiscoverAndTest({
   triggerSource = "manual",
   timeoutMs = 45000,
   onRunCreated = null,
+  mode = "auto_discover",
+  instructions = null,
 }) {
   if (!url || !String(url).trim().startsWith("http")) throw new Error("A valid HTTP URL is required");
 
@@ -4013,9 +4260,9 @@ export async function autoDiscoverAndTest({
   const { rows: [run] } = await pool.query(
     `INSERT INTO testing_agent_runs
        (workspace_id, project_id, task_id, trigger_source, mode, status, generated_cases, commands, output_json, created_by)
-     VALUES ($1,$2,$3,$4,'auto_discover','running','[]'::jsonb,'[]'::jsonb,'{"stepResults":[]}'::jsonb,$5)
+     VALUES ($1,$2,$3,$4,$5,'running','[]'::jsonb,'[]'::jsonb,'{"stepResults":[]}'::jsonb,$6)
      RETURNING *`,
-    [workspaceId, projectId, taskId, triggerSource, triggeredBy || null]
+    [workspaceId, projectId, taskId, triggerSource, mode, triggeredBy || null]
   );
   if (onRunCreated) onRunCreated(run.id);
   const runController = createRunController(run.id);
@@ -4028,24 +4275,16 @@ export async function autoDiscoverAndTest({
   try {
     const ctx = await createStealthContext(discoverBrowser);
     const page = await ctx.newPage();
-    await page.goto(url, { timeout: actionTimeoutMs, waitUntil: "domcontentloaded" });
+    const response = await page.goto(url, { timeout: actionTimeoutMs, waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
     try { await page.waitForLoadState("networkidle", { timeout: 5000 }); } catch { /* ok */ }
     await dismissOverlays(page);
+    const fatalPageState = await detectFatalPageState(page, response);
+    if (fatalPageState.fatal) {
+      throw new Error(fatalPageState.reason);
+    }
     initialScreenshot = await takeScreenshot(page);
-    pageInfo = await page.evaluate(() => ({
-      title: document.title,
-      visibleText: document.body.innerText.slice(0, 500),
-      elements: [...document.querySelectorAll("a,button,input,select,textarea,[role='button']")].slice(0, 80).map((el) => ({
-        tag: el.tagName.toLowerCase(),
-        id: el.id || null,
-        name: el.getAttribute("name") || null,
-        text: (el.innerText || el.value || "").trim().slice(0, 40) || null,
-        placeholder: el.placeholder || null,
-        ariaLabel: el.getAttribute("aria-label") || null,
-        type: el.type || null,
-      })),
-    }));
+    pageInfo = await scanPageContext(page);
   } catch (err) {
     await discoverBrowser.close().catch(() => {});
     await pool.query(
@@ -4061,30 +4300,80 @@ export async function autoDiscoverAndTest({
   try {
     discoveredSteps = await generateAutoDiscoveryPlan(url, pageInfo);
   } catch {
-    discoveredSteps = [{ action: "navigate", url, description: "Open app" }, { action: "screenshot", label: "Page" }];
+    discoveredSteps = buildDeterministicBrowserPlan(url, pageInfo);
   }
+  const precisionSweepPlanned = shouldRunPrecisionPageSweep(pageInfo);
+  const plannedSteps = precisionSweepPlanned
+    ? [
+      ...discoveredSteps,
+      {
+        action: "precision_sweep",
+        description: "Aggressively probe validation, boundary inputs, side effects, and destructive flows",
+      },
+    ]
+    : discoveredSteps;
 
   await pool.query(
     `UPDATE testing_agent_runs SET commands=$2::jsonb WHERE id=$1`,
-    [run.id, safeJsonStringify(discoveredSteps)]
+    [run.id, safeJsonStringify(plannedSteps)]
   );
 
   // Phase 3: Execute
   let stepResults = [];
+  let precisionSweep = precisionSweepPlanned ? { enabled: true, stepCount: 0, error: null } : null;
   try {
     stepResults = await executeBrowserSteps(discoveredSteps, actionTimeoutMs, {
       runId: run.id,
       stopOnFailure: false,
       runController,
     });
+
+    if (precisionSweepPlanned) {
+      try {
+        const precisionResult = await runPrecisionPageSweep({
+          url,
+          runId: run.id,
+          resultOffset: stepResults.length,
+          timeoutMs: Math.max(Number(timeoutMs) || 0, 90000),
+          runController,
+          moduleName: clipText(pageInfo?.title || "Target Page", 80) || "Target Page",
+        });
+        const precisionResults = Array.isArray(precisionResult?.stepResults) ? precisionResult.stepResults : [];
+        stepResults = [...stepResults, ...precisionResults];
+        precisionSweep = {
+          enabled: true,
+          stepCount: precisionResults.length,
+          createdEntities: precisionResult?.createdEntities || [],
+          credentialChecks: precisionResult?.credentialChecks || [],
+          moduleName: precisionResult?.reconData?.name || clipText(pageInfo?.title || "Target Page", 80) || "Target Page",
+          pageTitle: precisionResult?.pageContext?.title || pageInfo?.title || "",
+          error: null,
+        };
+      } catch (err) {
+        if (isRunCancelledError(err)) throw err;
+        precisionSweep = {
+          enabled: true,
+          stepCount: 0,
+          error: err.message,
+        };
+        stepResults.push(buildSyntheticBrowserStepResult({
+          stepIndex: stepResults.length,
+          description: "Aggressive failure-mode precision sweep",
+          error: err.message,
+        }));
+      }
+    }
   } catch (err) {
     if (isRunCancelledError(err)) {
       const output = {
+        ...(instructions ? { instructions } : {}),
         url,
         pageTitle: pageInfo.title,
         initialScreenshot,
         discoveredSteps,
+        plannedSteps,
         stepResults,
+        ...(precisionSweep ? { precisionSweep } : {}),
         cancelControl: {
           message: err.message,
           details: err.details || null,
@@ -4118,9 +4407,20 @@ export async function autoDiscoverAndTest({
   const failed = stepResults.filter((s) => s.status === "failed").length;
   const skipped = stepResults.filter((s) => s.status === "skipped").length;
   const finalStatus = failed > 0 ? "failed" : "passed";
-  const insights = await generateRunInsights(stepResults, "auto_discover");
+  const insights = await generateRunInsights(stepResults, mode === "browser" ? "browser" : "auto_discover");
 
-  const output = { url, pageTitle: pageInfo.title, initialScreenshot, discoveredSteps, stepResults, insights, summary: { total: stepResults.length, passed, failed, skipped } };
+  const output = {
+    ...(instructions ? { instructions } : {}),
+    url,
+    pageTitle: pageInfo.title,
+    initialScreenshot,
+    discoveredSteps,
+    plannedSteps,
+    ...(precisionSweep ? { precisionSweep } : {}),
+    stepResults,
+    insights,
+    summary: { total: stepResults.length, passed, failed, skipped },
+  };
 
   await pool.query(
     `UPDATE testing_agent_runs SET status=$2, output_json=$3, finished_at=NOW() WHERE id=$1`,
@@ -4132,42 +4432,71 @@ export async function autoDiscoverAndTest({
     status: finalStatus,
     pageTitle: pageInfo.title,
     discoveredSteps,
+    plannedSteps,
     insights,
     summary: output.summary,
     steps: stepResults.map((s) => ({ ...s, screenshot: s.screenshot ? true : null })),
+    ...(instructions ? { parsedSteps: plannedSteps } : {}),
   };
 }
 
 // ─────────────────────────────────────────────────────────
 // MULTI-SCENARIO: 4 scenario types from one description
 // ─────────────────────────────────────────────────────────
-async function generateScenarioPlans(description, url) {
+async function generateScenarioPlans(description, url, pageContext = null) {
   const prompt = `QA architect. Create exactly 4 browser test scenarios for this feature.
 Feature: "${description}"
 ${url ? `Base URL: ${url}` : ""}
+${pageContext ? summarizePageContextForPrompt(pageContext) : ""}
 
 Return JSON with exactly these keys:
 {"happy_path":[...steps],"error_handling":[...steps],"edge_cases":[...steps],"performance":[...steps]}
 
-Each scenario: 4-8 steps. Actions: navigate, click, fill, press, wait, screenshot, assert_visible, assert_text, assert_url, ai_click, ai_fill, ai_assert, check_performance.
+Rules:
+- Use only actions grounded by the visible page context when page context is provided
+- Each scenario must prove the effect of user actions, not just click them
+- happy_path: prove the main user flow works
+- error_handling: provoke validation or handled error feedback
+- edge_cases: boundary/alternate navigation or filter/search/tab behavior
+- performance: measure load and prove the page remains usable
+- Each scenario: 4-8 steps. Actions: navigate, click, fill, press, wait, screenshot, assert_visible, assert_text, assert_url, ai_click, ai_fill, ai_assert, check_performance.
 Return ONLY the JSON object. No markdown.`;
 
-  const raw = await generateText({ prompt, maxTokens: 2000 });
-  const parsed = parseJsonSafe(raw, null);
-  if (parsed && typeof parsed === "object") {
-    return {
-      happy_path: Array.isArray(parsed.happy_path) ? parsed.happy_path : [],
-      error_handling: Array.isArray(parsed.error_handling) ? parsed.error_handling : [],
-      edge_cases: Array.isArray(parsed.edge_cases) ? parsed.edge_cases : [],
-      performance: Array.isArray(parsed.performance) ? parsed.performance : [],
-    };
-  }
-  const base = url ? [{ action: "navigate", url, description: "Open app" }, { action: "screenshot", label: "Initial" }] : [];
+  try {
+    const raw = await generateText({ prompt, maxTokens: 2200 });
+    const parsed = parseJsonSafe(raw, null);
+    if (parsed && typeof parsed === "object") {
+      return {
+        happy_path: enrichBrowserPlanWithVerification(Array.isArray(parsed.happy_path) ? parsed.happy_path : [], pageContext, url),
+        error_handling: enrichBrowserPlanWithVerification(Array.isArray(parsed.error_handling) ? parsed.error_handling : [], pageContext, url),
+        edge_cases: enrichBrowserPlanWithVerification(Array.isArray(parsed.edge_cases) ? parsed.edge_cases : [], pageContext, url),
+        performance: enrichBrowserPlanWithVerification(Array.isArray(parsed.performance) ? parsed.performance : [], pageContext, url),
+      };
+    }
+  } catch { /* fall through */ }
+
+  const base = buildDeterministicBrowserPlan(url || pageContext?.pageUrl || null, pageContext);
   return {
-    happy_path: [...base, { action: "ai_assert", description: "page loaded with visible content" }],
-    error_handling: [...base, { action: "ai_assert", description: "page shows proper error messages" }],
-    edge_cases: [...base, { action: "ai_assert", description: "page handles edge cases" }],
-    performance: [...base, { action: "check_performance", description: "Page load performance", failOnSlow: false }],
+    happy_path: base,
+    error_handling: enrichBrowserPlanWithVerification([
+      ...(url ? [{ action: "navigate", url, description: "Open app" }] : []),
+      { action: "screenshot", label: "error_handling_start" },
+      { action: "ai_click", description: "primary submit or save button", optional: true },
+      { action: "ai_assert", description: "validation or handled error feedback is visible", optional: true },
+    ], pageContext, url),
+    edge_cases: enrichBrowserPlanWithVerification([
+      ...(url ? [{ action: "navigate", url, description: "Open app" }] : []),
+      pageContext?.hasSearch
+        ? { action: "ai_fill", description: "search bar or search input", value: "   ", optional: true }
+        : { action: "ai_click", description: `${pageContext?.tabs?.[0] || "secondary"} tab`, optional: true },
+      { action: "ai_assert", description: "the page handles edge-case input or alternate navigation without breaking", optional: true },
+    ], pageContext, url),
+    performance: enrichBrowserPlanWithVerification([
+      ...(url ? [{ action: "navigate", url, description: "Open app" }] : []),
+      { action: "check_performance", description: "Page load performance", failOnSlow: false },
+      { action: "screenshot", label: "performance_state" },
+      { action: "ai_assert", description: "page remains usable after load and interaction" },
+    ], pageContext, url),
   };
 }
 
@@ -4206,7 +4535,8 @@ export async function runMultiScenario({
   if (!taskRows[0]) throw new Error("Task not found in workspace");
   const projectId = taskRows[0].project_id;
 
-  const scenarios = await generateScenarioPlans(description.trim(), url || "");
+  const pageContext = url ? await quickPageScan(url).catch(() => null) : null;
+  const scenarios = await generateScenarioPlans(description.trim(), url || "", pageContext);
   const LABELS = { happy_path: "Happy Path", error_handling: "Error Handling", edge_cases: "Edge Cases", performance: "Performance" };
   const actionTimeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
 
@@ -4352,16 +4682,44 @@ export async function runMultiScenario({
 // DEEP EXPLORATION HELPERS
 // ─────────────────────────────────────────────────────────
 
-function extractCredentialValue(instructions, labels = []) {
-  for (const label of labels) {
-    const regex = new RegExp(
-      `${label}\\s*(?:=|:|-)\\s*(?:"([^"]+)"|'([^']+)'|([^\\n,;]+))`,
-      "i"
-    );
-    const match = instructions.match(regex);
-    if (!match) continue;
-    const value = match[1] || match[2] || match[3];
-    if (value && value.trim()) return value.trim();
+function escapeRegex(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeCredentialCapture(match = null) {
+  if (!match) return null;
+  const value = match[1] || match[2] || match[3] || "";
+  return value && value.trim() ? value.trim() : null;
+}
+
+function extractCredentialValue(instructions, labels = [], { allowBareLine = true } = {}) {
+  const text = String(instructions || "");
+  for (const rawLabel of labels) {
+    const label = escapeRegex(rawLabel);
+    const patterns = [
+      new RegExp(
+        `(?:^|[\\n,;])\\s*${label}\\s*(?:=|:|-|\\bis\\b)\\s*(?:"([^"]+)"|'([^']+)'|([^\\n,;]+))`,
+        "im"
+      ),
+      new RegExp(
+        `\\b${label}\\b\\s*(?:=|:|-|\\bis\\b)\\s*(?:"([^"]+)"|'([^']+)'|([^\\n,;]+))`,
+        "i"
+      ),
+    ];
+
+    if (allowBareLine) {
+      patterns.push(
+        new RegExp(
+          `^\\s*${label}\\s+(?:"([^"]+)"|'([^']+)'|([^\\n,;]+))\\s*$`,
+          "im"
+        )
+      );
+    }
+
+    for (const pattern of patterns) {
+      const value = normalizeCredentialCapture(text.match(pattern));
+      if (value) return value;
+    }
   }
   return null;
 }
@@ -4382,13 +4740,14 @@ function parseCredentialsFromInstructions(instructions) {
 
 async function navigateToDiscoveredModule(page, navItem, originUrl = null) {
   try {
+    let response = null;
     if (navItem?.href && /^https?:\/\//.test(navItem.href)) {
-      await page.goto(navItem.href, { timeout: 20000, waitUntil: "domcontentloaded" });
+      response = await page.goto(navItem.href, { timeout: 20000, waitUntil: "domcontentloaded" });
     } else if (navItem?.href && navItem.href.startsWith("/")) {
       const origin = originUrl ? new URL(originUrl).origin : new URL(page.url()).origin;
-      await page.goto(new URL(navItem.href, origin).toString(), { timeout: 20000, waitUntil: "domcontentloaded" });
+      response = await page.goto(new URL(navItem.href, origin).toString(), { timeout: 20000, waitUntil: "domcontentloaded" });
     } else if (navItem?.url && /^https?:\/\//.test(navItem.url)) {
-      await page.goto(navItem.url, { timeout: 20000, waitUntil: "domcontentloaded" });
+      response = await page.goto(navItem.url, { timeout: 20000, waitUntil: "domcontentloaded" });
     } else if (navItem?.text) {
       const loc = page.getByText(navItem.text, { exact: false }).first();
       const vis = await loc.isVisible({ timeout: 3000 }).catch(() => false);
@@ -4401,6 +4760,8 @@ async function navigateToDiscoveredModule(page, navItem, originUrl = null) {
     await page.waitForTimeout(1500);
     try { await page.waitForLoadState("networkidle", { timeout: 6000 }); } catch { /* ok */ }
     await dismissOverlays(page).catch(() => {});
+    const fatalPageState = await detectFatalPageState(page, response);
+    if (fatalPageState.fatal) return false;
     return true;
   } catch {
     return false;
@@ -5474,6 +5835,316 @@ async function sampleSelectableOptions(page, control, timeoutMs = 10000) {
   } catch {
     await page.keyboard.press("Escape").catch(() => {});
     return [];
+  }
+}
+
+async function scanPageContext(page) {
+  const [baseInfo, formsRaw, tabsRaw, controlsRaw, tablesRaw] = await Promise.all([
+    extractPageInfoFull(page),
+    collectVisiblePageForms(page),
+    discoverPageTabs(page),
+    collectSelectableControls(page),
+    page.evaluate(() => {
+      const visible = (el) => {
+        if (!(el instanceof Element)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return style.visibility !== "hidden" && style.display !== "none" && (rect.width > 0 || rect.height > 0);
+      };
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      return [...document.querySelectorAll("table, [role='grid'], [role='table']")]
+        .filter((table) => visible(table))
+        .map((table) => ({
+          headers: [...table.querySelectorAll("th, [role='columnheader']")]
+            .map((cell) => normalize(cell.textContent))
+            .filter(Boolean)
+            .slice(0, 8),
+          rowCount: [...table.querySelectorAll("tbody tr, [role='row']")]
+            .filter((row) => visible(row))
+            .length,
+        }))
+        .slice(0, 4);
+    }).catch(() => []),
+  ]);
+
+  const clickableLabels = uniqueTextList(
+    (baseInfo?.elements || [])
+      .filter((element) =>
+        ["a", "button"].includes(element.tag) ||
+        ["button", "link", "menuitem", "tab"].includes(String(element.role || ""))
+      )
+      .map((element) => element.text || element.ariaLabel || element.name || element.id || element.tag),
+    30
+  );
+
+  const inputLabels = uniqueTextList(
+    (baseInfo?.elements || [])
+      .filter((element) =>
+        ["input", "textarea", "select"].includes(element.tag) ||
+        ["textbox", "combobox", "searchbox"].includes(String(element.role || ""))
+      )
+      .map((element) => element.placeholder || element.ariaLabel || element.name || element.text || element.type || element.tag),
+    18
+  );
+
+  const forms = (formsRaw || []).slice(0, 6).map((form) => ({
+    title: clipText(form?.title || "", 80) || null,
+    fields: (form?.fields || []).slice(0, 8).map((field) => ({
+      label: clipText(getFormFieldLabel(field), 80),
+      kind: getFormFieldKind(field),
+      required: Boolean(field?.required),
+    })),
+    buttons: uniqueTextList(form?.buttons || (form?.buttonDetails || []).map((button) => button.text), 6),
+  }));
+
+  const selectableControls = [];
+  for (const control of (controlsRaw || []).slice(0, 8)) {
+    const options = await sampleSelectableOptions(page, control).catch(() => control?.options || []);
+    selectableControls.push({
+      label: clipText(control?.label || "select", 80),
+      kind: control?.kind || "select",
+      options: uniqueTextList((options || []).map((option) => option?.text || option?.value), 6),
+    });
+  }
+
+  return {
+    ...baseInfo,
+    pageUrl: page.url(),
+    clickableLabels,
+    inputLabels,
+    navList: clickableLabels.join(", "),
+    inputList: inputLabels.join(", "),
+    buttonList: clickableLabels.join(", "),
+    forms,
+    tabs: uniqueTextList((tabsRaw || []).map((tab) => tab?.text), 10),
+    selectableControls,
+    tables: tablesRaw || [],
+  };
+}
+
+function summarizePageContextForPrompt(pageContext = null) {
+  if (!pageContext) return "REAL PAGE CONTEXT: unavailable.";
+
+  const formLines = (pageContext.forms || []).map((form, index) => {
+    const fields = (form.fields || []).map((field) =>
+      `${field.label}${field.required ? " (required)" : ""}${field.kind ? ` [${field.kind}]` : ""}`
+    ).join(", ");
+    const buttons = (form.buttons || []).join(", ");
+    return `- Form ${index + 1}${form.title ? ` "${form.title}"` : ""}: fields [${fields || "none"}], actions [${buttons || "none"}]`;
+  });
+
+  const controlLines = (pageContext.selectableControls || []).map((control) =>
+    `- ${control.label} (${control.kind}) options [${(control.options || []).join(", ") || "unknown"}]`
+  );
+
+  const tableLines = (pageContext.tables || []).map((table, index) =>
+    `- Table ${index + 1}: headers [${(table.headers || []).join(", ") || "unknown"}], visible rows ${table.rowCount || 0}`
+  );
+
+  return [
+    "REAL PAGE CONTEXT (grounded from the live DOM - never invent elements):",
+    `Title: "${pageContext.title || ""}"`,
+    `Visible text snippet: "${String(pageContext.visibleText || "").slice(0, 400)}"`,
+    `Clickable/Nav: [${(pageContext.clickableLabels || []).join(", ") || "none"}]`,
+    `Inputs: [${(pageContext.inputLabels || []).join(", ") || "none"}]`,
+    `Tabs: [${(pageContext.tabs || []).join(", ") || "none"}]`,
+    `Has search: ${pageContext.hasSearch ? "yes" : "no"}`,
+    `Has table/list: ${pageContext.hasTable ? "yes" : "no"}`,
+    `Has create/add action: ${pageContext.hasCreateBtn ? "yes" : "no"}`,
+    formLines.length ? `Forms:\n${formLines.join("\n")}` : "Forms: none",
+    controlLines.length ? `Selectable controls:\n${controlLines.join("\n")}` : null,
+    tableLines.length ? `Tables:\n${tableLines.join("\n")}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+function buildDeterministicBrowserPlan(url, pageContext = null) {
+  const steps = [];
+  if (url) {
+    steps.push(
+      { action: "navigate", url, description: "Open application" },
+      { action: "check_performance", description: "Capture page load performance", failOnSlow: false }
+    );
+  }
+  steps.push(
+    { action: "screenshot", label: "initial_state" },
+    { action: "ai_assert", description: "page loaded with visible content and no blocking error state" }
+  );
+
+  if (pageContext?.hasSearch) {
+    steps.push(
+      { action: "ai_fill", description: "search bar or search input", value: "test", optional: true },
+      { action: "screenshot", label: "search_results" },
+      { action: "ai_assert", description: "search or filter results update without errors", optional: true }
+    );
+  }
+
+  if (Array.isArray(pageContext?.tabs) && pageContext.tabs[0]) {
+    steps.push(
+      { action: "ai_click", description: `${pageContext.tabs[0]} tab`, optional: true },
+      { action: "screenshot", label: "tab_change" },
+      { action: "ai_assert", description: `${pageContext.tabs[0]} section content is visible`, optional: true }
+    );
+  }
+
+  const primaryForm = Array.isArray(pageContext?.forms) ? pageContext.forms[0] : null;
+  if (primaryForm?.buttons?.[0]) {
+    steps.push(
+      { action: "ai_click", description: primaryForm.buttons[0], optional: true },
+      { action: "ai_assert", description: "validation or submission feedback is visible", optional: true }
+    );
+  }
+
+  if (primaryForm?.fields?.[0]) {
+    const firstField = primaryForm.fields[0];
+    const value = /email/i.test(firstField.label) || firstField.kind === "email"
+      ? "qa@example.com"
+      : "QA Smoke";
+    steps.push({ action: "ai_fill", description: `${firstField.label} field`, value, optional: true });
+  }
+
+  return enrichBrowserPlanWithVerification(steps, pageContext, url);
+}
+
+function shouldRunPrecisionPageSweep(pageContext = null) {
+  if (!pageContext) return false;
+  return Boolean(
+    pageContext.hasForms ||
+    (Array.isArray(pageContext.forms) && pageContext.forms.length > 0) ||
+    pageContext.hasTable ||
+    pageContext.hasSearch ||
+    pageContext.hasCreateBtn ||
+    (Array.isArray(pageContext.inputLabels) && pageContext.inputLabels.length > 0) ||
+    (Array.isArray(pageContext.selectableControls) && pageContext.selectableControls.length > 0) ||
+    (Array.isArray(pageContext.tabs) && pageContext.tabs.length > 0) ||
+    (Array.isArray(pageContext.clickableLabels) && pageContext.clickableLabels.length >= 3)
+  );
+}
+
+function buildReconFromPageContext(pageContext = {}, moduleName = "Target Page") {
+  const visibleText = String(pageContext?.visibleText || "");
+  return {
+    name: moduleName,
+    url: pageContext?.pageUrl || null,
+    title: pageContext?.title || moduleName,
+    visibleText,
+    tabs: Array.isArray(pageContext?.tabs) ? pageContext.tabs.slice(0, 10) : [],
+    tabContents: Array.isArray(pageContext?.tabs)
+      ? pageContext.tabs.slice(0, 10).map((tab) => ({
+        tab,
+        buttons: [],
+        modalButtons: [],
+        hasForms: Boolean(pageContext?.forms?.length),
+        hasTable: Boolean(pageContext?.hasTable),
+        visibleText: visibleText.slice(0, 200),
+      }))
+      : [],
+    clickableButtons: uniqueTextList(pageContext?.clickableLabels || [], 20).map((text) => ({
+      text,
+      opensModal: false,
+      modalFields: [],
+      modalActions: [],
+      effect: "in-page",
+    })),
+    forms: Array.isArray(pageContext?.forms)
+      ? pageContext.forms.map((form) => ({
+        title: form?.title || null,
+        fields: Array.isArray(form?.fields) ? form.fields.map((field) => ({
+          label: field?.label || "field",
+          type: field?.kind || "text",
+          required: Boolean(field?.required),
+        })) : [],
+      }))
+      : [],
+    dropdowns: Array.isArray(pageContext?.selectableControls)
+      ? pageContext.selectableControls.map((control) => ({
+        label: control?.label || "select",
+        options: Array.isArray(control?.options) ? control.options : [],
+      }))
+      : [],
+    tables: Array.isArray(pageContext?.tables) ? pageContext.tables : [],
+    hasForms: Boolean(pageContext?.forms?.length || pageContext?.hasForms),
+    hasTable: Boolean(pageContext?.hasTable),
+    hasSearch: Boolean(pageContext?.hasSearch),
+    hasCreateBtn: Boolean(pageContext?.hasCreateBtn),
+    elements: Array.isArray(pageContext?.elements) ? pageContext.elements.slice(0, 40) : [],
+  };
+}
+
+async function runPrecisionPageSweep({
+  url,
+  runId = null,
+  resultOffset = 0,
+  timeoutMs = 90000,
+  runController = null,
+  moduleName = "Target Page",
+}) {
+  if (!url || !String(url).trim().startsWith("http")) {
+    throw new Error("A valid HTTP URL is required for the precision sweep");
+  }
+
+  const browser = await createStealthBrowser();
+  let context = null;
+  const sessionMemory = {
+    seed: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    createdEntities: [],
+    pendingCredentialChecks: [],
+    credentialChecks: [],
+    auth: {
+      loginUrl: url,
+      initialEmail: null,
+    },
+  };
+
+  try {
+    context = await createStealthContext(browser);
+    const page = await context.newPage();
+    page.on("dialog", async (dialog) => { try { await dialog.accept("yes"); } catch { /* ignore */ } });
+
+    const actionTimeoutMs = normalizeActionTimeoutMs(timeoutMs, 20000);
+    await page.goto(url, { timeout: actionTimeoutMs, waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(1500);
+    try { await page.waitForLoadState("networkidle", { timeout: 7000 }); } catch { /* ok */ }
+    await dismissOverlays(page);
+
+    if (runId) {
+      await updateCurrentScreen(
+        runId,
+        await takeScreenshot(page),
+        "Precision sweep: probing failure cases, boundary inputs, and side effects..."
+      ).catch(() => {});
+    }
+
+    const pageContext = await scanPageContext(page).catch(() => null);
+    let reconData = null;
+    try {
+      reconData = await deepReconModule(page, moduleName);
+    } catch (err) {
+      console.warn("[browserAgent] Precision recon fallback:", err.message);
+      reconData = buildReconFromPageContext(pageContext || { pageUrl: page.url(), title: moduleName }, moduleName);
+    }
+
+    const stepResults = await executeDeepModuleTest(page, reconData?.name || moduleName, {
+      context,
+      browser,
+      runId,
+      resultOffset,
+      moduleTimeoutMs: actionTimeoutMs,
+      expectedModuleUrl: page.url(),
+      runController,
+      sessionMemory,
+      reconData,
+    });
+
+    return {
+      pageContext,
+      reconData,
+      stepResults,
+      createdEntities: sessionMemory.createdEntities,
+      credentialChecks: sessionMemory.credentialChecks,
+    };
+  } finally {
+    await context?.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 }
 
@@ -7000,7 +7671,6 @@ export async function runDeepExploration({
 }) {
   const raw = String(instructions ?? "").trim();
   if (!raw) throw new Error("Instructions are required");
-
   const { url, email, password } = parseCredentialsFromInstructions(raw);
   if (!url) throw new Error("No URL found in instructions — include a full https:// URL");
 
@@ -7070,7 +7740,7 @@ export async function runDeepExploration({
 
     const loginResults = await executeBrowserSteps(loginSteps, actionTimeoutMs, {
       runId: run.id,
-      stopOnFailure: false,
+      stopOnFailure: true,
       liveScreen: true,
       autoScreenshot: true,
       _existingPage: page,
@@ -7081,11 +7751,16 @@ export async function runDeepExploration({
     });
     allStepResults.push(...loginResults);
 
+    const initialLoadFailed = loginResults.find((r) => r.status === "failed");
+    const initialFatalPageState = await detectFatalPageState(page).catch(() => ({ fatal: false, reason: null }));
     const criticalLoginFailed = email && loginResults.some((r) =>
       r.status === "failed" &&
       (r.action === "ai_fill" || r.action === "ai_click") &&
       r.action !== "check_performance"
     );
+    if (initialLoadFailed || initialFatalPageState.fatal) {
+      throw new Error(initialLoadFailed?.error || initialFatalPageState.reason || "Initial application load failed");
+    }
     if (criticalLoginFailed) throw new Error("Login failed — cannot proceed with deep exploration");
 
     try { await page.waitForLoadState("networkidle", { timeout: 10000 }); } catch { /* ok */ }
@@ -7200,6 +7875,10 @@ export async function runDeepExploration({
           })
           .slice(0, 30);
       }).catch(() => []);
+    }
+    const reconFatalPageState = await detectFatalPageState(page).catch(() => ({ fatal: false, reason: null }));
+    if (reconFatalPageState.fatal) {
+      throw new Error(reconFatalPageState.reason || "Fatal page state detected during reconnaissance");
     }
     const targetModules = navItems.length > 0 ? navItems : [{ text: "Main", href: page.url() }];
     console.log(`[deepExplore] Phase 1: Discovered ${targetModules.length} modules:`, targetModules.map(n => n.text).join(", "));
@@ -7603,18 +8282,7 @@ async function quickPageScan(url) {
     await page.goto(url, { timeout: 15000, waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1000);
     await dismissOverlays(page);
-    return await page.evaluate(() => {
-      const navEls = [...document.querySelectorAll(
-        "nav a, aside a, [role='navigation'] a, [role='menuitem'], [role='tab'], [class*='nav'] a, [class*='sidebar'] a, header a"
-      )].slice(0, 30);
-      const inputEls = [...document.querySelectorAll("input, textarea, select")].slice(0, 15);
-      return {
-        navList: navEls.map(el => (el.innerText || el.getAttribute("aria-label") || "").trim())
-          .filter(t => t.length > 1 && t.length < 50).join(", "),
-        inputList: inputEls.map(el => (el.placeholder || el.getAttribute("aria-label") || el.name || el.type || "").trim())
-          .filter(t => t.length > 0).join(", "),
-      };
-    }).catch(() => ({ navList: "", inputList: "" }));
+    return await scanPageContext(page).catch(() => ({ navList: "", inputList: "", clickableLabels: [], inputLabels: [], forms: [], tabs: [] }));
   } catch {
     return null;
   } finally {
@@ -7633,6 +8301,9 @@ export async function runBrowserAgent({
 }) {
   const raw = String(instructions ?? "").trim();
   if (!raw) throw new Error("Instructions are required");
+  const parsedCredentials = parseCredentialsFromInstructions(raw);
+  const urlMatch = raw.match(/https?:\/\/[^\s,'"]+/);
+  const extractedUrl = parsedCredentials.url || (urlMatch ? urlMatch[0] : null);
 
   // ── Detect "explore / test all modules" intent ──
   // When the user says "test all modules", "explore everything", etc., the pre-scan trick
@@ -7640,8 +8311,7 @@ export async function runBrowserAgent({
   // which correctly logs in first, then discovers real nav items.
   const isDeepExploreIntent = /\b(all\s+modules?|all\s+features?|all\s+pages?|every\s+module|every\s+feature|explore\s+all|test\s+all|test\s+every|explore\s+every|check\s+all\s+modules?|test\s+each\s+module|go\s+through\s+all|entire\s+app|full\s+app|all\s+functionality)\b/i.test(raw);
   if (isDeepExploreIntent) {
-    const { url } = parseCredentialsFromInstructions(raw);
-    if (url) {
+    if (extractedUrl) {
       console.log("[browserAgent] Detected explore-all-modules intent — routing to deep exploration");
       return runDeepExploration({
         workspaceId,
@@ -7655,13 +8325,40 @@ export async function runBrowserAgent({
     }
   }
 
+  if (extractedUrl && isPrecisionUrlTestIntent(raw)) {
+    if (parsedCredentials.email && parsedCredentials.password) {
+      console.log("[browserAgent] Detected credentialed URL test intent - routing to deep exploration");
+      return runDeepExploration({
+        workspaceId,
+        taskId,
+        instructions: raw,
+        triggeredBy,
+        triggerSource,
+        timeoutMs,
+        onRunCreated,
+      });
+    }
+
+    console.log("[browserAgent] Detected generic URL test intent - routing to aggressive auto-discovery");
+    return autoDiscoverAndTest({
+      workspaceId,
+      taskId,
+      url: extractedUrl,
+      triggeredBy,
+      triggerSource,
+      timeoutMs,
+      onRunCreated,
+      mode: "browser",
+      instructions: raw,
+    });
+  }
+
   // Pre-scan: if a URL is in the instructions, fetch real page elements so LLM
   // only generates steps for elements that ACTUALLY exist (no hallucinated modules).
   // Note: this only works for public pages — auth-gated pages will return no nav.
   let pageContext = null;
-  const urlMatch = raw.match(/https?:\/\/[^\s,'"]+/);
-  if (urlMatch) {
-    pageContext = await quickPageScan(urlMatch[0]).catch(() => null);
+  if (extractedUrl) {
+    pageContext = await quickPageScan(extractedUrl).catch(() => null);
   }
 
   const parsedSteps = await parseInstructionsToSteps(raw, pageContext);
@@ -7770,3 +8467,4 @@ export async function getBrowserAgentRunById({ workspaceId, runId }) {
     output_json: typeof r.output_json === "string" ? JSON.parse(r.output_json) : r.output_json,
   };
 }
+
