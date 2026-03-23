@@ -360,25 +360,7 @@ socket.emit("chat:history", {
           });
         }
 
-        if (!socket.disconnected && !socket._isCleanedUp) {
-          socket.to(legacyRoom).emit("chat:system", {
-            type: "join",
-            channelId: channelKey,
-            workspaceId: resolvedWorkspaceId,
-            userId,
-            username,
-            at: new Date().toISOString(),
-          });
-
-          socket.to(wsRoom).emit("chat:system", {
-            type: "join",
-            channelId: channelKey,
-            workspaceId: resolvedWorkspaceId,
-            userId,
-            username,
-            at: new Date().toISOString(),
-          });
-        }
+        // join/leave system messages intentionally suppressed
       } catch (err) {
         console.error("🔥 chat:join error", {
           socketId: socket.id,
@@ -403,23 +385,7 @@ socket.emit("chat:history", {
     socket.leave(legacyRoom);
     socket.leave(wsRoom);
 
-    socket.to(legacyRoom).emit("chat:system", {
-      type: "leave",
-      channelId: channelKey,
-      workspaceId,
-      userId,
-      username,
-      at: new Date().toISOString(),
-    });
-
-    socket.to(wsRoom).emit("chat:system", {
-      type: "leave",
-      channelId: channelKey,
-      workspaceId,
-      userId,
-      username,
-      at: new Date().toISOString(),
-    });
+    // join/leave system messages intentionally suppressed
   });
 
   /* -----------------------------------------------------
@@ -478,6 +444,7 @@ socket.emit("chat:history", {
     await createChatMessage({
       channelKey: channelId,
       userId,
+      tempId: tempId || null,
       textHtml: cleanText,
       parentId: parentId || null,
       attachments: Array.isArray(attachments) ? attachments : [],
@@ -994,6 +961,5 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     parentId: message.parentId || message.parent_id || null,
   };
 
-io.to(
-  workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)
-).except(payload.userId).emit("chat:message", payload);}
+io.to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)).emit("chat:message", payload);
+}

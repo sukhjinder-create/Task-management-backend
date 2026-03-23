@@ -89,6 +89,19 @@ import votesRoutes from "./routes/votes.routes.js";
 import issueTemplatesRoutes from "./routes/issueTemplates.routes.js";
 import savedFiltersRoutes from "./routes/savedFilters.routes.js";
 
+// ─── Enterprise Phase 1-4 ─────────────────────────────────────────────────────
+import auditRoutes    from "./routes/audit.routes.js";
+import mfaRoutes      from "./routes/mfa.routes.js";
+import ssoRoutes      from "./routes/sso.routes.js";
+import wikiRoutes     from "./routes/wiki.routes.js";
+import leaveRoutes    from "./routes/leave.routes.js";
+import okrRoutes      from "./routes/okr.routes.js";
+import reviewsRoutes  from "./routes/reviews.routes.js";
+import gdprRoutes     from "./routes/gdpr.routes.js";
+import apiKeysRoutes  from "./routes/apiKeys.routes.js";
+import webhooksRoutes    from "./routes/webhooks.routes.js";
+import aiFeaturesRoutes from "./routes/aiFeatures.routes.js";
+
 
 
 
@@ -239,6 +252,19 @@ app.use("/watchers",        authMiddleware, requireWorkspaceForUser, watchersRou
 app.use("/votes",           authMiddleware, requireWorkspaceForUser, votesRoutes);
 app.use("/issue-templates", authMiddleware, requireWorkspaceForUser, issueTemplatesRoutes);
 app.use("/saved-filters",   authMiddleware, requireWorkspaceForUser, savedFiltersRoutes);
+
+// ─── Enterprise Phase 1-4 routes ─────────────────────────────────────────────
+app.use("/audit",     authMiddleware, requireWorkspaceForUser, auditRoutes);
+app.use("/mfa",       mfaRoutes);   // authMiddleware applied inside the router
+app.use("/auth/sso",  ssoRoutes);   // public SAML endpoints + auth-protected config
+app.use("/wiki",      authMiddleware, requireWorkspaceForUser, wikiRoutes);
+app.use("/leave",     authMiddleware, requireWorkspaceForUser, leaveRoutes);
+app.use("/okr",       authMiddleware, requireWorkspaceForUser, okrRoutes);
+app.use("/reviews",   authMiddleware, requireWorkspaceForUser, reviewsRoutes);
+app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, gdprRoutes);
+app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, apiKeysRoutes);
+app.use("/webhooks",    authMiddleware, requireWorkspaceForUser, webhooksRoutes);
+app.use("/ai-features", authMiddleware, requireWorkspaceForUser, aiFeaturesRoutes);
 
 app.use("/integration-debug", integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);

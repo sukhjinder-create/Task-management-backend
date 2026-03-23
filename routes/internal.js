@@ -336,6 +336,45 @@ router.post("/ai/provenance", async (req, res) => {
 });
 
 /**
+ * 🔒 Internal: Get a user's AI auto-reply preference
+ * Called by AI service to check if recipient has opted in before replying
+ */
+router.get("/user-ai-preference/:userId", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.replace("Bearer ", "");
+    if (token !== process.env.AI_SERVICE_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { userId } = req.params;
+
+    const { rows } = await pool.query(
+      `SELECT u.id, u.username, u.workspace_id, up.ai_reply_enabled
+       FROM users u
+       LEFT JOIN user_preferences up ON up.user_id = u.id
+       WHERE u.id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({
+      userId: rows[0].id,
+      username: rows[0].username,
+      workspaceId: rows[0].workspace_id,
+      ai_reply_enabled: rows[0].ai_reply_enabled ?? false, // default OFF
+    });
+  } catch (err) {
+    console.error("[INTERNAL_USER_AI_PREF_ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch user AI preference" });
+  }
+});
+
+/**
  * 🔒 Internal: Fetch project reports (used by frontend)
  */
 router.get("/reports/project", async (req, res) => {

@@ -12,6 +12,8 @@
     "migrate:testing-agent": "node run-testing-agent-migration.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1014.0",
+    "@aws-sdk/s3-request-presigner": "^3.1014.0",
     "axios": "^1.13.2",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.3",
@@ -23,8 +25,12 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.11",
+    "otplib": "^13.4.0",
+    "passport": "^0.7.0",
+    "passport-saml": "^3.2.4",
     "pg": "^8.11.3",
     "playwright": "^1.58.2",
+    "qrcode": "^1.5.4",
     "qs": "^6.15.0",
     "socket.io": "^4.8.1",
     "uuid": "^13.0.0"

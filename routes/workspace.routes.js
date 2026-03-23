@@ -62,7 +62,7 @@ router.get(
     try {
       const { rows } = await pool.query(
         `
-        SELECT ai_enabled, ai_auto_reply
+        SELECT ai_enabled, ai_auto_reply, ai_name
         FROM workspace_ai_settings
         WHERE workspace_id = $1
         `,
@@ -70,8 +70,9 @@ router.get(
       );
 
       const settings = rows[0] || {
-        ai_enabled: true,
-        ai_auto_reply: true,
+        ai_enabled: false,
+        ai_auto_reply: false,
+        ai_name: 'AI Assistant',
       };
 
       res.json(settings);
@@ -103,19 +104,24 @@ if (!["admin"].includes(caller.role)) {
 }
 
 
-      const { ai_enabled = true, ai_auto_reply = true } = req.body;
+      const {
+        ai_enabled = false,
+        ai_auto_reply = false,
+        ai_name = 'AI Assistant',
+      } = req.body;
 
       await pool.query(
         `
-        INSERT INTO workspace_ai_settings (workspace_id, ai_enabled, ai_auto_reply)
-        VALUES ($1, $2, $3)
+        INSERT INTO workspace_ai_settings (workspace_id, ai_enabled, ai_auto_reply, ai_name)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (workspace_id)
         DO UPDATE SET
           ai_enabled = EXCLUDED.ai_enabled,
           ai_auto_reply = EXCLUDED.ai_auto_reply,
+          ai_name = EXCLUDED.ai_name,
           updated_at = now()
         `,
-        [req.workspaceId, ai_enabled, ai_auto_reply]
+        [req.workspaceId, ai_enabled, ai_auto_reply, ai_name]
       );
 
       res.json({ success: true });

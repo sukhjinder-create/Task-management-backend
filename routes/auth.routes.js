@@ -4,6 +4,7 @@ import {
   loginWithEmail,
   loginWithMagicToken,
   loginWithGoogle,
+  loginWithMfa,
   getCurrentUser,
 } from "../services/auth.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
@@ -22,6 +23,20 @@ router.post("/login", async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error("Login error:", err);
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// ─── MFA SECOND FACTOR ────────────────────────────────────────────────────────
+router.post("/mfa/verify", async (req, res) => {
+  try {
+    const { mfa_session_token, code } = req.body;
+    if (!mfa_session_token || !code) {
+      return res.status(400).json({ error: "mfa_session_token and code are required" });
+    }
+    const data = await loginWithMfa(mfa_session_token, code);
+    res.json(data);
+  } catch (err) {
     res.status(401).json({ error: err.message });
   }
 });

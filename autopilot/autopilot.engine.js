@@ -24,7 +24,7 @@ import { ensureSystemUser } from "../services/ai.system.service.js";
  * Main autopilot analysis runner
  * Scans workspace/project and generates actions
  */
-export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
+export async function runAutopilotAnalysis({ workspaceId, projectId = null, skipStandup = false }) {
   console.log(`🤖 Running autopilot analysis for workspace: ${workspaceId}, project: ${projectId || 'all'}`);
 
   // Get autopilot settings
@@ -45,7 +45,8 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
   if (settings.auto_escalate_blockers) {
     modulePromises.push(analyzeBlockers(workspaceId, projectId, settings));
   }
-  if (settings.auto_generate_standup) {
+  // Standups run on a dedicated daily cron — skip here to avoid duplicates
+  if (!skipStandup && settings.auto_generate_standup) {
     modulePromises.push(generateStandupSummary(workspaceId, projectId, settings));
   }
   // Always analyse overdue tasks
@@ -72,9 +73,23 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null }) {
     });
   });
 
+  const validActions = createdActions.filter(Boolean);
+
+  // Execute auto_approved actions immediately (e.g. standups).
+  // processAutoApprovals only handles 'pending' actions, so auto_approved ones
+  // must be executed here or they never run.
+  const autoApprovedActions = validActions.filter(a => a.status === 'auto_approved');
+  for (const action of autoApprovedActions) {
+    try {
+      await executeAutopilotAction(action.id, null);
+    } catch (err) {
+      console.error(`Failed to immediately execute auto_approved action ${action.id}:`, err.message);
+    }
+  }
+
   return {
-    actionsCreated: createdActions.length,
-    actions: createdActions,
+    actionsCreated: validActions.length,
+    actions: validActions,
     settings,
   };
 }
@@ -774,7 +789,7 @@ async function createAutopilotAction({
     reassign: 6,
     adjust_deadline: 6,
     escalate: 12,
-    create_standup: 20,
+    create_standup: 23,
     handle_overdue: 12,
   };
   const dedupeHours = dedupeHoursByType[actionType] || 6;
@@ -916,15 +931,24 @@ export async function executeAutopilotAction(actionId, approvedBy = null) {
 
     return { success: true, action, outcome };
   } catch (err) {
-    console.error(`Failed to execute action ${actionId}:`, err);
+    // State-conflict errors mean the task was manually changed before auto-execution.
+    // Treat as cancelled (not failed) to avoid noisy logs.
+    const isStaleState = err.message?.includes('state changed') || err.message?.includes('no longer valid');
+    const finalStatus = isStaleState ? 'cancelled' : 'failed';
+
+    if (isStaleState) {
+      console.log(`⏭️  Action ${actionId} (${action.action_type}) skipped — task state changed before execution`);
+    } else {
+      console.error(`Failed to execute action ${actionId}:`, err);
+    }
 
     await pool.query(`
       UPDATE autopilot_actions
-      SET status = 'failed'
+      SET status = $2
       WHERE id = $1
-    `, [actionId]);
+    `, [actionId, finalStatus]);
 
-    outcome = { status: 'failed', error: err.message };
+    outcome = { status: finalStatus, error: err.message };
 
     await pool.query(`
       INSERT INTO autopilot_decisions (

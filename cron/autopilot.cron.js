@@ -68,7 +68,8 @@ export function startAutopilotCron() {
         try {
           const result = await runAutopilotAnalysis({
             workspaceId: ws.workspace_id,
-            projectId: null, // Run for entire workspace
+            projectId: null,
+            skipStandup: true, // Standups run on dedicated daily cron at 11:00 AM
           });
 
           console.log(
@@ -108,7 +109,40 @@ export function startAutopilotCron() {
     }
   });
 
+  // ============================================
+  // JOB 3: Generate & deliver daily standups at 11:00 AM every day
+  // ============================================
+  cron.schedule("0 11 * * *", async () => {
+    console.log("\n📋 [CRON] Generating daily standups (11:00 AM)...");
+
+    try {
+      const { rows: workspaces } = await pool.query(`
+        SELECT DISTINCT workspace_id
+        FROM autopilot_settings
+        WHERE enabled = true AND auto_generate_standup = true
+      `);
+
+      console.log(`Generating standups for ${workspaces.length} workspaces`);
+
+      for (const ws of workspaces) {
+        try {
+          const result = await runAutopilotAnalysis({
+            workspaceId: ws.workspace_id,
+            projectId: null,
+            skipStandup: false, // Only standups run here
+          });
+          console.log(`✅ Standups for workspace ${ws.workspace_id}: ${result.actionsCreated} created`);
+        } catch (err) {
+          console.error(`❌ Standup failed for workspace ${ws.workspace_id}:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.error("❌ Daily standup cron failed:", err);
+    }
+  });
+
   console.log("✅ Autopilot cron jobs started");
-  console.log("  - Analysis: Every 4 hours");
+  console.log("  - Analysis: Every 4 hours (no standups)");
+  console.log("  - Daily standups: Every day at 11:00 AM");
   console.log("  - Auto-approvals: Every 15 minutes");
 }

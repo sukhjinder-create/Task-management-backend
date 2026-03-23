@@ -110,7 +110,7 @@ async function ensureWorkspaceAIUser(client, workspaceId) {
       su.id AS system_user_id,
       COALESCE(ws.ai_name, su.display_name, 'AI Assistant') AS ai_name
     FROM system_users su
-    LEFT JOIN workspace_settings ws
+    LEFT JOIN workspace_ai_settings ws
       ON ws.workspace_id = su.workspace_id
     WHERE su.workspace_id = $1::uuid
     LIMIT 1
@@ -119,9 +119,16 @@ async function ensureWorkspaceAIUser(client, workspaceId) {
   );
 
   if (res.rows.length > 0) {
+    const aiName = res.rows[0].ai_name;
+    const aiUserId = res.rows[0].user_id;
+    // Keep users.username in sync so history queries always show the current AI name
+    await client.query(
+      `UPDATE users SET username = $1 WHERE id = $2 AND username != $1`,
+      [aiName, aiUserId]
+    );
     return {
-      userId: res.rows[0].user_id,
-      username: res.rows[0].ai_name,
+      userId: aiUserId,
+      username: aiName,
     };
   }
 
@@ -434,6 +441,7 @@ export async function ensureChannelMember(channelId, userId) {
 export async function createChatMessage({
   channelKey,
   userId,
+  tempId = null,
   textHtml,
   parentId = null,
   encryptedJson = null,
@@ -493,7 +501,7 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
     $7,
     $8::jsonb
   )
-  RETURNING *
+  RETURNING *, (SELECT u.username FROM users u WHERE u.id = user_id) AS username
   `,
   [
     channelKey,
@@ -519,6 +527,7 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
 
     const socketMessage = {
       id: savedMessage.id,
+      tempId,
       channelId: channelKey,
       userId: savedMessage.user_id,
       username: savedMessage.username,
@@ -532,8 +541,11 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
       workspaceId,
     };
 
+    // ✅ Emit to all clients IMMEDIATELY — do not wait for AI checks
+    emitMessage(socketMessage, workspaceId);
+
     // -----------------------------
-    // AI logic (unchanged, deferred)
+    // AI logic (background only — message already delivered above)
     // -----------------------------
     const isSystemUser = await client.query(
       `SELECT 1 FROM system_users WHERE user_id = $1 LIMIT 1`,
@@ -562,80 +574,103 @@ try {
 }
 
     if (isSystemUser.rows.length === 0) {
+      // ── Step 1: check workspace AI master switch ──────────────
       const ws = await client.query(
-        `SELECT ai_enabled FROM workspace_settings WHERE workspace_id = $1 LIMIT 1`,
+        `SELECT ai_enabled FROM workspace_ai_settings WHERE workspace_id = $1 LIMIT 1`,
         [workspaceId]
       );
-
       const workspaceAIEnabled =
         ws.rows.length === 0 ? true : ws.rows[0].ai_enabled === true;
 
       if (workspaceAIEnabled) {
-        const pref = await client.query(
-          `
-          SELECT ai_reply_enabled
-          FROM user_ai_preferences
-          WHERE user_id = $1 AND workspace_id = $2
-          LIMIT 1
-          `,
-          [userId, workspaceId]
-        );
+        // ── Step 2: determine whether AI should reply ─────────────
+        // For DMs  → check the RECIPIENT's ai_reply_enabled preference
+        // For channels → check workspace ai_auto_reply setting
+        let aiAllowed = false;
+        let recipientId = null;
+        let recipientName = null;
+        const isDm = channelKey.startsWith("dm:");
 
-        const aiAllowed =
-          pref.rows.length > 0
+        if (isDm) {
+          // DM key format: dm:<smallerId>:<largerId>
+          const parts = channelKey.split(":");
+          const id1 = parts[1];
+          const id2 = parts[2];
+          recipientId = String(id1) === String(userId) ? id2 : id1;
+
+          // Only trigger if recipient has opted in to AI auto-reply
+          const pref = await client.query(
+            `SELECT ai_reply_enabled FROM user_preferences WHERE user_id = $1 LIMIT 1`,
+            [recipientId]
+          );
+          aiAllowed = pref.rows.length > 0
             ? pref.rows[0].ai_reply_enabled === true
-            : true;
+            : false; // default OFF — users must opt in
+
+          if (aiAllowed) {
+            const recRow = await client.query(
+              `SELECT username FROM users WHERE id = $1 LIMIT 1`,
+              [recipientId]
+            );
+            recipientName = recRow.rows[0]?.username || null;
+          }
+        } else {
+          // Channel: use workspace-level ai_auto_reply setting
+          const wsSettings = await client.query(
+            `SELECT ai_auto_reply FROM workspace_ai_settings WHERE workspace_id = $1 LIMIT 1`,
+            [workspaceId]
+          );
+          aiAllowed = wsSettings.rows.length > 0
+            ? wsSettings.rows[0].ai_auto_reply === true
+            : false; // default OFF
+        }
 
         if (aiAllowed) {
-          const aiUser = await ensureWorkspaceAIUser(client, workspaceId);
+          await ensureWorkspaceAIUser(client, workspaceId);
           postCommit = async () => {
-  console.log("🚀 EMITTING TO AI (postCommit)", {
-    workspaceId,
-    channelKey,
-    messageId: savedMessage.id,
-  });
+            console.log("🚀 EMITTING TO AI (postCommit)", {
+              workspaceId,
+              channelKey,
+              messageId: savedMessage.id,
+              isDm,
+              recipientId,
+            });
 
-  // 1️⃣ Always update UI
-  emitMessage(socketMessage, workspaceId);
-
-  // 2️⃣ ALWAYS notify AI (no filtering)
-  await emitToAI({
-    workspace_id: workspaceId,
-    type: "chat:new-message",
-    payload: {
-      workspace_id: workspaceId,
-      channel_key: channelKey,
-      message_id: savedMessage.id,
-      user_id: savedMessage.user_id,
-      user_role: userRole, // ✅ ADD THIS LINE
-
-      // Send EVERYTHING – AI will decide
-      encrypted_json: savedMessage.encrypted_json,
-      fallback_text: savedMessage.fallback_text,
-      text_html: savedMessage.text_html,
-
-      created_at: savedMessage.created_at,
-    },
-  });
-};
+            await emitToAI({
+              workspace_id: workspaceId,
+              type: "chat:new-message",
+              payload: {
+                workspace_id: workspaceId,
+                channel_key: channelKey,
+                message_id: savedMessage.id,
+                user_id: savedMessage.user_id,
+                user_role: userRole,
+                // Recipient context — used by AI to reply "on behalf of" the right person
+                is_dm: isDm,
+                recipient_id: recipientId,
+                recipient_name: recipientName,
+                encrypted_json: savedMessage.encrypted_json,
+                fallback_text: savedMessage.fallback_text,
+                text_html: savedMessage.text_html,
+                created_at: savedMessage.created_at,
+              },
+            });
+          };
         }
       }
     }
 
-    // fallback: still emit socket if AI is skipped
-    if (!postCommit) {
-  postCommit = async () => {
-    emitMessage(socketMessage, workspaceId);
-  };
-}
+    // postCommit is only needed for AI side-effects; message already emitted above
     return savedMessage;
   } finally {
     client.release();
 
-    // 🔥 side-effects AFTER DB is safe
-    postCommit().catch(err =>
-      console.error("Post-commit side effect failed:", err)
-    );
+    // 🔥 AI side-effects AFTER DB is safe (message was already emitted above)
+    if (postCommit) {
+      postCommit().catch(err =>
+        console.error("Post-commit side effect failed:", err)
+      );
+    }
   }
 }
 

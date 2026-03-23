@@ -369,17 +369,19 @@ export async function getAutopilotHistory({
 ===================================================== */
 
 export async function processAutoApprovals() {
-  // Find actions that have expired and should auto-approve
-  // ONLY for workspaces where autopilot is still enabled
+  // Find actions to execute:
+  // 1. Pending actions whose approval window has expired
+  // 2. auto_approved actions never executed (e.g. standups from before the immediate-execution fix)
   const { rows: expiredActions } = await pool.query(`
     SELECT a.id, a.workspace_id
     FROM autopilot_actions a
     INNER JOIN autopilot_settings s ON s.workspace_id = a.workspace_id
-    WHERE a.status = 'pending'
-      AND a.expires_at IS NOT NULL
-      AND a.expires_at < NOW()
-      AND s.enabled = true
-      AND s.require_approval = true
+    WHERE s.enabled = true
+      AND (
+        (a.status = 'pending' AND a.expires_at IS NOT NULL AND a.expires_at < NOW() AND s.require_approval = true)
+        OR
+        (a.status = 'auto_approved' AND a.created_at < NOW() - INTERVAL '5 minutes')
+      )
   `);
 
   console.log(`🤖 Processing ${expiredActions.length} auto-approvals`);

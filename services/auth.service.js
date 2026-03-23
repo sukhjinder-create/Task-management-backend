@@ -6,6 +6,7 @@ import {
   getUserById,
 } from "../repositories/user.repository.js";
 import { verifyMagicToken } from "./magicLink.service.js";
+import { verifyMfaToken } from "./mfa.service.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
@@ -72,6 +73,8 @@ export function generateToken(user) {
 
 /**
  * LOGIN WITH EMAIL + PASSWORD
+ * If MFA is enabled, returns { mfa_required: true, mfa_session_token } instead of full JWT.
+ * Second step: call loginWithMfa(mfa_session_token, totpCode).
  */
 export async function loginWithEmail(email, password) {
   if (!email || !password) {
@@ -79,30 +82,48 @@ export async function loginWithEmail(email, password) {
   }
 
   const user = await getUserByEmail(email);
-
-  if (!user) {
-    throw new Error("Invalid email or password");
-  }
-
-  if (!user.password_hash) {
-    throw new Error("User has no password set. Contact admin.");
-  }
+  if (!user) throw new Error("Invalid email or password");
+  if (!user.password_hash) throw new Error("User has no password set. Contact admin.");
 
   const match = await bcrypt.compare(password, user.password_hash);
+  if (!match) throw new Error("Invalid email or password");
 
-  if (!match) {
-    throw new Error("Invalid email or password");
+  // If MFA enabled, issue a short-lived session token (5 min) instead of full JWT
+  if (user.mfa_enabled) {
+    const mfaSessionToken = jwt.sign(
+      { id: user.id, mfa_pending: true },
+      JWT_SECRET,
+      { expiresIn: "5m" }
+    );
+    return { mfa_required: true, mfa_session_token: mfaSessionToken };
   }
 
-  // 🔐 Normalize + enforce workspace
   const safeUser = normalizeUserRow(user);
-
   const token = generateToken(safeUser);
+  return { token, user: safeUser };
+}
 
-  return {
-    token,
-    user: safeUser,
-  };
+/**
+ * COMPLETE MFA LOGIN — verify TOTP / backup code and return full JWT
+ */
+export async function loginWithMfa(mfaSessionToken, totpCode) {
+  let payload;
+  try {
+    payload = jwt.verify(mfaSessionToken, JWT_SECRET);
+  } catch {
+    throw new Error("MFA session expired or invalid. Please log in again.");
+  }
+  if (!payload.mfa_pending) throw new Error("Invalid MFA session token");
+
+  const valid = await verifyMfaToken(payload.id, totpCode);
+  if (!valid) throw new Error("Invalid authentication code");
+
+  const user = await getUserById(payload.id);
+  if (!user) throw new Error("User not found");
+
+  const safeUser = normalizeUserRow(user);
+  const token = generateToken(safeUser);
+  return { token, user: safeUser };
 }
 
 /**

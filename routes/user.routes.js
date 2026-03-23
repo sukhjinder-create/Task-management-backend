@@ -116,7 +116,7 @@ router.get("/:id/ai-preference", async (req, res) => {
     );
 
     res.json({
-      aiReplyEnabled: rows[0]?.ai_reply_enabled ?? true, // default ON
+      aiReplyEnabled: rows[0]?.ai_reply_enabled ?? false, // default OFF — users must opt in
     });
   } catch (err) {
     console.error("Error fetching AI preference:", err);

@@ -1,80 +1,91 @@
 // routes/upload.routes.js
 import express from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
+import { uploadFile, storageMode } from "../services/storage.service.js";
 
 const router = express.Router();
 
-// ESM-compatible __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Ensure uploads folder exists: ../uploads
-const uploadDir = path.join(__dirname, "..", "uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Multer storage config
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    cb(null, unique + ext);
-  },
-});
-
-// Limit each file to 20 MB (description HTML is handled by express.json limit)
+// Use memory storage so we can forward buffer to S3 when configured
 const upload = multer({
-  storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB for chat attachments
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
 });
 
 /**
  * POST /upload/richtext
- * Used by ReactQuill handler:
- * - field name: "file"
+ * field name: "file"
  * Returns: { url, original_name }
  */
-router.post("/richtext", upload.single("file"), (req, res) => {
+router.post("/richtext", upload.single("file"), async (req, res) => {
   const file = req.file;
-  if (!file) {
-    return res.status(400).json({ error: "No file uploaded" });
+  if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+  try {
+    const url = await uploadFile({
+      buffer:       file.buffer,
+      originalname: file.originalname,
+      mimetype:     file.mimetype,
+      folder:       "uploads",
+    });
+    return res.json({ url, original_name: file.originalname });
+  } catch (err) {
+    console.error("Upload error:", err);
+    return res.status(500).json({ error: "Upload failed" });
   }
-
-  const publicUrl = `/uploads/${file.filename}`;
-
-  return res.json({
-    url: publicUrl,
-    original_name: file.originalname,
-  });
 });
 
 /**
  * POST /upload/chat-attachment
- * Accepts any file type (image, video, audio, pdf, zip, etc.)
  * field name: "file"
  * Returns: { url, name, size, type }
  */
-router.post("/chat-attachment", upload.single("file"), (req, res) => {
+router.post("/chat-attachment", upload.single("file"), async (req, res) => {
   const file = req.file;
-  if (!file) {
-    return res.status(400).json({ error: "No file uploaded" });
+  if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+  try {
+    const url = await uploadFile({
+      buffer:       file.buffer,
+      originalname: file.originalname,
+      mimetype:     file.mimetype,
+      folder:       "uploads",
+    });
+    return res.json({ url, name: file.originalname, size: file.size, type: file.mimetype });
+  } catch (err) {
+    console.error("Upload error:", err);
+    return res.status(500).json({ error: "Upload failed" });
   }
+});
 
-  const publicUrl = `/uploads/${file.filename}`;
+/**
+ * POST /upload/avatar
+ * field name: "file"
+ * Returns: { url }
+ */
+router.post("/avatar", upload.single("file"), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "No file uploaded" });
 
-  return res.json({
-    url: publicUrl,
-    name: file.originalname,
-    size: file.size,
-    type: file.mimetype,
-  });
+  try {
+    const url = await uploadFile({
+      buffer:       file.buffer,
+      originalname: file.originalname,
+      mimetype:     file.mimetype,
+      folder:       "avatars",
+    });
+    return res.json({ url });
+  } catch (err) {
+    console.error("Avatar upload error:", err);
+    return res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+/**
+ * GET /upload/storage-mode
+ * Returns whether S3 or local storage is active.
+ */
+router.get("/storage-mode", (_req, res) => {
+  res.json({ mode: storageMode });
 });
 
 export default router;
