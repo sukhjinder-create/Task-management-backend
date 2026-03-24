@@ -7,6 +7,7 @@ import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   getSsoConfig, saveSsoConfig, processSamlAssertion,
 } from "../services/sso.service.js";
+import { getClientIp } from "../utils/requestContext.util.js";
 
 const router = express.Router();
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
@@ -125,7 +126,7 @@ router.post("/saml/callback", async (req, res) => {
       return res.redirect(`${FRONTEND_URL}/login?error=sso_no_email`);
     }
 
-    const { token, user } = await processSamlAssertion(workspaceId, profile, req.ip);
+    const { token, user } = await processSamlAssertion(workspaceId, profile, getClientIp(req));
 
     const params = new URLSearchParams({ token, user: JSON.stringify(user) });
     res.redirect(`${FRONTEND_URL}/auth/callback?${params}`);

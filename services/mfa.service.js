@@ -1,6 +1,6 @@
 // services/mfa.service.js
-// TOTP-based MFA using otplib
-import { TOTP, generateSecret } from "otplib";
+// TOTP-based MFA using otplib standalone functions
+import { generateSecret, generate, verify, generateURI } from "otplib";
 import QRCode from "qrcode";
 import crypto from "crypto";
 import db from "../db.js";
@@ -24,7 +24,7 @@ export async function setupMfa(userId) {
   const userRow = await db.query("SELECT email FROM users WHERE id = $1", [userId]);
   const email = userRow.rows[0]?.email || userId;
 
-  const otpAuthUrl = TOTP.keyuri(email, APP_NAME, secret);
+  const otpAuthUrl = await generateURI({ secret, label: email, issuer: APP_NAME, type: "totp" });
   const qrCodeDataUrl = await QRCode.toDataURL(otpAuthUrl);
 
   return { secret, qrCodeDataUrl, otpAuthUrl };
@@ -43,8 +43,8 @@ export async function confirmMfa(userId, token, workspaceId, ipAddress) {
   if (!user?.mfa_secret) throw new Error("MFA setup not initiated");
   if (user.mfa_enabled)  throw new Error("MFA already enabled");
 
-  const isValid = TOTP.verify({ token, secret: user.mfa_secret });
-  if (!isValid) throw new Error("Invalid verification code");
+  const result = await verify({ token, secret: user.mfa_secret });
+  if (!result?.valid) throw new Error("Invalid verification code");
 
   // Generate 10 backup codes
   const backupCodes = Array.from({ length: 10 }, () =>
@@ -76,7 +76,8 @@ export async function verifyMfaToken(userId, token) {
   if (!user?.mfa_enabled) return true; // MFA not enabled, skip
 
   // Try TOTP
-  if (TOTP.verify({ token, secret: user.mfa_secret })) return true;
+  const result = await verify({ token, secret: user.mfa_secret });
+  if (result?.valid) return true;
 
   // Try backup codes
   const codes = user.mfa_backup_codes || [];
@@ -105,8 +106,8 @@ export async function disableMfa(userId, token, workspaceId, ipAddress) {
   const user = row.rows[0];
   if (!user?.mfa_enabled) throw new Error("MFA is not enabled");
 
-  const isValid = TOTP.verify({ token, secret: user.mfa_secret });
-  if (!isValid) throw new Error("Invalid verification code");
+  const result = await verify({ token, secret: user.mfa_secret });
+  if (!result?.valid) throw new Error("Invalid verification code");
 
   await db.query(
     "UPDATE users SET mfa_enabled = false, mfa_secret = NULL, mfa_backup_codes = NULL WHERE id = $1",

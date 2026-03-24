@@ -1,7 +1,8 @@
 export function detectSignals(
   dimensions,
   historicalScores,
-  executionSnapshot // ⭐ NEW
+  executionSnapshot, // execution reality snapshot
+  okrContext         // OKR portfolio health (optional) — from /objectives/workspace/health
 ) {
 
   const signals = [];
@@ -23,7 +24,7 @@ export function detectSignals(
 
 
   // -----------------------------
-  // EXECUTION REALITY SIGNALS (NEW)
+  // EXECUTION REALITY SIGNALS
   // -----------------------------
   if (executionSnapshot) {
 
@@ -55,6 +56,43 @@ export function detectSignals(
     )
   ) {
     signals.push("Three-month consecutive decline");
+  }
+
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // GOAL PORTFOLIO SIGNALS
+  //
+  // These signals fire when the intelligence layer detects that workspace
+  // goals are unhealthy — stalled goals, off-track progress, or sprint
+  // velocity that cannot deliver goals on time.
+  //
+  // okrContext shape (from GET /goals/workspace/health):
+  //   { totalGoals, atRiskCount, stalledCount, behindCount,
+  //     avgHealthScore, avgProgress, completedCount }
+  // ─────────────────────────────────────────────────────────────────────────
+  if (okrContext && okrContext.totalGoals > 0) {
+
+    if (okrContext.atRiskCount > 0)
+      signals.push(
+        `${okrContext.atRiskCount} goal(s) are at risk or off-track`
+      );
+
+    if (okrContext.stalledCount > 0)
+      signals.push(
+        `${okrContext.stalledCount} goal(s) have stalled — no progress in 14+ days`
+      );
+
+    if (okrContext.behindCount > 0)
+      signals.push(
+        `${okrContext.behindCount} goal(s) are behind their expected progress pace`
+      );
+
+    if (okrContext.avgHealthScore !== null && okrContext.avgHealthScore < 35)
+      signals.push("Goal portfolio health is critically low — most goals are at risk");
+
+    const riskRatio = okrContext.atRiskCount / okrContext.totalGoals;
+    if (riskRatio > 0.5)
+      signals.push("More than half of workspace goals are currently at risk");
   }
 
   return signals;

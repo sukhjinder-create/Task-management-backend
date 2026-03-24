@@ -19,6 +19,7 @@ router.get("/", async (req, res) => {
     const {
       userId, action, entityType, entityId,
       startDate, endDate,
+      page, pageSize,
       limit = 50, offset = 0,
     } = req.query;
 
@@ -30,6 +31,8 @@ router.get("/", async (req, res) => {
       entityId,
       startDate,
       endDate,
+      page,
+      pageSize,
       limit: Math.min(parseInt(limit) || 50, 200),
       offset: parseInt(offset) || 0,
     });

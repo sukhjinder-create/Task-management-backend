@@ -34,6 +34,8 @@ class IntelligenceService {
 
       COUNT(*) FILTER (
         WHERE status = 'completed'
+        AND completed_at IS NOT NULL
+        AND due_date IS NOT NULL
         AND completed_at > due_date
       ) AS late_completions,
 
@@ -41,6 +43,17 @@ class IntelligenceService {
         WHERE status != 'completed'
         AND due_date < NOW()
       ) AS active_overdue,
+
+      -- Unified timeliness: all tasks that have a due date
+      COUNT(*) FILTER (WHERE due_date IS NOT NULL) AS tasks_with_due_date,
+
+      -- On-time completions (completed before or on due date)
+      COUNT(*) FILTER (
+        WHERE status = 'completed'
+        AND due_date IS NOT NULL
+        AND completed_at IS NOT NULL
+        AND completed_at <= due_date
+      ) AS on_time_completions,
 
       AVG(
         EXTRACT(EPOCH FROM (completed_at - created_at))
@@ -161,42 +174,69 @@ const externalExecution =
   const late = Number(metrics.late_completions) || 0;
   const overdue = Number(metrics.active_overdue) || 0;
   const avgTime = Number(metrics.avg_completion_time_seconds) || 0;
+  const tasksWithDue = Number(metrics.tasks_with_due_date) || 0;
+  const onTime = Number(metrics.on_time_completions) || 0;
 
-  // Include external execution as bonus credit
-const adjustedCompleted = completed + externalExecution;
+  // ── Execution Discipline ────────────────────────────────────────────────────
+  // "What % of assigned tasks have you completed?"
+  // External execution bonus removed — it added phantom completions that had
+  // no basis in verifiable individual work and could artificially inflate scores.
+  // External execution is now a signal only (surfaced in signals array below).
+  const executionDiscipline = total === 0 ? 0 : (completed / total) * 100;
 
-// prevent division by zero
-const adjustedTotal = Math.max(total, adjustedCompleted);
-
-const executionDiscipline =
-  adjustedTotal === 0
-    ? 0
-    : (adjustedCompleted / adjustedTotal) * 100;
-
+  // ── Timeliness (unified) ────────────────────────────────────────────────────
+  // "Of all tasks that have a due date, what % were delivered on time?"
+  // Denominator includes active overdue tasks — they count as "not on time".
+  // Neutral (50) when no due dates are set: don't reward or penalise unmeasured work.
   const timelinessIndex =
-    completed === 0 ? 100 :
-    (1 - late / completed) * 100;
+    tasksWithDue === 0 ? 50 :
+    (onTime / tasksWithDue) * 100;
 
   const workloadStress =
     total === 0 ? 0 :
     (overdue / total) * 100;
 
+  // ── Velocity ────────────────────────────────────────────────────────────────
+  // Hyperbolic decay referenced to a 7-day completion target.
+  // 0 days→100, 3.5 days→67, 7 days→50, 14 days→33, 28 days→20.
+  // Previous linear formula (100 − avgDays) barely distinguished the normal
+  // 1–30 day range (scored 70–99), making velocity nearly meaningless.
   const velocityScore =
-    avgTime === 0 ? 50 :
-    Math.max(0, 100 - (avgTime / 86400));
+    (avgTime === 0 || completed === 0) ? 0 :
+    Math.round(Math.max(0, 100 / (1 + (avgTime / 86400) / 7)));
 
-  // 🔹 Risk modeling
-  const riskScore =
+  // ── Behavioural risk (real-time) ────────────────────────────────────────────
+  const behaviouralRisk =
       0.30 * (100 - executionDiscipline)
     + 0.25 * (100 - timelinessIndex)
     + 0.25 * workloadStress
     + 0.20 * (100 - velocityScore);
 
-  const riskProbability = Math.min(100, Math.max(0, riskScore));
+  // ── Score-based risk (authoritative monthly) ────────────────────────────────
+  // The monthly score is the official performance record.
+  // Low score MUST raise risk — they cannot contradict each other.
+  // score 10 → score risk 90 | score 80 → score risk 20
+  const monthlyScore = record?.score ?? null;
+  const scoreBasedRisk = monthlyScore !== null ? (100 - monthlyScore) : behaviouralRisk;
+
+  // ── Unified risk: 55% real-time behaviour + 45% authoritative score ─────────
+  const riskScore = behaviouralRisk * 0.55 + scoreBasedRisk * 0.45;
+
+  // ── Score-based risk floor ────────────────────────────────────────────────
+  // A critically low monthly score MUST produce High Risk regardless of
+  // how good the real-time behavioural dimensions look.
+  //   score ≤ 30  →  minimum 66% (firmly in High zone)
+  //   score ≤ 50  →  minimum 36% (firmly in Medium zone)
+  const riskFloor =
+    monthlyScore !== null && monthlyScore <= 30 ? 66 :
+    monthlyScore !== null && monthlyScore <= 50 ? 36 :
+    0;
+
+  const riskProbability = Math.min(100, Math.max(riskFloor, riskScore));
 
   const riskLevel =
-    riskProbability > 70 ? "High" :
-    riskProbability > 40 ? "Medium" :
+    riskProbability > 65 ? "High"   :  // score ≤ 30 always lands here
+    riskProbability > 35 ? "Medium" :
     "Low";
 
   // 🔹 Signals
@@ -211,13 +251,16 @@ const executionDiscipline =
   if (executionDiscipline < 50)
     signals.push("Low execution discipline");
 
-  if (timelinessIndex < 60)
+  if (total > 0 && completed === 0)
+    signals.push("No tasks completed this month");
+
+  if (timelinessIndex < 60 && completed > 0 && tasksWithDue > 0)
     signals.push("Chronic deadline slippage");
 
   if (workloadStress > 60)
     signals.push("High workload stress");
 
-  if (velocityScore < 40)
+  if (velocityScore < 40 && completed > 0)
     signals.push("Slow task completion velocity");
 
   const dynamicCoaching = [];
@@ -242,7 +285,7 @@ const executionDiscipline =
     }
   }
 
-  if (timelinessIndex < 70) {
+  if (timelinessIndex < 70 && completed > 0 && tasksWithDue > 0) {
     if (late > 0 && lateRows.length > 0) {
       const lateExamples = lateRows
         .map(r => `"${r.title}" (${r.days_late}d late)`)
@@ -252,7 +295,7 @@ const executionDiscipline =
       );
     } else if (late > 0) {
       dynamicCoaching.push(
-        `${late} of your ${completed} completed task${completed !== 1 ? "s were" : " was"} delivered late (${Math.round(100 - timelinessIndex)}% late rate). Add 48-hour reminders to all upcoming due dates.`
+        `${onTime} of ${tasksWithDue} deadline-tracked tasks delivered on time (${Math.round(timelinessIndex)}% timeliness). Add 48-hour reminders to all upcoming due dates.`
       );
     } else {
       dynamicCoaching.push("Deadline adherence is trending low. Review all open tasks with due dates and flag any that are at risk of slipping today.");
@@ -304,6 +347,9 @@ const executionDiscipline =
   return {
   score: record.score,
   explanation: record.reasoning?.summary || "",
+
+  // Score composition from last monthly run (attendance + productivity sub-scores)
+  breakdown: record.breakdown ?? null,
 
   coaching: [
     ...(record.coaching || []),

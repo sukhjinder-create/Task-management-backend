@@ -12,8 +12,16 @@ import {
   completeSprint,
   assignTaskToSprint,
 } from "../services/sprint.service.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = express.Router({ mergeParams: true });
+
+function historyMeta(projectId, extra = {}) {
+  return {
+    projectId,
+    ...extra,
+  };
+}
 
 router.use(authMiddleware);
 router.use(requireWorkspaceForUser);
@@ -27,6 +35,7 @@ router.get("/projects/:projectId/sprints", async (req, res) => {
     const sprints = await listSprints({
       projectId: req.params.projectId,
       workspaceId: req.workspaceId,
+      userRole: req.user.role,
     });
     res.json(sprints);
   } catch (err) {
@@ -40,6 +49,8 @@ router.get("/projects/:projectId/sprints", async (req, res) => {
 ------------------------------------------------------- */
 router.post("/projects/:projectId/sprints", allowRoles("admin", "manager"), async (req, res) => {
   try {
+    // Only admins can create hidden sprints
+    const isHidden = req.user.role === "admin" ? (req.body.is_hidden === true) : false;
     const sprint = await createSprint({
       projectId: req.params.projectId,
       workspaceId: req.workspaceId,
@@ -48,7 +59,29 @@ router.post("/projects/:projectId/sprints", allowRoles("admin", "manager"), asyn
       startDate: req.body.start_date,
       endDate: req.body.end_date,
       createdBy: req.user.id,
+      isHidden,
     });
+
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "project.history.sprint.created",
+      entityType: "project",
+      entityId: req.params.projectId,
+      newValue: {
+        sprint_id: sprint.id,
+        name: sprint.name,
+        goal: sprint.goal ?? null,
+        status: sprint.status,
+        start_date: sprint.start_date ?? null,
+        end_date: sprint.end_date ?? null,
+      },
+      metadata: historyMeta(req.params.projectId, {
+        sprintId: sprint.id,
+        sprintName: sprint.name,
+      }),
+    });
+
     res.status(201).json(sprint);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -61,6 +94,15 @@ router.post("/projects/:projectId/sprints", allowRoles("admin", "manager"), asyn
 ------------------------------------------------------- */
 router.put("/sprints/:id", allowRoles("admin", "manager"), async (req, res) => {
   try {
+    // Only admins can toggle hidden flag
+    const isHidden = req.user.role === "admin" && req.body.is_hidden !== undefined
+      ? req.body.is_hidden
+      : undefined;
+    const beforeRes = await pool.query(
+      `SELECT * FROM sprints WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+    const before = beforeRes.rows[0];
     const sprint = await updateSprint({
       id: req.params.id,
       workspaceId: req.workspaceId,
@@ -68,7 +110,41 @@ router.put("/sprints/:id", allowRoles("admin", "manager"), async (req, res) => {
       goal: req.body.goal,
       startDate: req.body.start_date,
       endDate: req.body.end_date,
+      isHidden,
     });
+
+    if (before) {
+      await logAudit({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "project.history.sprint.updated",
+        entityType: "project",
+        entityId: sprint.project_id,
+        oldValue: {
+          sprint_id: before.id,
+          name: before.name,
+          goal: before.goal ?? null,
+          status: before.status,
+          start_date: before.start_date ?? null,
+          end_date: before.end_date ?? null,
+          is_hidden: before.is_hidden ?? false,
+        },
+        newValue: {
+          sprint_id: sprint.id,
+          name: sprint.name,
+          goal: sprint.goal ?? null,
+          status: sprint.status,
+          start_date: sprint.start_date ?? null,
+          end_date: sprint.end_date ?? null,
+          is_hidden: sprint.is_hidden ?? false,
+        },
+        metadata: historyMeta(sprint.project_id, {
+          sprintId: sprint.id,
+          sprintName: sprint.name,
+        }),
+      });
+    }
+
     res.json(sprint);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -81,7 +157,33 @@ router.put("/sprints/:id", allowRoles("admin", "manager"), async (req, res) => {
 ------------------------------------------------------- */
 router.delete("/sprints/:id", allowRoles("admin"), async (req, res) => {
   try {
+    const beforeRes = await pool.query(
+      `SELECT * FROM sprints WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+    const before = beforeRes.rows[0];
     await deleteSprint({ id: req.params.id, workspaceId: req.workspaceId });
+
+    if (before) {
+      await logAudit({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "project.history.sprint.deleted",
+        entityType: "project",
+        entityId: before.project_id,
+        oldValue: {
+          sprint_id: before.id,
+          name: before.name,
+          goal: before.goal ?? null,
+          status: before.status,
+        },
+        metadata: historyMeta(before.project_id, {
+          sprintId: before.id,
+          sprintName: before.name,
+        }),
+      });
+    }
+
     res.json({ message: "Sprint deleted. Tasks moved to backlog." });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -95,6 +197,20 @@ router.delete("/sprints/:id", allowRoles("admin"), async (req, res) => {
 router.post("/sprints/:id/start", allowRoles("admin", "manager"), async (req, res) => {
   try {
     const sprint = await startSprint({ id: req.params.id, workspaceId: req.workspaceId });
+
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "project.history.sprint.started",
+      entityType: "project",
+      entityId: sprint.project_id,
+      newValue: { sprint_id: sprint.id, status: sprint.status },
+      metadata: historyMeta(sprint.project_id, {
+        sprintId: sprint.id,
+        sprintName: sprint.name,
+      }),
+    });
+
     res.json(sprint);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -108,6 +224,23 @@ router.post("/sprints/:id/start", allowRoles("admin", "manager"), async (req, re
 router.post("/sprints/:id/complete", allowRoles("admin", "manager"), async (req, res) => {
   try {
     const result = await completeSprint({ id: req.params.id, workspaceId: req.workspaceId });
+
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "project.history.sprint.completed",
+      entityType: "project",
+      entityId: result.sprint?.project_id || result.project_id,
+      newValue: {
+        sprint_id: result.sprint?.id || req.params.id,
+        status: result.sprint?.status || "completed",
+      },
+      metadata: historyMeta(result.sprint?.project_id || result.project_id, {
+        sprintId: result.sprint?.id || req.params.id,
+        sprintName: result.sprint?.name,
+      }),
+    });
+
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -120,11 +253,33 @@ router.post("/sprints/:id/complete", allowRoles("admin", "manager"), async (req,
 ------------------------------------------------------- */
 router.patch("/tasks/:taskId/sprint", async (req, res) => {
   try {
+    const taskRes = await pool.query(
+      `SELECT id, project_id, sprint_id, task FROM tasks WHERE id = $1 AND workspace_id = $2`,
+      [req.params.taskId, req.workspaceId]
+    );
+    const beforeTask = taskRes.rows[0];
     const result = await assignTaskToSprint({
       taskId: req.params.taskId,
       sprintId: req.body.sprint_id || null, // null = backlog
       workspaceId: req.workspaceId,
     });
+
+    if (beforeTask) {
+      await logAudit({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "project.history.task.sprint_changed",
+        entityType: "project",
+        entityId: beforeTask.project_id,
+        oldValue: { sprint_id: beforeTask.sprint_id || null },
+        newValue: { sprint_id: req.body.sprint_id || null },
+        metadata: historyMeta(beforeTask.project_id, {
+          taskId: beforeTask.id,
+          taskTitle: beforeTask.task,
+        }),
+      });
+    }
+
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -132,17 +287,58 @@ router.patch("/tasks/:taskId/sprint", async (req, res) => {
 });
 
 /* -------------------------------------------------------
+   PATCH /sprints/:id/visibility
+   Toggle is_hidden on a sprint (admin only)
+------------------------------------------------------- */
+router.patch("/sprints/:id/visibility", allowRoles("admin"), async (req, res) => {
+  try {
+    const { is_hidden } = req.body;
+    if (typeof is_hidden !== "boolean") {
+      return res.status(400).json({ error: "is_hidden must be a boolean" });
+    }
+    const { rows } = await pool.query(
+      `UPDATE sprints SET is_hidden = $1, updated_at = NOW()
+       WHERE id = $2 AND workspace_id = $3 RETURNING *`,
+      [is_hidden, req.params.id, req.workspaceId]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Sprint not found" });
+
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "project.history.sprint.visibility_changed",
+      entityType: "project",
+      entityId: rows[0].project_id,
+      oldValue: { is_hidden: !is_hidden },
+      newValue: { is_hidden },
+      metadata: historyMeta(rows[0].project_id, {
+        sprintId: rows[0].id,
+        sprintName: rows[0].name,
+      }),
+    });
+
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/* -------------------------------------------------------
    GET /sprints
-   List all sprints in the workspace (for reports filter)
+   List all sprints in the workspace (for reports filter / OKR linking)
+   Admins see all sprints including hidden; others only see visible ones.
 ------------------------------------------------------- */
 router.get("/sprints", async (req, res) => {
   try {
+    const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+    const hiddenClause = isAdmin ? "" : "AND s.is_hidden = FALSE";
     const { rows } = await pool.query(
-      `SELECT s.id, s.name, s.status, s.project_id,
+      `SELECT s.id, s.name, s.status, s.project_id, s.is_hidden,
               p.name AS project_name
        FROM sprints s
        LEFT JOIN projects p ON p.id = s.project_id
        WHERE s.workspace_id = $1
+         ${hiddenClause}
        ORDER BY p.name ASC, s.created_at DESC`,
       [req.workspaceId]
     );

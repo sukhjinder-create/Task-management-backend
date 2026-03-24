@@ -5,39 +5,13 @@
 //   3. Smart notification suppression
 //   4. Natural-language reporting
 
-import axios from "axios";
 import db from "../db.js";
-
-const AI_URL    = process.env.AI_SERVICE_URL    || "http://localhost:11434";
-const AI_SECRET = process.env.AI_SERVICE_SECRET || "";
-const MODEL     = process.env.AI_MODEL          || "llama3";
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
+import { generateText } from "./llm.js";
 
 // ─── LLM call helper ──────────────────────────────────────────────────────────
 async function llm(prompt, maxTokens = 500, json = false) {
   try {
-    if (OPENAI_KEY) {
-      const res = await axios.post(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: maxTokens,
-          temperature: 0.3,
-          ...(json ? { response_format: { type: "json_object" } } : {}),
-        },
-        { headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" }, timeout: 30000 }
-      );
-      return res.data.choices[0].message.content.trim();
-    }
-
-    // Ollama fallback
-    const res = await axios.post(
-      `${AI_URL}/api/generate`,
-      { model: MODEL, prompt, stream: false, options: { num_predict: maxTokens } },
-      { headers: { "X-Secret": AI_SECRET }, timeout: 60000 }
-    );
-    return res.data.response?.trim() || "";
+    return await generateText({ prompt, maxTokens, json });
   } catch (err) {
     console.warn("[aiFeatures] LLM error:", err.message);
     return null;
@@ -306,50 +280,84 @@ Write a 2-sentence friendly digest summary highlighting the most important items
  * type: 'weekly' | 'sprint' | 'project'
  */
 export async function generateNlReport({ workspaceId, type = "weekly", projectId, sprintId }) {
-  // Gather stats
+  const isProject = type === "project";
   const since = type === "weekly" ? "7 days" : "30 days";
 
-  const [taskStats, memberStats, overdueRow] = await Promise.all([
-    db.query(
-      `SELECT status, COUNT(*) AS count
-       FROM tasks
-       WHERE workspace_id = $1
-         AND updated_at > NOW() - INTERVAL '${since}'
-         ${projectId ? "AND project_id = $2" : ""}
-       GROUP BY status`,
-      [workspaceId, ...(projectId ? [projectId] : [])]
-    ),
-    db.query(
-      `SELECT u.username,
-              COUNT(*) FILTER (WHERE t.status = 'done') AS completed,
-              COUNT(*) AS total
-       FROM tasks t
-       JOIN users u ON u.id = t.assigned_to
-       WHERE t.workspace_id = $1 AND t.updated_at > NOW() - INTERVAL '${since}'
-       GROUP BY u.id, u.username
-       ORDER BY completed DESC
-       LIMIT 5`,
-      [workspaceId]
-    ),
-    db.query(
-      `SELECT COUNT(*) AS count FROM tasks
-       WHERE workspace_id = $1 AND due_date < NOW() AND status != 'done'`,
-      [workspaceId]
-    ),
-  ]);
+  // For project reports: no date filter, must have projectId
+  if (isProject && !projectId) throw new Error("projectId is required for project reports");
+
+  // Fetch project name for project reports
+  let projectName = null;
+  if (isProject) {
+    const pRow = await db.query("SELECT name FROM projects WHERE id = $1", [projectId]);
+    projectName = pRow.rows[0]?.name || "Unknown Project";
+  }
+
+  const taskStatsQuery = isProject
+    ? db.query(
+        `SELECT status, COUNT(*) AS count FROM tasks
+         WHERE workspace_id = $1 AND project_id = $2
+         GROUP BY status`,
+        [workspaceId, projectId]
+      )
+    : db.query(
+        `SELECT status, COUNT(*) AS count FROM tasks
+         WHERE workspace_id = $1 AND updated_at > NOW() - INTERVAL '${since}'
+         GROUP BY status`,
+        [workspaceId]
+      );
+
+  const memberStatsQuery = isProject
+    ? db.query(
+        `SELECT u.username,
+                COUNT(*) FILTER (WHERE t.status = 'done') AS completed,
+                COUNT(*) AS total
+         FROM tasks t
+         JOIN users u ON u.id = t.assigned_to
+         WHERE t.workspace_id = $1 AND t.project_id = $2
+         GROUP BY u.id, u.username
+         ORDER BY completed DESC LIMIT 5`,
+        [workspaceId, projectId]
+      )
+    : db.query(
+        `SELECT u.username,
+                COUNT(*) FILTER (WHERE t.status = 'done') AS completed,
+                COUNT(*) AS total
+         FROM tasks t
+         JOIN users u ON u.id = t.assigned_to
+         WHERE t.workspace_id = $1 AND t.updated_at > NOW() - INTERVAL '${since}'
+         GROUP BY u.id, u.username
+         ORDER BY completed DESC LIMIT 5`,
+        [workspaceId]
+      );
+
+  const overdueQuery = isProject
+    ? db.query(
+        `SELECT COUNT(*) AS count FROM tasks
+         WHERE workspace_id = $1 AND project_id = $2 AND due_date < NOW() AND status != 'done'`,
+        [workspaceId, projectId]
+      )
+    : db.query(
+        `SELECT COUNT(*) AS count FROM tasks
+         WHERE workspace_id = $1 AND due_date < NOW() AND status != 'done'`,
+        [workspaceId]
+      );
+
+  const [taskStats, memberStats, overdueRow] = await Promise.all([taskStatsQuery, memberStatsQuery, overdueQuery]);
 
   const statusMap = Object.fromEntries(taskStats.rows.map(r => [r.status, parseInt(r.count)]));
   const overdue = parseInt(overdueRow.rows[0]?.count || 0);
   const topMembers = memberStats.rows;
 
-  const prompt = `You are a project management analyst. Generate a concise ${type} report for a workspace.
+  const scope = isProject ? `project "${projectName}"` : `workspace (last ${since})`;
+  const prompt = `You are a project management analyst. Generate a concise ${type} report for ${scope}.
 
-Data (last ${since}):
+Data:
 - Tasks done: ${statusMap.done || 0}
 - Tasks in progress: ${statusMap.in_progress || 0}
 - Tasks todo: ${statusMap.todo || 0}
 - Overdue tasks: ${overdue}
-- Top performers: ${topMembers.map(m => `${m.username} (${m.completed}/${m.total})`).join(", ") || "none"}
+- Top contributors: ${topMembers.map(m => `${m.username} (${m.completed}/${m.total})`).join(", ") || "none"}
 
 Write a professional 3-4 paragraph report covering:
 1. Executive summary (1 sentence)
@@ -363,7 +371,8 @@ Be specific and data-driven.`;
 
   return {
     type,
-    period: since,
+    projectName: projectName || undefined,
+    period: isProject ? "all time" : since,
     stats: { ...statusMap, overdue },
     topPerformers: topMembers,
     report,

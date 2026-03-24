@@ -10,6 +10,7 @@ import {
 import projectRepository from "../repositories/project.repository.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
 import { getWatchers } from "./watchers.service.js";
+import { logAudit } from "./audit.service.js";
 
 /**
  * Returns IDs of all workspace admins + managers assigned to this project.
@@ -57,6 +58,34 @@ async function assertProjectInWorkspace(projectId, workspaceId) {
   }
 
   return project;
+}
+
+async function logProjectHistory({
+  workspaceId,
+  actorId,
+  projectId,
+  action,
+  taskId = null,
+  taskTitle = null,
+  oldValue = null,
+  newValue = null,
+  metadata = {},
+}) {
+  await logAudit({
+    workspaceId,
+    userId: actorId,
+    action,
+    entityType: "project",
+    entityId: projectId,
+    oldValue,
+    newValue,
+    metadata: {
+      projectId,
+      taskId,
+      taskTitle,
+      ...metadata,
+    },
+  });
 }
 
 /* -------------------------------------------------------
@@ -204,6 +233,23 @@ emitWorkspaceIntelligenceUpdate(workspaceId, {
   projectId: created.project_id,
   taskId: created.id,
 });
+
+  await logProjectHistory({
+    workspaceId,
+    actorId: added_by,
+    projectId: created.project_id,
+    action: "project.history.task.created",
+    taskId: created.id,
+    taskTitle: created.task,
+    newValue: {
+      task: created.task,
+      status: created.status,
+      priority: created.priority,
+      assigned_to: created.assigned_to,
+      due_date: created.due_date,
+      sprint_id: created.sprint_id ?? null,
+    },
+  });
 
   try {
     const notified = new Set([added_by]);
@@ -387,9 +433,23 @@ export async function updateTaskAsAdminOrManager(id, data) {
   // 🔹 2️⃣ Fetch updated version
   const updatedTask = await getTaskById(id);
 
+
   // 🔹 3️⃣ LOG DIFFERENCES SAFELY
 
   const actorId = data.updated_by;
+
+  if (existing.task !== updatedTask.task) {
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.title_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { task: existing.task },
+      newValue: { task: updatedTask.task },
+    });
+  }
 
   // ASSIGNEE CHANGE
   if (existing.assigned_to !== updatedTask.assigned_to) {
@@ -405,6 +465,17 @@ export async function updateTaskAsAdminOrManager(id, data) {
       JSON.stringify({ assigned_to: existing.assigned_to }),
       JSON.stringify({ assigned_to: updatedTask.assigned_to })
     ]);
+
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.assignee_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { assigned_to: existing.assigned_to },
+      newValue: { assigned_to: updatedTask.assigned_to },
+    });
   }
 
   // STATUS CHANGE
@@ -421,6 +492,17 @@ export async function updateTaskAsAdminOrManager(id, data) {
       JSON.stringify({ status: existing.status }),
       JSON.stringify({ status: updatedTask.status })
     ]);
+
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.status_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { status: existing.status },
+      newValue: { status: updatedTask.status },
+    });
   }
 
   // PRIORITY CHANGE
@@ -437,6 +519,17 @@ export async function updateTaskAsAdminOrManager(id, data) {
       JSON.stringify({ priority: existing.priority }),
       JSON.stringify({ priority: updatedTask.priority })
     ]);
+
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.priority_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { priority: existing.priority },
+      newValue: { priority: updatedTask.priority },
+    });
   }
 
   // DESCRIPTION CHANGE
@@ -453,6 +546,82 @@ export async function updateTaskAsAdminOrManager(id, data) {
       null,
       null
     ]);
+
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.description_updated",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { description_length: existing.description?.length || 0 },
+      newValue: { description_length: updatedTask.description?.length || 0 },
+    });
+  }
+
+  if ((existing.due_date || null) !== (updatedTask.due_date || null)) {
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.due_date_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { due_date: existing.due_date || null },
+      newValue: { due_date: updatedTask.due_date || null },
+    });
+  }
+
+  if ((existing.sprint_id || null) !== (updatedTask.sprint_id || null)) {
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.sprint_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { sprint_id: existing.sprint_id || null },
+      newValue: { sprint_id: updatedTask.sprint_id || null },
+    });
+  }
+
+  if ((existing.task_type || "task") !== (updatedTask.task_type || "task")) {
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.type_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { task_type: existing.task_type || "task" },
+      newValue: { task_type: updatedTask.task_type || "task" },
+    });
+  }
+
+  if ((existing.story_points ?? null) !== (updatedTask.story_points ?? null)) {
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.story_points_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { story_points: existing.story_points ?? null },
+      newValue: { story_points: updatedTask.story_points ?? null },
+    });
+  }
+
+  if (Boolean(existing.is_blocked) !== Boolean(updatedTask.is_blocked)) {
+    await logProjectHistory({
+      workspaceId: data.workspaceId,
+      actorId,
+      projectId: updatedTask.project_id,
+      action: "project.history.task.blocked_changed",
+      taskId: updatedTask.id,
+      taskTitle: updatedTask.task,
+      oldValue: { is_blocked: Boolean(existing.is_blocked) },
+      newValue: { is_blocked: Boolean(updatedTask.is_blocked) },
+    });
   }
 
   // ─── NOTIFICATIONS ───────────────────────────────────────────────
@@ -635,11 +804,21 @@ await pool.query(`
   workspaceId,
   userId,
   "STATUS_CHANGED",
-  existing.status,
-  newStatus
+  JSON.stringify({ status: existing.status }),
+  JSON.stringify({ status: newStatus })
 ]);
 
   const updatedTask = await getTaskById(id);
+  await logProjectHistory({
+    workspaceId,
+    actorId: userId,
+    projectId: updatedTask.project_id,
+    action: "project.history.task.status_changed",
+    taskId: updatedTask.id,
+    taskTitle: updatedTask.task,
+    oldValue: { status: existing.status },
+    newValue: { status: newStatus },
+  });
   // 🧠 trigger intelligence recalculation (async, non-blocking)
 import("../intelligence/manualScoring.service.js")
   .then(({ runManualMonthlyScoring }) => {
@@ -702,7 +881,7 @@ return updatedTask;
 /**
  * Delete task
  */
-export async function deleteTask(id, workspaceId) {
+export async function deleteTask(id, workspaceId, actorId = null) {
   const existing = await getTaskById(id);
 
   // 🔒 workspace check
@@ -723,6 +902,23 @@ await pool.query(`
 ]);
 
   await pool.query(`DELETE FROM tasks WHERE id = $1`, [id]);
+
+  await logProjectHistory({
+    workspaceId,
+    actorId: actorId || existing.added_by,
+    projectId: existing.project_id,
+    action: "project.history.task.deleted",
+    taskId: existing.id,
+    taskTitle: existing.task,
+    oldValue: {
+      task: existing.task,
+      status: existing.status,
+      priority: existing.priority,
+      assigned_to: existing.assigned_to,
+      due_date: existing.due_date,
+      sprint_id: existing.sprint_id ?? null,
+    },
+  });
 
   emitWorkspaceIntelligenceUpdate(workspaceId, {
     type: "task-deleted",
@@ -832,3 +1028,6 @@ async function recomputeParentProgress(taskId) {
     [pct, newParentStatus, taskId]
   );
 }
+
+
+

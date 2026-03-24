@@ -3,6 +3,7 @@
 import express from "express";
 import db from "../db.js";
 import { logAudit } from "../services/audit.service.js";
+import { getClientIp, getUserAgent } from "../utils/requestContext.util.js";
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ router.post("/consent", async (req, res) => {
 
     await db.query(
       "INSERT INTO gdpr_consents (user_id, type, version, consented, ip_address, user_agent) VALUES ($1,$2,$3,$4,$5,$6)",
-      [req.user.id, type, version, consented !== false, req.ip, req.headers["user-agent"] || null]
+      [req.user.id, type, version, consented !== false, getClientIp(req), getUserAgent(req)]
     );
     res.json({ success: true });
   } catch (err) {
@@ -40,7 +41,8 @@ router.get("/my-data", async (req, res) => {
       workspaceId: req.workspaceId, userId,
       action: "gdpr.data_export",
       entityType: "user", entityId: userId,
-      ipAddress: req.ip,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
     });
 
     res.json({
@@ -69,7 +71,8 @@ router.post("/erasure", async (req, res) => {
       workspaceId: req.workspaceId, userId: req.user.id,
       action: "gdpr.erasure_request",
       entityType: "user", entityId: req.user.id,
-      ipAddress: req.ip,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
     });
 
     res.json({ success: true, requestId: row.rows[0].id, message: "Your erasure request has been submitted. An admin will process it within 30 days." });

@@ -9,7 +9,7 @@ class IntelligenceRepository {
   async getMonthlyUserScore({ workspaceId, userId, month }) {
     const { rows } = await pool.query(
       `
-      SELECT score, reasoning, improvements AS coaching
+      SELECT score, breakdown, reasoning, improvements AS coaching
       FROM workspace_monthly_scores
       WHERE workspace_id = $1
         AND user_id = $2

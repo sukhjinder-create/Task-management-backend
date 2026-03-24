@@ -17,7 +17,16 @@ import {
   upsertTestingAgentProjectProfile,
   upsertTestingAgentSettings,
 } from "../services/testingAgent.service.js";
-import { runBrowserAgent, autoDiscoverAndTest, runMultiScenario, runDeepExploration } from "../services/browserAgent.service.js";
+import {
+  runBrowserAgent,
+  autoDiscoverAndTest,
+  runMultiScenario,
+  runDeepExploration,
+  previewBrowserRun,
+  previewAutoDiscoverRun,
+  previewMultiScenarioRun,
+  previewDeepExplorationRun,
+} from "../services/browserAgent.service.js";
 
 const router = express.Router();
 
@@ -278,6 +287,19 @@ function buildDeepExploreInstructions(body = {}) {
 }
 
 // Browser agent run
+router.post("/tasks/:taskId/browser-preview", async (req, res) => {
+  try {
+    const { instructions } = req.body || {};
+    const preview = await previewBrowserRun({
+      instructions: String(instructions || "").trim(),
+    });
+    res.json(preview);
+  } catch (error) {
+    console.error("Browser agent preview failed:", error);
+    res.status(400).json({ error: "Browser agent preview failed", details: error.message });
+  }
+});
+
 router.post("/tasks/:taskId/browser-run", (req, res) => {
   const { instructions, timeoutMs } = req.body || {};
   if (!instructions || !String(instructions).trim()) {
@@ -299,6 +321,17 @@ router.post("/tasks/:taskId/browser-run", (req, res) => {
 });
 
 // Auto-discover: give URL → AI explores page → builds & runs its own test plan
+router.post("/tasks/:taskId/auto-discover-preview", async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    const preview = await previewAutoDiscoverRun({ url });
+    res.json(preview);
+  } catch (error) {
+    console.error("Auto-discover preview failed:", error);
+    res.status(400).json({ error: "Auto-discover preview failed", details: error.message });
+  }
+});
+
 router.post("/tasks/:taskId/auto-discover", (req, res) => {
   const { url, timeoutMs } = req.body || {};
   if (!url || !String(url).trim().startsWith("http")) {
@@ -320,6 +353,17 @@ router.post("/tasks/:taskId/auto-discover", (req, res) => {
 });
 
 // Multi-scenario: describe feature → AI generates 4 scenario types → runs them all
+router.post("/tasks/:taskId/multi-scenario-preview", async (req, res) => {
+  try {
+    const { description, url } = req.body || {};
+    const preview = await previewMultiScenarioRun({ description, url });
+    res.json(preview);
+  } catch (error) {
+    console.error("Multi-scenario preview failed:", error);
+    res.status(400).json({ error: "Multi-scenario preview failed", details: error.message });
+  }
+});
+
 router.post("/tasks/:taskId/multi-scenario", (req, res) => {
   const { description, url, timeoutMs } = req.body || {};
   if (!description || String(description).trim().length < 5) {
@@ -342,6 +386,17 @@ router.post("/tasks/:taskId/multi-scenario", (req, res) => {
 });
 
 // Deep Exploration — Login → discover all modules → deep test each one with real DOM context
+router.post("/tasks/:taskId/deep-explore-preview", async (req, res) => {
+  try {
+    const deepInstructions = buildDeepExploreInstructions(req.body || {});
+    const preview = await previewDeepExplorationRun({ instructions: deepInstructions });
+    res.json(preview);
+  } catch (error) {
+    console.error("Deep exploration preview failed:", error);
+    res.status(400).json({ error: "Deep exploration preview failed", details: error.message });
+  }
+});
+
 router.post("/tasks/:taskId/deep-explore", (req, res) => {
   const { timeoutMs } = req.body || {};
   const deepInstructions = buildDeepExploreInstructions(req.body || {});

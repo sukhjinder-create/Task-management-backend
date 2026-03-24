@@ -8290,6 +8290,116 @@ async function quickPageScan(url) {
   }
 }
 
+function summarizePreviewPageContext(pageContext = null) {
+  if (!pageContext) return null;
+  return {
+    pageTitle: pageContext.pageTitle || pageContext.title || "",
+    pageUrl: pageContext.pageUrl || "",
+    navCount: Array.isArray(pageContext.clickableLabels) ? pageContext.clickableLabels.length : 0,
+    inputCount: Array.isArray(pageContext.inputLabels) ? pageContext.inputLabels.length : 0,
+    formCount: Array.isArray(pageContext.forms) ? pageContext.forms.length : 0,
+    tabCount: Array.isArray(pageContext.tabs) ? pageContext.tabs.length : 0,
+    hasSearch: Boolean(pageContext.hasSearch),
+    hasTable: Boolean(pageContext.hasTable),
+    navPreview: Array.isArray(pageContext.clickableLabels) ? pageContext.clickableLabels.slice(0, 8) : [],
+    inputPreview: Array.isArray(pageContext.inputLabels) ? pageContext.inputLabels.slice(0, 8) : [],
+    tabPreview: Array.isArray(pageContext.tabs) ? pageContext.tabs.slice(0, 8) : [],
+  };
+}
+
+export async function previewBrowserRun({ instructions }) {
+  const raw = String(instructions ?? "").trim();
+  if (!raw) throw new Error("Instructions are required");
+
+  const parsedCredentials = parseCredentialsFromInstructions(raw);
+  const urlMatch = raw.match(/https?:\/\/[^\s,'"]+/);
+  const extractedUrl = parsedCredentials.url || (urlMatch ? urlMatch[0] : null);
+  const isDeepExploreIntent = /\b(all\s+modules?|all\s+features?|all\s+pages?|every\s+module|every\s+feature|explore\s+all|test\s+all|test\s+every|explore\s+every|check\s+all\s+modules?|test\s+each\s+module|go\s+through\s+all|entire\s+app|full\s+app|all\s+functionality)\b/i.test(raw);
+
+  if (isDeepExploreIntent) {
+    return previewDeepExplorationRun({ instructions: raw });
+  }
+
+  const pageContext = extractedUrl ? await quickPageScan(extractedUrl).catch(() => null) : null;
+  const steps = await parseInstructionsToSteps(raw, pageContext);
+
+  return {
+    mode: "browser",
+    url: extractedUrl,
+    loginRequired: Boolean(parsedCredentials.email || parsedCredentials.password),
+    steps: Array.isArray(steps) ? steps.slice(0, 25) : [],
+    pageContext: summarizePreviewPageContext(pageContext),
+  };
+}
+
+export async function previewAutoDiscoverRun({ url }) {
+  const targetUrl = String(url || "").trim();
+  if (!targetUrl.startsWith("http")) throw new Error("A valid HTTP URL is required");
+
+  const pageContext = await quickPageScan(targetUrl).catch(() => null);
+  const steps = await generateAutoDiscoveryPlan(targetUrl, pageContext || {});
+
+  return {
+    mode: "auto_discover",
+    url: targetUrl,
+    steps: Array.isArray(steps) ? steps.slice(0, 25) : [],
+    pageContext: summarizePreviewPageContext(pageContext),
+  };
+}
+
+export async function previewMultiScenarioRun({ description, url = null }) {
+  const featureDescription = String(description || "").trim();
+  if (featureDescription.length < 5) throw new Error("Description is required (min 5 characters)");
+
+  const targetUrl = url ? String(url).trim() : null;
+  const pageContext = targetUrl ? await quickPageScan(targetUrl).catch(() => null) : null;
+  const plans = await generateScenarioPlans(featureDescription, targetUrl, pageContext);
+
+  return {
+    mode: "multi_scenario",
+    url: targetUrl,
+    scenarios: [
+      { type: "happy_path", steps: Array.isArray(plans?.happy_path) ? plans.happy_path.slice(0, 12) : [] },
+      { type: "error_handling", steps: Array.isArray(plans?.error_handling) ? plans.error_handling.slice(0, 12) : [] },
+      { type: "edge_cases", steps: Array.isArray(plans?.edge_cases) ? plans.edge_cases.slice(0, 12) : [] },
+      { type: "performance", steps: Array.isArray(plans?.performance) ? plans.performance.slice(0, 12) : [] },
+    ],
+    pageContext: summarizePreviewPageContext(pageContext),
+  };
+}
+
+export async function previewDeepExplorationRun({ instructions }) {
+  const raw = String(instructions ?? "").trim();
+  if (!raw) throw new Error("Instructions are required");
+
+  const parsed = parseCredentialsFromInstructions(raw);
+  const pageContext = parsed.url ? await quickPageScan(parsed.url).catch(() => null) : null;
+
+  return {
+    mode: "deep_exploration",
+    url: parsed.url || null,
+    loginRequired: Boolean(parsed.email || parsed.password),
+    credentialsDetected: {
+      email: Boolean(parsed.email),
+      password: Boolean(parsed.password),
+    },
+    phases: [
+      "Authenticate and establish a stable starting state",
+      "Discover visible modules, tabs, forms, and navigation paths",
+      "Exercise core flows with proof of effect after each state change",
+      "Probe validation, edge cases, and usability/performance issues",
+      "Produce a reproducible QA report with prioritized findings",
+    ],
+    checklist: [
+      "Target URL is present",
+      parsed.email ? "Login identifier detected" : "Add login identifier if authentication is required",
+      parsed.password ? "Password detected" : "Add password if authentication is required",
+      "Environment is safe for automated writes and test data creation",
+    ],
+    pageContext: summarizePreviewPageContext(pageContext),
+  };
+}
+
 export async function runBrowserAgent({
   workspaceId,
   taskId,

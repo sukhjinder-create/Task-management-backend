@@ -54,20 +54,29 @@ export function calculateScore(metrics) {
 
   const productivityScore = Object.values(productivityBreakdown).reduce((a, b) => a + b, 0);
 
+  /* ── ATTENDANCE SCORING ──────────────────────────────────── */
+  // Attendance is always scored against the work calendar (Mon–Fri by default,
+  // minus holidays + approved leave). Absence on a working day is penalised.
+  // Only fall back to neutral (50) if no expected working days exist in the
+  // month (e.g., the month hasn't started yet or a misconfigured schedule).
+  const hasAttendanceTracking = metrics.hasAttendanceTracking ?? true;
+  const effectiveAttScore = hasAttendanceTracking ? attendanceScore : 50;
+
   /* ── OVERALL SCORE ───────────────────────────────────────── */
   const finalScore = Math.round(
-    (attendanceScore   * W.attendanceWeight   / 100) +
+    (effectiveAttScore * W.attendanceWeight   / 100) +
     (productivityScore * W.productivityWeight / 100)
   );
 
   return {
     score: finalScore,
-    attendanceScore,
+    attendanceScore: effectiveAttScore,
     productivityScore,
     breakdown: {
       // Top-level sub-scores
-      attendanceScore,
+      attendanceScore: effectiveAttScore,
       productivityScore,
+      hasAttendanceTracking,
       // Attendance detail
       ...attendanceBreakdown,
       // Productivity detail

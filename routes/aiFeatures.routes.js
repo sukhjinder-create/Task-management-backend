@@ -2,6 +2,7 @@
 // Phase 3 AI Feature endpoints
 import express from "express";
 import db from "../db.js";
+import { generateText } from "../services/llm.js";
 import {
   extractTasksFromMeetingNotes,
   predictDeadlineRisk,
@@ -178,12 +179,6 @@ router.post("/parse-task", async (req, res) => {
       [req.workspaceId]
     );
 
-    const { default: axios } = await import("axios");
-    const AI_URL    = process.env.AI_SERVICE_URL || "http://localhost:11434";
-    const AI_SECRET = process.env.AI_SERVICE_SECRET || "";
-    const MODEL     = process.env.AI_MODEL || "llama3";
-    const OPENAI_KEY = process.env.OPENAI_API_KEY;
-
     const prompt = `Parse this task description and extract structured data:
 "${text}"
 
@@ -200,18 +195,7 @@ Return ONLY JSON with:
   "labels": ["label1"]
 }`;
 
-    let raw = null;
-    if (OPENAI_KEY) {
-      const r = await axios.post(
-        "https://api.openai.com/v1/chat/completions",
-        { model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], max_tokens: 200, response_format: { type: "json_object" } },
-        { headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" }, timeout: 15000 }
-      );
-      raw = r.data.choices[0].message.content;
-    } else {
-      const r = await axios.post(`${AI_URL}/api/generate`, { model: MODEL, prompt, stream: false, options: { num_predict: 200 } }, { headers: { "X-Secret": AI_SECRET }, timeout: 30000 });
-      raw = r.data.response;
-    }
+    const raw = await generateText({ prompt, maxTokens: 200 });
 
     let parsed = {};
     try {

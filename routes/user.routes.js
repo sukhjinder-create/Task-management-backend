@@ -13,6 +13,8 @@ import {
   deleteUserService,
 } from "../services/user.service.js";
 import { getUserById, updateAvatarUrl } from "../repositories/user.repository.js";
+import { logAudit } from "../services/audit.service.js";
+import { getRequestAuditContext } from "../utils/requestContext.util.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +37,18 @@ const avatarUpload = multer({
 });
 
 const router = express.Router();
+
+function userSnapshot(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    projects: Array.isArray(user.projects) ? user.projects : [],
+    workspace_id: user.workspace_id ?? null,
+  };
+}
 
 /**
  * =====================================================
@@ -218,6 +232,19 @@ router.post("/", async (req, res) => {
       workspace_id: req.workspaceId, // ✅ correct
     });
 
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "user.create",
+      entityType: "user",
+      entityId: user.id,
+      newValue: userSnapshot(user),
+      ...getRequestAuditContext(req, {
+        targetUserId: user.id,
+        targetUsername: user.username,
+      }),
+    });
+
     res.status(201).json(user);
   } catch (err) {
     console.error("Error creating user:", err);
@@ -261,6 +288,20 @@ router.put("/:id", async (req, res) => {
       req.workspaceId
     );
 
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "user.update",
+      entityType: "user",
+      entityId: updated.id,
+      oldValue: userSnapshot(targetUser),
+      newValue: userSnapshot(updated),
+      ...getRequestAuditContext(req, {
+        targetUserId: updated.id,
+        targetUsername: updated.username,
+      }),
+    });
+
     res.json(updated);
   } catch (err) {
     console.error("Error updating user:", err);
@@ -289,6 +330,19 @@ router.delete("/:id", async (req, res) => {
 
     // ✅ FIX: pass workspaceId
     await deleteUserService(req.params.id, req.workspaceId);
+
+    await logAudit({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      action: "user.delete",
+      entityType: "user",
+      entityId: req.params.id,
+      oldValue: userSnapshot(targetUser),
+      ...getRequestAuditContext(req, {
+        targetUserId: req.params.id,
+        targetUsername: targetUser.username,
+      }),
+    });
 
     res.json({ success: true });
   } catch (err) {

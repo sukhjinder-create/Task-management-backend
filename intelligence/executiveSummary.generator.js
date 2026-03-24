@@ -1,6 +1,42 @@
 import { generateText } from "./llm/llmClient.js";
 
+/*
+  okrHealth (optional) shape from GET /objectives/workspace/health:
+  {
+    totalObjectives, atRiskCount, stalledCount, behindCount,
+    avgHealthScore, avgProgress, completedCount, byStatus
+  }
+*/
 export async function generateExecutiveSummary(data) {
+
+  // Build the Goals section for the prompt only when data is available
+  let okrSection = "";
+  if (data.okrHealth && data.okrHealth.totalGoals > 0) {
+    const g = data.okrHealth;
+    const riskRatio = Math.round((g.atRiskCount / g.totalGoals) * 100);
+    okrSection = `
+
+GOALS PORTFOLIO STATUS (Strategic Goal Health):
+
+Total Goals: ${g.totalGoals}
+Average Progress: ${g.avgProgress}%
+Average Health Score: ${g.avgHealthScore !== null ? g.avgHealthScore + "/100" : "N/A"}
+Goals At Risk or Off-Track: ${g.atRiskCount} (${riskRatio}% of portfolio)
+Stalled Goals (0% progress, 14+ days): ${g.stalledCount}
+Behind Expected Pace: ${g.behindCount}
+Completed: ${g.completedCount}
+Status Breakdown: ${JSON.stringify(g.byStatus || {})}
+
+Goals Intelligence Signal: ${
+  g.avgHealthScore !== null && g.avgHealthScore < 35
+    ? "CRITICAL — Goal portfolio is severely off-track. Strategic goals are not being met."
+    : g.atRiskCount > g.totalGoals / 2
+      ? "WARNING — Majority of goals are at risk. Execution is not aligned with strategy."
+      : g.stalledCount > 0
+        ? "CAUTION — Some goals have stalled. Leadership review needed."
+        : "Goal portfolio is progressing within acceptable range."
+}`;
+  }
 
   const prompt = `
 You are a senior organizational performance analyst hired by executive leadership.
@@ -129,6 +165,7 @@ Trend Direction: ${data.forecast?.trend}
 Risk Projection: ${data.forecast?.riskProjection}
 Forecast Confidence: ${data.forecast?.confidence}
 Momentum: ${data.forecast?.momentum}
+${okrSection}
 `;
 
   try {

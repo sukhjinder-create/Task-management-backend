@@ -13,8 +13,8 @@
 
 export const SCORE_WEIGHTS = {
   // ── FINAL AGGREGATION ───────────────────────────────────────
-  attendanceWeight:   40,   // attendance sub-score contribution
-  productivityWeight: 60,   // productivity sub-score contribution
+  attendanceWeight:   30,   // attendance sub-score contribution
+  productivityWeight: 70,   // productivity sub-score contribution
 
   // ── ATTENDANCE SUB-DIMENSIONS (must sum to 100) ─────────────
   attendancePresence:     30,  // were they there?

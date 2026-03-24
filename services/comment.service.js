@@ -3,6 +3,7 @@ import pool from "../db.js";
 import { notifyUser } from "./notification.service.js";
 import { getTaskById } from "./task.service.js";
 import { getUserByUsername } from "../repositories/user.repository.js";
+import { logAudit } from "./audit.service.js";
 
 export async function createComment({ task_id, comment_text, user, workspaceId }) {
   if (!task_id || !comment_text || !user?.id || !workspaceId) {
@@ -24,6 +25,25 @@ export async function createComment({ task_id, comment_text, user, workspaceId }
     (task_id, workspace_id, actor_id, action_type, old_value, new_value)
     VALUES ($1,$2,$3,$4,$5,$6)
   `, [task_id, workspaceId, user.id, "COMMENT_ADDED", null, null]);
+
+  await logAudit({
+    workspaceId,
+    userId: user.id,
+    action: "project.history.comment.added",
+    entityType: "project",
+    entityId: task.project_id,
+    newValue: {
+      comment_id: comment.id,
+      comment_preview: String(comment_text).slice(0, 160),
+    },
+    metadata: {
+      projectId: task.project_id,
+      taskId: task.id,
+      taskTitle: task.task,
+      commentId: comment.id,
+      commentPreview: String(comment_text).slice(0, 160),
+    },
+  });
 
   try {
     // Track all IDs already notified so we never send duplicates

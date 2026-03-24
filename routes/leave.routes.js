@@ -126,18 +126,36 @@ router.post("/requests", async (req, res) => {
       return res.status(400).json({ error: "leave_type_id, start_date, and end_date are required" });
     }
 
-    // Calculate business days — parse as local dates to avoid UTC timezone shift
+    // Calculate working days using workspace schedule + holidays
     const [sy, sm, sd] = String(start_date).split("T")[0].split("-").map(Number);
     const [ey, em, ed] = String(end_date).split("T")[0].split("-").map(Number);
     const start = new Date(sy, sm - 1, sd);
     const end   = new Date(ey, em - 1, ed);
     if (end < start) return res.status(400).json({ error: "end_date must be after start_date" });
 
+    // Fetch workspace work schedule (default Mon–Fri if not configured)
+    const schedResult = await db.query(
+      `SELECT work_days FROM workspace_work_schedule WHERE workspace_id = $1`,
+      [req.workspaceId]
+    );
+    const workDayNums = (schedResult.rows[0]?.work_days || [1, 2, 3, 4, 5]).map(Number);
+
+    // Fetch holidays in the leave date range
+    const startStr = start.toISOString().slice(0, 10);
+    const endStr   = end.toISOString().slice(0, 10);
+    const holResult = await db.query(
+      `SELECT date::text AS date FROM workspace_holidays
+       WHERE workspace_id = $1 AND date BETWEEN $2 AND $3`,
+      [req.workspaceId, startStr, endStr]
+    ).catch(() => ({ rows: [] })); // graceful if table doesn't exist yet
+    const holidayDates = new Set(holResult.rows.map(r => r.date.slice(0, 10)));
+
     let days = 0;
     const cur = new Date(start);
     while (cur <= end) {
-      const dow = cur.getDay();
-      if (dow !== 0 && dow !== 6) days++;
+      const dow     = cur.getDay();
+      const dateStr = cur.toISOString().slice(0, 10);
+      if (workDayNums.includes(dow) && !holidayDates.has(dateStr)) days++;
       cur.setDate(cur.getDate() + 1);
     }
 

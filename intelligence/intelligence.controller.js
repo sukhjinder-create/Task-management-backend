@@ -5,9 +5,8 @@ import { advancedForecast } from "./forecast/forecast.engine.js";
 import { generateExecutiveSummary } from "./executiveSummary.generator.js";
 import { saveExecutiveSummary } from "../events/executive/executiveSummary.store.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
-import { getExecutionMetrics } from "./executionIntelligence.service.js";
-import { getExecutionSnapshot }
-  from "./executionSnapshot.service.js";
+import { getExecutionSnapshot } from "./executionSnapshot.service.js";
+import { detectSignals } from "./signal.detector.js";
 
 /**
  * USER — Monthly performance
@@ -48,9 +47,11 @@ export async function getAdminInsights(req, res) {
     let projectFilter = "";
     let projectParams = [];
 
-    // 🔥 unified execution reality (internal + external)
-const executionSnapshot =
-  await getExecutionSnapshot(workspaceId);
+    // 🔥 unified execution reality + goal portfolio health (parallel)
+const [executionSnapshot, goalsHealth] = await Promise.all([
+  getExecutionSnapshot(workspaceId),
+  computeGoalWorkspaceHealth(workspaceId),
+]);
 
 // ROLE-BASED DATA SCOPE
 
@@ -177,6 +178,14 @@ else if (completionRate < 65) {
   executionRisk = "Medium";
 }
 
+// ── Org-level signals (execution + goals portfolio) ──────────────────────
+const orgSignals = detectSignals(
+  { executionDiscipline: completionRate },
+  scoreHistory,
+  executionSnapshot,
+  goalsHealth
+);
+
     return res.json({
   orgScore: {
     averageScore: stats.average_score
@@ -210,12 +219,108 @@ else if (completionRate < 65) {
       executionSnapshot.completedWork,
     pressure: executionPressure,
     risk: executionRisk
-  }
+  },
+
+  signals: orgSignals,
 });
 } catch (err) {
   console.error("getAdminInsights error:", err);
   res.status(500).json({ error: "Failed to fetch admin insights" });
 }
+}
+
+// ─── GOAL WORKSPACE HEALTH (used by intelligence layer & executive summary) ────
+export async function getGoalWorkspaceHealth(req, res) {
+  try {
+    const { workspaceId } = req;
+    const goalsHealth = await computeGoalWorkspaceHealth(workspaceId);
+    return res.json(goalsHealth);
+  } catch (err) {
+    console.error("getGoalWorkspaceHealth error:", err);
+    res.status(500).json({ error: "Failed to fetch goals health" });
+  }
+}
+
+/*
+  Internal helper — computes OKR portfolio health for a workspace.
+  Mirrors the logic in GET /objectives/workspace/health so the intelligence
+  layer can call it directly without an HTTP round-trip.
+*/
+/*
+  Internal helper — computes goal portfolio health for a workspace.
+  Mirrors the logic in GET /goals/workspace/health so the intelligence
+  layer can call it directly without an HTTP round-trip.
+*/
+async function computeGoalWorkspaceHealth(workspaceId) {
+  const { rows: objectives } = await pool.query(
+    `SELECT id, title, status, progress, time_period, created_at
+     FROM okr_objectives WHERE workspace_id = $1`,
+    [workspaceId]
+  );
+
+  if (objectives.length === 0) {
+    return {
+      totalGoals: 0, byStatus: {}, atRiskCount: 0,
+      stalledCount: 0, avgProgress: 0, avgHealthScore: null,
+      behindCount: 0, completedCount: 0
+    };
+  }
+
+  const now = new Date();
+
+  const summaries = objectives.map(obj => {
+    const tp = (obj.time_period || "").toUpperCase();
+    const yearStr = tp.match(/(\d{4})/);
+    const year = yearStr ? parseInt(yearStr[1]) : now.getFullYear();
+    let startDate, endDate;
+
+    if      (tp.includes("Q1")) { startDate = new Date(year, 0, 1);  endDate = new Date(year, 2, 31); }
+    else if (tp.includes("Q2")) { startDate = new Date(year, 3, 1);  endDate = new Date(year, 5, 30); }
+    else if (tp.includes("Q3")) { startDate = new Date(year, 6, 1);  endDate = new Date(year, 8, 30); }
+    else if (tp.includes("Q4")) { startDate = new Date(year, 9, 1);  endDate = new Date(year, 11, 31); }
+    else if (tp.includes("H1")) { startDate = new Date(year, 0, 1);  endDate = new Date(year, 5, 30); }
+    else if (tp.includes("H2")) { startDate = new Date(year, 6, 1);  endDate = new Date(year, 11, 31); }
+    else                         { startDate = new Date(year, 0, 1);  endDate = new Date(year, 11, 31); }
+
+    const totalDays       = Math.max(1, (endDate - startDate) / 86400000);
+    const daysElapsed     = Math.max(0, Math.min(totalDays, (now - startDate) / 86400000));
+    const expectedProgress = Math.min(100, (daysElapsed / totalDays) * 100);
+    const actualProgress   = Number(obj.progress) || 0;
+    const progressGap      = actualProgress - expectedProgress;
+
+    let healthScore = 50;
+    if      (progressGap >= 15)  healthScore += 25;
+    else if (progressGap >= 5)   healthScore += 15;
+    else if (progressGap >= -10) healthScore += 0;
+    else if (progressGap >= -20) healthScore -= 15;
+    else                         healthScore -= 30;
+    healthScore = Math.max(0, Math.min(100, Math.round(healthScore)));
+
+    return {
+      status:        obj.status,
+      actualProgress,
+      expectedProgress,
+      progressGap,
+      healthScore,
+      isStalled:  actualProgress === 0 && daysElapsed > 14,
+      isBehind:   progressGap < -10,
+      isComplete: actualProgress >= 100,
+    };
+  });
+
+  const byStatus = {};
+  for (const s of summaries) { byStatus[s.status] = (byStatus[s.status] || 0) + 1; }
+
+  return {
+    totalGoals: objectives.length,
+    byStatus,
+    atRiskCount:    summaries.filter(s => s.status === "at_risk" || s.status === "off_track").length,
+    stalledCount:   summaries.filter(s => s.isStalled).length,
+    behindCount:    summaries.filter(s => s.isBehind).length,
+    completedCount: summaries.filter(s => s.isComplete).length,
+    avgProgress:    Math.round(summaries.reduce((a, s) => a + s.actualProgress, 0) / summaries.length),
+    avgHealthScore: Math.round(summaries.reduce((a, s) => a + s.healthScore, 0) / summaries.length),
+  };
 }
 
 /**
@@ -273,24 +378,13 @@ const history = await pool.query(`
 
 const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
 
-const forecast = advancedForecast(scoreHistory);
-
     const stats = rows[0];
 
-    const executionMetrics =
-  await getExecutionMetrics(workspaceId, month);
-
-  // 🔥 unified execution reality
-const executionSnapshot =
-  await getExecutionSnapshot(workspaceId);
-  const executionContext = {
-  completionRate: Math.round(
-    executionSnapshot.completionRate * 100
-  ),
-  backlog:
-    executionSnapshot.totalWork -
-    executionSnapshot.completedWork
-};
+  // unified execution reality + goal portfolio health (run in parallel)
+  const [executionSnapshot, goalsHealth] = await Promise.all([
+    getExecutionSnapshot(workspaceId),
+    computeGoalWorkspaceHealth(workspaceId),
+  ]);
 
     const data = {
   month,
@@ -298,12 +392,8 @@ const executionSnapshot =
   execution: executionSnapshot,
 
   executionContext: {
-    completionRate: Math.round(
-      executionSnapshot.completionRate * 100
-    ),
-    backlog:
-      executionSnapshot.totalWork -
-      executionSnapshot.completedWork
+    completionRate: Math.round(executionSnapshot.completionRate * 100),
+    backlog: executionSnapshot.totalWork - executionSnapshot.completedWork,
   },
 
   orgScore: {
@@ -321,10 +411,10 @@ const executionSnapshot =
 
   leaderboard: leaderboard.rows,
 
-  forecast: advancedForecast(
-    scoreHistory,
-    executionSnapshot
-  )
+  forecast: advancedForecast(scoreHistory, executionSnapshot),
+
+  // Goal portfolio context — injected into the LLM prompt
+  okrHealth: goalsHealth,
 };
 
     // ===== Check existing summary =====

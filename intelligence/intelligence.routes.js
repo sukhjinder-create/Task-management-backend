@@ -13,6 +13,7 @@ import {
   getProjectsHealth,
   getTeamComparison,
   getWorkspaceDashboard,
+  getGoalWorkspaceHealth,
 } from "./intelligence.controller.js";
 
 
@@ -108,6 +109,29 @@ router.get(
   authMiddleware,
   requireWorkspaceForUser,
   getWorkspaceDashboard
+);
+
+/*
+  GET /intelligence/okr/health
+  ────────────────────────────
+  Returns aggregated OKR portfolio health for the workspace.
+  The intelligence layer actively watches OKRs through this endpoint.
+
+  Response includes:
+  • totalObjectives    — how many OKRs exist
+  • atRiskCount        — at_risk or off_track objectives
+  • stalledCount       — objectives with 0% progress after 14+ days
+  • behindCount        — objectives behind expected pace
+  • avgHealthScore     — 0–100 portfolio health
+  • avgProgress        — mean progress across all objectives
+  • completedCount     — objectives at 100%
+  • byStatus           — count per status bucket
+*/
+router.get(
+  "/goals/health",
+  authMiddleware,
+  requireWorkspaceForUser,
+  getGoalWorkspaceHealth
 );
 
 export default router;

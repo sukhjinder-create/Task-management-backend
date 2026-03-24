@@ -14,9 +14,47 @@ async function assertSprintInWorkspace(sprintId, workspaceId) {
 }
 
 /* -------------------------------------------------------
-   LIST sprints for a project
+   Recalculate a goal's progress from its linked sprints.
+   Called automatically whenever a linked sprint is completed.
+   Progress = (# completed linked sprints / # total linked sprints) * 100
 ------------------------------------------------------- */
-export async function listSprints({ projectId, workspaceId }) {
+export async function recalcGoalFromSprints(objectiveId) {
+  const { rows: links } = await pool.query(
+    `SELECT sl.sprint_id, s.status
+     FROM okr_sprint_links sl
+     JOIN sprints s ON s.id = sl.sprint_id
+     WHERE sl.objective_id = $1`,
+    [objectiveId]
+  );
+
+  if (links.length === 0) return; // no linked sprints — nothing to recalc
+
+  const completed = links.filter(l => l.status === "completed").length;
+  const progress  = Math.round((completed / links.length) * 100);
+
+  // Derive status from progress
+  let status = "on_track";
+  if (progress === 100)      status = "done";
+  else if (progress >= 60)   status = "on_track";
+  else if (progress >= 30)   status = "at_risk";
+  else                       status = "off_track";
+
+  await pool.query(
+    `UPDATE okr_objectives SET progress = $1, status = $2, updated_at = NOW() WHERE id = $3`,
+    [progress, status, objectiveId]
+  );
+}
+
+/* -------------------------------------------------------
+   LIST sprints for a project
+   - Non-admin / non-superadmin roles never see hidden sprints
+------------------------------------------------------- */
+export async function listSprints({ projectId, workspaceId, userRole }) {
+  const hiddenFilter =
+    userRole === "admin" || userRole === "superadmin"
+      ? ""
+      : "AND s.is_hidden = FALSE";
+
   const { rows } = await pool.query(
     `
     SELECT
@@ -28,11 +66,26 @@ export async function listSprints({ projectId, workspaceId }) {
       COALESCE(SUM(t.story_points), 0)::int                           AS total_points,
       COALESCE(SUM(t.story_points) FILTER (WHERE t.status = 'completed'), 0)::int AS completed_points,
       COUNT(t.id) FILTER (WHERE t.is_blocked = true)::int             AS blocked_tasks,
-      COUNT(t.id) FILTER (WHERE t.task_type = 'bug')::int             AS bug_count
+      COUNT(t.id) FILTER (WHERE t.task_type = 'bug')::int             AS bug_count,
+      -- Goals linked to this sprint (visible to all; clickable for admin/manager on the UI)
+      (SELECT json_agg(
+                json_build_object(
+                  'goal_id',       oo.id,
+                  'goal_title',    oo.title,
+                  'goal_status',   oo.status,
+                  'goal_progress', oo.progress,
+                  'time_period',   oo.time_period
+                ) ORDER BY oo.created_at
+              )
+       FROM okr_sprint_links osl
+       JOIN okr_objectives oo ON oo.id = osl.objective_id
+       WHERE osl.sprint_id = s.id
+      ) AS linked_goals
     FROM sprints s
     LEFT JOIN tasks t ON t.sprint_id = s.id AND t.workspace_id = $2
     WHERE s.project_id = $1
       AND s.workspace_id = $2
+      ${hiddenFilter}
     GROUP BY s.id
     ORDER BY
       CASE s.status WHEN 'active' THEN 0 WHEN 'planning' THEN 1 ELSE 2 END,
@@ -46,24 +99,24 @@ export async function listSprints({ projectId, workspaceId }) {
 /* -------------------------------------------------------
    CREATE sprint
 ------------------------------------------------------- */
-export async function createSprint({ projectId, workspaceId, name, goal, startDate, endDate, createdBy }) {
+export async function createSprint({ projectId, workspaceId, name, goal, startDate, endDate, createdBy, isHidden = false }) {
   if (!name?.trim()) throw new Error("Sprint name is required");
 
   const { rows } = await pool.query(
     `
-    INSERT INTO sprints (project_id, workspace_id, name, goal, start_date, end_date, created_by)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    INSERT INTO sprints (project_id, workspace_id, name, goal, start_date, end_date, created_by, is_hidden)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     RETURNING *
     `,
-    [projectId, workspaceId, name.trim(), goal || null, startDate || null, endDate || null, createdBy]
+    [projectId, workspaceId, name.trim(), goal || null, startDate || null, endDate || null, createdBy, isHidden]
   );
   return rows[0];
 }
 
 /* -------------------------------------------------------
-   UPDATE sprint (name / goal / dates)
+   UPDATE sprint (name / goal / dates / is_hidden)
 ------------------------------------------------------- */
-export async function updateSprint({ id, workspaceId, name, goal, startDate, endDate }) {
+export async function updateSprint({ id, workspaceId, name, goal, startDate, endDate, isHidden }) {
   const sprint = await assertSprintInWorkspace(id, workspaceId);
 
   if (sprint.status === "completed") {
@@ -77,11 +130,13 @@ export async function updateSprint({ id, workspaceId, name, goal, startDate, end
         goal       = COALESCE($2, goal),
         start_date = COALESCE($3, start_date),
         end_date   = COALESCE($4, end_date),
+        is_hidden  = COALESCE($5, is_hidden),
         updated_at = NOW()
-    WHERE id = $5 AND workspace_id = $6
+    WHERE id = $6 AND workspace_id = $7
     RETURNING *
     `,
-    [name?.trim() || null, goal || null, startDate || null, endDate || null, id, workspaceId]
+    [name?.trim() || null, goal || null, startDate || null, endDate || null,
+     isHidden !== undefined ? isHidden : null, id, workspaceId]
   );
   return rows[0];
 }
@@ -140,6 +195,7 @@ export async function startSprint({ id, workspaceId }) {
 
 /* -------------------------------------------------------
    COMPLETE sprint — incomplete tasks go back to backlog
+   Automatically recalculates any linked OKR objectives.
 ------------------------------------------------------- */
 export async function completeSprint({ id, workspaceId }) {
   const sprint = await assertSprintInWorkspace(id, workspaceId);
@@ -172,9 +228,20 @@ export async function completeSprint({ id, workspaceId }) {
     [id, workspaceId]
   );
 
+  // ─── Auto-sync linked Goals ────────────────────────────────────────────────
+  const { rows: linkedGoals } = await pool.query(
+    `SELECT DISTINCT objective_id FROM okr_sprint_links WHERE sprint_id = $1`,
+    [id]
+  );
+  for (const { objective_id } of linkedGoals) {
+    await recalcGoalFromSprints(objective_id);
+  }
+  // ───────────────────────────────────────────────────────────────────────────
+
   return {
-    sprint: rows[0],
+    sprint:        rows[0],
     movedToBacklog: incomplete[0].count,
+    goalsUpdated:  linkedGoals.length,
   };
 }
 

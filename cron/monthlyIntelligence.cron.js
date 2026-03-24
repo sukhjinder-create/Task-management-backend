@@ -1,3 +1,4 @@
+import cron from "node-cron";
 import pool from "../db.js";
 import { generateMonthlyScore } from "../events/scoring/monthlyScoring.service.js";
 import { generateMonthlyCoaching } from "../events/coaching/coachingScheduler.service.js";
@@ -67,4 +68,48 @@ export async function runMonthlyIntelligence({
   }
 
   console.log("✅ Monthly Intelligence Cron completed:", month);
+}
+
+/**
+ * Schedules two recurring intelligence runs:
+ *
+ *  1. 1st of every month @ 02:00 — official end-of-month score for the
+ *     month that just closed (authoritative record).
+ *
+ *  2. Every Sunday @ 03:00 — mid-month refresh for the current month so
+ *     scores never go more than 7 days stale. Idempotent UPSERT keeps this safe.
+ */
+export function startMonthlyIntelligenceCron() {
+  // Helper: returns "YYYY-MM" for an offset of N months from today
+  const monthStr = (offsetMonths = 0) => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + offsetMonths);
+    return d.toISOString().slice(0, 7);
+  };
+
+  // Official end-of-month run — scores the month that just ended
+  cron.schedule("0 2 1 * *", async () => {
+    const month         = monthStr(-1); // previous month
+    const previousMonth = monthStr(-2);
+    console.log(`[intelligence-cron] End-of-month run for ${month}`);
+    try {
+      await runMonthlyIntelligence({ month, previousMonth });
+    } catch (err) {
+      console.error("[intelligence-cron] End-of-month run failed:", err);
+    }
+  });
+
+  // Weekly mid-month refresh — keeps current-month scores fresh
+  cron.schedule("0 3 * * 0", async () => {
+    const month         = monthStr(0);  // current month
+    const previousMonth = monthStr(-1);
+    console.log(`[intelligence-cron] Weekly refresh for ${month}`);
+    try {
+      await runMonthlyIntelligence({ month, previousMonth });
+    } catch (err) {
+      console.error("[intelligence-cron] Weekly refresh failed:", err);
+    }
+  });
+
+  console.log("✅ Monthly Intelligence cron started (end-of-month + weekly refresh)");
 }

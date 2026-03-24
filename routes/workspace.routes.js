@@ -9,8 +9,22 @@ import { allowRoles } from "../middleware/role.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import { ensureWorkspaceMember } from "../middleware/ensureWorkspaceMember.middleware.js";
 import pool from "../db.js";
+import { logAudit } from "../services/audit.service.js";
+import { getRequestAuditContext } from "../utils/requestContext.util.js";
 
 const router = express.Router();
+
+function workspaceSnapshot(workspace) {
+  if (!workspace) return null;
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    slug: workspace.slug ?? null,
+    billing_plan: workspace.billing_plan ?? null,
+    max_members: workspace.max_members ?? null,
+    metadata: workspace.metadata ?? null,
+  };
+}
 
 // All workspace routes require auth
 router.use(authMiddleware);
@@ -103,6 +117,17 @@ if (!["admin"].includes(caller.role)) {
   }
 }
 
+      const beforeRes = await pool.query(
+        `SELECT ai_enabled, ai_auto_reply, ai_name
+           FROM workspace_ai_settings
+          WHERE workspace_id = $1`,
+        [req.workspaceId]
+      );
+      const before = beforeRes.rows[0] || {
+        ai_enabled: false,
+        ai_auto_reply: false,
+        ai_name: "AI Assistant",
+      };
 
       const {
         ai_enabled = false,
@@ -123,6 +148,17 @@ if (!["admin"].includes(caller.role)) {
         `,
         [req.workspaceId, ai_enabled, ai_auto_reply, ai_name]
       );
+
+      await logAudit({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "workspace.ai_settings_updated",
+        entityType: "workspace",
+        entityId: req.workspaceId,
+        oldValue: before,
+        newValue: { ai_enabled, ai_auto_reply, ai_name },
+        ...getRequestAuditContext(req, { workspaceId: req.workspaceId }),
+      });
 
       res.json({ success: true });
     } catch (err) {
@@ -210,11 +246,23 @@ router.put("/:id", requireWorkspaceForUser, async (req, res) => {
       return res.status(400).json({ error: "No updatable fields provided" });
     }
 
+    const before = await workspaceService.getOne(id);
     values.push(id); // last param = workspace id
 
     const q = `UPDATE workspaces SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`;
     const { rows } = await pool.query(q, values);
     if (!rows || rows.length === 0) return res.status(404).json({ error: "Workspace not found" });
+
+    await logAudit({
+      workspaceId: id,
+      userId: caller.id,
+      action: "workspace.update",
+      entityType: "workspace",
+      entityId: id,
+      oldValue: workspaceSnapshot(before),
+      newValue: workspaceSnapshot(rows[0]),
+      ...getRequestAuditContext(req, { workspaceId: id }),
+    });
 
     res.json(rows[0]);
   } catch (err) {
@@ -246,6 +294,18 @@ router.post("/:id/members", requireWorkspaceForUser, async (req, res) => {
         userId: userIdToAdd,
         role: req.body.role || "member",
       });
+      await logAudit({
+        workspaceId,
+        userId: caller.id,
+        action: "workspace.member_added",
+        entityType: "workspace",
+        entityId: workspaceId,
+        newValue: {
+          user_id: userIdToAdd,
+          role: req.body.role || "member",
+        },
+        ...getRequestAuditContext(req, { workspaceId, memberUserId: userIdToAdd }),
+      });
       return res.status(201).json(added);
     }
 
@@ -260,6 +320,19 @@ router.post("/:id/members", requireWorkspaceForUser, async (req, res) => {
       workspaceId,
       userId: userIdToAdd,
       role: req.body.role || "member",
+    });
+
+    await logAudit({
+      workspaceId,
+      userId: caller.id,
+      action: "workspace.member_added",
+      entityType: "workspace",
+      entityId: workspaceId,
+      newValue: {
+        user_id: userIdToAdd,
+        role: req.body.role || "member",
+      },
+      ...getRequestAuditContext(req, { workspaceId, memberUserId: userIdToAdd }),
     });
 
     res.status(201).json(added);
@@ -295,6 +368,17 @@ router.delete("/:id/members/:userId", requireWorkspaceForUser, async (req, res) 
     }
 
     await workspaceService.removeMember({ workspaceId, userId: targetUserId });
+
+    await logAudit({
+      workspaceId,
+      userId: caller.id,
+      action: "workspace.member_removed",
+      entityType: "workspace",
+      entityId: workspaceId,
+      oldValue: { user_id: targetUserId },
+      ...getRequestAuditContext(req, { workspaceId, memberUserId: targetUserId }),
+    });
+
     res.json({ message: "Member removed" });
   } catch (err) {
     console.error("[workspaces.removeMember] error:", err?.message || err);

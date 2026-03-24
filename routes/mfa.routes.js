@@ -4,6 +4,7 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 import {
   setupMfa, confirmMfa, disableMfa, isMfaEnabled,
 } from "../services/mfa.service.js";
+import { getClientIp } from "../utils/requestContext.util.js";
 
 const router = express.Router();
 
@@ -37,7 +38,7 @@ router.post("/confirm", async (req, res) => {
     if (!token) return res.status(400).json({ error: "token is required" });
 
     const workspaceId = req.headers["x-workspace-id"] || null;
-    const ipAddress = req.ip;
+    const ipAddress = getClientIp(req);
     const result = await confirmMfa(req.user.id, token, workspaceId, ipAddress);
     res.json(result);
   } catch (err) {
@@ -52,7 +53,7 @@ router.post("/disable", async (req, res) => {
     if (!token) return res.status(400).json({ error: "token is required" });
 
     const workspaceId = req.headers["x-workspace-id"] || null;
-    const ipAddress = req.ip;
+    const ipAddress = getClientIp(req);
     await disableMfa(req.user.id, token, workspaceId, ipAddress);
     res.json({ success: true });
   } catch (err) {

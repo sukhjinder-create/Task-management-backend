@@ -172,6 +172,65 @@ router.get("/nl/suggestions", async (req, res) => {
 });
 
 /**
+ * GET /tasks/all
+ * Returns ALL workspace tasks in a single query (with project_name).
+ * Admin/manager: all workspace tasks.
+ * User: only tasks assigned to them.
+ * Much faster than loading per-project — replaces N sequential requests.
+ */
+router.get("/all", async (req, res) => {
+  try {
+    const { workspaceId, user } = req;
+
+    const values = [workspaceId];
+    let userClause = "";
+    if (user.role === "user") {
+      userClause = " AND t.assigned_to = $2";
+      values.push(user.id);
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        t.*,
+        p.name AS project_name,
+        COALESCE(st.total_subtasks, 0)     AS subtasks_total,
+        COALESCE(st.completed_subtasks, 0) AS subtasks_completed,
+        CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+             THEN p.project_code || '-' || t.ticket_number END AS display_id,
+        sp.name  AS sprint_name,
+        sp.status AS sprint_status
+      FROM tasks t
+      LEFT JOIN projects p       ON p.id = t.project_id
+      LEFT JOIN sprints sp       ON sp.id = t.sprint_id
+      LEFT JOIN (
+        SELECT task_id,
+               COUNT(*) AS total_subtasks,
+               COUNT(*) FILTER (WHERE status = 'completed') AS completed_subtasks
+        FROM subtasks
+        GROUP BY task_id
+      ) st ON st.task_id = t.id
+      WHERE t.workspace_id = $1
+        AND (
+          p.id IS NULL
+          OR p.id IN (
+            SELECT id FROM projects WHERE workspace_id = $1
+          )
+        )
+        ${userClause}
+      ORDER BY t.created_at DESC
+      `,
+      values
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("Error fetching all tasks:", err);
+    res.status(500).json({ error: "Failed to load tasks" });
+  }
+});
+
+/**
  * GET /tasks/:projectId
  * - Admin/manager: all tasks in project
  * - User: only assigned tasks
@@ -390,7 +449,7 @@ router.delete("/:id", async (req, res) => {
         .json({ error: "Only admin/manager can delete tasks" });
     }
 
-    await deleteTask(id, req.workspaceId); // 🔐 enforced
+    await deleteTask(id, req.workspaceId, req.user.id);
     res.json({ success: true });
   } catch (err) {
     console.error("Error deleting task:", err);

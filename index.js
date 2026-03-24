@@ -27,6 +27,7 @@ import dashboardRoutes from "./routes/dashboard.routes.js";
 import testingAgentRoutes from "./routes/testingAgent.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
+import { startMonthlyIntelligenceCron } from "./cron/monthlyIntelligence.cron.js";
 
 // 🔵 Chat channels
 import chatMessagesRoutes from "./routes/chatMessages.routes.js";
@@ -95,7 +96,8 @@ import mfaRoutes      from "./routes/mfa.routes.js";
 import ssoRoutes      from "./routes/sso.routes.js";
 import wikiRoutes     from "./routes/wiki.routes.js";
 import leaveRoutes    from "./routes/leave.routes.js";
-import okrRoutes      from "./routes/okr.routes.js";
+import holidaysRoutes from "./routes/holidays.routes.js";
+import goalsRoutes    from "./routes/goals.routes.js";
 import reviewsRoutes  from "./routes/reviews.routes.js";
 import gdprRoutes     from "./routes/gdpr.routes.js";
 import apiKeysRoutes  from "./routes/apiKeys.routes.js";
@@ -108,6 +110,7 @@ import aiFeaturesRoutes from "./routes/aiFeatures.routes.js";
 const app = express();
 
 app.set("etag", false);
+app.set("trust proxy", true);
 
 app.use((req, res, next) => {
   console.log("🌍 GLOBAL REQUEST:", req.method, req.originalUrl);
@@ -259,7 +262,8 @@ app.use("/mfa",       mfaRoutes);   // authMiddleware applied inside the router
 app.use("/auth/sso",  ssoRoutes);   // public SAML endpoints + auth-protected config
 app.use("/wiki",      authMiddleware, requireWorkspaceForUser, wikiRoutes);
 app.use("/leave",     authMiddleware, requireWorkspaceForUser, leaveRoutes);
-app.use("/okr",       authMiddleware, requireWorkspaceForUser, okrRoutes);
+app.use("/holidays",  authMiddleware, requireWorkspaceForUser, holidaysRoutes);
+app.use("/goals",     authMiddleware, requireWorkspaceForUser, goalsRoutes);
 app.use("/reviews",   authMiddleware, requireWorkspaceForUser, reviewsRoutes);
 app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, gdprRoutes);
 app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, apiKeysRoutes);
@@ -322,3 +326,4 @@ await import("./integrations/integration.bootstrap.js");
 // 4️⃣ Start cron LAST
 startAttendanceCron();
 startAutopilotCron();
+startMonthlyIntelligenceCron();
