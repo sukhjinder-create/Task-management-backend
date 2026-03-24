@@ -28,6 +28,7 @@ import testingAgentRoutes from "./routes/testingAgent.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
 import { startMonthlyIntelligenceCron } from "./cron/monthlyIntelligence.cron.js";
+import { startReviewsCron } from "./cron/reviews.cron.js";
 
 // 🔵 Chat channels
 import chatMessagesRoutes from "./routes/chatMessages.routes.js";
@@ -327,3 +328,4 @@ await import("./integrations/integration.bootstrap.js");
 startAttendanceCron();
 startAutopilotCron();
 startMonthlyIntelligenceCron();
+startReviewsCron();

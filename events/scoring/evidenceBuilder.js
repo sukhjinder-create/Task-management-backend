@@ -199,8 +199,11 @@ export async function buildUserEvidence({ workspaceId, userId, month }) {
   const tasksWithDue    = Number(timelinessRows[0]?.tasks_with_due || 0);
   const onTime          = Number(timelinessRows[0]?.on_time        || 0);
   const activeOverdueTL = Number(timelinessRows[0]?.active_overdue || 0);
-  // Neutral (0.5) when no due dates set — don't penalise for unmeasured work
-  const timelinessRatio = tasksWithDue > 0 ? onTime / tasksWithDue : 0.5;
+  // Neutral (0.5) only when tasks were completed but none had due dates
+  // (workspace doesn't use deadlines — can't penalise what isn't measured).
+  // Zero when nothing was completed — no completions = no timeliness credit.
+  const timelinessRatio = completedTasks === 0 ? 0
+    : tasksWithDue > 0 ? onTime / tasksWithDue : 0.5;
 
   // ── Story Point Velocity ──────────────────────────────────
   // Workspace avg points/month for normalisation (or target = 40 pts)
@@ -219,9 +222,11 @@ export async function buildUserEvidence({ workspaceId, userId, month }) {
   );
   const wsAvgPoints = Number(wsPointsRows[0]?.avg_pts || 0);
   const pointsTarget = wsAvgPoints > 0 ? wsAvgPoints : 40; // 40 pts default target
-  const storyPointVelocityRatio = completedPoints > 0
-    ? Math.min(completedPoints / pointsTarget, 1)
-    : taskCompletionRatio > 0 ? taskCompletionRatio : 0.5; // neutral when workspace doesn't use story points
+  // Neutral (0.5 → taskCompletionRatio) only when tasks were completed but story points
+  // aren't used (workspace feature choice). Zero when nothing completed.
+  const storyPointVelocityRatio = completedTasks === 0 ? 0
+    : completedPoints > 0 ? Math.min(completedPoints / pointsTarget, 1)
+    : taskCompletionRatio; // story points not used → use completion rate directly
 
   // ── Estimation Accuracy ───────────────────────────────────
   // Compare estimated_hours on completed tasks vs actual logged hours
@@ -290,15 +295,24 @@ export async function buildUserEvidence({ workspaceId, userId, month }) {
   );
   const blockedTotal    = Number(blockerRows[0]?.blocked_tasks || 0);
   const blockedResolved = Number(blockerRows[0]?.resolved      || 0);
-  const blockerResolutionRatio = blockedTotal > 0
-    ? blockedResolved / blockedTotal
-    : 1; // no blocked tasks = perfect score
+  // Perfect score only when user was active (completed work) and had no blocked tasks.
+  // Zero when nothing was completed — can't credit blocker-free work when no work was done.
+  const blockerResolutionRatio = completedTasks === 0 ? 0
+    : blockedTotal > 0 ? blockedResolved / blockedTotal : 1;
 
   /* ═══════════════════════════════════════════════════════════
      OUTPUT
   ═══════════════════════════════════════════════════════════ */
+  // User is considered inactive if they have zero sign-ins AND zero completed tasks.
+  // Covers: Slack-imported ghost users, users who were assigned tasks but never started.
+  // Inactive users get no score — the scoring neutrals would otherwise give a
+  // misleading artificial baseline (~31/100) despite zero real activity.
+  const isInactive = presentDays === 0 && completedTasks === 0;
+
   return {
     metrics: {
+      // Activity flag — checked by manualScoring to skip ghost users
+      isInactive,
       // Attendance
       hasAttendanceTracking: expectedWorkingDays > 0,  // always true when month has working days
       attendancePresenceRatio,

@@ -156,17 +156,34 @@ export async function sendLeaveStatusEmail({ to, username, status, leaveType, st
   });
 }
 
-export async function sendPerformanceReviewEmail({ to, username, reviewerName, cycleName, dueDate, reviewUrl }) {
-  await send({
-    to,
-    subject: `Performance review request: ${cycleName}`,
-    html: wrap("Performance Review Requested", `
+export async function sendPerformanceReviewEmail({
+  to, username, reviewerName, cycleName, dueDate, reviewUrl,
+  isReminder = false, daysLeft, reviewCount, pendingCount,
+}) {
+  const subject = isReminder
+    ? `⏰ Reminder: ${cycleName} closes in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}`
+    : `Performance review request: ${cycleName}`;
+
+  const body = isReminder
+    ? `
       <p>Hi ${username},</p>
-      <p>You have been asked to complete a performance review as part of <strong>${cycleName}</strong>.</p>
+      <p>This is a reminder that <strong>${cycleName}</strong> closes in <strong>${daysLeft} day${daysLeft !== 1 ? "s" : ""}</strong>.</p>
+      ${pendingCount ? `<p>You still have <strong>${pendingCount} review${pendingCount !== 1 ? "s" : ""}</strong> to submit.</p>` : ""}
+      ${dueDate ? `<p>Deadline: <strong>${dueDate}</strong></p>` : ""}
+      <a class="btn" href="${reviewUrl || APP_URL}">Complete Reviews</a>
+    `
+    : `
+      <p>Hi ${username},</p>
+      <p>You have ${reviewCount ? `<strong>${reviewCount} review${reviewCount !== 1 ? "s" : ""}</strong>` : "a review"} to complete as part of <strong>${cycleName}</strong>.</p>
       ${reviewerName ? `<p>You are reviewing: <strong>${reviewerName}</strong></p>` : ""}
       ${dueDate ? `<p>Due by: <strong>${dueDate}</strong></p>` : ""}
-      <a class="btn" href="${reviewUrl || APP_URL}">Start Review</a>
-    `),
+      <a class="btn" href="${reviewUrl || APP_URL}">Start Reviews</a>
+    `;
+
+  await send({
+    to,
+    subject,
+    html: wrap(isReminder ? "Review Reminder" : "Performance Reviews Open", body),
   });
 }
 

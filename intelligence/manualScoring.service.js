@@ -22,14 +22,14 @@ export async function runManualMonthlyScoring({
   month,
   triggeredBy,
 }) {
-  // 1️⃣ Get all active users in workspace
+  // 1️⃣ Get all members of this workspace via workspace_users
+  //    (covers Slack-imported and cross-workspace members, not just users.workspace_id)
   const { rows: users } = await pool.query(
-    `
-    SELECT id
-    FROM users
-    WHERE workspace_id = $1
-      AND role != 'superadmin'
-    `,
+    `SELECT DISTINCT wu.user_id AS id
+     FROM workspace_users wu
+     JOIN users u ON u.id = wu.user_id
+     WHERE wu.workspace_id = $1
+       AND u.role != 'superadmin'`,
     [workspaceId]
   );
 
@@ -90,10 +90,22 @@ for (const proj of projectRows) {
   });
 }
 
-    // 3️⃣ Calculate score (Step 2.1)
+    // 3️⃣ Skip inactive users (zero attendance + zero tasks = no meaningful signal)
+    //    Remove any stale score they may have from a previous run.
+    if (metrics.isInactive) {
+      await pool.query(
+        `DELETE FROM workspace_monthly_scores
+         WHERE workspace_id = $1 AND user_id = $2 AND month = $3`,
+        [workspaceId, user.id, month]
+      );
+      results.push({ userId: user.id, score: null, skipped: true, reason: "no_activity" });
+      continue;
+    }
+
+    // 4️⃣ Calculate score
     const scoreResult = calculateScore(metrics);
 
-    // 4️⃣ Build explanation (deterministic)
+    // 5️⃣ Build explanation (deterministic)
     const explanation = buildMonthlyEvidence({
       month,
       baselineScore: 50,
@@ -101,7 +113,7 @@ for (const proj of projectRows) {
       score: scoreResult.score,
     });
 
-    // 5️⃣ Persist monthly score (UPSERT SAFE)
+    // 6️⃣ Persist monthly score (UPSERT SAFE)
     await saveMonthlyScore({
       workspaceId,
       userId: user.id,
