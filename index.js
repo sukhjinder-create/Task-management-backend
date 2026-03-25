@@ -209,7 +209,7 @@ app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
 app.use("/internal", internalRoutes);
 app.use(internalTasks);
-app.use(reportsRouter);
+app.use(authMiddleware, requireWorkspaceForUser, reportsRouter);
 // 🧠 Intelligence APIs (READ-ONLY, UI-facing)
 app.use(
   "/intelligence",

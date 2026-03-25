@@ -180,6 +180,25 @@ router.put("/:id/ai-preference", async (req, res) => {
  */
 router.get("/", async (req, res) => {
   try {
+    // Optional ?projectIds=x,y  → return only users who have tasks in those projects
+    const { projectIds } = req.query;
+    if (projectIds) {
+      const ids = projectIds.split(",").map((s) => s.trim()).filter(Boolean);
+      if (ids.length > 0) {
+        const { rows } = await pool.query(
+          `SELECT DISTINCT u.id, u.username, u.email, u.role, u.avatar_url
+           FROM users u
+           JOIN tasks t ON t.assigned_to = u.id
+           WHERE t.workspace_id = $1
+             AND t.project_id = ANY($2)`,
+          [req.workspaceId, ids]
+        );
+        return res.json(rows.map((u) => ({
+          id: u.id, username: u.username, email: u.email, role: u.role, avatar_url: u.avatar_url || null,
+        })));
+      }
+    }
+
     const users = await getAllUsersService({
       workspaceId: req.workspaceId, // ✅ correct
     });

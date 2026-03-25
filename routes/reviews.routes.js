@@ -178,6 +178,10 @@ router.get("/about-me", async (req, res) => {
 
 /** Latest intelligence context for a reviewee (to show in the review form) */
 router.get("/user-context/:userId", async (req, res) => {
+  // Users can only see their own context; admin/manager can see anyone's
+  if (req.user.role === "user" && req.user.id !== req.params.userId) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
   try {
     const rows = await db.query(
       `SELECT month, score, breakdown

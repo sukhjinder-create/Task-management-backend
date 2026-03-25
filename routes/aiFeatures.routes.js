@@ -130,8 +130,29 @@ router.get("/digest", async (req, res) => {
  * body: { type: 'weekly'|'sprint'|'project', projectId?, sprintId? }
  */
 router.post("/report", async (req, res) => {
+  const { type = "weekly", projectId, sprintId } = req.body;
+
+  if (req.user.role === "manager") {
+    // Managers may only generate project reports for their assigned projects
+    if (type !== "project") {
+      return res.status(403).json({ error: "Managers can only generate project reports" });
+    }
+    if (!projectId) {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+    const { rows } = await db.query(
+      `SELECT projects FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+    const assignedProjects = rows[0]?.projects || [];
+    if (!assignedProjects.includes(projectId)) {
+      return res.status(403).json({ error: "Not assigned to this project" });
+    }
+  } else if (!["admin", "owner"].includes(req.user.role)) {
+    return res.status(403).json({ error: "Admin required for workspace reports" });
+  }
+
   try {
-    const { type = "weekly", projectId, sprintId } = req.body;
     const result = await generateNlReport({
       workspaceId: req.workspaceId,
       type,
@@ -195,7 +216,22 @@ Return ONLY JSON with:
   "labels": ["label1"]
 }`;
 
-    const raw = await generateText({ prompt, maxTokens: 200 });
+    let raw = null;
+    try {
+      raw = await generateText({ prompt, maxTokens: 200 });
+    } catch {
+      // LLM unavailable — return a basic parse without AI enhancement
+      return res.json({
+        title: text,
+        priority: "medium",
+        assignee_id: null,
+        assignee_name: null,
+        project_id: null,
+        project_name: null,
+        due_date_hint: null,
+        labels: [],
+      });
+    }
 
     let parsed = {};
     try {

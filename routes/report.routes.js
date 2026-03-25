@@ -24,6 +24,17 @@ router.get(
   requireWorkspaceForUser,
   requirePlanFeature("reports"),
   async (req, res) => {
+    // Determine access scope: admin sees all, manager sees only their assigned projects
+    let managerProjectIds = null; // null = no restriction (admin)
+    if (req.user.role === "manager") {
+      const { rows: mgRows } = await pool.query(
+        `SELECT projects FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      managerProjectIds = mgRows[0]?.projects || [];
+    } else if (!["admin", "owner"].includes(req.user.role)) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
     try {
       const { projects, users, status, priority, sprints } = req.query;
       const from = parseDate(req.query.from);
@@ -33,7 +44,24 @@ router.get(
       const values = [req.workspaceId];
       let idx = 2;
 
-      if (projects) {
+      if (managerProjectIds !== null) {
+        // Manager: intersect requested projects with their assigned projects
+        const requested = projects
+          ? projects.split(",").map((s) => s.trim()).filter(Boolean)
+          : [];
+        const effective = requested.length
+          ? requested.filter((id) => managerProjectIds.includes(id))
+          : managerProjectIds;
+        if (effective.length > 0) {
+          whereClauses.push(`t.project_id = ANY($${idx++})`);
+          values.push(effective);
+        } else {
+          return res.json({
+            summary: { total: 0, completed: 0, in_progress: 0, overdue: 0 },
+            byStatus: [], byUser: [], byProject: [], bySprint: [], tasks: [],
+          });
+        }
+      } else if (projects) {
         const projectIds = projects.split(",").map((s) => s.trim()).filter(Boolean);
         if (projectIds.length > 0) {
           whereClauses.push(`t.project_id = ANY($${idx++})`);
@@ -186,6 +214,21 @@ router.get(
   requireWorkspaceForUser,
   requirePlanFeature("reports"),
   async (req, res) => {
+    // Users cannot access project reports
+    if (req.user.role === "user") {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+    // Managers can only access reports for their assigned projects
+    if (req.user.role === "manager") {
+      const { rows } = await pool.query(
+        `SELECT projects FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      const assignedProjects = rows[0]?.projects || [];
+      if (!assignedProjects.includes(req.params.projectId)) {
+        return res.status(403).json({ error: "Not assigned to this project" });
+      }
+    }
     try {
       const { projectId } = req.params;
       const from = parseDate(req.query.from);

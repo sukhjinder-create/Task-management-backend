@@ -22,8 +22,6 @@ class IntelligenceService {
       month,
     });
 
-  if (!record) return null;
-
   // 🔹 Real-time behavioral metrics
   const { rows } = await pool.query(
     `
@@ -344,15 +342,23 @@ const externalExecution =
     );
   }
 
+  // Fallback score computed from real-time behavioral dimensions when no monthly record exists
+  const computedScore = Math.round(
+    executionDiscipline * 0.35 +
+    timelinessIndex * 0.30 +
+    (100 - workloadStress) * 0.20 +
+    velocityScore * 0.15
+  );
+
   return {
-  score: record.score,
-  explanation: record.reasoning?.summary || "",
+  score: record?.score ?? computedScore,
+  explanation: record?.reasoning?.summary || "",
 
   // Score composition from last monthly run (attendance + productivity sub-scores)
-  breakdown: record.breakdown ?? null,
+  breakdown: record?.breakdown ?? null,
 
   coaching: [
-    ...(record.coaching || []),
+    ...(record?.coaching || []),
     ...dynamicCoaching
   ],
 

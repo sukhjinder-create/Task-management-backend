@@ -187,6 +187,18 @@ router.get("/all", async (req, res) => {
     if (user.role === "user") {
       userClause = " AND t.assigned_to = $2";
       values.push(user.id);
+    } else if (user.role === "manager") {
+      const { rows: mgRows } = await pool.query(
+        `SELECT projects FROM users WHERE id = $1`,
+        [user.id]
+      );
+      const assignedProjects = mgRows[0]?.projects || [];
+      if (assignedProjects.length > 0) {
+        userClause = " AND t.project_id = ANY($2)";
+        values.push(assignedProjects);
+      } else {
+        return res.json([]);
+      }
     }
 
     const { rows } = await pool.query(
@@ -281,6 +293,18 @@ router.post("/:projectId", async (req, res) => {
       return res.status(400).json({ error: "Invalid project id" });
     }
 
+    // Managers can only create tasks in their assigned projects
+    if (req.user.role === "manager") {
+      const { rows } = await pool.query(
+        `SELECT projects FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      const assignedProjects = rows[0]?.projects || [];
+      if (!assignedProjects.includes(project_id)) {
+        return res.status(403).json({ error: "Not assigned to this project" });
+      }
+    }
+
     const {
       task,
       status,
@@ -342,6 +366,18 @@ router.post("/", async (req, res) => {
 
     if (!isValidUuid(project_id)) {
       return res.status(400).json({ error: "Invalid project id" });
+    }
+
+    // Managers can only create tasks in their assigned projects
+    if (req.user.role === "manager") {
+      const { rows } = await pool.query(
+        `SELECT projects FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      const assignedProjects = rows[0]?.projects || [];
+      if (!assignedProjects.includes(project_id)) {
+        return res.status(403).json({ error: "Not assigned to this project" });
+      }
     }
 
     const created = await createTask({

@@ -11,8 +11,11 @@ const router = express.Router();
  *  - to (date string)
  */
 router.get("/reports", async (req, res) => {
+  if (!["admin", "owner"].includes(req.user?.role)) {
+    return res.status(403).json({ error: "Admin required" });
+  }
   const { project, from, to } = req.query;
-  const workspaceId = req.headers["x-workspace-id"];
+  const workspaceId = req.workspaceId || req.headers["x-workspace-id"];
 
   if (!workspaceId || !project || !from || !to) {
     return res.status(400).json({
@@ -65,8 +68,11 @@ router.get("/reports", async (req, res) => {
 });
 
 router.get("/reports/export", async (req, res) => {
+  if (!["admin", "owner"].includes(req.user?.role)) {
+    return res.status(403).json({ error: "Admin required" });
+  }
   const { project, from, to, format = "csv" } = req.query;
-  const workspaceId = req.headers["x-workspace-id"];
+  const workspaceId = req.workspaceId || req.headers["x-workspace-id"];
 
   if (!workspaceId || !project || !from || !to) {
     return res.status(400).send("Missing parameters");

@@ -73,7 +73,7 @@ router.get("/goals", async (req, res) => {
 
 // ─── CREATE GOAL ──────────────────────────────────────────────────────────────
 
-router.post("/goals", async (req, res) => {
+router.post("/goals", allowRoles("admin", "manager"), async (req, res) => {
   try {
     const { title, description, time_period, owner_id, parent_id } = req.body;
     if (!title || !time_period)
@@ -102,7 +102,7 @@ router.post("/goals", async (req, res) => {
 
 // ─── UPDATE GOAL ──────────────────────────────────────────────────────────────
 
-router.put("/goals/:id", async (req, res) => {
+router.put("/goals/:id", allowRoles("admin", "manager"), async (req, res) => {
   try {
     const { title, description, time_period, status, progress, owner_id } = req.body;
 
@@ -415,7 +415,7 @@ router.get("/goals/:id/assessment", async (req, res) => {
   Aggregated health for all goals in the workspace.
   Used by the intelligence layer, executive summary, and admin dashboards.
 */
-router.get("/goals/workspace/health", async (req, res) => {
+router.get("/goals/workspace/health", allowRoles("admin", "manager"), async (req, res) => {
   try {
     const { rows: goals } = await db.query(
       `SELECT o.id, o.title, o.status, o.progress, o.time_period, o.created_at,

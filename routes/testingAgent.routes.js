@@ -89,6 +89,8 @@ router.get("/tasks/options", async (req, res) => {
       workspaceId: req.workspaceId,
       search,
       limit,
+      userId: req.user?.id || null,
+      role: req.user?.role || null,
     });
     res.json(items);
   } catch (error) {
@@ -426,6 +428,8 @@ router.get("/runs", async (req, res) => {
       page: Number(req.query.page || 1),
       limit: Number(req.query.limit || 20),
       search: String(req.query.search || ""),
+      userId: req.user?.id || null,
+      role: req.user?.role || null,
     });
     res.json(result);
   } catch (error) {

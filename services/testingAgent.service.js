@@ -2587,6 +2587,8 @@ export async function listTestingAgentRuns({
   page = 1,
   limit = 20,
   search = "",
+  userId = null,
+  role = null,
 }) {
   const safeLimit = Math.min(Math.max(Number(limit || 20), 1), 100);
   const safePage = Math.max(Number(page || 1), 1);
@@ -2595,6 +2597,13 @@ export async function listTestingAgentRuns({
   const params = [workspaceId];
   const where = ["r.workspace_id = $1"];
   let idx = 2;
+
+  // Managers only see runs they triggered themselves
+  if (role === "manager" && userId) {
+    where.push(`r.created_by = $${idx}`);
+    params.push(userId);
+    idx += 1;
+  }
 
   if (taskId) {
     where.push(`r.task_id = $${idx}`);
@@ -2810,11 +2819,20 @@ export async function listTestingAgentTaskOptions({
   workspaceId,
   search = "",
   limit = 20,
+  userId = null,
+  role = null,
 }) {
   const safeLimit = Math.min(Math.max(Number(limit || 20), 1), 100);
   const params = [workspaceId];
   const where = ["t.workspace_id = $1"];
   let idx = 2;
+
+  // Managers only see tasks from their assigned projects
+  if (role === "manager" && userId) {
+    where.push(`t.project_id = ANY(SELECT unnest(projects) FROM users WHERE id = $${idx})`);
+    params.push(userId);
+    idx += 1;
+  }
 
   if (search && search.trim()) {
     where.push(`(t.task ILIKE $${idx} OR p.name ILIKE $${idx} OR u.username ILIKE $${idx})`);
