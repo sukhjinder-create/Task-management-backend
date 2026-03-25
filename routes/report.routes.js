@@ -4,6 +4,7 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import { requirePlanFeature } from "../middleware/plan.middleware.js";
 import pool from "../db.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = express.Router();
 
@@ -159,6 +160,8 @@ router.get(
         values
       );
 
+      logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "report.download", entityType: "reports", metadata: { reportType: "combined", from: req.query.from, to: req.query.to } });
+
       res.json({
         summary: summaryRes.rows[0] || { total: 0, completed: 0, in_progress: 0, overdue: 0 },
         byStatus: byStatusRes.rows,
@@ -255,6 +258,8 @@ router.get(
         values
       );
 
+      logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "report.download", entityType: "reports", entityId: projectId, metadata: { reportType: "project", projectId, from: req.query.from, to: req.query.to } });
+
       res.json({
         summary: summaryRes.rows[0],
         byStatus: byStatusRes.rows,
@@ -341,6 +346,8 @@ router.get(
         `,
         values
       );
+
+      logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "report.download", entityType: "reports", entityId: userId, metadata: { reportType: "user", targetUserId: userId, from: req.query.from, to: req.query.to } });
 
       res.json({
         summary: summaryRes.rows[0],

@@ -13,6 +13,7 @@ import {
 import pool from "../db.js";
 import { notifyUser } from "./notification.service.js";
 import { sendWelcomeMagicLink } from "./magicLink.service.js";
+import { countWorkspaceMembers, getWorkspaceById } from "../repositories/workspace.repository.js";
 
 const WORKSPACE_GLOBAL = "GLOBAL";
 
@@ -88,6 +89,18 @@ export async function createUserService({
   const existing = await getUserByEmail(email);
   if (existing) {
     throw new Error("Email is already in use");
+  }
+
+  // Enforce member limit
+  const ws = await getWorkspaceById(workspace_id);
+  if (ws) {
+    const limit = ws.max_members ?? ws.member_limit ?? null;
+    if (limit !== null) {
+      const current = await countWorkspaceMembers(workspace_id);
+      if (current >= limit) {
+        throw new Error(`Member limit reached (${limit}). Upgrade your plan to add more users.`);
+      }
+    }
   }
 
   const password_hash = await bcrypt.hash(password, 10);

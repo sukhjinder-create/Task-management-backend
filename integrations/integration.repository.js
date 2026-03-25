@@ -63,14 +63,20 @@ export async function getIntegration(workspaceId, provider) {
 }
 
 /**
- * Get ALL active integrations (used on boot)
+ * Get ALL active integrations (used by sync worker)
+ * Uses a short statement_timeout so a slow DB can't stall the worker.
  */
 export async function getAllActiveIntegrations() {
-  const result = await pool.query(`
-    SELECT *
-    FROM workspace_integrations
-    WHERE status = 'connected'
-  `);
-
-  return result.rows;
+  const client = await pool.connect();
+  try {
+    await client.query("SET statement_timeout = '15s'");
+    const result = await client.query(`
+      SELECT *
+      FROM workspace_integrations
+      WHERE status = 'connected'
+    `);
+    return result.rows;
+  } finally {
+    client.release();
+  }
 }

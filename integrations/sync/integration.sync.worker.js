@@ -1,27 +1,33 @@
 import { runIntegrationSyncCycle } from "./integration.sync.manager.js";
 
 let intervalHandle = null;
+let isRunning = false; // guard against overlapping cycles
 
 /**
  * Starts background integration polling
  */
 export function startIntegrationSyncWorker() {
-
-  if (intervalHandle) return;
+  if (intervalHandle) return; // already started
 
   console.log("🔄 Integration sync worker started");
 
-  // every 30 seconds (safe starting interval)
-  setInterval(async () => {
-  try {
-    // ✅ Tell system this execution comes from SYNC WORKER
-    process.env.INTEGRATION_SYNC_CONTEXT = "worker";
+  intervalHandle = setInterval(async () => {
+    // Skip if previous cycle is still running
+    if (isRunning) {
+      console.warn("⏭️  Integration sync: previous cycle still running, skipping");
+      return;
+    }
 
-    await runIntegrationSyncCycle();
-
-  } finally {
-    // ✅ VERY IMPORTANT — reset context
-    delete process.env.INTEGRATION_SYNC_CONTEXT;
-  }
-}, 60000);
+    isRunning = true;
+    try {
+      process.env.INTEGRATION_SYNC_CONTEXT = "worker";
+      await runIntegrationSyncCycle();
+    } catch (err) {
+      // Log but never crash the worker
+      console.error("⚠️  Integration sync worker error:", err.message);
+    } finally {
+      delete process.env.INTEGRATION_SYNC_CONTEXT;
+      isRunning = false;
+    }
+  }, 60000);
 }

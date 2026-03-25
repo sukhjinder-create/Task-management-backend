@@ -2,6 +2,7 @@ import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import pool from "../db.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = express.Router();
 
@@ -70,6 +71,8 @@ router.get("/export", async (req, res) => {
       "Content-Disposition",
       `attachment; filename=attendance_${month}.csv`
     );
+
+    logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "attendance.export", entityType: "reports", metadata: { month } });
 
     res.send(csv);
   } catch (err) {

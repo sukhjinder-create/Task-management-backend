@@ -43,6 +43,7 @@ import { requireWorkspaceForUser } from "./middleware/workspace.middleware.js";
 import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
 import superadminRoutes from "./routes/superadmin.routes.js";
+import superadminPlansRoutes from "./routes/superadminPlans.routes.js";
 
 import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
@@ -104,6 +105,7 @@ import gdprRoutes     from "./routes/gdpr.routes.js";
 import apiKeysRoutes  from "./routes/apiKeys.routes.js";
 import webhooksRoutes    from "./routes/webhooks.routes.js";
 import aiFeaturesRoutes from "./routes/aiFeatures.routes.js";
+import paymentsRoutes, { webhookRouter as paymentsWebhookRouter } from "./routes/payments.routes.js";
 
 
 
@@ -202,6 +204,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/auth", authRoutes);
+app.use("/payments/webhook", paymentsWebhookRouter);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
 app.use("/internal", internalRoutes);
@@ -219,6 +222,12 @@ app.use("/autopilot", autopilotRoutes);
 app.use("/dashboard", dashboardRoutes);
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, testingAgentRoutes);
 
+// ── Superadmin routes MUST be before the wildcard "/" route ──
+app.use("/superadmin", superadminAuthRoutes);
+app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
+app.use("/superadmin/plans", superadminPlansRoutes);
+app.use("/superadmin", superadminRoutes);
+
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
 app.use("/", authMiddleware, requireWorkspaceForUser, sprintRoutes);
@@ -231,10 +240,6 @@ app.use("/attendance", authMiddleware, requireWorkspaceForUser, attendanceRoutes
 app.use("/settings", authMiddleware, requireWorkspaceForUser, settingsAttendanceRoutes);
 app.use("/users", authMiddleware, requireWorkspaceForUser, userRoutes);
 app.use("/workspaces", authMiddleware, requireWorkspaceForUser, workspaceRoutes);
-
-app.use("/superadmin", superadminAuthRoutes);
-app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
-app.use("/superadmin", superadminRoutes);
 
 app.use(
   "/chat/messages",
@@ -270,6 +275,7 @@ app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, gdprRoutes);
 app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, apiKeysRoutes);
 app.use("/webhooks",    authMiddleware, requireWorkspaceForUser, webhooksRoutes);
 app.use("/ai-features", authMiddleware, requireWorkspaceForUser, aiFeaturesRoutes);
+app.use("/payments", authMiddleware, requireWorkspaceForUser, paymentsRoutes);
 
 app.use("/integration-debug", integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);

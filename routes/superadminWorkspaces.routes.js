@@ -1,6 +1,7 @@
 import express from "express";
 import bcrypt from "bcryptjs";
 import requireSuperadmin from "../middleware/requireSuperadmin.js";
+import pool from "../db.js";
 import * as repo from "../repositories/superadminWorkspaces.repository.js";
 import {
   updateWorkspaceStatus as updateWorkspaceStatusV2,
@@ -53,6 +54,20 @@ router.post("/", async (req, res) => {
     return res.status(500).json({
       error: err.message || "Failed to create workspace",
     });
+  }
+});
+
+/**
+ * GET /superadmin/workspaces/stats
+ * Platform-level stats
+ */
+router.get("/stats", async (_req, res) => {
+  try {
+    const stats = await repo.getPlatformStats();
+    return res.json(stats);
+  } catch (err) {
+    console.error("[superadmin] stats error:", err);
+    return res.status(500).json({ error: err.message || "Failed to load stats" });
   }
 });
 
@@ -186,6 +201,52 @@ router.put("/:workspaceId/status-v2", async (req, res) => {
     return res.status(400).json({
       error: err.message || "Status update failed",
     });
+  }
+});
+
+/**
+ * GET /superadmin/workspaces/:workspaceId/users
+ * List all users in a workspace
+ */
+router.get("/:workspaceId/users", async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, username, email, role, created_at
+       FROM users
+       WHERE workspace_id = $1
+       ORDER BY role DESC, created_at ASC`,
+      [req.params.workspaceId]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error("[superadmin] listUsers error:", err);
+    return res.status(500).json({ error: err.message || "Failed to list users" });
+  }
+});
+
+/**
+ * POST /superadmin/workspaces/:workspaceId/reset-password
+ * Reset password for a user in a workspace
+ */
+router.post("/:workspaceId/reset-password", async (req, res) => {
+  try {
+    const { userId, newPassword } = req.body;
+    if (!userId || !newPassword) {
+      return res.status(400).json({ error: "userId and newPassword are required" });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    const { rowCount } = await pool.query(
+      `UPDATE users SET password_hash = $1 WHERE id = $2 AND workspace_id = $3`,
+      [hash, userId, req.params.workspaceId]
+    );
+    if (!rowCount) return res.status(404).json({ error: "User not found in this workspace" });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[superadmin] resetPassword error:", err);
+    return res.status(500).json({ error: err.message || "Failed to reset password" });
   }
 });
 

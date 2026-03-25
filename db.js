@@ -19,10 +19,11 @@ const pool = new Pool({
   port: process.env.DB_PORT,
 
   // ✅ CONNECTION REUSE SETTINGS
-  max: 10,                    // max open connections
-  idleTimeoutMillis: 30000,   // close idle clients after 30s
-  connectionTimeoutMillis: 5000, // fail fast if DB slow
-  keepAlive: true             // reuse TCP connection
+  max: 10,                             // max open connections
+  idleTimeoutMillis: 60000,            // close idle clients after 60s
+  connectionTimeoutMillis: 10000,      // wait up to 10s for a free connection
+  keepAlive: true,                     // reuse TCP connection
+  keepAliveInitialDelayMillis: 10000,  // send first keepalive after 10s of idle
 });
 
 // 🔐 PRODUCTION SAFETY: Prevent hard crashes

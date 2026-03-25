@@ -10,7 +10,8 @@
     "migrate:git-automation": "node run-git-automation-migration.js",
     "configure:git-automation": "node auto-configure-git-automation.js",
     "migrate:testing-agent": "node run-testing-agent-migration.js",
-    "migrate:sprint-goal-sync": "node run-sprint-goal-sync-migration.js"
+    "migrate:sprint-goal-sync": "node run-sprint-goal-sync-migration.js",
+    "migrate:payments": "node run-payments-migration.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",

@@ -25,18 +25,19 @@ export async function createWorkspace({
   try {
     await client.query("BEGIN");
 
-    // 1️⃣ Create workspace
+    // 1️⃣ Create workspace — sync both column pairs so limit enforcement works
+    const limit = Number(member_limit) || 10;
     const { rows: [workspace] } = await client.query(
       `
       INSERT INTO workspaces (
-        id, name, plan, member_limit, is_active, created_at, updated_at
+        id, name, plan, member_limit, billing_plan, max_members, is_active, created_at, updated_at
       )
       VALUES (
-        gen_random_uuid(), $1, $2, $3, true, now(), now()
+        gen_random_uuid(), $1, $2, $3, $2, $3, true, now(), now()
       )
       RETURNING *
       `,
-      [name, plan, Number(member_limit) || 10]
+      [name, plan, limit]
     );
 
     // 2️⃣ Create owner user
@@ -82,10 +83,37 @@ export async function createWorkspace({
 }
 
 export async function listWorkspaces() {
-  const res = await pool.query(
-    `SELECT * FROM workspaces ORDER BY created_at DESC`
-  );
+  const res = await pool.query(`
+    SELECT
+      w.*,
+      u.email  AS owner_email,
+      u.username AS owner_name,
+      u.id     AS owner_id,
+      (SELECT COUNT(*)::int FROM users WHERE workspace_id = w.id) AS user_count
+    FROM workspaces w
+    LEFT JOIN LATERAL (
+      SELECT id, email, username
+      FROM users
+      WHERE workspace_id = w.id AND role = 'admin'
+      ORDER BY created_at ASC
+      LIMIT 1
+    ) u ON true
+    ORDER BY w.created_at DESC
+  `);
   return res.rows;
+}
+
+export async function getPlatformStats() {
+  const res = await pool.query(`
+    SELECT
+      COUNT(*)::int                                                          AS total_workspaces,
+      COUNT(*) FILTER (WHERE is_active = true)::int                         AS active_workspaces,
+      COUNT(*) FILTER (WHERE is_active = false)::int                        AS suspended_workspaces,
+      (SELECT COUNT(*)::int FROM users)                                      AS total_users,
+      (SELECT COUNT(*)::int FROM workspaces WHERE created_at > now() - interval '30 days') AS new_this_month
+    FROM workspaces
+  `);
+  return res.rows[0];
 }
 
 export async function getWorkspace(id) {
@@ -106,6 +134,15 @@ export async function updateWorkspace(id, data = {}) {
     if (data[key] !== undefined) {
       sets.push(`${key} = $${idx++}`);
       values.push(data[key]);
+      // Keep enforcement columns in sync
+      if (key === "plan") {
+        sets.push(`billing_plan = $${idx++}`);
+        values.push(data[key]);
+      }
+      if (key === "member_limit") {
+        sets.push(`max_members = $${idx++}`);
+        values.push(data[key]);
+      }
     }
   }
 
