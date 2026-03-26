@@ -1,21 +1,12 @@
 // repositories/superadminWorkspaces.repository.js
 import pool from "../db.js";
-import crypto from "crypto";
 import { ensureDefaultChannelsForWorkspace } from "../services/workspace.service.js";
 import { ensureSystemUser } from "../services/ai.system.service.js";
 
-function genUuid() {
-  return crypto.randomUUID
-    ? crypto.randomUUID()
-    : crypto.createHash("sha1").update(String(Date.now()) + Math.random()).digest("hex");
-}
-
-// repositories/superadminWorkspaces.repository.js
 
 export async function createWorkspace({
   name,
   plan = "basic",
-  member_limit = 10,
   ownerEmail,
   ownerPasswordHash,
   ownerName = null,
@@ -25,8 +16,14 @@ export async function createWorkspace({
   try {
     await client.query("BEGIN");
 
-    // 1️⃣ Create workspace — sync both column pairs so limit enforcement works
-    const limit = Number(member_limit) || 10;
+    // 1️⃣ Look up member limit from billing_plans (null = unlimited)
+    const planRow = await client.query(
+      `SELECT member_limit FROM billing_plans WHERE slug = $1 LIMIT 1`,
+      [plan]
+    );
+    const memberLimit = planRow.rows[0]?.member_limit ?? null;
+
+    // 2️⃣ Create workspace — sync both column pairs so limit enforcement works
     const { rows: [workspace] } = await client.query(
       `
       INSERT INTO workspaces (
@@ -37,7 +34,7 @@ export async function createWorkspace({
       )
       RETURNING *
       `,
-      [name, plan, limit]
+      [name, plan, memberLimit]
     );
 
     // 2️⃣ Create owner user
@@ -125,7 +122,7 @@ export async function getWorkspace(id) {
 }
 
 export async function updateWorkspace(id, data = {}) {
-  const allowed = ["name", "plan", "member_limit"];
+  const allowed = ["name", "plan"];
   const sets = [];
   const values = [];
   let idx = 1;
@@ -134,14 +131,19 @@ export async function updateWorkspace(id, data = {}) {
     if (data[key] !== undefined) {
       sets.push(`${key} = $${idx++}`);
       values.push(data[key]);
-      // Keep enforcement columns in sync
       if (key === "plan") {
         sets.push(`billing_plan = $${idx++}`);
         values.push(data[key]);
-      }
-      if (key === "member_limit") {
+        // Sync max_members from billing plan (null = unlimited)
+        const planRow = await pool.query(
+          `SELECT member_limit FROM billing_plans WHERE slug = $1 LIMIT 1`,
+          [data[key]]
+        );
+        const memberLimit = planRow.rows[0]?.member_limit ?? null;
+        sets.push(`member_limit = $${idx++}`);
+        values.push(memberLimit);
         sets.push(`max_members = $${idx++}`);
-        values.push(data[key]);
+        values.push(memberLimit);
       }
     }
   }
@@ -167,9 +169,51 @@ export async function updateWorkspaceStatus(id, is_active) {
   return res.rows[0];
 }
 
-export async function deleteWorkspace(id) {
-  await pool.query(
-    `UPDATE workspaces SET is_active = false, updated_at = now() WHERE id = $1`,
-    [id]
-  );
+export async function hardDeleteWorkspace(id) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // ── Level 1: comments referencing tasks in this workspace ──
+    await client.query(
+      `DELETE FROM comments WHERE task_id IN (SELECT id FROM tasks WHERE workspace_id = $1)`,
+      [id]
+    );
+
+    // ── Level 2: tasks (cascades task_activity_logs, task_attachments, task_watchers, etc.) ──
+    await client.query(`DELETE FROM tasks             WHERE workspace_id = $1`, [id]);
+
+    // ── Level 3: sprint/project children ──
+    await client.query(`DELETE FROM sprints           WHERE workspace_id = $1`, [id]);
+    await client.query(`DELETE FROM projects          WHERE workspace_id = $1`, [id]);
+
+    // ── Level 4: chat — workspace_id may be NULL on old rows, so also delete by user_id ──
+    await client.query(
+      `DELETE FROM chat_messages
+       WHERE workspace_id = $1
+          OR user_id IN (SELECT id FROM users WHERE workspace_id = $1)`,
+      [id]
+    );
+    await client.query(`DELETE FROM chat_channel_members WHERE workspace_id = $1`, [id]);
+    await client.query(`DELETE FROM chat_channel_admins  WHERE workspace_id = $1`, [id]);
+    await client.query(`DELETE FROM chat_channels        WHERE workspace_id = $1`, [id]);
+
+    // ── Level 5: workspace_users + system_users (must go before users) ──
+    await client.query(`DELETE FROM workspace_users   WHERE workspace_id = $1`, [id]);
+    await client.query(`DELETE FROM system_users      WHERE workspace_id = $1`, [id]);
+
+    // ── Level 6: users ──
+    await client.query(`DELETE FROM users             WHERE workspace_id = $1`, [id]);
+
+    // ── Level 7: workspace itself (cascades payments, subscriptions, billing, etc.) ──
+    await client.query(`DELETE FROM workspaces        WHERE id = $1`, [id]);
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("hardDeleteWorkspace error:", err.message);
+    throw err;
+  } finally {
+    client.release();
+  }
 }

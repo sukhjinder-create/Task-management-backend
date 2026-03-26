@@ -897,7 +897,10 @@ export async function getChannelMembers(channelId) {
     `SELECT m.user_id, u.username
      FROM chat_channel_members m
      JOIN users u ON u.id = m.user_id
-     WHERE m.channel_id = $1`,
+     JOIN chat_channels c ON c.id = m.channel_id
+     LEFT JOIN workspace_users wu ON wu.user_id = m.user_id AND wu.workspace_id = c.workspace_id
+     WHERE m.channel_id = $1
+       AND (wu.billing_status IS NULL OR wu.billing_status != 'pending')`,
     [channelId]
   );
   return rows;

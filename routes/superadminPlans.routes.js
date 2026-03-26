@@ -6,7 +6,7 @@ import {
   getPlanById,
   createPlan,
   updatePlan,
-  deactivatePlan,
+  hardDeletePlan,
 } from "../repositories/billingPlans.repository.js";
 import { syncPlanToRazorpay } from "../services/razorpay.service.js";
 
@@ -66,7 +66,7 @@ router.post("/", async (req, res) => {
       price_monthly_paise:  Math.round((Number(price_monthly) || 0) * 100),
       price_yearly_paise:   Math.round((Number(price_yearly)  || 0) * 100),
       yearly_discount_pct:  Number(yearly_discount_pct) || 0,
-      member_limit:         Number(member_limit) || 10,
+      member_limit:         member_limit ? Number(member_limit) : null,
       max_projects:         max_projects ? Number(max_projects) : null,
       max_integrations:     max_integrations ? Number(max_integrations) : null,
       storage_limit_gb:     storage_limit_gb ? Number(storage_limit_gb) : null,
@@ -100,7 +100,7 @@ router.put("/:id", async (req, res) => {
     if (body.price_monthly   !== undefined) data.price_monthly_paise = Math.round(Number(body.price_monthly) * 100);
     if (body.price_yearly    !== undefined) data.price_yearly_paise  = Math.round(Number(body.price_yearly)  * 100);
     if (body.yearly_discount_pct !== undefined) data.yearly_discount_pct = Number(body.yearly_discount_pct);
-    if (body.member_limit    !== undefined) data.member_limit      = Number(body.member_limit);
+    if (body.member_limit    !== undefined) data.member_limit      = body.member_limit ? Number(body.member_limit) : null;
     if (body.max_projects    !== undefined) data.max_projects       = body.max_projects ? Number(body.max_projects) : null;
     if (body.max_integrations !== undefined) data.max_integrations  = body.max_integrations ? Number(body.max_integrations) : null;
     if (body.storage_limit_gb !== undefined) data.storage_limit_gb  = body.storage_limit_gb ? Number(body.storage_limit_gb) : null;
@@ -121,14 +121,14 @@ router.put("/:id", async (req, res) => {
 
 /**
  * DELETE /superadmin/plans/:id
- * Soft-deactivate (cannot hard-delete as active subscriptions reference the plan)
+ * Hard-delete if no workspaces are on this plan; error if in use.
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const deactivated = await deactivatePlan(req.params.id);
-    return res.json(deactivated);
+    await hardDeletePlan(req.params.id);
+    return res.json({ success: true });
   } catch (err) {
-    return res.status(400).json({ error: err.message });
+    return res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 

@@ -6,7 +6,6 @@ import * as repo from "../repositories/superadminWorkspaces.repository.js";
 import {
   updateWorkspaceStatus as updateWorkspaceStatusV2,
   updateWorkspacePlan,
-  softDeleteWorkspace,
 } from "../repositories/workspace.repository.js";
 
 const router = express.Router();
@@ -25,7 +24,6 @@ router.post("/", async (req, res) => {
     const {
       name,
       plan = "basic",
-      member_limit = 10,
       ownerEmail,
       ownerPassword,
       ownerName,
@@ -42,7 +40,6 @@ router.post("/", async (req, res) => {
     const workspace = await repo.createWorkspace({
       name: String(name).trim(),
       plan: String(plan || "basic").trim(),
-      member_limit: Number(member_limit) || 10,
       ownerEmail: String(ownerEmail).trim().toLowerCase(),
       ownerPasswordHash: passwordHash,
       ownerName: ownerName ? String(ownerName).trim() : null,
@@ -125,10 +122,6 @@ router.put("/:workspaceId", async (req, res) => {
         req.params.workspaceId,
         updates.plan
       );
-    }
-
-    if (req.body.member_limit !== undefined) {
-      updates.member_limit = Number(req.body.member_limit) || 10;
     }
 
     if (Object.keys(updates).length === 0) {
@@ -252,15 +245,15 @@ router.post("/:workspaceId/reset-password", async (req, res) => {
 
 /**
  * DELETE /superadmin/workspaces/:workspaceId
- * Soft delete (Phase 2.2 canonical)
+ * Hard delete — permanently removes workspace and all its data
  */
 router.delete("/:workspaceId", async (req, res) => {
   try {
-    await softDeleteWorkspace(req.params.workspaceId);
+    await repo.hardDeleteWorkspace(req.params.workspaceId);
     return res.json({ success: true });
   } catch (err) {
     console.error("[superadmin] deleteWorkspace error:", err);
-    return res.status(400).json({
+    return res.status(500).json({
       error: err.message || "Delete failed",
     });
   }

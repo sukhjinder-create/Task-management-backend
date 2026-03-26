@@ -51,19 +51,22 @@ export async function createUserRepo({
 
 /* =====================================================
    ADD USER TO WORKSPACE (REQUIRED FOR SYSTEM CHAT)
+   billingStatus: 'trial' | 'active' | 'pending'
 ===================================================== */
-export async function addUserToWorkspaceRepo(userId, workspaceId) {
+export async function addUserToWorkspaceRepo(userId, workspaceId, billingStatus = 'active') {
   if (!userId || !workspaceId || workspaceId === WORKSPACE_GLOBAL) {
     return;
   }
 
+  const validStatus = ['trial', 'active', 'pending'].includes(billingStatus) ? billingStatus : 'active';
+
   const q = `
-    INSERT INTO workspace_users (user_id, workspace_id)
-    VALUES ($1, $2)
-    ON CONFLICT (user_id) DO NOTHING
+    INSERT INTO workspace_users (user_id, workspace_id, billing_status)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (user_id) DO UPDATE SET billing_status = EXCLUDED.billing_status
   `;
 
-  await pool.query(q, [userId, workspaceId]);
+  await pool.query(q, [userId, workspaceId, validStatus]);
 }
 
 
@@ -161,6 +164,7 @@ export async function getAllUsersByWorkspaceRepo(workspaceId) {
     throw new Error("workspaceId is required");
   }
 
+  // Excludes 'pending' users — they are not accessible until admin activates them
   const q = `
     SELECT
       u.id,
@@ -171,13 +175,50 @@ export async function getAllUsersByWorkspaceRepo(workspaceId) {
       u.workspace_id,
       u.avatar_url,
       u.created_at,
-      k.public_key
+      k.public_key,
+      wu.billing_status
     FROM users u
+    JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
     LEFT JOIN user_keys k ON k.user_id = u.id
     WHERE u.workspace_id = $1
       AND (u.is_system IS NULL OR u.is_system = false)
       AND u.role != 'system'
+      AND wu.billing_status != 'pending'
     ORDER BY u.created_at DESC
+  `;
+
+  const { rows } = await pool.query(q, [workspaceId]);
+  return rows;
+}
+
+/* =====================================================
+   GET ALL USERS INCLUDING PENDING (billing admin view)
+===================================================== */
+export async function getAllUsersIncludingPendingRepo(workspaceId) {
+  if (!workspaceId) {
+    throw new Error("workspaceId is required");
+  }
+
+  const q = `
+    SELECT
+      u.id,
+      u.username,
+      u.email,
+      u.role,
+      u.projects,
+      u.workspace_id,
+      u.avatar_url,
+      u.created_at,
+      wu.billing_status,
+      wu.activated_at,
+      wu.cycle_start,
+      wu.cycle_end
+    FROM users u
+    JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
+    WHERE u.workspace_id = $1
+      AND (u.is_system IS NULL OR u.is_system = false)
+      AND u.role != 'system'
+    ORDER BY wu.billing_status ASC, u.created_at DESC
   `;
 
   const { rows } = await pool.query(q, [workspaceId]);

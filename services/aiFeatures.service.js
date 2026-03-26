@@ -123,9 +123,9 @@ Return ONLY a JSON array. Example:
 
   if (tasks.length === 0) return [];
 
-  // Resolve assignee hints to user IDs
+  // Resolve assignee hints to user IDs (exclude pending/unlicensed users)
   const members = await db.query(
-    "SELECT u.id, u.username FROM users u JOIN workspace_users wu ON wu.user_id = u.id WHERE wu.workspace_id = $1",
+    "SELECT u.id, u.username FROM users u JOIN workspace_users wu ON wu.user_id = u.id WHERE wu.workspace_id = $1 AND wu.billing_status != 'pending'",
     [workspaceId]
   );
 

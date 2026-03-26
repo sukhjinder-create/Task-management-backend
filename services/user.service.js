@@ -18,6 +18,51 @@ import { countWorkspaceMembers, getWorkspaceById } from "../repositories/workspa
 const WORKSPACE_GLOBAL = "GLOBAL";
 
 /* =====================================================
+   DETERMINE BILLING STATUS FOR A NEW USER
+   Trial limits: 1 admin, 2 managers, 10 regular users
+===================================================== */
+async function determineBillingStatus(workspaceId, role) {
+  const wsRes = await pool.query(
+    `SELECT trial_started_at, billing_cycle_anchor FROM workspaces WHERE id = $1 LIMIT 1`,
+    [workspaceId]
+  );
+  const ws = wsRes.rows[0];
+  if (!ws) return 'pending';
+
+  // If workspace has an active billing cycle, all new users are pending until paid
+  if (ws.billing_cycle_anchor) return 'pending';
+
+  // Check if workspace is still within 7-day trial window
+  const trialStart = ws.trial_started_at ? new Date(ws.trial_started_at) : new Date();
+  const trialEnd = new Date(trialStart);
+  trialEnd.setDate(trialEnd.getDate() + 7);
+
+  if (new Date() > trialEnd) {
+    // Trial expired, admin has not subscribed yet — new users are pending
+    return 'pending';
+  }
+
+  // Within trial: check per-role limits against existing trial users
+  const countsRes = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE u.role = 'admin')                       AS admin_count,
+       COUNT(*) FILTER (WHERE u.role = 'manager')                     AS manager_count,
+       COUNT(*) FILTER (WHERE u.role NOT IN ('admin', 'manager'))     AS user_count
+     FROM workspace_users wu
+     JOIN users u ON u.id = wu.user_id
+     WHERE wu.workspace_id = $1 AND wu.billing_status = 'trial'`,
+    [workspaceId]
+  );
+  const { admin_count, manager_count, user_count } = countsRes.rows[0];
+
+  if (role === 'admin'   && parseInt(admin_count)   < 1)  return 'trial';
+  if (role === 'manager' && parseInt(manager_count) < 2)  return 'trial';
+  if (!['admin', 'manager'].includes(role) && parseInt(user_count) < 10) return 'trial';
+
+  return 'pending';
+}
+
+/* =====================================================
    CREATE IMPORTED USER
    Universal entry point for all migration sources:
    Slack, Asana, YouTrack, or any future import.
@@ -50,7 +95,8 @@ export async function createImportedUser({
     workspace_id,
   });
 
-  await addUserToWorkspaceRepo(user.id, workspace_id);
+  const billingStatus = await determineBillingStatus(workspace_id, role);
+  await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus);
 
   if (avatar_url) {
     await pool.query(
@@ -115,8 +161,9 @@ export async function createUserService({
     workspace_id,
   });
 
-  // 🔐 REQUIRED: bind user to workspace_users
-  await addUserToWorkspaceRepo(user.id, workspace_id);
+  // 🔐 REQUIRED: bind user to workspace_users with correct billing status
+  const billingStatus = await determineBillingStatus(workspace_id, role);
+  await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus);
 
   return user;
 }

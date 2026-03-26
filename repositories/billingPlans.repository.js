@@ -8,10 +8,7 @@ export async function listPlans({ includeInactive = false } = {}) {
   const res = await pool.query(`
     SELECT
       bp.*,
-      COUNT(DISTINCT w.id) FILTER (
-        WHERE w.billing_status = 'active'
-           OR (w.billing_plan = bp.slug AND w.billing_status IS NULL)
-      )::int AS subscriber_count
+      COUNT(DISTINCT w.id)::int AS subscriber_count
     FROM billing_plans bp
     LEFT JOIN workspaces w
       ON (w.billing_plan = bp.slug OR w.plan = bp.slug)
@@ -134,6 +131,25 @@ export async function deactivatePlan(id) {
     [id]
   );
   return res.rows[0];
+}
+
+export async function hardDeletePlan(id) {
+  // Check how many workspaces are on this plan
+  const check = await pool.query(
+    `SELECT w.id, w.name
+     FROM workspaces w
+     JOIN billing_plans bp ON bp.id = $1
+     WHERE w.billing_plan = bp.slug OR w.plan = bp.slug
+     LIMIT 10`,
+    [id]
+  );
+  if (check.rows.length > 0) {
+    const names = check.rows.map(r => `"${r.name}"`).join(", ");
+    const err = new Error(`Plan is in use by ${check.rows.length} workspace(s): ${names}`);
+    err.statusCode = 409;
+    throw err;
+  }
+  await pool.query(`DELETE FROM billing_plans WHERE id = $1`, [id]);
 }
 
 // ── Subscription helpers ──────────────────────────────────────────────────────

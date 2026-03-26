@@ -189,8 +189,10 @@ router.get("/", async (req, res) => {
           `SELECT DISTINCT u.id, u.username, u.email, u.role, u.avatar_url
            FROM users u
            JOIN tasks t ON t.assigned_to = u.id
+           JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
            WHERE t.workspace_id = $1
-             AND t.project_id = ANY($2)`,
+             AND t.project_id = ANY($2)
+             AND wu.billing_status != 'pending'`,
           [req.workspaceId, ids]
         );
         return res.json(rows.map((u) => ({

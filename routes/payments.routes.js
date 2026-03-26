@@ -3,6 +3,7 @@
 // Workspace billing endpoints (Razorpay — UPI AutoPay, Cards, NACH)
 // =============================================================================
 import express from "express";
+import pool from "../db.js";
 import { listPlans } from "../repositories/billingPlans.repository.js";
 import {
   getPublicConfig,
@@ -13,6 +14,10 @@ import {
   getBillingSummary,
   verifyWebhookSignature,
   handleWebhookEvent,
+  listPendingUsers,
+  calculateActivationCost,
+  createActivationOrder,
+  verifyAndActivateUsers,
 } from "../services/razorpay.service.js";
 
 const router = express.Router();
@@ -161,6 +166,98 @@ router.post("/cancel", requireBillingAdmin, async (req, res) => {
     return res.json(result);
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// ── Per-user billing endpoints ────────────────────────────────────────────────
+
+/**
+ * GET /payments/pending-users
+ * Lists all workspace users with billing_status = 'pending'.
+ * Also returns per-user price and next cycle info for cost preview.
+ */
+router.get("/pending-users", requireBillingAdmin, async (req, res) => {
+  try {
+    const users = await listPendingUsers(req.workspaceId);
+
+    // Attach billing context for the frontend cost preview
+    const { rows: wsRows } = await pool.query(
+      `SELECT billing_cycle_anchor, per_user_price_paise FROM workspaces WHERE id = $1`,
+      [req.workspaceId]
+    );
+    const ws = wsRows[0] || {};
+
+    return res.json({
+      users,
+      perUserPricePaise: ws.per_user_price_paise || null,
+      billingCycleAnchor: ws.billing_cycle_anchor || null,
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /payments/activation-cost
+ * Preview pro-rated cost for selected user IDs before payment.
+ * Body: { userIds: string[] }
+ */
+router.post("/activation-cost", requireBillingAdmin, async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ error: "userIds array is required" });
+    }
+    const cost = await calculateActivationCost(req.workspaceId, userIds);
+    return res.json(cost);
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /payments/create-activation-order
+ * Creates a Razorpay Order for pro-rated user activation payment.
+ * Body: { userIds: string[] }
+ */
+router.post("/create-activation-order", requireBillingAdmin, async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ error: "userIds array is required" });
+    }
+    const result = await createActivationOrder(req.workspaceId, userIds, req.user?.id);
+    return res.status(201).json(result);
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });
+  }
+});
+
+/**
+ * POST /payments/verify-activation
+ * Verify Razorpay Order payment signature and activate users.
+ * Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature, userIds }
+ */
+router.post("/verify-activation", requireBillingAdmin, async (req, res) => {
+  try {
+    const {
+      razorpay_order_id:   orderId,
+      razorpay_payment_id: paymentId,
+      razorpay_signature:  signature,
+      userIds,
+    } = req.body;
+
+    if (!orderId || !paymentId || !signature) {
+      return res.status(400).json({ error: "order_id, payment_id, and signature are required" });
+    }
+
+    const result = await verifyAndActivateUsers(req.workspaceId, {
+      orderId, paymentId, signature, userIds,
+    });
+
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 

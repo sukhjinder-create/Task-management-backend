@@ -209,6 +209,13 @@ app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
 app.use("/internal", internalRoutes);
 app.use(internalTasks);
+
+// ── Superadmin routes MUST be before any global authMiddleware ──
+app.use("/superadmin", superadminAuthRoutes);
+app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
+app.use("/superadmin/plans", superadminPlansRoutes);
+app.use("/superadmin", superadminRoutes);
+
 app.use(authMiddleware, requireWorkspaceForUser, reportsRouter);
 // 🧠 Intelligence APIs (READ-ONLY, UI-facing)
 app.use(
@@ -221,12 +228,6 @@ app.use(
 app.use("/autopilot", autopilotRoutes);
 app.use("/dashboard", dashboardRoutes);
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, testingAgentRoutes);
-
-// ── Superadmin routes MUST be before the wildcard "/" route ──
-app.use("/superadmin", superadminAuthRoutes);
-app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
-app.use("/superadmin/plans", superadminPlansRoutes);
-app.use("/superadmin", superadminRoutes);
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);

@@ -219,7 +219,8 @@ export async function migrateSlackWorkspace({
       try {
         const existing = await getUserByEmail(email);
         if (existing) {
-          await addUserToWorkspaceRepo(existing.id, workspaceId);
+          // Migrated users start as 'pending' — admin pays to activate them
+          await addUserToWorkspaceRepo(existing.id, workspaceId, 'pending');
           userMap[su.id] = { internalId: existing.id, username: existing.username };
           result.usersLinked++;
         } else {

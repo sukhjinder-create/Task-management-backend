@@ -247,29 +247,53 @@ export async function confirmSubscription({ workspaceId, paymentId, subscription
   // Update workspace billing columns so superadmin sees new plan immediately
   const memberLimit = PLAN_MEMBER_LIMITS[planSlug] ?? 10;
 
+  // Fetch per-user price from the plan
+  const planRes = await pool.query(
+    `SELECT price_monthly_paise FROM billing_plans WHERE slug = $1 AND is_active = true LIMIT 1`,
+    [planSlug]
+  );
+  const perUserPricePaise = planRes.rows[0]?.price_monthly_paise || null;
+
   await pool.query(
     `UPDATE workspaces
-     SET billing_plan         = $2,
-         plan                 = $2,
-         billing_status       = 'active',
-         billing_provider     = 'razorpay',
-         billing_subscription_id = $3,
-         billing_updated_at   = now(),
-         member_limit         = $4,
-         max_members          = $4
+     SET billing_plan              = $2,
+         plan                      = $2,
+         billing_status            = 'active',
+         billing_provider          = 'razorpay',
+         billing_subscription_id   = $3,
+         billing_updated_at        = now(),
+         member_limit              = $4,
+         max_members               = $4,
+         billing_cycle_anchor      = COALESCE(billing_cycle_anchor, now()),
+         per_user_price_paise      = COALESCE(per_user_price_paise, $5),
+         trial_started_at          = COALESCE(trial_started_at, now())
      WHERE id = $1`,
-    [workspaceId, planSlug, subscriptionId, memberLimit]
+    [workspaceId, planSlug, subscriptionId, memberLimit, perUserPricePaise]
   );
 
   await pool.query(
     `UPDATE workspace_subscriptions
-     SET status         = 'authenticated',
+     SET status          = 'authenticated',
          last_payment_id = $2,
          last_payment_at = now(),
          updated_at      = now()
      WHERE workspace_id = $1 AND provider = 'razorpay'`,
     [workspaceId, paymentId]
   );
+
+  // Convert all trial users to active for this billing cycle (one month from now)
+  // and keep pending users as-is — admin must pay for them separately
+  await pool.query(
+    `UPDATE workspace_users
+     SET billing_status = 'active',
+         activated_at   = now(),
+         cycle_start    = now(),
+         cycle_end      = now() + INTERVAL '1 month'
+     WHERE workspace_id = $1 AND billing_status = 'trial'`,
+    [workspaceId]
+  );
+
+  console.log(`[billing] subscription confirmed workspace=${workspaceId} plan=${planSlug} per_user=${perUserPricePaise}`);
 }
 
 // ── Step 4: Handle Razorpay webhooks ─────────────────────────────────────────
@@ -408,6 +432,17 @@ export async function handleWebhookEvent(event) {
       );
 
       await setWorkspaceActive(wid, slug);
+
+      // Renew cycle dates for all active users in this workspace
+      if (periodStart && periodEnd) {
+        await pool.query(
+          `UPDATE workspace_users
+           SET cycle_start = $2, cycle_end = $3
+           WHERE workspace_id = $1 AND billing_status = 'active'`,
+          [wid, periodStart, periodEnd]
+        );
+      }
+
       console.log(`[billing] subscription.charged workspace=${wid} period=${periodStart}→${periodEnd}`);
       break;
     }
@@ -497,10 +532,211 @@ export async function cancelSubscription(workspaceId) {
   return { cancelled: true, effectiveDate: sub.current_period_end };
 }
 
+// ── Per-user billing: list pending users ─────────────────────────────────────
+
+export async function listPendingUsers(workspaceId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.username, u.email, u.role, u.avatar_url, u.created_at,
+            wu.billing_status, wu.activated_at, wu.cycle_start, wu.cycle_end
+     FROM users u
+     JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
+     WHERE u.workspace_id = $1
+       AND wu.billing_status = 'pending'
+       AND (u.is_system IS NULL OR u.is_system = false)
+       AND u.role != 'system'
+     ORDER BY u.created_at DESC`,
+    [workspaceId]
+  );
+  return rows;
+}
+
+// ── Per-user billing: calculate pro-rated activation cost ─────────────────────
+// Pro-rating: charge only for remaining days in current billing cycle.
+// If no billing_cycle_anchor (admin hasn't subscribed yet), charge full month.
+
+export async function calculateActivationCost(workspaceId, userIds) {
+  if (!Array.isArray(userIds) || userIds.length === 0) {
+    throw Object.assign(new Error("Select at least one user to activate"), { statusCode: 400 });
+  }
+
+  const wsRes = await pool.query(
+    `SELECT billing_cycle_anchor, per_user_price_paise FROM workspaces WHERE id = $1 LIMIT 1`,
+    [workspaceId]
+  );
+  const ws = wsRes.rows[0];
+  if (!ws) throw Object.assign(new Error("Workspace not found"), { statusCode: 404 });
+
+  const pricePerUser = ws.per_user_price_paise;
+  if (!pricePerUser || pricePerUser <= 0) {
+    throw Object.assign(
+      new Error("No per-user price configured. Please subscribe to a plan first."),
+      { statusCode: 400 }
+    );
+  }
+
+  const now = new Date();
+  let cycleStart = now;
+  let cycleEnd;
+  let proRatedDays;
+  let daysInCycle;
+
+  if (ws.billing_cycle_anchor) {
+    // Find the next cycle end from anchor
+    const anchor = new Date(ws.billing_cycle_anchor);
+    // Advance anchor to the next upcoming cycle boundary
+    cycleEnd = new Date(anchor);
+    while (cycleEnd <= now) {
+      cycleEnd.setMonth(cycleEnd.getMonth() + 1);
+    }
+    // cycleStart is this cycle's start
+    cycleStart = new Date(cycleEnd);
+    cycleStart.setMonth(cycleStart.getMonth() - 1);
+
+    const msInCycle = cycleEnd - cycleStart;
+    const msRemaining = cycleEnd - now;
+    daysInCycle = Math.round(msInCycle / 86400000);
+    proRatedDays = Math.ceil(msRemaining / 86400000);
+  } else {
+    // No billing cycle yet — charge full month
+    cycleEnd = new Date(now);
+    cycleEnd.setMonth(cycleEnd.getMonth() + 1);
+    daysInCycle = 30;
+    proRatedDays = 30;
+  }
+
+  const pricePerUserProRated = Math.ceil((proRatedDays / daysInCycle) * pricePerUser);
+  const totalPaise = pricePerUserProRated * userIds.length;
+
+  return {
+    userCount: userIds.length,
+    pricePerUserMonthlyPaise: pricePerUser,
+    pricePerUserProRatedPaise: pricePerUserProRated,
+    proRatedDays,
+    daysInCycle,
+    totalPaise,
+    cycleStart: cycleStart.toISOString(),
+    cycleEnd: cycleEnd.toISOString(),
+  };
+}
+
+// ── Per-user billing: create Razorpay Order for activation ────────────────────
+
+export async function createActivationOrder(workspaceId, userIds, createdBy) {
+  const cost = await calculateActivationCost(workspaceId, userIds);
+
+  // Validate that all userIds are pending in this workspace
+  const { rows: pendingUsers } = await pool.query(
+    `SELECT wu.user_id FROM workspace_users wu
+     WHERE wu.workspace_id = $1 AND wu.user_id = ANY($2) AND wu.billing_status = 'pending'`,
+    [workspaceId, userIds]
+  );
+
+  if (pendingUsers.length !== userIds.length) {
+    throw Object.assign(
+      new Error("Some selected users are not pending or don't belong to this workspace"),
+      { statusCode: 400 }
+    );
+  }
+
+  const { keyId, keySecret } = getCredentials();
+
+  const order = await rzpRequest("POST", "/orders", {
+    amount:   cost.totalPaise,
+    currency: "INR",
+    receipt:  `activation_${workspaceId.slice(0, 8)}_${Date.now()}`,
+    notes: {
+      workspace_id: workspaceId,
+      user_ids:     userIds.join(","),
+      type:         "user_activation",
+    },
+  });
+
+  // Log the pending payment
+  await pool.query(
+    `INSERT INTO user_activation_payments
+       (workspace_id, user_ids, amount_paise, razorpay_order_id, status,
+        pro_rated_days, cycle_start, cycle_end, created_by)
+     VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8)`,
+    [
+      workspaceId,
+      userIds,
+      cost.totalPaise,
+      order.id,
+      cost.proRatedDays,
+      cost.cycleStart,
+      cost.cycleEnd,
+      createdBy || null,
+    ]
+  );
+
+  return {
+    orderId:    order.id,
+    keyId,
+    amountPaise: cost.totalPaise,
+    currency:   "INR",
+    cost,
+  };
+}
+
+// ── Per-user billing: verify activation payment and activate users ────────────
+
+export async function verifyAndActivateUsers(workspaceId, { orderId, paymentId, signature, userIds }) {
+  // Verify HMAC signature: hash(orderId|paymentId)
+  const { keySecret } = getCredentials();
+  const expected = crypto
+    .createHmac("sha256", keySecret)
+    .update(`${orderId}|${paymentId}`)
+    .digest("hex");
+
+  if (expected !== signature) {
+    throw Object.assign(new Error("Payment signature verification failed"), { statusCode: 400 });
+  }
+
+  // Look up the payment record
+  const { rows: paymentRows } = await pool.query(
+    `SELECT * FROM user_activation_payments
+     WHERE workspace_id = $1 AND razorpay_order_id = $2 AND status = 'created'
+     LIMIT 1`,
+    [workspaceId, orderId]
+  );
+  if (!paymentRows[0]) {
+    throw Object.assign(new Error("Activation payment record not found"), { statusCode: 404 });
+  }
+  const payment = paymentRows[0];
+  const activatingUserIds = Array.isArray(userIds) && userIds.length > 0
+    ? userIds
+    : payment.user_ids;
+
+  const cycleEnd = payment.cycle_end || new Date(Date.now() + 30 * 86400000).toISOString();
+  const cycleStart = payment.cycle_start || new Date().toISOString();
+
+  // Activate the users
+  await pool.query(
+    `UPDATE workspace_users
+     SET billing_status = 'active',
+         activated_at   = NOW(),
+         cycle_start    = $3,
+         cycle_end      = $4
+     WHERE workspace_id = $1 AND user_id = ANY($2)`,
+    [workspaceId, activatingUserIds, cycleStart, cycleEnd]
+  );
+
+  // Mark payment as paid
+  await pool.query(
+    `UPDATE user_activation_payments
+     SET status = 'paid', razorpay_payment_id = $2, razorpay_signature = $3, updated_at = NOW()
+     WHERE workspace_id = $1 AND razorpay_order_id = $4`,
+    [workspaceId, paymentId, signature, orderId]
+  );
+
+  console.log(`[billing] ${activatingUserIds.length} user(s) activated workspace=${workspaceId}`);
+  return { activated: activatingUserIds.length, cycleEnd };
+}
+
 // ── Billing summary ───────────────────────────────────────────────────────────
 
 export async function getBillingSummary(workspaceId) {
-  const [wsRes, subRes] = await Promise.all([
+  const [wsRes, subRes, memberCountRes] = await Promise.all([
     pool.query(
       `SELECT id, name, plan, billing_plan, billing_status, billing_provider,
               billing_subscription_id, billing_current_period_end, billing_updated_at,
@@ -509,11 +745,17 @@ export async function getBillingSummary(workspaceId) {
       [workspaceId]
     ),
     getWorkspaceSubscription(workspaceId),
+    pool.query(
+      `SELECT COUNT(*) AS count FROM workspace_users
+       WHERE workspace_id = $1 AND billing_status != 'pending'`,
+      [workspaceId]
+    ),
   ]);
 
   return {
-    config:       getPublicConfig(),
-    workspace:    wsRes.rows[0] || null,
-    subscription: subRes,
+    config:            getPublicConfig(),
+    workspace:         wsRes.rows[0] || null,
+    subscription:      subRes,
+    activeMemberCount: parseInt(memberCountRes.rows[0]?.count || 0),
   };
 }

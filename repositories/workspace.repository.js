@@ -94,12 +94,13 @@ export async function countWorkspaceMembers(workspaceId) {
  * Intended for SuperAdmin use only.
  */
 export async function updateWorkspaceStatus(workspaceId, status) {
+  const isActive = status === "active";
   const { rows } = await pool.query(
     `UPDATE workspaces
-     SET status = $2
+     SET status = $2, is_active = $3, updated_at = now()
      WHERE id = $1
      RETURNING *`,
-    [workspaceId, status]
+    [workspaceId, status, isActive]
   );
   return rows[0] || null;
 }
