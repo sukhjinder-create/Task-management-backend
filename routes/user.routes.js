@@ -3,6 +3,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import bcrypt from "bcryptjs";
 import pool from "../db.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
@@ -369,6 +370,37 @@ router.delete("/:id", async (req, res) => {
   } catch (err) {
     console.error("Error deleting user:", err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * 🔹 POST /users/:id/reset-password – WORKSPACE ADMIN ONLY
+ */
+router.post("/:id/reset-password", async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Only admin can reset passwords" });
+    }
+
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+
+    const { getUserById } = await import("../repositories/user.repository.js");
+    const target = await getUserById(req.params.id);
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (String(target.workspace_id) !== String(req.workspaceId)) {
+      return res.status(403).json({ error: "Workspace access denied" });
+    }
+
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hash, req.params.id]);
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error resetting password:", err);
+    return res.status(500).json({ error: err.message || "Failed to reset password" });
   }
 });
 

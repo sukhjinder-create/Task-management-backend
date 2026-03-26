@@ -11,9 +11,7 @@ import {
 } from "../services/chat.service.js";
 import { getIO } from "../realtime/socket.js";
 
-/* ✅ ADD: workspace + plan gating */
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
-import { requirePlanFeature } from "../middleware/plan.middleware.js";
 
 const router = express.Router();
 
@@ -39,7 +37,6 @@ function requireAuth(req, res, next) {
 ------------------------------------------------------- */
 router.use(requireAuth);
 router.use(requireWorkspaceForUser);
-router.use(requirePlanFeature("chat"));
 
 /**
  * POST /chat

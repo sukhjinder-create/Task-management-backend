@@ -1,16 +1,20 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import axios from "axios";
+import crypto from "crypto";
 import {
   getUserByEmail,
   getUserById,
 } from "../repositories/user.repository.js";
 import { verifyMagicToken } from "./magicLink.service.js";
 import { verifyMfaToken } from "./mfa.service.js";
+import { sendPasswordResetEmail } from "./email.service.js";
+import pool from "../db.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
 const WORKSPACE_GLOBAL = "GLOBAL";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 /**
  * Helper: normalize DB user row to a safe user object
@@ -145,6 +149,72 @@ export async function loginWithMagicToken(token) {
   const safeUser = normalizeUserRow(user);
   const jwt      = generateToken(safeUser);
   return { token: jwt, user: safeUser };
+}
+
+/**
+ * FORGOT PASSWORD — generates a secure reset token, stores hash, sends email.
+ * Always responds the same way to prevent user enumeration.
+ */
+export async function requestPasswordReset(email) {
+  const user = await getUserByEmail(email);
+  if (!user) return; // silently succeed — don't leak whether email exists
+
+  // Generate a secure random 32-byte hex token
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+  // Invalidate any existing unused tokens for this user
+  await pool.query(
+    `DELETE FROM password_reset_tokens WHERE user_id = $1`,
+    [user.id]
+  );
+
+  // Store hashed token (plaintext never persisted)
+  await pool.query(
+    `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+    [user.id, tokenHash, expiresAt]
+  );
+
+  const resetUrl = `${FRONTEND_URL}/reset-password?token=${token}`;
+  await sendPasswordResetEmail({ to: user.email, username: user.username, resetUrl });
+}
+
+/**
+ * RESET PASSWORD — verifies token hash, updates password, marks token used.
+ */
+export async function resetPassword(token, newPassword) {
+  if (!token || !newPassword) throw new Error("Token and password are required");
+  if (newPassword.length < 8) throw new Error("Password must be at least 8 characters");
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+  const { rows } = await pool.query(
+    `SELECT * FROM password_reset_tokens
+     WHERE token_hash = $1
+       AND used_at IS NULL
+       AND expires_at > now()`,
+    [tokenHash]
+  );
+
+  if (!rows[0]) {
+    throw new Error("Invalid or expired reset link. Please request a new one.");
+  }
+
+  const record = rows[0];
+  const passwordHash = await bcrypt.hash(newPassword, 12);
+
+  // Update user password
+  await pool.query(
+    `UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`,
+    [passwordHash, record.user_id]
+  );
+
+  // Mark token as consumed so it cannot be reused
+  await pool.query(
+    `UPDATE password_reset_tokens SET used_at = now() WHERE id = $1`,
+    [record.id]
+  );
 }
 
 /**

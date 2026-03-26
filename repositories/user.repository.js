@@ -87,17 +87,19 @@ export async function getUserByEmail(email) {
 export async function getUserById(id) {
   const q = `
     SELECT
-      id,
-      username,
-      email,
-      role,
-      projects,
-      workspace_id,
-      avatar_url,
-      created_at,
-      updated_at
-    FROM users
-    WHERE id = $1
+      u.id,
+      u.username,
+      u.email,
+      u.role,
+      u.projects,
+      u.workspace_id,
+      u.avatar_url,
+      u.created_at,
+      u.updated_at,
+      w.name AS workspace_name
+    FROM users u
+    LEFT JOIN workspaces w ON w.id = u.workspace_id
+    WHERE u.id = $1
   `;
   const { rows } = await pool.query(q, [id]);
   return rows[0] || null;

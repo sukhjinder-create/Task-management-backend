@@ -69,6 +69,34 @@ router.get("/", allowRoles("superadmin"), async (req, res) => {
 /**
  * 🔹 GET /workspace/ai-settings
  */
+/**
+ * GET /workspaces/my-plan
+ * Returns the plan name and allowed feature keys for this workspace.
+ * Used by frontend to show/hide and protect routes.
+ */
+router.get("/my-plan", requireWorkspaceForUser, async (req, res) => {
+  try {
+    const workspace = req.workspace;
+    const planSlug   = workspace.billing_plan || workspace.plan || null;
+    const features   = Array.isArray(workspace.planFeatures) ? workspace.planFeatures : [];
+    const onTrial    = workspace.onTrial || false;
+    const trialEndsAt = workspace.trialEndsAt || null;
+    // trial_expired = trial window has closed AND no paid plan has been assigned yet
+    const trialExpired = !onTrial && !!workspace.trial_ends_at && !planSlug;
+
+    return res.json({
+      plan: planSlug,
+      features,
+      workspace_name: workspace.name,
+      on_trial:      onTrial,
+      trial_ends_at: trialEndsAt,
+      trial_expired: trialExpired,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 router.get(
   "/ai-settings",
   requireWorkspaceForUser,

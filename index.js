@@ -39,6 +39,7 @@ import { initSocket } from "./realtime/socket.js";
 
 import { authMiddleware } from "./middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "./middleware/workspace.middleware.js";
+import { requirePlanFeature } from "./middleware/plan.middleware.js";
 
 import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
@@ -242,13 +243,8 @@ app.use("/settings", authMiddleware, requireWorkspaceForUser, settingsAttendance
 app.use("/users", authMiddleware, requireWorkspaceForUser, userRoutes);
 app.use("/workspaces", authMiddleware, requireWorkspaceForUser, workspaceRoutes);
 
-app.use(
-  "/chat/messages",
-  authMiddleware,
-  requireWorkspaceForUser,
-  chatMessagesRoutes
-);
-app.use("/chat", authMiddleware, requireWorkspaceForUser, chatChannelRoutes);
+app.use("/chat/messages", authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatMessagesRoutes);
+app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatChannelRoutes);
 
 app.use("/admin/attendance", adminAttendanceRoutes);
 app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
@@ -257,26 +253,26 @@ app.use("/admin/attendance", adminAttendanceExportRoutes);
 // ── YouTrack parity features ──────────────────────────
 app.use("/tags",            authMiddleware, requireWorkspaceForUser, tagsRoutes);
 app.use("/task-links",      authMiddleware, requireWorkspaceForUser, taskLinksRoutes);
-app.use("/time-tracking",   authMiddleware, requireWorkspaceForUser, timeTrackingRoutes);
+app.use("/time-tracking",   authMiddleware, requireWorkspaceForUser, requirePlanFeature("time_tracking"),   timeTrackingRoutes);
 app.use("/watchers",        authMiddleware, requireWorkspaceForUser, watchersRoutes);
 app.use("/votes",           authMiddleware, requireWorkspaceForUser, votesRoutes);
-app.use("/issue-templates", authMiddleware, requireWorkspaceForUser, issueTemplatesRoutes);
-app.use("/saved-filters",   authMiddleware, requireWorkspaceForUser, savedFiltersRoutes);
+app.use("/issue-templates", authMiddleware, requireWorkspaceForUser, requirePlanFeature("issue_templates"), issueTemplatesRoutes);
+app.use("/saved-filters",   authMiddleware, requireWorkspaceForUser, requirePlanFeature("saved_filters"),   savedFiltersRoutes);
 
 // ─── Enterprise Phase 1-4 routes ─────────────────────────────────────────────
-app.use("/audit",     authMiddleware, requireWorkspaceForUser, auditRoutes);
+app.use("/audit",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("audit_logs_30d"),      auditRoutes);
 app.use("/mfa",       mfaRoutes);   // authMiddleware applied inside the router
 app.use("/auth/sso",  ssoRoutes);   // public SAML endpoints + auth-protected config
-app.use("/wiki",      authMiddleware, requireWorkspaceForUser, wikiRoutes);
-app.use("/leave",     authMiddleware, requireWorkspaceForUser, leaveRoutes);
-app.use("/holidays",  authMiddleware, requireWorkspaceForUser, holidaysRoutes);
-app.use("/goals",     authMiddleware, requireWorkspaceForUser, goalsRoutes);
-app.use("/reviews",   authMiddleware, requireWorkspaceForUser, reviewsRoutes);
-app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, gdprRoutes);
-app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, apiKeysRoutes);
-app.use("/webhooks",    authMiddleware, requireWorkspaceForUser, webhooksRoutes);
-app.use("/ai-features", authMiddleware, requireWorkspaceForUser, aiFeaturesRoutes);
-app.use("/payments", authMiddleware, requireWorkspaceForUser, paymentsRoutes);
+app.use("/wiki",      authMiddleware, requireWorkspaceForUser, requirePlanFeature("wiki_docs"),            wikiRoutes);
+app.use("/leave",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("leave_management"),     leaveRoutes);
+app.use("/holidays",  authMiddleware, requireWorkspaceForUser, requirePlanFeature("leave_management"),     holidaysRoutes);
+app.use("/goals",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("okr_goals"),            goalsRoutes);
+app.use("/reviews",   authMiddleware, requireWorkspaceForUser, requirePlanFeature("performance_reviews"),  reviewsRoutes);
+app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, requirePlanFeature("gdpr_tools"),           gdprRoutes);
+app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, requirePlanFeature("api_access"),           apiKeysRoutes);
+app.use("/webhooks",  authMiddleware, requireWorkspaceForUser, requirePlanFeature("webhooks"),             webhooksRoutes);
+app.use("/ai-features", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_hub"),            aiFeaturesRoutes);
+app.use("/payments",  authMiddleware, requireWorkspaceForUser, paymentsRoutes);
 
 app.use("/integration-debug", integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);

@@ -1,5 +1,6 @@
 import express from "express";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import requireSuperadmin from "../middleware/requireSuperadmin.js";
 import pool from "../db.js";
 import * as repo from "../repositories/superadminWorkspaces.repository.js";
@@ -7,6 +8,7 @@ import {
   updateWorkspaceStatus as updateWorkspaceStatusV2,
   updateWorkspacePlan,
 } from "../repositories/workspace.repository.js";
+import { emitPlanUpdated } from "../realtime/socket.js";
 
 const router = express.Router();
 
@@ -37,12 +39,16 @@ router.post("/", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(String(ownerPassword), 10);
 
+    const rawIp = req.ip || req.socket?.remoteAddress || "";
+    const ipHash = rawIp ? crypto.createHash("sha256").update(rawIp).digest("hex") : null;
+
     const workspace = await repo.createWorkspace({
       name: String(name).trim(),
       plan: String(plan || "basic").trim(),
       ownerEmail: String(ownerEmail).trim().toLowerCase(),
       ownerPasswordHash: passwordHash,
       ownerName: ownerName ? String(ownerName).trim() : null,
+      ipHash,
     });
 
     return res.status(201).json(workspace);
@@ -118,10 +124,7 @@ router.put("/:workspaceId", async (req, res) => {
     if (req.body.plan !== undefined) {
       updates.plan = String(req.body.plan).trim();
       // Phase 2.2 canonical field
-      await updateWorkspacePlan(
-        req.params.workspaceId,
-        updates.plan
-      );
+      await updateWorkspacePlan(req.params.workspaceId, updates.plan);
     }
 
     if (Object.keys(updates).length === 0) {
@@ -129,6 +132,12 @@ router.put("/:workspaceId", async (req, res) => {
     }
 
     const ws = await repo.updateWorkspace(req.params.workspaceId, updates);
+
+    // Notify all connected users in this workspace to re-fetch their plan
+    if (updates.plan !== undefined) {
+      emitPlanUpdated(req.params.workspaceId, updates.plan);
+    }
+
     return res.json(ws);
   } catch (err) {
     console.error("[superadmin] updateWorkspace error:", err);
@@ -214,6 +223,58 @@ router.get("/:workspaceId/users", async (req, res) => {
   } catch (err) {
     console.error("[superadmin] listUsers error:", err);
     return res.status(500).json({ error: err.message || "Failed to list users" });
+  }
+});
+
+/**
+ * PUT /superadmin/workspaces/:workspaceId/users/:userId
+ * Edit a user's username, email, or role
+ */
+router.put("/:workspaceId/users/:userId", async (req, res) => {
+  try {
+    const { username, email, role } = req.body;
+    const allowed = ["admin", "user", "owner"];
+    const sets = [];
+    const values = [];
+    let idx = 1;
+
+    if (username !== undefined) { sets.push(`username = $${idx++}`); values.push(String(username).trim()); }
+    if (email    !== undefined) { sets.push(`email = $${idx++}`);    values.push(String(email).trim().toLowerCase()); }
+    if (role     !== undefined) {
+      if (!allowed.includes(role)) return res.status(400).json({ error: "role must be admin | user | owner" });
+      sets.push(`role = $${idx++}`); values.push(role);
+    }
+    if (!sets.length) return res.status(400).json({ error: "Nothing to update" });
+
+    values.push(req.params.userId, req.params.workspaceId);
+    const { rows, rowCount } = await pool.query(
+      `UPDATE users SET ${sets.join(", ")} WHERE id = $${idx} AND workspace_id = $${idx + 1}
+       RETURNING id, username, email, role, created_at`,
+      values
+    );
+    if (!rowCount) return res.status(404).json({ error: "User not found in this workspace" });
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error("[superadmin] editUser error:", err);
+    return res.status(500).json({ error: err.message || "Failed to update user" });
+  }
+});
+
+/**
+ * DELETE /superadmin/workspaces/:workspaceId/users/:userId
+ * Remove a user from a workspace
+ */
+router.delete("/:workspaceId/users/:userId", async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      `DELETE FROM users WHERE id = $1 AND workspace_id = $2`,
+      [req.params.userId, req.params.workspaceId]
+    );
+    if (!rowCount) return res.status(404).json({ error: "User not found in this workspace" });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[superadmin] deleteUser error:", err);
+    return res.status(500).json({ error: err.message || "Failed to delete user" });
   }
 });
 

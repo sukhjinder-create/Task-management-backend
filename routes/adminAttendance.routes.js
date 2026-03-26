@@ -50,39 +50,41 @@ router.get("/", async (req, res) => {
       });
     }
 
-    const conditions = [`workspace_id = $1`];
+    const conditions = [`ad.workspace_id = $1`];
     const values = [workspaceId];
 
     let idx = 2;
 
     if (from) {
-      conditions.push(`date >= $${idx++}`);
+      conditions.push(`ad.date >= $${idx++}`);
       values.push(from);
     }
 
     if (to) {
-      conditions.push(`date <= $${idx++}`);
+      conditions.push(`ad.date <= $${idx++}`);
       values.push(to);
     }
 
     if (userId) {
-      conditions.push(`user_id = $${idx++}`);
+      conditions.push(`ad.user_id = $${idx++}`);
       values.push(userId);
     }
 
     const query = `
       SELECT
-        user_id,
-        date,
-        signed_in_minutes AS total_signed_in_minutes,
-        aws_minutes,
-        lunch_minutes,
-        available_minutes,
-        screen_on_minutes,
-        screen_off_minutes
-      FROM attendance_daily
+        ad.user_id,
+        COALESCE(u.username, 'Deleted User') AS username,
+        ad.date,
+        ad.signed_in_minutes AS total_signed_in_minutes,
+        ad.aws_minutes,
+        ad.lunch_minutes,
+        ad.available_minutes,
+        ad.screen_on_minutes,
+        ad.screen_off_minutes
+      FROM attendance_daily ad
+      LEFT JOIN users u ON u.id = ad.user_id
       WHERE ${conditions.join(" AND ")}
-      ORDER BY date DESC, user_id
+      ORDER BY ad.date DESC, ad.user_id
       LIMIT 500
     `;
 

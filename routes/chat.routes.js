@@ -7,7 +7,6 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 
 /* ✅ ADD: workspace + plan gating */
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
-import { requirePlanFeature } from "../middleware/plan.middleware.js";
 
 const router = express.Router();
 
@@ -36,7 +35,6 @@ function requireAuth(req, res, next) {
 router.use(authMiddleware);
 router.use(requireAuth);
 router.use(requireWorkspaceForUser);
-router.use(requirePlanFeature("chat"));
 
 /**
  * POST /chat/         -> create channel

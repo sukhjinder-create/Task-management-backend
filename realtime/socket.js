@@ -856,6 +856,18 @@ export async function emitWorkspaceIntelligenceUpdate(workspaceId, payload) {
   });
 }
 
+/**
+ * Emitted when a superadmin changes a workspace's billing plan.
+ * All connected users in that workspace re-fetch their plan features.
+ */
+export function emitPlanUpdated(workspaceId, planSlug) {
+  if (!io) return;
+  io.to(`workspace:${workspaceId}`).emit("workspace:plan_updated", {
+    workspaceId,
+    plan: planSlug,
+  });
+}
+
 export function emitChannelCreated(channel, workspaceId = WORKSPACE_GLOBAL) {
   if (!io) return;
 

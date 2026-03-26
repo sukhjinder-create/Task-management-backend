@@ -1,8 +1,14 @@
 // repositories/superadminWorkspaces.repository.js
 import pool from "../db.js";
+import crypto from "crypto";
 import { ensureDefaultChannelsForWorkspace } from "../services/workspace.service.js";
 import { ensureSystemUser } from "../services/ai.system.service.js";
 
+/** SHA-256 of the lowercased email domain — used for trial anti-abuse tracking */
+function emailDomainFingerprint(email) {
+  const domain = (email.split("@")[1] || email).toLowerCase().trim();
+  return crypto.createHash("sha256").update(domain).digest("hex");
+}
 
 export async function createWorkspace({
   name,
@@ -10,66 +16,97 @@ export async function createWorkspace({
   ownerEmail,
   ownerPasswordHash,
   ownerName = null,
+  ipHash = null,
 }) {
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
 
-    // 1️⃣ Look up member limit from billing_plans (null = unlimited)
-    const planRow = await client.query(
-      `SELECT member_limit FROM billing_plans WHERE slug = $1 LIMIT 1`,
-      [plan]
-    );
-    const memberLimit = planRow.rows[0]?.member_limit ?? null;
+    const isTrial = plan === "trial";
 
-    // 2️⃣ Create workspace — sync both column pairs so limit enforcement works
+    // ── Anti-abuse: each email domain gets ONE free trial ───────────────────
+    if (isTrial) {
+      const fingerprint = emailDomainFingerprint(ownerEmail);
+      const existing = await client.query(
+        `SELECT id FROM trial_fingerprints WHERE fingerprint_hash = $1 LIMIT 1`,
+        [fingerprint]
+      );
+      if (existing.rows.length > 0) {
+        throw new Error(
+          "This email domain has already used a free trial. Please select a paid plan."
+        );
+      }
+
+      // ── Anti-abuse: each IP address gets ONE free trial ──────────────────
+      if (ipHash) {
+        const ipUsed = await client.query(
+          `SELECT id FROM trial_fingerprints WHERE ip_hash = $1 LIMIT 1`,
+          [ipHash]
+        );
+        if (ipUsed.rows.length > 0) {
+          throw new Error(
+            "A free trial has already been created from this IP address. Please select a paid plan."
+          );
+        }
+      }
+    }
+
+    // ── Resolve member limit from billing plan (trial = unlimited) ──────────
+    let memberLimit = null;
+    if (!isTrial) {
+      const planRow = await client.query(
+        `SELECT member_limit FROM billing_plans WHERE slug = $1 LIMIT 1`,
+        [plan]
+      );
+      memberLimit = planRow.rows[0]?.member_limit ?? null;
+    }
+
+    // billing_plan stays NULL during trial — features come from trial window
+    const billingPlan = isTrial ? null : plan;
+    const trialStart  = isTrial ? new Date() : null;
+    const trialEnd    = isTrial ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) : null;
+
+    // ── Create workspace ─────────────────────────────────────────────────────
     const { rows: [workspace] } = await client.query(
-      `
-      INSERT INTO workspaces (
-        id, name, plan, member_limit, billing_plan, max_members, is_active, created_at, updated_at
-      )
-      VALUES (
-        gen_random_uuid(), $1, $2, $3, $2, $3, true, now(), now()
-      )
-      RETURNING *
-      `,
-      [name, plan, memberLimit]
+      `INSERT INTO workspaces (
+         id, name, plan, member_limit, billing_plan, max_members, is_active,
+         trial_started_at, trial_ends_at, created_at, updated_at
+       ) VALUES (
+         gen_random_uuid(), $1, $2, $3, $4, $3, true,
+         $5, $6, now(), now()
+       ) RETURNING *`,
+      [name, billingPlan, memberLimit, billingPlan, trialStart, trialEnd]
     );
 
-    // 2️⃣ Create owner user
+    // ── Store trial fingerprint so the domain/IP can't claim another trial ───
+    if (isTrial) {
+      const fingerprint = emailDomainFingerprint(ownerEmail);
+      await client.query(
+        `INSERT INTO trial_fingerprints (workspace_id, fingerprint_hash, ip_hash) VALUES ($1, $2, $3)`,
+        [workspace.id, fingerprint, ipHash || null]
+      );
+    }
+
+    // ── Create owner (admin) user ────────────────────────────────────────────
     const { rows: [owner] } = await client.query(
-      `
-      INSERT INTO users (
-        id, username, email, password_hash, role, workspace_id, created_at
-      )
-      VALUES (
-        gen_random_uuid(), $1, $2, $3, 'admin', $4, now()
-      )
-      RETURNING id, username, email, role, workspace_id
-      `,
-      [
-        ownerName || ownerEmail.split("@")[0],
-        ownerEmail,
-        ownerPasswordHash,
-        workspace.id,
-      ]
+      `INSERT INTO users (
+         id, username, email, password_hash, role, workspace_id, created_at
+       ) VALUES (
+         gen_random_uuid(), $1, $2, $3, 'admin', $4, now()
+       ) RETURNING id, username, email, role, workspace_id`,
+      [ownerName || ownerEmail.split("@")[0], ownerEmail, ownerPasswordHash, workspace.id]
     );
 
-    // 3️⃣ ENSURE system (AI) user — ONLY via service
-    // ⚠️ DO NOT manually insert into system_users
+    // ── Ensure system (AI) user ──────────────────────────────────────────────
     const systemUser = await ensureSystemUser(workspace.id, client);
 
     await client.query("COMMIT");
 
-    // 4️⃣ Default channels (post-TX, safe)
+    // ── Default channels (post-TX, safe) ────────────────────────────────────
     await ensureDefaultChannelsForWorkspace(workspace.id, owner.id);
 
-    return {
-      workspace,
-      owner,
-      systemUser,
-    };
+    return { workspace, owner, systemUser };
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("createWorkspace TX error:", err);

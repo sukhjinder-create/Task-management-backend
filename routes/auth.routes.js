@@ -6,8 +6,11 @@ import {
   loginWithGoogle,
   loginWithMfa,
   getCurrentUser,
+  requestPasswordReset,
+  resetPassword,
 } from "../services/auth.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = express.Router();
 
@@ -20,8 +23,33 @@ router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
     const data = await loginWithEmail(email, password);
+
+    // Audit successful login (skip for MFA — logged after MFA step)
+    if (!data.mfa_required && data.user) {
+      logAudit({
+        workspaceId: data.user.workspaceId || data.user.workspace_id,
+        userId: data.user.id,
+        action: "user.login",
+        entityType: "user",
+        entityId: data.user.id,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+        metadata: { method: "email" },
+      });
+    }
+
     res.json(data);
   } catch (err) {
+    // Audit failed login attempt
+    logAudit({
+      workspaceId: null,
+      userId: null,
+      action: "user.login.failed",
+      entityType: "user",
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { email: req.body?.email, reason: err.message },
+    });
     console.error("Login error:", err);
     res.status(401).json({ error: err.message });
   }
@@ -35,9 +63,66 @@ router.post("/mfa/verify", async (req, res) => {
       return res.status(400).json({ error: "mfa_session_token and code are required" });
     }
     const data = await loginWithMfa(mfa_session_token, code);
+
+    // Audit MFA login success
+    if (data.user) {
+      logAudit({
+        workspaceId: data.user.workspaceId || data.user.workspace_id,
+        userId: data.user.id,
+        action: "user.login",
+        entityType: "user",
+        entityId: data.user.id,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+        metadata: { method: "mfa" },
+      });
+    }
+
     res.json(data);
   } catch (err) {
     res.status(401).json({ error: err.message });
+  }
+});
+
+// ─── LOGOUT ───────────────────────────────────────────────────────────────────
+// Client always clears its own token; this endpoint just creates the audit log.
+router.post("/logout", authMiddleware, async (req, res) => {
+  logAudit({
+    workspaceId: req.user.workspaceId || req.user.workspace_id,
+    userId: req.user.id,
+    action: "user.logout",
+    entityType: "user",
+    entityId: req.user.id,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+    metadata: {},
+  });
+  res.json({ success: true });
+});
+
+// ─── FORGOT PASSWORD ──────────────────────────────────────────────────────────
+// Always returns 200 regardless of whether the email exists (prevents enumeration)
+router.post("/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required" });
+    await requestPasswordReset(email);
+    res.json({ message: "If an account with that email exists, a reset link has been sent." });
+  } catch (err) {
+    console.error("[forgot-password]", err);
+    res.status(500).json({ error: "Failed to process request" });
+  }
+});
+
+// ─── RESET PASSWORD ───────────────────────────────────────────────────────────
+router.post("/reset-password", async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: "Token and password are required" });
+    await resetPassword(token, password);
+    res.json({ message: "Password reset successfully. You can now log in." });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

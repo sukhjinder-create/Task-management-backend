@@ -8,8 +8,6 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 /* ✅ ADD: workspace context (does NOT affect existing behavior) */
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 
-/* ✅ ADD: plan / feature gating */
-import { requirePlanFeature } from "../middleware/plan.middleware.js";
 import {
   getAllChannelsForWorkspace,
   getAllDMsForWorkspace,
@@ -25,9 +23,6 @@ router.use(authMiddleware);
 
 /* ✅ ADD: attach req.workspaceId (no logic changed) */
 router.use(requireWorkspaceForUser);
-
-/* ✅ ADD: HARD GATE CHAT BY PLAN (Phase 2.3) */
-router.use(requirePlanFeature("chat"));
 
 /* -------------------------------------------------------
    helper: normalize isPrivate / is_private
