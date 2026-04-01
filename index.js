@@ -29,6 +29,7 @@ import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
 import { startMonthlyIntelligenceCron } from "./cron/monthlyIntelligence.cron.js";
 import { startReviewsCron } from "./cron/reviews.cron.js";
+import { startBackupCron } from "./cron/backup.cron.js";
 
 // 🔵 Chat channels
 import chatMessagesRoutes from "./routes/chatMessages.routes.js";
@@ -45,6 +46,7 @@ import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
 import superadminRoutes from "./routes/superadmin.routes.js";
 import superadminPlansRoutes from "./routes/superadminPlans.routes.js";
+import backupRoutes from "./routes/backup.routes.js";
 
 import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
@@ -215,6 +217,7 @@ app.use(internalTasks);
 app.use("/superadmin", superadminAuthRoutes);
 app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin/plans", superadminPlansRoutes);
+app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin", superadminRoutes);
 
 app.use(authMiddleware, requireWorkspaceForUser, reportsRouter);
@@ -225,10 +228,11 @@ app.use(
   requireWorkspaceForUser,
   intelligenceRoutes
 );
-// 🤖 Autopilot AI
-app.use("/autopilot", autopilotRoutes);
-app.use("/dashboard", dashboardRoutes);
-app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, testingAgentRoutes);
+// 🤖 Autopilot AI — plan-gated
+app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
+app.use("/dashboard",     dashboardRoutes);
+// 🧪 Testing Agent — plan-gated
+app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
@@ -236,7 +240,7 @@ app.use("/", authMiddleware, requireWorkspaceForUser, sprintRoutes);
 app.use("/comments", authMiddleware, requireWorkspaceForUser, commentRoutes);
 app.use("/subtasks", authMiddleware, requireWorkspaceForUser, subtaskRoutes);
 app.use("/project-statuses", authMiddleware, requireWorkspaceForUser, projectStatusRoutes);
-app.use("/reports", authMiddleware, requireWorkspaceForUser, reportRoutes);
+app.use("/reports", authMiddleware, requireWorkspaceForUser, requirePlanFeature("basic_reporting"), reportRoutes);
 app.use("/notifications", authMiddleware, requireWorkspaceForUser, notificationRoutes);
 app.use("/attendance", authMiddleware, requireWorkspaceForUser, attendanceRoutes);
 app.use("/settings", authMiddleware, requireWorkspaceForUser, settingsAttendanceRoutes);
@@ -246,9 +250,10 @@ app.use("/workspaces", authMiddleware, requireWorkspaceForUser, workspaceRoutes)
 app.use("/chat/messages", authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatMessagesRoutes);
 app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatChannelRoutes);
 
-app.use("/admin/attendance", adminAttendanceRoutes);
-app.use("/admin/attendance", adminAttendanceRecalculateRoutes);
-app.use("/admin/attendance", adminAttendanceExportRoutes);
+// Admin attendance — fully protected (auth + workspace + attendance plan feature)
+app.use("/admin/attendance", authMiddleware, requireWorkspaceForUser, requirePlanFeature("attendance"), adminAttendanceRoutes);
+app.use("/admin/attendance", authMiddleware, requireWorkspaceForUser, requirePlanFeature("attendance"), adminAttendanceRecalculateRoutes);
+app.use("/admin/attendance", authMiddleware, requireWorkspaceForUser, requirePlanFeature("attendance"), adminAttendanceExportRoutes);
 
 // ── YouTrack parity features ──────────────────────────
 app.use("/tags",            authMiddleware, requireWorkspaceForUser, tagsRoutes);
@@ -260,7 +265,14 @@ app.use("/issue-templates", authMiddleware, requireWorkspaceForUser, requirePlan
 app.use("/saved-filters",   authMiddleware, requireWorkspaceForUser, requirePlanFeature("saved_filters"),   savedFiltersRoutes);
 
 // ─── Enterprise Phase 1-4 routes ─────────────────────────────────────────────
-app.use("/audit",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("audit_logs_30d"),      auditRoutes);
+// All sub-features of the Enterprise module share the same feature gate
+// ("custom_branding" = the Enterprise module key). If the module is off in the
+// plan, every endpoint inside it is blocked — URL-bypass proof.
+const enterpriseGate = requirePlanFeature("custom_branding");
+app.use("/audit",     authMiddleware, requireWorkspaceForUser, enterpriseGate, auditRoutes);
+app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, enterpriseGate, gdprRoutes);
+app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, enterpriseGate, apiKeysRoutes);
+app.use("/webhooks",  authMiddleware, requireWorkspaceForUser, enterpriseGate, webhooksRoutes);
 app.use("/mfa",       mfaRoutes);   // authMiddleware applied inside the router
 app.use("/auth/sso",  ssoRoutes);   // public SAML endpoints + auth-protected config
 app.use("/wiki",      authMiddleware, requireWorkspaceForUser, requirePlanFeature("wiki_docs"),            wikiRoutes);
@@ -268,9 +280,6 @@ app.use("/leave",     authMiddleware, requireWorkspaceForUser, requirePlanFeatur
 app.use("/holidays",  authMiddleware, requireWorkspaceForUser, requirePlanFeature("leave_management"),     holidaysRoutes);
 app.use("/goals",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("okr_goals"),            goalsRoutes);
 app.use("/reviews",   authMiddleware, requireWorkspaceForUser, requirePlanFeature("performance_reviews"),  reviewsRoutes);
-app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, requirePlanFeature("gdpr_tools"),           gdprRoutes);
-app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, requirePlanFeature("api_access"),           apiKeysRoutes);
-app.use("/webhooks",  authMiddleware, requireWorkspaceForUser, requirePlanFeature("webhooks"),             webhooksRoutes);
 app.use("/ai-features", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_hub"),            aiFeaturesRoutes);
 app.use("/payments",  authMiddleware, requireWorkspaceForUser, paymentsRoutes);
 
@@ -332,3 +341,4 @@ startAttendanceCron();
 startAutopilotCron();
 startMonthlyIntelligenceCron();
 startReviewsCron();
+startBackupCron();

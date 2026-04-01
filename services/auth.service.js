@@ -217,6 +217,159 @@ export async function resetPassword(token, newPassword) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION MANAGEMENT (Refresh Token System)
+//
+// Security model:
+//   • Only the SHA-256 hash of the refresh token is stored in the DB.
+//   • The plaintext token is returned to the client exactly once and never
+//     persisted server-side.
+//   • Tokens rotate on every use — the old row is deleted and a new one
+//     is inserted (prevents replay attacks).
+//   • All sessions are wiped on password change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REFRESH_TOKEN_EXPIRES_DAYS = 7;
+
+function hashToken(plaintext) {
+  return crypto.createHash("sha256").update(plaintext).digest("hex");
+}
+
+/**
+ * Create a new session after a successful login.
+ * Returns the plaintext refresh token (send to client, never store).
+ */
+export async function createSession(userId, workspaceId, ipAddress, userAgent) {
+  const refreshToken = crypto.randomBytes(40).toString("hex"); // 80-char hex
+  const tokenHash    = hashToken(refreshToken);
+  const expiresAt    = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_DAYS * 86_400_000);
+
+  await pool.query(
+    `INSERT INTO user_sessions
+       (user_id, workspace_id, refresh_token_hash, ip_address, user_agent, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [userId, workspaceId || "GLOBAL", tokenHash, ipAddress || null, userAgent || null, expiresAt]
+  );
+
+  return refreshToken;
+}
+
+/**
+ * Exchange a refresh token for a new JWT + rotated refresh token.
+ * The old session row is deleted and a fresh one is created.
+ */
+export async function refreshSession(refreshToken, ipAddress, userAgent) {
+  if (!refreshToken) throw new Error("Refresh token required");
+
+  const tokenHash = hashToken(refreshToken);
+
+  const { rows } = await pool.query(
+    `SELECT * FROM user_sessions
+     WHERE refresh_token_hash = $1
+       AND expires_at > now()`,
+    [tokenHash]
+  );
+
+  if (!rows[0]) {
+    throw new Error("Session expired or invalid. Please log in again.");
+  }
+
+  const session = rows[0];
+
+  const user = await getUserById(session.user_id);
+  if (!user) throw new Error("User not found");
+
+  const safeUser    = normalizeUserRow(user);
+  const newJwt      = generateToken(safeUser);
+
+  // Rotate: delete old session, create new one
+  await pool.query("DELETE FROM user_sessions WHERE id = $1", [session.id]);
+
+  const newRefreshToken = crypto.randomBytes(40).toString("hex");
+  const newTokenHash    = hashToken(newRefreshToken);
+  const expiresAt       = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_DAYS * 86_400_000);
+
+  await pool.query(
+    `INSERT INTO user_sessions
+       (user_id, workspace_id, refresh_token_hash, ip_address, user_agent, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      session.user_id,
+      session.workspace_id,
+      newTokenHash,
+      ipAddress || session.ip_address,
+      userAgent || session.user_agent,
+      expiresAt,
+    ]
+  );
+
+  return { token: newJwt, refreshToken: newRefreshToken, user: safeUser };
+}
+
+/**
+ * Revoke a specific session (called on logout).
+ */
+export async function revokeSession(refreshToken) {
+  if (!refreshToken) return;
+  const tokenHash = hashToken(refreshToken);
+  await pool.query("DELETE FROM user_sessions WHERE refresh_token_hash = $1", [tokenHash]);
+}
+
+/**
+ * Revoke all sessions for a user (called on password change — forces re-login everywhere).
+ */
+export async function revokeAllUserSessions(userId) {
+  await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [userId]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTHENTICATED PASSWORD CHANGE (from inside the app, not via reset link)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Change password for a logged-in user.
+ * Requires the current password for verification.
+ * Revokes all active sessions on success (forces re-login everywhere for security).
+ */
+export async function changePassword(userId, currentPassword, newPassword) {
+  if (!currentPassword || !newPassword) {
+    throw new Error("Both current and new password are required");
+  }
+  if (newPassword.length < 8) {
+    throw new Error("New password must be at least 8 characters");
+  }
+
+  const { rows } = await pool.query(
+    "SELECT password_hash FROM users WHERE id = $1",
+    [userId]
+  );
+
+  if (!rows[0]) throw new Error("User not found");
+
+  if (!rows[0].password_hash) {
+    throw new Error(
+      "Your account uses Google SSO or a magic link — password login is not set up."
+    );
+  }
+
+  const match = await bcrypt.compare(currentPassword, rows[0].password_hash);
+  if (!match) throw new Error("Current password is incorrect");
+
+  if (currentPassword === newPassword) {
+    throw new Error("New password must be different from your current password");
+  }
+
+  const newHash = await bcrypt.hash(newPassword, 12);
+
+  await pool.query(
+    "UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2",
+    [newHash, userId]
+  );
+
+  // Security: revoke all sessions so any stolen tokens immediately stop working
+  await revokeAllUserSessions(userId);
+}
+
 /**
  * LOGIN WITH GOOGLE SSO
  * Exchanges OAuth2 code for Google user info, finds user by email.

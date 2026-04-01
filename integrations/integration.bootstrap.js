@@ -22,8 +22,12 @@ setTimeout(() => {
 }, 0);
 
 setTimeout(async () => {
-  const jira = integrationManager.createProvider("jira");
-  await jira.connect();
+  try {
+    const jira = integrationManager.createProvider("jira");
+    await jira.connect();
+  } catch (err) {
+    console.warn("[bootstrap] Jira provider connect failed (non-fatal):", err.message);
+  }
 }, 2000);
 
 // 🔄 Restore integrations after boot

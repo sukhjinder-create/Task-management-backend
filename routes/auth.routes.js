@@ -8,6 +8,10 @@ import {
   getCurrentUser,
   requestPasswordReset,
   resetPassword,
+  createSession,
+  refreshSession,
+  revokeSession,
+  changePassword,
 } from "../services/auth.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { logAudit } from "../services/audit.service.js";
@@ -26,6 +30,14 @@ router.post("/login", async (req, res) => {
 
     // Audit successful login (skip for MFA — logged after MFA step)
     if (!data.mfa_required && data.user) {
+      // Create persistent session → return refresh token to client
+      data.refreshToken = await createSession(
+        data.user.id,
+        data.user.workspaceId,
+        req.ip,
+        req.headers["user-agent"]
+      );
+
       logAudit({
         workspaceId: data.user.workspaceId || data.user.workspace_id,
         userId: data.user.id,
@@ -64,8 +76,15 @@ router.post("/mfa/verify", async (req, res) => {
     }
     const data = await loginWithMfa(mfa_session_token, code);
 
-    // Audit MFA login success
+    // Audit MFA login success + create persistent session
     if (data.user) {
+      data.refreshToken = await createSession(
+        data.user.id,
+        data.user.workspaceId,
+        req.ip,
+        req.headers["user-agent"]
+      );
+
       logAudit({
         workspaceId: data.user.workspaceId || data.user.workspace_id,
         userId: data.user.id,
@@ -85,8 +104,14 @@ router.post("/mfa/verify", async (req, res) => {
 });
 
 // ─── LOGOUT ───────────────────────────────────────────────────────────────────
-// Client always clears its own token; this endpoint just creates the audit log.
+// Revokes the refresh token (session) and creates an audit log entry.
 router.post("/logout", authMiddleware, async (req, res) => {
+  // Revoke the refresh token so it can't be used to silently re-auth
+  const { refreshToken } = req.body;
+  if (refreshToken) {
+    revokeSession(refreshToken).catch(() => {}); // fire-and-forget
+  }
+
   logAudit({
     workspaceId: req.user.workspaceId || req.user.workspace_id,
     userId: req.user.id,
@@ -98,6 +123,53 @@ router.post("/logout", authMiddleware, async (req, res) => {
     metadata: {},
   });
   res.json({ success: true });
+});
+
+// ─── REFRESH SESSION ──────────────────────────────────────────────────────────
+// Exchange a (still-valid) refresh token for a new short-lived JWT and a new
+// rotated refresh token. The old refresh token is deleted immediately.
+// No authMiddleware — the expired JWT cannot be used here, only the refresh token.
+router.post("/refresh", async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({ error: "refreshToken is required" });
+    }
+    const data = await refreshSession(refreshToken, req.ip, req.headers["user-agent"]);
+    res.json(data); // { token, refreshToken, user }
+  } catch (err) {
+    // Return 401 so the frontend interceptor knows to log out
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// ─── CHANGE PASSWORD (authenticated) ─────────────────────────────────────────
+// For logged-in users who know their current password.
+// Revokes ALL sessions on success (forces re-login on all devices).
+router.put("/change-password", authMiddleware, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "currentPassword and newPassword are required" });
+    }
+
+    await changePassword(req.user.id, currentPassword, newPassword);
+
+    logAudit({
+      workspaceId: req.user.workspaceId || req.user.workspace_id,
+      userId: req.user.id,
+      action: "user.password.changed",
+      entityType: "user",
+      entityId: req.user.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: {},
+    });
+
+    res.json({ message: "Password changed successfully. Please log in again." });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ─── FORGOT PASSWORD ──────────────────────────────────────────────────────────
@@ -135,6 +207,17 @@ router.get("/magic", async (req, res) => {
     if (!token) return res.status(400).json({ error: "Token is required" });
 
     const data = await loginWithMagicToken(token);
+
+    // Create persistent session for magic-link logins too
+    if (data.user) {
+      data.refreshToken = await createSession(
+        data.user.id,
+        data.user.workspaceId,
+        req.ip,
+        req.headers["user-agent"]
+      );
+    }
+
     res.json(data);
   } catch (err) {
     res.status(401).json({ error: err.message });

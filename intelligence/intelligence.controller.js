@@ -7,6 +7,12 @@ import { saveExecutiveSummary } from "../events/executive/executiveSummary.store
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
 import { getExecutionSnapshot } from "./executionSnapshot.service.js";
 import { detectSignals } from "./signal.detector.js";
+import {
+  getProfitabilityOracle,
+  getResignationRadar,
+  getGhostWorkDetection,
+  getOrgTruthMap,
+} from "./enterpriseIntelligence.service.js";
 
 /**
  * USER — Monthly performance
@@ -920,3 +926,60 @@ export async function getWorkspaceHealth(req, res) {
     });
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enterprise Intelligence Controllers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function getProfitabilityOracleController(req, res) {
+  try {
+    if (req.user.role !== "admin" && req.user.role !== "manager") {
+      return res.status(403).json({ error: "Admin or manager access required" });
+    }
+    const data = await getProfitabilityOracle(req.workspaceId);
+    res.json(data);
+  } catch (err) {
+    console.error("getProfitabilityOracle error:", err);
+    res.status(500).json({ error: "Failed to compute profitability oracle" });
+  }
+}
+
+export async function getResignationRadarController(req, res) {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    const data = await getResignationRadar(req.workspaceId);
+    res.json(data);
+  } catch (err) {
+    console.error("getResignationRadar error:", err);
+    res.status(500).json({ error: "Failed to compute resignation radar" });
+  }
+}
+
+export async function getGhostWorkController(req, res) {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    const data = await getGhostWorkDetection(req.workspaceId);
+    res.json(data);
+  } catch (err) {
+    console.error("getGhostWorkDetection error:", err);
+    res.status(500).json({ error: "Failed to run ghost work detection" });
+  }
+}
+
+export async function getOrgTruthMapController(req, res) {
+  try {
+    if (req.user.role !== "admin" && req.user.role !== "manager") {
+      return res.status(403).json({ error: "Admin or manager access required" });
+    }
+    const data = await getOrgTruthMap(req.workspaceId);
+    res.json(data);
+  } catch (err) {
+    console.error("getOrgTruthMap error:", err);
+    res.status(500).json({ error: "Failed to compute org truth map" });
+  }
+}
+

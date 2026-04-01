@@ -1,6 +1,7 @@
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+import { requirePlanFeature } from "../middleware/plan.middleware.js";
 import {
   getUserPerformance,
   getAdminInsights,
@@ -14,124 +15,56 @@ import {
   getTeamComparison,
   getWorkspaceDashboard,
   getGoalWorkspaceHealth,
+  getProfitabilityOracleController,
+  getResignationRadarController,
+  getGhostWorkController,
+  getOrgTruthMapController,
 } from "./intelligence.controller.js";
-
 
 console.log("🧠 Intelligence routes loaded");
 
 const router = express.Router();
 
-/* =====================================================
-   USER ROUTES
-===================================================== */
-
-router.get(
-  "/user/performance",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getUserPerformance
-);
+// Feature gates
+const advIntel = requirePlanFeature("advanced_analytics");  // Strategic Intelligence page
+const wsIntel  = requirePlanFeature("workspace_intelligence"); // Enterprise Intelligence page
 
 /* =====================================================
-   ADMIN ROUTES
+   USER ROUTES — basic feature, no plan gate
 ===================================================== */
 
-router.post(
-  "/admin/run-monthly-scoring",
-  authMiddleware,
-  requireWorkspaceForUser,
-  runMonthlyScoring
-);
+router.get("/user/performance",       authMiddleware, requireWorkspaceForUser, getUserPerformance);
+router.get("/user/trend",             authMiddleware, requireWorkspaceForUser, getUserTrend);
+router.get("/user/project-performance", authMiddleware, requireWorkspaceForUser, getUserProjectPerformance);
 
-router.get(
-  "/insights",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getAdminInsights
-);
+/* =====================================================
+   ADMIN ROUTES — gated by advanced_analytics
+   (Strategic Intelligence page, requiredFeature="advanced_analytics" in App.jsx)
+===================================================== */
 
- console.log("Executive summary hit");
-router.get(
-  "/admin/executive-summary",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getExecutiveSummary
-);
+router.post("/admin/run-monthly-scoring",  authMiddleware, requireWorkspaceForUser, runMonthlyScoring);
 
-router.get(
-  "/admin/coaching-effectiveness",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getCoachingEffectiveness
-);
+router.get("/insights",                    authMiddleware, requireWorkspaceForUser, advIntel, getAdminInsights);
+router.get("/admin/executive-summary",     authMiddleware, requireWorkspaceForUser, advIntel, getExecutiveSummary);
+router.get("/admin/coaching-effectiveness",authMiddleware, requireWorkspaceForUser, advIntel, getCoachingEffectiveness);
+router.get("/workspace/health",            authMiddleware, requireWorkspaceForUser, advIntel, getWorkspaceHealth);
+router.get("/projects/health",             authMiddleware, requireWorkspaceForUser, advIntel, getProjectsHealth);
+router.get("/team/comparison",             authMiddleware, requireWorkspaceForUser, advIntel, getTeamComparison);
+router.get("/workspace/dashboard",         authMiddleware, requireWorkspaceForUser, advIntel, getWorkspaceDashboard);
 
-/**
- * USER — Monthly trend
- */
-router.get(
-  "/user/trend",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getUserTrend
-);
+/* =====================================================
+   GOALS HEALTH — gated by okr_goals (Goals module)
+===================================================== */
 
-/**
- * USER — Project performance
- */
-router.get(
-  "/user/project-performance",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getUserProjectPerformance
-);
+router.get("/goals/health", authMiddleware, requireWorkspaceForUser, requirePlanFeature("okr_goals"), getGoalWorkspaceHealth);
 
-router.get(
-  "/workspace/health",
-  getWorkspaceHealth
-);
+/* =====================================================
+   ENTERPRISE INTELLIGENCE — gated by workspace_intelligence
+===================================================== */
 
-router.get(
-  "/projects/health",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getProjectsHealth
-);
-
-router.get(
-  "/team/comparison",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getTeamComparison
-);
-
-router.get(
-  "/workspace/dashboard",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getWorkspaceDashboard
-);
-
-/*
-  GET /intelligence/okr/health
-  ────────────────────────────
-  Returns aggregated OKR portfolio health for the workspace.
-  The intelligence layer actively watches OKRs through this endpoint.
-
-  Response includes:
-  • totalObjectives    — how many OKRs exist
-  • atRiskCount        — at_risk or off_track objectives
-  • stalledCount       — objectives with 0% progress after 14+ days
-  • behindCount        — objectives behind expected pace
-  • avgHealthScore     — 0–100 portfolio health
-  • avgProgress        — mean progress across all objectives
-  • completedCount     — objectives at 100%
-  • byStatus           — count per status bucket
-*/
-router.get(
-  "/goals/health",
-  authMiddleware,
-  requireWorkspaceForUser,
-  getGoalWorkspaceHealth
-);
+router.get("/enterprise/profitability-oracle", authMiddleware, requireWorkspaceForUser, wsIntel, getProfitabilityOracleController);
+router.get("/enterprise/resignation-radar",    authMiddleware, requireWorkspaceForUser, wsIntel, getResignationRadarController);
+router.get("/enterprise/ghost-work",           authMiddleware, requireWorkspaceForUser, wsIntel, getGhostWorkController);
+router.get("/enterprise/org-truth-map",        authMiddleware, requireWorkspaceForUser, wsIntel, getOrgTruthMapController);
 
 export default router;
