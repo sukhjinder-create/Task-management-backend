@@ -4,7 +4,7 @@
 import axios from 'axios';  // Add this line to import axios
 import pool from "../db.js";
 // 🔥 EMIT TO SOCKET SO UI UPDATES INSTANTLY
-import { emitMessage } from "../realtime/socket.js";
+import { emitMessage, emitAiTyping } from "../realtime/socket.js";
 /* -------------------------------------------------------
    HELPERS — mapping functions (workspace-aware, backwards compatible)
 ------------------------------------------------------- */
@@ -59,9 +59,20 @@ function mapMessageRow(row) {
 function extractAIPlainText(savedMessage) {
   if (!savedMessage) return null;
 
-  // 1️⃣ DB fallback_text (if explicitly stored)
+  // 1️⃣ DB fallback_text — but it may itself be the encrypted envelope JSON.
+  //    When the frontend sends an E2E message the raw encrypted JSON gets stored
+  //    as fallback_text. Parse it and pull out the embedded fallbackText field.
   if (typeof savedMessage.fallback_text === "string") {
-    return stripHtml(savedMessage.fallback_text);
+    const fb = savedMessage.fallback_text;
+    if (fb.includes("e2e-p256-aesgcm")) {
+      try {
+        const parsed = JSON.parse(fb);
+        if (parsed?.fallbackText) return stripHtml(String(parsed.fallbackText));
+      } catch {}
+      // encrypted with no usable fallback — fall through to step 2
+    } else {
+      return stripHtml(fb);
+    }
   }
 
   // 2️⃣ encrypted_json.message (STRINGIFIED JSON)
@@ -487,7 +498,8 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
     workspace_id,
     created_at,
     parent_id,
-    attachments
+    attachments,
+    temp_id
   )
   VALUES (
     gen_random_uuid(),
@@ -499,21 +511,25 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
     $6::uuid,
     now(),
     $7,
-    $8::jsonb
+    $8::jsonb,
+    $9
   )
+  ON CONFLICT (workspace_id, temp_id) WHERE temp_id IS NOT NULL
+  DO UPDATE SET temp_id = EXCLUDED.temp_id
   RETURNING *, (SELECT u.username FROM users u WHERE u.id = user_id) AS username
   `,
   [
     channelKey,
     userId,
-    textHtml || baseText,   // $3 → text_html: prefer HTML param, fall back to baseText
-    baseText,               // $4 → fallback_text: always plain text
+    textHtml || baseText,
+    baseText,
     encryptedJson
-    ? JSON.stringify(encryptedJson)   // ✅ KEEP REAL ENCRYPTED DATA
-    : JSON.stringify({ message: baseText }), // legacy fallback
-    workspaceId,     // 🔥 MUST ALWAYS BE NON-NULL
+    ? JSON.stringify(encryptedJson)
+    : JSON.stringify({ message: baseText }),
+    workspaceId,
     parentId,
     JSON.stringify(safeAttachments),
+    tempId || null,          // $9 → temp_id for dedup
   ]
 );
 
@@ -636,6 +652,9 @@ try {
               recipientId,
             });
 
+            // Signal to the sender that AI is processing — shows typing indicator
+            emitAiTyping(channelKey, workspaceId);
+
             await emitToAI({
               workspace_id: workspaceId,
               type: "chat:new-message",
@@ -647,10 +666,13 @@ try {
                 user_role: userRole,
                 // Recipient context — used by AI to reply "on behalf of" the right person
                 is_dm: isDm,
+                sender_name: savedMessage.username,
                 recipient_id: recipientId,
                 recipient_name: recipientName,
                 encrypted_json: savedMessage.encrypted_json,
-                fallback_text: savedMessage.fallback_text,
+                // Use extractAIPlainText so the AI always receives readable text,
+                // even when the message body is an E2E-encrypted JSON envelope.
+                fallback_text: extractAIPlainText(savedMessage),
                 text_html: savedMessage.text_html,
                 created_at: savedMessage.created_at,
               },
@@ -750,6 +772,7 @@ if (!aiUser?.userId) {
         reactions: {},
         attachments: [],
         workspaceId,
+        isAiMessage: true, // used by frontend to render the reasoning button regardless of username
       },
       workspaceId
     );

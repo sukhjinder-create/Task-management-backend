@@ -20,17 +20,57 @@ const pool = new Pool({
 
   // ✅ CONNECTION REUSE SETTINGS
   max: 10,                             // max open connections
-  idleTimeoutMillis: 60000,            // close idle clients after 60s
+  idleTimeoutMillis: 20000,            // close idle clients after 20s
+                                       // (shorter than typical NAT/firewall TCP idle timeout)
   connectionTimeoutMillis: 10000,      // wait up to 10s for a free connection
-  keepAlive: true,                     // reuse TCP connection
-  keepAliveInitialDelayMillis: 10000,  // send first keepalive after 10s of idle
+  keepAlive: true,                     // enable TCP keepalives
+  keepAliveInitialDelayMillis: 0,      // send first keepalive immediately on idle
+                                       // (prevents NAT devices from killing the socket)
 });
 
-// 🔐 PRODUCTION SAFETY: Prevent hard crashes
+// 🔐 PRODUCTION SAFETY: Prevent hard crashes on idle pool clients
 pool.on("error", (err) => {
   console.error("🔥 PostgreSQL Pool Error (connection lost):", err);
   // DO NOT exit process — pool will recover
 });
 
+// Attach error handler to ALL clients at creation time (idle + checked-out).
+// pool.on("error") only covers idle clients; a checked-out client whose TCP
+// connection drops will emit "error" with no listener → Node throws → crash.
+pool.on("connect", (client) => {
+  client.on("error", (err) => {
+    console.error("🔥 pg Client error:", err.message);
+    // Pool will discard and replace this connection on the next request
+  });
+});
+
+// Detect errors caused by a stale/dropped TCP connection so we can retry.
+function isStaleConnectionError(err) {
+  const msg = err?.message || "";
+  return (
+    msg.includes("Connection terminated") ||
+    msg.includes("connection is not open") ||
+    msg.includes("Client was closed") ||
+    msg.includes("read ECONNRESET") ||
+    err?.code === "57P01" // PostgreSQL admin shutdown
+  );
+}
+
+// Patch pool.query with a single transparent retry on stale-connection errors.
+// NAT/firewall devices silently kill idle TCP connections; when pg-pool hands
+// out one of these dead connections the first query fails. One retry always
+// gets a fresh connection, so callers never need to handle this themselves.
+const _query = pool.query.bind(pool);
+pool.query = async (...args) => {
+  try {
+    return await _query(...args);
+  } catch (err) {
+    if (isStaleConnectionError(err)) {
+      console.warn("🔄 pg: stale connection detected, retrying query...");
+      return await _query(...args);
+    }
+    throw err;
+  }
+};
 
 export default pool;

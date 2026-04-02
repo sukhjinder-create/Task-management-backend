@@ -100,13 +100,15 @@ router.post("/", async (req, res) => {
     const encryptedJson = encrypted;
 
     const saved = await createChatMessage({
-      channelId: channel.id,
+      channelKey: channel.key || channelId,
       userId,
+      tempId: tempId || null,
       textHtml: encryptedJson,
       encryptedJson,
       fallbackText: fallbackText || null,
       parentId: parentId || null,
       attachments: Array.isArray(attachments) ? attachments : [],
+      workspaceId: req.workspaceId,
     });
 
     // emit via socket

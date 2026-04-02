@@ -168,6 +168,28 @@ router.put("/:id/ai-preference", async (req, res) => {
       [id, aiReplyEnabled === true]
     );
 
+    // When AI auto-reply is turned OFF, clear the AI service's in-memory and
+    // persisted conversation history for this user so stale context is not
+    // reused if they re-enable later.
+    if (aiReplyEnabled === false) {
+      const aiUrl = process.env.AI_SERVICE_URL;
+      const aiSecret = process.env.AI_SERVICE_SECRET;
+      if (aiUrl && aiSecret) {
+        const clearUrl = new URL("/internal/clear-dm-context", aiUrl).origin +
+          "/internal/clear-dm-context";
+        fetch(clearUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${aiSecret}`,
+          },
+          body: JSON.stringify({ userId: id, workspaceId: req.workspaceId, recipientName: user.username }),
+        }).catch((err) =>
+          console.warn("[ai-preference] clear-dm-context call failed:", err.message)
+        );
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error("Error updating AI preference:", err);

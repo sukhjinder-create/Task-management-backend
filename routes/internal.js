@@ -93,6 +93,82 @@ router.get("/workspace-ai-settings/:workspaceId", async (req, res) => {
 });
 
 /**
+ * 🔒 Internal: Ensure a user's private AI notification channel exists.
+ * Creates it if missing. Returns the stable channel key.
+ * Channel name = the AI name set in workspace settings.
+ */
+router.post("/ai/ensure-notify-channel", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.replace("Bearer ", "");
+    if (token !== process.env.AI_SERVICE_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { userId, workspaceId } = req.body || {};
+    if (!userId || !workspaceId) {
+      return res.status(400).json({ error: "userId and workspaceId required" });
+    }
+
+    // Stable, predictable key — one per user
+    const channelKey = `ai-notify:${userId}`;
+
+    // Return existing channel if already created
+    const existing = await pool.query(
+      `SELECT key FROM chat_channels WHERE key = $1 AND workspace_id = $2`,
+      [channelKey, workspaceId]
+    );
+    if (existing.rows.length) {
+      return res.json({ channelKey });
+    }
+
+    // Look up the AI name for this workspace
+    const aiNameRes = await pool.query(
+      `SELECT COALESCE(ai_name, 'AI Assistant') AS ai_name
+       FROM workspace_ai_settings
+       WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    const aiName = aiNameRes.rows[0]?.ai_name || "AI Assistant";
+
+    // Look up the AI system user for this workspace
+    const aiUserRes = await pool.query(
+      `SELECT user_id FROM system_users WHERE workspace_id = $1 LIMIT 1`,
+      [workspaceId]
+    );
+    const aiUserId = aiUserRes.rows[0]?.user_id;
+    if (!aiUserId) {
+      return res.status(500).json({ error: "AI system user not found for workspace" });
+    }
+
+    // Create the channel (AI user is creator, user is member, read-only via type)
+    await pool.query(
+      `INSERT INTO chat_channels (id, key, name, type, created_by, is_private, workspace_id, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'ai-notify', $3, true, $4, now())`,
+      [channelKey, aiName, aiUserId, workspaceId]
+    );
+
+    // Add the user as a member (read-only — they can see but not post)
+    const channelRes = await pool.query(
+      `SELECT id FROM chat_channels WHERE key = $1`,
+      [channelKey]
+    );
+    const channelId = channelRes.rows[0].id;
+
+    await pool.query(
+      `INSERT INTO chat_channel_members (id, channel_id, user_id)
+       VALUES (gen_random_uuid(), $1, $2) ON CONFLICT DO NOTHING`,
+      [channelId, userId]
+    );
+
+    return res.json({ channelKey });
+  } catch (err) {
+    console.error("[INTERNAL_ENSURE_NOTIFY_CHANNEL_ERROR]", err);
+    return res.status(500).json({ error: "Failed to ensure notify channel" });
+  }
+});
+
+/**
  * 🔒 Internal AI Memory Storage (WMDPE)
  * Stores opaque AI memory as JSON per workspace
  * Used ONLY by AI service
@@ -131,6 +207,46 @@ router.post("/ai/memory", async (req, res) => {
   } catch (err) {
     console.error("[INTERNAL_AI_MEMORY_SAVE_ERROR]", err);
     return res.status(500).json({ error: "Failed to save AI memory" });
+  }
+});
+
+// Fetch all DM conversations for a specific user (used for away summary on disable)
+router.get("/ai/conversations/:userId", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.replace("Bearer ", "");
+    if (token !== process.env.AI_SERVICE_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { userId } = req.params;
+    const { workspaceId } = req.query;
+
+    if (!userId || !workspaceId) {
+      return res.status(400).json({ error: "userId and workspaceId required" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT type, payload
+       FROM ai_memory
+       WHERE workspace_id = $1
+         AND type LIKE 'dm_conv:%'
+         AND payload->>'recipientId' = $2
+         AND (payload->>'cleared' IS NULL OR payload->>'cleared' = 'false')`,
+      [workspaceId, userId]
+    );
+
+    // Extract channelKey from type ("dm_conv:channelKey") and return
+    const conversations = rows.map((r) => ({
+      channelKey: r.type.replace("dm_conv:", ""),
+      messages: r.payload?.messages || [],
+      hasGreeted: r.payload?.hasGreeted || false,
+    }));
+
+    return res.json({ conversations });
+  } catch (err) {
+    console.error("[INTERNAL_AI_CONVERSATIONS_ERROR]", err);
+    return res.status(500).json({ error: "Failed to fetch conversations" });
   }
 });
 
@@ -371,6 +487,196 @@ router.get("/user-ai-preference/:userId", async (req, res) => {
   } catch (err) {
     console.error("[INTERNAL_USER_AI_PREF_ERROR]", err);
     res.status(500).json({ error: "Failed to fetch user AI preference" });
+  }
+});
+
+/**
+ * 🔒 Internal: Get away user's context for AI auto-reply
+ * Returns projects, active tasks, overdue tasks so the AI can give informed answers
+ * Called ONLY by AI service
+ */
+router.get("/user-context/:awayUserId", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.replace("Bearer ", "");
+    if (token !== process.env.AI_SERVICE_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { awayUserId } = req.params;
+    const { workspaceId, projectIds } = req.query;
+
+    if (!awayUserId || !workspaceId) {
+      return res.status(400).json({ error: "awayUserId and workspaceId required" });
+    }
+
+    // Optional project filter — if provided, only return data from those projects
+    // projectIds is a comma-separated list of UUIDs sent by the AI service
+    const projectIdList = projectIds
+      ? projectIds.split(",").map((id) => id.trim()).filter(Boolean)
+      : null;
+
+    // Build project filter clause (applies to all task queries when filter is set)
+    const projectFilter = projectIdList?.length
+      ? `AND t.project_id = ANY($3::uuid[])`
+      : "";
+    const taskParams = (base) =>
+      projectIdList?.length ? [...base, projectIdList] : base;
+
+    const [
+      { rows: projects },
+      { rows: activeTasks },
+      { rows: overdueTasks },
+      { rows: recentlyCompleted },
+      { rows: createdTasks },
+      { rows: taskActivity },
+      { rows: attendanceRecent },
+      { rows: attendanceEvents },
+    ] = await Promise.all([
+      // Projects (scoped to filter if provided, else all user's assigned projects)
+      projectIdList?.length
+        ? pool.query(
+            `SELECT id, name FROM projects
+             WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+            [workspaceId, projectIdList]
+          )
+        : pool.query(
+            `SELECT DISTINCT p.id, p.name
+             FROM projects p
+             JOIN tasks t ON t.project_id = p.id
+             WHERE p.workspace_id = $2 AND t.assigned_to = $1
+             LIMIT 15`,
+            [awayUserId, workspaceId]
+          ),
+      // Active assigned tasks (not overdue)
+      pool.query(
+        `SELECT t.id, t.task AS title, t.status, t.due_date, t.updated_at, p.name AS project_name
+         FROM tasks t
+         LEFT JOIN projects p ON p.id = t.project_id
+         WHERE t.assigned_to = $1 AND t.workspace_id = $2
+           AND t.status NOT IN ('completed', 'cancelled')
+           AND (t.due_date IS NULL OR t.due_date >= CURRENT_DATE)
+           ${projectFilter}
+         ORDER BY t.due_date ASC NULLS LAST
+         LIMIT 10`,
+        taskParams([awayUserId, workspaceId])
+      ),
+      // Overdue assigned tasks
+      pool.query(
+        `SELECT t.id, t.task AS title, t.status, t.due_date, t.updated_at, p.name AS project_name
+         FROM tasks t
+         LEFT JOIN projects p ON p.id = t.project_id
+         WHERE t.assigned_to = $1 AND t.workspace_id = $2
+           AND t.status NOT IN ('completed', 'cancelled')
+           AND t.due_date < CURRENT_DATE
+           ${projectFilter}
+         ORDER BY t.due_date ASC
+         LIMIT 5`,
+        taskParams([awayUserId, workspaceId])
+      ),
+      // Recently completed tasks (last 14 days)
+      pool.query(
+        `SELECT t.id, t.task AS title, t.status, t.due_date, t.updated_at, p.name AS project_name
+         FROM tasks t
+         LEFT JOIN projects p ON p.id = t.project_id
+         WHERE t.assigned_to = $1 AND t.workspace_id = $2
+           AND t.status = 'completed'
+           AND t.updated_at >= NOW() - INTERVAL '14 days'
+           ${projectFilter}
+         ORDER BY t.updated_at DESC
+         LIMIT 5`,
+        taskParams([awayUserId, workspaceId])
+      ),
+      // Placeholder — createdTasks requires added_by column; returns empty for safety
+      Promise.resolve({ rows: [] }),
+      // Task activity logs — recent changes on this user's tasks (last 14 days)
+      pool.query(
+        `SELECT tal.action_type, tal.old_value, tal.new_value, tal.created_at,
+                t.task AS task_title, u.username AS actor_name
+         FROM task_activity_logs tal
+         JOIN tasks t ON t.id = tal.task_id
+         LEFT JOIN users u ON u.id = tal.actor_id
+         WHERE t.assigned_to = $1 AND tal.workspace_id = $2
+           AND tal.created_at >= NOW() - INTERVAL '14 days'
+         ORDER BY tal.created_at DESC
+         LIMIT 20`,
+        [awayUserId, workspaceId]
+      ),
+      // Attendance: last 30 days from daily aggregates
+      pool.query(
+        `SELECT date, signed_in_minutes, available_minutes, aws_minutes, lunch_minutes
+         FROM attendance_daily
+         WHERE user_id = $1 AND workspace_id = $2
+           AND date >= CURRENT_DATE - INTERVAL '30 days'
+         ORDER BY date DESC
+         LIMIT 14`,
+        [awayUserId, workspaceId]
+      ),
+      // Attendance events: last sign-in per day (fallback if daily table is empty)
+      pool.query(
+        `SELECT date(started_at) AS date, max(started_at) AS last_event
+         FROM attendance_events
+         WHERE user_id = $1 AND workspace_id = $2
+           AND event_type = 'SIGN_IN'
+           AND started_at >= NOW() - INTERVAL '30 days'
+         GROUP BY date(started_at)
+         ORDER BY date DESC
+         LIMIT 14`,
+        [awayUserId, workspaceId]
+      ),
+    ]);
+
+    return res.json({ projects, activeTasks, overdueTasks, recentlyCompleted, createdTasks, attendanceRecent, attendanceEvents, taskActivity });
+  } catch (err) {
+    console.error("[INTERNAL_USER_CONTEXT_ERROR]", err.message, err.stack?.split("\n")[1]);
+    return res.status(500).json({ error: "Failed to fetch user context", detail: err.message });
+  }
+});
+
+/**
+ * 🔒 Internal: Check if two users are associated (share a project or task)
+ * Used by AI auto-reply to decide whether data sharing is permitted
+ * Called ONLY by AI service
+ */
+router.get("/association", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.replace("Bearer ", "");
+    if (token !== process.env.AI_SERVICE_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { awayUserId, askingUserId, workspaceId } = req.query;
+
+    if (!awayUserId || !askingUserId || !workspaceId) {
+      return res.status(400).json({ error: "awayUserId, askingUserId, workspaceId required" });
+    }
+
+    // Find projects where BOTH users have assigned tasks
+    const { rows } = await pool.query(
+      `SELECT p.id, p.name
+       FROM projects p
+       WHERE p.workspace_id = $3
+         AND EXISTS (
+           SELECT 1 FROM tasks
+           WHERE assigned_to = $1 AND project_id = p.id
+         )
+         AND EXISTS (
+           SELECT 1 FROM tasks
+           WHERE assigned_to = $2 AND project_id = p.id
+         )`,
+      [awayUserId, askingUserId, workspaceId]
+    );
+
+    const associated = rows.length > 0;
+    return res.json({
+      associated,
+      sharedProjects: rows,
+      reason: associated ? "shared_project" : "none",
+    });
+  } catch (err) {
+    console.error("[INTERNAL_ASSOCIATION_CHECK_ERROR]", err);
+    return res.status(500).json({ error: "Association check failed" });
   }
 });
 

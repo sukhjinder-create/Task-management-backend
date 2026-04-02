@@ -289,22 +289,34 @@ const orderedRows = rows.reverse();
 socket.emit("chat:history", {
   channelId: channelKey,
   workspaceId,
-  messages: orderedRows.map((m) => ({
-    id: m.id,
-    channelId: channelKey,
-    userId: m.user_id,
-    username: m.username,
-    textHtml: resolveRenderableText(m),
-    createdAt: m.created_at,
-    updatedAt: m.updated_at,
-    deletedAt: m.deleted_at,
-    reactions: m.reactions || {},
-    attachments: m.attachments || [],
-    encrypted: m.encrypted_json,
-    fallbackText: m.fallback_text,
-    senderPublicKeyJwk: m.sender_public_key,
-    parentId: m.parent_id,
-  })),
+  messages: orderedRows.map((m) => {
+    // Detect AI-generated messages via the __from_ai flag stored in encrypted_json
+    let isAiMessage = false;
+    try {
+      const enc = typeof m.encrypted_json === "string"
+        ? JSON.parse(m.encrypted_json)
+        : m.encrypted_json;
+      isAiMessage = enc?.__from_ai === true;
+    } catch {}
+
+    return {
+      id: m.id,
+      channelId: channelKey,
+      userId: m.user_id,
+      username: m.username,
+      textHtml: resolveRenderableText(m),
+      createdAt: m.created_at,
+      updatedAt: m.updated_at,
+      deletedAt: m.deleted_at,
+      reactions: m.reactions || {},
+      attachments: m.attachments || [],
+      encrypted: m.encrypted_json,
+      fallbackText: m.fallback_text,
+      senderPublicKeyJwk: m.sender_public_key,
+      parentId: m.parent_id,
+      isAiMessage,
+    };
+  }),
 });
   } catch (err) {
     console.error("🔥 chat:open history error:", err);
@@ -391,7 +403,8 @@ socket.emit("chat:history", {
   /* -----------------------------------------------------
      CHAT: MESSAGE
   ----------------------------------------------------- */
- socket.on("chat:message", async ({ channelId, text, tempId, parentId, attachments }) => {
+ socket.on("chat:message", async (data, ack) => {
+  const { channelId, text, tempId, parentId, attachments } = data || {};
   if (socket.disconnected || socket._isCleanedUp) return;
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
   if (!channelId || (!text?.trim() && !hasAttachments)) return;
@@ -451,9 +464,11 @@ socket.emit("chat:history", {
       workspaceId,
     });
 
-    // ❌ DO NOT EMIT HERE (correct as-is)
+    // ✅ Confirm save to sender — frontend uses this to cancel its fallback timer
+    if (typeof ack === "function") ack({ ok: true, tempId: tempId || null });
   } catch (err) {
     console.error("chat:message error:", err);
+    if (typeof ack === "function") ack({ ok: false, error: err.message });
   }
 });
 
@@ -971,7 +986,22 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
       message.senderPublicKeyJwk || message.sender_public_key || null,
     fallbackText: message.fallbackText || message.fallback_text || "",
     parentId: message.parentId || message.parent_id || null,
+    isAiMessage: message.isAiMessage === true,
   };
 
 io.to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)).emit("chat:message", payload);
+}
+
+/**
+ * Emit an AI-typing indicator to a channel.
+ * Called immediately when the AI starts processing a message so the sender
+ * sees "AI is typing..." while waiting for the LLM response.
+ */
+export function emitAiTyping(channelKey, workspaceId) {
+  if (!io || !channelKey || !workspaceId) return;
+  const payload = { channelId: channelKey, workspaceId };
+  // Emit to both rooms so every client in the DM sees the indicator,
+  // regardless of which room they joined (legacy or workspace-scoped).
+  io.to(legacyRoomName(channelKey)).emit("chat:ai-typing", payload);
+  io.to(workspaceRoomName(channelKey, workspaceId)).emit("chat:ai-typing", payload);
 }

@@ -10,7 +10,7 @@
 import axios from "axios";
 
 const PROVIDER     = process.env.LLM_PROVIDER  || "ollama";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "llama3";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "llama3.2:1b";
 const OLLAMA_URL   = "http://localhost:11434";
 const OLLAMA_NUM_GPU = parseInt(process.env.OLLAMA_NUM_GPU ?? "0");
 

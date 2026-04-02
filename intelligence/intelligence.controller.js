@@ -88,25 +88,72 @@ if (role !== "admin") {
 }
    const statsParams = [workspaceId, month, ...projectParams];
 
-const { rows } = await pool.query(
-`
-SELECT
-  COUNT(*) AS user_count,
-  AVG(score)::numeric(5,2) AS average_score,
-  COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
-  COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
-  COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
-  COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
-  COUNT(*) FILTER (WHERE score < 50) AS high_risk
-FROM workspace_monthly_scores
-WHERE workspace_id = $1
-  AND month = $2
-  ${projectFilter}
-`,
-statsParams
-);
+const [{ rows }, { rows: memberRows }] = await Promise.all([
+  pool.query(
+  `
+  SELECT
+    COUNT(*) AS user_count,
+    AVG(score)::numeric(5,2) AS average_score,
+    COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
+    COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
+    COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
+    COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
+    COUNT(*) FILTER (WHERE score < 50) AS high_risk
+  FROM workspace_monthly_scores
+  WHERE workspace_id = $1
+    AND month = $2
+    ${projectFilter}
+  `,
+  statsParams
+  ),
+  pool.query(
+    `SELECT COUNT(*)::int AS total FROM users
+     WHERE workspace_id = $1
+       AND (is_system IS NULL OR is_system = false)
+       AND role != 'system'`,
+    [workspaceId]
+  ),
+]);
 
-    const stats = rows[0];
+    let stats = rows[0];
+    let effectiveMonth = month;
+
+    // If no scores computed for the requested month yet, fall back to most
+    // recent month that has data, and fire background scoring for current month.
+    if (Number(stats.user_count) === 0) {
+      const { rows: recentMonthRows } = await pool.query(
+        `SELECT month FROM workspace_monthly_scores
+         WHERE workspace_id = $1
+         GROUP BY month
+         ORDER BY month DESC
+         LIMIT 1`,
+        [workspaceId]
+      );
+      if (recentMonthRows.length > 0) {
+        effectiveMonth = recentMonthRows[0].month;
+        const fallbackParams = [workspaceId, effectiveMonth, ...projectParams];
+        const { rows: fallbackRows } = await pool.query(
+          `SELECT
+            COUNT(*) AS user_count,
+            AVG(score)::numeric(5,2) AS average_score,
+            COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
+            COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
+            COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
+            COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
+            COUNT(*) FILTER (WHERE score < 50) AS high_risk
+          FROM workspace_monthly_scores
+          WHERE workspace_id = $1 AND month = $2 ${projectFilter}`,
+          fallbackParams
+        );
+        if (Number(fallbackRows[0]?.user_count) > 0) {
+          stats = fallbackRows[0];
+        }
+      }
+      // Kick off background scoring for the requested month (non-blocking)
+      runManualMonthlyScoring({ workspaceId, month, triggeredBy: 'auto' })
+        .catch(err => console.warn('[intelligence] Background auto-scoring:', err.message));
+    }
+
     // 🔥 Fetch last 6 months org scores for forecasting
     const historyParams =
   role === "admin"
@@ -145,7 +192,7 @@ let forecastReasoning = forecast.reasoning || null;
 
     // 🔥 Leaderboard (Top performers)
 
-    const leaderboardParams = [workspaceId, month, ...projectParams];
+    const leaderboardParams = [workspaceId, effectiveMonth, ...projectParams];
 
 const leaderboardResult = await pool.query(
 `
@@ -197,7 +244,7 @@ const orgSignals = detectSignals(
     averageScore: stats.average_score
       ? Number(stats.average_score)
       : null,
-    userCount: Number(stats.user_count),
+    userCount: Number(memberRows[0]?.total ?? stats.user_count),
     highPerformers: Number(stats.high_performers),
     atRiskUsers: Number(stats.at_risk_users),
   },

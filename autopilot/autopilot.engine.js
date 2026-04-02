@@ -587,8 +587,8 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
           : Promise.resolve({ rows: [{}] }),
       ]);
 
-      // Skip projects with zero activity
-      if (statusChanges.length === 0 && newTasks.length === 0) continue;
+      // Skip projects with no activity AND no overdue tasks to report
+      if (statusChanges.length === 0 && newTasks.length === 0 && overdueTasks.length === 0) continue;
 
       const health = healthRows[0] || {};
       const sprintStats = sprintTaskRows[0] || {};
