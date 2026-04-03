@@ -60,21 +60,9 @@ export async function ensureSystemUser(workspaceId, client = null) {
 
     // 3️⃣ Ensure mapping ALWAYS exists
     await db.query(
-      `
-      INSERT INTO system_users (
-        id,
-        workspace_id,
-        user_id,
-        created_at
-      )
-      VALUES (
-        gen_random_uuid(),
-        $1,
-        $2,
-        now()
-      )
-      ON CONFLICT (workspace_id) DO NOTHING
-      `,
+      `INSERT INTO system_users (workspace_id, user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (workspace_id) DO NOTHING`,
       [workspaceId, aiUser.id]
     );
 

@@ -5,6 +5,71 @@ import { runAutopilotAnalysis } from "../autopilot/autopilot.engine.js";
 import { processAutoApprovals } from "../services/autopilot.service.js";
 import { notifyUser } from "../services/notification.service.js";
 
+// ─── Working-day helpers ──────────────────────────────────────────────────────
+
+/**
+ * Returns true if `date` is a configured working day for the workspace.
+ * Checks both the work_days schedule (day-of-week) AND declared holidays.
+ *
+ * Falls back to Mon–Fri (1–5) if the workspace has no schedule configured.
+ */
+async function isWorkingDayForWorkspace(workspaceId, date) {
+  const { rows: scheduleRows } = await pool.query(
+    `SELECT work_days FROM workspace_work_schedule WHERE workspace_id = $1`,
+    [workspaceId]
+  );
+  // work_days uses JS DOW convention: 0=Sun, 1=Mon … 6=Sat
+  const workDays = scheduleRows[0]?.work_days ?? [1, 2, 3, 4, 5];
+
+  if (!workDays.includes(date.getDay())) return false;
+
+  const dateStr = date.toISOString().slice(0, 10);
+  const { rows: holidays } = await pool.query(
+    `SELECT 1 FROM workspace_holidays WHERE workspace_id = $1 AND date = $2`,
+    [workspaceId, dateStr]
+  );
+  return holidays.length === 0;
+}
+
+/**
+ * Walks backwards from yesterday to find the most recent working day.
+ * Returns the timestamp at standup-hour on that day (i.e., when the last
+ * standup should have been posted) plus a human-readable period label.
+ *
+ * Examples:
+ *   Monday  → { since: Friday 11:00,    label: "since Friday (Apr 3)" }
+ *   Tuesday → { since: Monday 11:00,    label: "since yesterday"       }
+ *   Tuesday (Monday was holiday) → { since: Friday 11:00, ... }
+ */
+async function getStandupLookbackSince(workspaceId, standupHour = 11) {
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  cursor.setDate(cursor.getDate() - 1); // start from yesterday
+
+  for (let i = 0; i < 14; i++) {
+    if (await isWorkingDayForWorkspace(workspaceId, cursor)) {
+      const since = new Date(cursor);
+      since.setHours(standupHour, 0, 0, 0);
+
+      const isYesterday = i === 0;
+      const dayName = cursor.toLocaleDateString("en-US", { weekday: "long" });
+      const dateLabel = cursor.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const periodLabel = isYesterday
+        ? "since yesterday"
+        : `since ${dayName} (${dateLabel})`;
+
+      return { sinceTimestamp: since, periodLabel };
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  // Safety fallback — should never be reached in a normally configured workspace
+  return {
+    sinceTimestamp: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    periodLabel: "last 24 hours",
+  };
+}
+
 async function notifyAdminsOfAutopilotRun(workspaceId, result) {
   try {
     const { rows: admins } = await pool.query(
@@ -111,6 +176,8 @@ export function startAutopilotCron() {
 
   // ============================================
   // JOB 3: Generate & deliver daily standups at 11:00 AM every day
+  // Skips workspaces where today is not a configured working day.
+  // Lookback window stretches to cover activity since the previous working day.
   // ============================================
   cron.schedule("0 11 * * *", async () => {
     console.log("\n📋 [CRON] Generating daily standups (11:00 AM)...");
@@ -122,14 +189,29 @@ export function startAutopilotCron() {
         WHERE enabled = true AND auto_generate_standup = true
       `);
 
-      console.log(`Generating standups for ${workspaces.length} workspaces`);
+      console.log(`Checking standups for ${workspaces.length} workspaces`);
+
+      const today = new Date();
 
       for (const ws of workspaces) {
         try {
+          // Skip if today is not a working day for this workspace
+          const isWorking = await isWorkingDayForWorkspace(ws.workspace_id, today);
+          if (!isWorking) {
+            console.log(`⏭️  Workspace ${ws.workspace_id}: today is not a working day — skipping standup`);
+            continue;
+          }
+
+          // Dynamic lookback: covers activity since the last working day standup
+          const { sinceTimestamp, periodLabel } = await getStandupLookbackSince(ws.workspace_id, 11);
+          console.log(`📋 Workspace ${ws.workspace_id}: generating standup (${periodLabel})`);
+
           const result = await runAutopilotAnalysis({
             workspaceId: ws.workspace_id,
             projectId: null,
-            skipStandup: false, // Only standups run here
+            skipStandup: false,   // Only standups run here
+            sinceTimestamp,
+            periodLabel,
           });
           console.log(`✅ Standups for workspace ${ws.workspace_id}: ${result.actionsCreated} created`);
         } catch (err) {

@@ -7,12 +7,15 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 /**
  * Auto-assign reviews for a cycle:
- *  1. Self-review      — every workspace member reviews themselves
- *  2. Manager review   — manager reviews each direct report (if manager_id set)
- *  3. Peer reviews     — each member randomly reviews `peerCount` colleagues
+ *  1. Self-review  — every workspace member reviews themselves
+ *  2. Manager review — manager reviews each direct report (if manager_id set)
+ *
+ * Peer reviews have been removed. Manager reviews are locked in the API
+ * until the employee's self-review is submitted.
+ *
  * Idempotent: ON CONFLICT DO NOTHING, safe to re-run.
  */
-async function autoAssignReviews(cycleId, workspaceId, peerCount = 2) {
+async function autoAssignReviews(cycleId, workspaceId) {
   const { rows: members } = await pool.query(
     `SELECT wu.user_id, wu.manager_id, u.email, u.username
      FROM workspace_users wu
@@ -29,7 +32,7 @@ async function autoAssignReviews(cycleId, workspaceId, peerCount = 2) {
   const cycle = cycleRows[0];
   if (!cycle) return 0;
 
-  // 1. Self-reviews
+  // 1. Self-reviews — every member reviews themselves
   for (const m of members) {
     await pool.query(
       `INSERT INTO performance_reviews (cycle_id, reviewee_id, reviewer_id, type)
@@ -39,7 +42,7 @@ async function autoAssignReviews(cycleId, workspaceId, peerCount = 2) {
     );
   }
 
-  // 2. Manager reviews
+  // 2. Manager reviews — created now but locked until self-review is submitted
   for (const m of members) {
     if (!m.manager_id) continue;
     await pool.query(
@@ -50,27 +53,7 @@ async function autoAssignReviews(cycleId, workspaceId, peerCount = 2) {
     );
   }
 
-  // 3. Peer reviews — each person reviews N random others
-  if (peerCount > 0 && members.length > 2) {
-    for (const m of members) {
-      const eligible = members.filter(
-        p => p.user_id !== m.user_id && p.user_id !== m.manager_id
-      );
-      const peers = eligible
-        .sort(() => 0.5 - Math.random())
-        .slice(0, Math.min(peerCount, eligible.length));
-      for (const peer of peers) {
-        await pool.query(
-          `INSERT INTO performance_reviews (cycle_id, reviewee_id, reviewer_id, type)
-           VALUES ($1, $2, $3, 'peer')
-           ON CONFLICT (cycle_id, reviewee_id, reviewer_id, type) DO NOTHING`,
-          [cycleId, m.user_id, peer.user_id]
-        );
-      }
-    }
-  }
-
-  // 4. Notify every unique reviewer
+  // 3. Notify every unique reviewer
   const { rows: reviewers } = await pool.query(
     `SELECT pr.reviewer_id, u.email, u.username,
             COUNT(pr.id) AS review_count
@@ -109,10 +92,10 @@ function getQuarterInfo(date = new Date()) {
   const year  = date.getFullYear();
   const q     = Math.floor(date.getMonth() / 3); // 0-3
   const names = ["Q1", "Q2", "Q3", "Q4"];
-  const starts = [0, 3, 6, 9];   // month index of quarter start
-  const ends   = [2, 5, 8, 11];  // month index of quarter end
+  const starts = [0, 3, 6, 9];
+  const ends   = [2, 5, 8, 11];
   const startDate = new Date(year, starts[q], 1);
-  const endDate   = new Date(year, ends[q] + 1, 0); // last day of end month
+  const endDate   = new Date(year, ends[q] + 1, 0);
   return {
     name:     `${names[q]} ${year} Performance Review`,
     type:     "quarterly",
@@ -138,18 +121,18 @@ export function startReviewsCron() {
           `SELECT id FROM review_cycles WHERE workspace_id = $1 AND name = $2`,
           [ws.id, q.name]
         );
-        if (existing.length > 0) continue; // already exists
+        if (existing.length > 0) continue;
 
         const { rows: inserted } = await pool.query(
           `INSERT INTO review_cycles
-             (workspace_id, name, type, start_date, end_date, status, auto_generated, peer_review_count)
-           VALUES ($1,$2,$3,$4,$5,'active',true,2)
-           RETURNING id, peer_review_count`,
+             (workspace_id, name, type, start_date, end_date, status, auto_generated)
+           VALUES ($1,$2,$3,$4,$5,'active',true)
+           RETURNING id`,
           [ws.id, q.name, q.type, q.startStr, q.endStr]
         );
 
         if (inserted[0]) {
-          const n = await autoAssignReviews(inserted[0].id, ws.id, inserted[0].peer_review_count);
+          const n = await autoAssignReviews(inserted[0].id, ws.id);
           console.log(`[reviews-cron] Created "${q.name}" workspace=${ws.id} — ${n} reviewers`);
         }
       }
@@ -166,11 +149,11 @@ export function startReviewsCron() {
       const { rows: cycles } = await pool.query(
         `UPDATE review_cycles SET status = 'active'
          WHERE status = 'draft' AND start_date <= $1
-         RETURNING id, workspace_id, name, peer_review_count`,
+         RETURNING id, workspace_id, name`,
         [today]
       );
       for (const c of cycles) {
-        const n = await autoAssignReviews(c.id, c.workspace_id, c.peer_review_count || 2);
+        const n = await autoAssignReviews(c.id, c.workspace_id);
         console.log(`[reviews-cron] Activated "${c.name}" — ${n} reviewers notified`);
       }
     } catch (err) {
@@ -178,29 +161,39 @@ export function startReviewsCron() {
     }
   });
 
-  // ── 3. Daily 09:00 — send deadline reminders (7 days and 1 day before) ──
+  // ── 3. Daily 09:00 — send deadline reminders (7, 3, and 1 day before) ──
   cron.schedule("0 9 * * *", async () => {
     console.log("[reviews-cron] Checking review reminders");
     try {
       const today = new Date();
 
       const d7 = new Date(today); d7.setDate(d7.getDate() + 7);
+      const d3 = new Date(today); d3.setDate(d3.getDate() + 3);
       const d1 = new Date(today); d1.setDate(d1.getDate() + 1);
       const d7str = d7.toISOString().slice(0, 10);
+      const d3str = d3.toISOString().slice(0, 10);
       const d1str = d1.toISOString().slice(0, 10);
 
-      const { rows: cycles7 } = await pool.query(
-        `UPDATE review_cycles SET reminder_sent_7d = true
-         WHERE status = 'active' AND end_date = $1 AND reminder_sent_7d IS NOT TRUE
-         RETURNING id, workspace_id, name, end_date`,
-        [d7str]
-      );
-      const { rows: cycles1 } = await pool.query(
-        `UPDATE review_cycles SET reminder_sent_1d = true
-         WHERE status = 'active' AND end_date = $1 AND reminder_sent_1d IS NOT TRUE
-         RETURNING id, workspace_id, name, end_date`,
-        [d1str]
-      );
+      const [{ rows: cycles7 }, { rows: cycles3 }, { rows: cycles1 }] = await Promise.all([
+        pool.query(
+          `UPDATE review_cycles SET reminder_sent_7d = true
+           WHERE status = 'active' AND end_date = $1 AND reminder_sent_7d IS NOT TRUE
+           RETURNING id, workspace_id, name, end_date`,
+          [d7str]
+        ),
+        pool.query(
+          `UPDATE review_cycles SET reminder_sent_3d = true
+           WHERE status = 'active' AND end_date = $1 AND reminder_sent_3d IS NOT TRUE
+           RETURNING id, workspace_id, name, end_date`,
+          [d3str]
+        ),
+        pool.query(
+          `UPDATE review_cycles SET reminder_sent_1d = true
+           WHERE status = 'active' AND end_date = $1 AND reminder_sent_1d IS NOT TRUE
+           RETURNING id, workspace_id, name, end_date`,
+          [d1str]
+        ),
+      ]);
 
       const sendReminders = async (cycles, daysLeft) => {
         for (const c of cycles) {
@@ -235,6 +228,7 @@ export function startReviewsCron() {
       };
 
       await sendReminders(cycles7, 7);
+      await sendReminders(cycles3, 3);
       await sendReminders(cycles1, 1);
     } catch (err) {
       console.error("[reviews-cron] Reminder error:", err.message);
@@ -255,15 +249,39 @@ export function startReviewsCron() {
       for (const c of expired) {
         console.log(`[reviews-cron] Completed cycle: ${c.name}`);
 
+        // Mark unsubmitted self-reviews as 'missed' — triggers score penalty in monthly scoring
+        const { rows: missed } = await pool.query(
+          `UPDATE performance_reviews
+           SET status = 'missed', updated_at = NOW()
+           WHERE cycle_id = $1 AND type = 'self' AND status != 'submitted'
+           RETURNING reviewee_id`,
+          [c.id]
+        );
+
+        // Notify users whose self-review was missed
+        for (const m of missed) {
+          notifyUser({
+            user_id: m.reviewee_id,
+            type: "review_missed",
+            message: `❌ You did not submit your self-review for "${c.name}" before the deadline. A score penalty has been applied to this month's performance score.`,
+            workspaceId: c.workspace_id,
+          }).catch(() => {});
+        }
+
+        if (missed.length > 0) {
+          console.log(`[reviews-cron] Marked ${missed.length} self-review(s) as missed in cycle: ${c.name}`);
+        }
+
         const { rows: stats } = await pool.query(
           `SELECT COUNT(*) AS total,
                   COUNT(*) FILTER (WHERE status = 'submitted') AS submitted,
+                  COUNT(*) FILTER (WHERE status = 'missed')    AS missed_count,
                   ROUND(AVG(overall_score) FILTER (WHERE status = 'submitted'), 1) AS avg_score
-           FROM performance_reviews WHERE cycle_id = $1`,
+           FROM performance_reviews WHERE cycle_id = $1 AND type = 'self'`,
           [c.id]
         );
         const s = stats[0];
-        const msg = `✅ "${c.name}" closed — ${s.submitted}/${s.total} reviews submitted${s.avg_score ? `, avg ${s.avg_score}/5` : ""}`;
+        const msg = `✅ "${c.name}" closed — ${s.submitted}/${s.total} self-reviews submitted${Number(s.missed_count) > 0 ? `, ${s.missed_count} missed` : ""}${s.avg_score ? `, avg ${s.avg_score}/5` : ""}`;
 
         const { rows: admins } = await pool.query(
           `SELECT u.id FROM users u
@@ -275,13 +293,61 @@ export function startReviewsCron() {
           notifyUser({ user_id: a.id, type: "review_cycle_complete", message: msg, workspaceId: c.workspace_id }).catch(() => {});
         }
       }
+
+      // ── Safety net: also complete any active cycles where every review is
+      //    already submitted/missed regardless of end_date (e.g. the real-time
+      //    route trigger failed to fire or the server was down at that moment).
+      const { rows: allDone } = await pool.query(
+        `SELECT rc.id, rc.workspace_id, rc.name
+         FROM review_cycles rc
+         WHERE rc.status = 'active'
+           -- at least one review row must exist (never complete an empty cycle)
+           AND EXISTS (
+             SELECT 1 FROM performance_reviews pr WHERE pr.cycle_id = rc.id
+           )
+           -- no review is still in an open state
+           AND NOT EXISTS (
+             SELECT 1 FROM performance_reviews pr
+             WHERE pr.cycle_id = rc.id
+               AND pr.status NOT IN ('submitted', 'missed')
+           )`
+      );
+
+      for (const c of allDone) {
+        const { rows: completed } = await pool.query(
+          `UPDATE review_cycles SET status = 'completed'
+           WHERE id = $1 AND status = 'active'
+           RETURNING id`,
+          [c.id]
+        );
+        if (!completed[0]) continue;
+
+        console.log(`[reviews-cron] Safety-net completed cycle: ${c.name}`);
+        const { rows: stats } = await pool.query(
+          `SELECT COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE status = 'submitted') AS submitted,
+                  ROUND(AVG(overall_score) FILTER (WHERE status = 'submitted'), 1) AS avg_score
+           FROM performance_reviews WHERE cycle_id = $1`,
+          [c.id]
+        );
+        const s   = stats[0];
+        const msg = `🎉 "${c.name}" auto-completed — all reviews done. ${s.submitted}/${s.total} submitted${s.avg_score ? `, avg ${s.avg_score}/5` : ""}.`;
+
+        const { rows: admins } = await pool.query(
+          `SELECT wu.user_id FROM workspace_users wu
+           WHERE wu.workspace_id = $1 AND wu.role IN ('admin','owner')`,
+          [c.workspace_id]
+        );
+        for (const a of admins) {
+          notifyUser({ user_id: a.user_id, type: "review_cycle_complete", message: msg, workspaceId: c.workspace_id }).catch(() => {});
+        }
+      }
     } catch (err) {
       console.error("[reviews-cron] Auto-complete error:", err.message);
     }
   });
 
-  console.log("[reviews-cron] ✅ Review automation started");
+  console.log("[reviews-cron] ✅ Review automation started (self + manager flow)");
 }
 
-// Export helper so routes can trigger assignment manually
 export { autoAssignReviews, getQuarterInfo };

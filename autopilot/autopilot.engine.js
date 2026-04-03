@@ -24,7 +24,7 @@ import { ensureSystemUser } from "../services/ai.system.service.js";
  * Main autopilot analysis runner
  * Scans workspace/project and generates actions
  */
-export async function runAutopilotAnalysis({ workspaceId, projectId = null, skipStandup = false }) {
+export async function runAutopilotAnalysis({ workspaceId, projectId = null, skipStandup = false, sinceTimestamp = null, periodLabel = null }) {
   console.log(`🤖 Running autopilot analysis for workspace: ${workspaceId}, project: ${projectId || 'all'}`);
 
   // Get autopilot settings
@@ -47,7 +47,7 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null, skip
   }
   // Standups run on a dedicated daily cron — skip here to avoid duplicates
   if (!skipStandup && settings.auto_generate_standup) {
-    modulePromises.push(generateStandupSummary(workspaceId, projectId, settings));
+    modulePromises.push(generateStandupSummary(workspaceId, projectId, settings, sinceTimestamp, periodLabel));
   }
   // Always analyse overdue tasks
   modulePromises.push(analyzeOverdueTasks(workspaceId, projectId, settings));
@@ -446,7 +446,11 @@ async function analyzeOverdueTasks(workspaceId, projectId, settings) {
  * and time-in-state analysis drawn from task_activity_logs.
  * When projectId is null, generates one standup per active project in the workspace.
  */
-async function generateStandupSummary(workspaceId, projectId, settings) {
+async function generateStandupSummary(workspaceId, projectId, settings, sinceTimestamp = null, periodLabel = null) {
+  // Default lookback: 24 hours
+  const since = sinceTimestamp || new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const period = periodLabel || "since yesterday";
+
   // Determine which projects to summarise
   let projects = [];
   if (projectId) {
@@ -462,9 +466,9 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
       JOIN tasks t ON t.id = al.task_id
       JOIN projects p ON p.id = t.project_id
       WHERE al.workspace_id = $1
-        AND al.created_at > NOW() - INTERVAL '24 hours'
+        AND al.created_at > $2::timestamptz
       LIMIT 10
-    `, [workspaceId]);
+    `, [workspaceId, since]);
     projects = rows;
   }
 
@@ -497,7 +501,7 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
         { rows: sprintTaskRows },
       ] = await Promise.all([
 
-        // Status transitions in last 24h with time-in-previous-state
+        // Status transitions since last working day standup
         pool.query(`
           SELECT
             al.task_id,
@@ -526,22 +530,22 @@ async function generateStandupSummary(workspaceId, projectId, settings) {
           WHERE al.workspace_id = $1
             AND t.project_id = $2
             AND al.action_type = 'STATUS_CHANGED'
-            AND al.created_at > NOW() - INTERVAL '24 hours'
+            AND al.created_at > $3::timestamptz
           ORDER BY al.created_at DESC
           LIMIT 40
-        `, scopeParams),
+        `, [...scopeParams, since]),
 
-        // New tasks created in last 24h
+        // New tasks created since last working day standup
         pool.query(`
           SELECT t.task AS task_name, t.priority, t.status, t.task_type,
             t.story_points, u.username AS assigned_to, t.due_date
           FROM tasks t
           LEFT JOIN users u ON u.id = t.assigned_to
           WHERE t.workspace_id = $1 AND t.project_id = $2
-            AND t.created_at > NOW() - INTERVAL '24 hours'
+            AND t.created_at > $3::timestamptz
           ORDER BY t.created_at DESC
           LIMIT 15
-        `, scopeParams),
+        `, [...scopeParams, since]),
 
         // Currently overdue tasks
         pool.query(`
@@ -655,13 +659,13 @@ ${sprintBlock}
 
 PROJECT HEALTH: ${health.active_count || 0} active | ${health.in_progress_count || 0} in-progress | ${health.in_review_count || 0} in-review | ${health.todo_count || 0} todo | ${health.overdue_count || 0} overdue
 
-TASK MOVEMENTS LAST 24H (${statusChanges.length} changes):
+TASK MOVEMENTS ${period.toUpperCase()} (${statusChanges.length} changes):
 ${transitionLines || '  - None'}
 
 PER-PERSON ACTIVITY:
 ${personLines || '  - No activity recorded'}
 
-NEW TASKS CREATED TODAY (${newTasks.length}):
+NEW TASKS CREATED ${period.toUpperCase()} (${newTasks.length}):
 ${newTaskLines || '  - None'}
 
 CURRENTLY OVERDUE (${overdueTasks.length}):
@@ -678,7 +682,7 @@ ${activeSprint ? `> 🏃 **Sprint:** "${activeSprint.name}" · ${activeSprint.da
 
 ---
 
-## 🟢 Yesterday's Progress
+## 🟢 Progress (${period})
 - List each completed or advanced task as a bullet
 - Format: **"Task Name"** — moved from X → Y by @Person [Xpts if available]
 - If nothing happened, write: *No task movements recorded*
@@ -694,9 +698,9 @@ ${activeSprint ? `> 🏃 **Sprint:** "${activeSprint.name}" · ${activeSprint.da
 - If no activity, write: *No individual activity recorded*
 
 ## 🆕 Newly Added
-- List new tasks added today
+- List new tasks added ${period}
 - Format: **"Task Name"** · Type · Assigned to @Owner · Priority: X
-- If none, write: *No new tasks today*
+- If none, write: *No new tasks ${period}*
 
 ## 🚨 Blockers & Overdue
 - List every overdue task as a bullet

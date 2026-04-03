@@ -94,7 +94,8 @@ export async function getAuditLogs({
 
   const conditions = [
     "al.workspace_id = $1",
-    "al.action NOT LIKE 'request.%'",
+    // Hide raw HTTP-read noise; write operations have semantic names (e.g. task.create)
+    "al.action != 'request.get'",
     "al.action NOT LIKE 'project.history.%'",
   ];
   const params = [workspaceId];
