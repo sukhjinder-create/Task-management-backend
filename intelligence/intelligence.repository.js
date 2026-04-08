@@ -22,6 +22,22 @@ class IntelligenceRepository {
     return rows[0] || null;
   }
 
+  async getLatestMonthlyUserScore({ workspaceId, userId }) {
+    const { rows } = await pool.query(
+      `
+      SELECT month, score, breakdown, reasoning, improvements AS coaching
+      FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND user_id = $2
+      ORDER BY month DESC
+      LIMIT 1
+      `,
+      [workspaceId, userId]
+    );
+
+    return rows[0] || null;
+  }
+
   async getAdminInsights({ workspaceId, month }) {
   const orgStats = await pool.query(`
     SELECT

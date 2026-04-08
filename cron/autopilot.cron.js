@@ -212,6 +212,7 @@ export function startAutopilotCron() {
             skipStandup: false,   // Only standups run here
             sinceTimestamp,
             periodLabel,
+            standupOnly: true,
           });
           console.log(`✅ Standups for workspace ${ws.workspace_id}: ${result.actionsCreated} created`);
         } catch (err) {

@@ -1,6 +1,5 @@
 // autopilot/autopilot.engine.js
 import pool from "../db.js";
-import { generateText } from "../intelligence/llm/llmClient.js";
 import {
   createChannel,
   getChannelByKey,
@@ -24,7 +23,7 @@ import { ensureSystemUser } from "../services/ai.system.service.js";
  * Main autopilot analysis runner
  * Scans workspace/project and generates actions
  */
-export async function runAutopilotAnalysis({ workspaceId, projectId = null, skipStandup = false, sinceTimestamp = null, periodLabel = null }) {
+export async function runAutopilotAnalysis({ workspaceId, projectId = null, skipStandup = false, sinceTimestamp = null, periodLabel = null, standupOnly = false, reportDate = null }) {
   console.log(`🤖 Running autopilot analysis for workspace: ${workspaceId}, project: ${projectId || 'all'}`);
 
   // Get autopilot settings
@@ -36,21 +35,23 @@ export async function runAutopilotAnalysis({ workspaceId, projectId = null, skip
 
   // Run enabled analysis modules in parallel for better throughput.
   const modulePromises = [];
-  if (settings.auto_assign) {
+  if (!standupOnly && settings.auto_assign) {
     modulePromises.push(analyzeUnassignedTasks(workspaceId, projectId, settings));
   }
-  if (settings.auto_deadline_adjust) {
+  if (!standupOnly && settings.auto_deadline_adjust) {
     modulePromises.push(analyzeDeadlines(workspaceId, projectId, settings));
   }
-  if (settings.auto_escalate_blockers) {
+  if (!standupOnly && settings.auto_escalate_blockers) {
     modulePromises.push(analyzeBlockers(workspaceId, projectId, settings));
   }
   // Standups run on a dedicated daily cron — skip here to avoid duplicates
   if (!skipStandup && settings.auto_generate_standup) {
-    modulePromises.push(generateStandupSummary(workspaceId, projectId, settings, sinceTimestamp, periodLabel));
+    modulePromises.push(generateStandupSummary(workspaceId, projectId, settings, sinceTimestamp, periodLabel, reportDate));
   }
   // Always analyse overdue tasks
-  modulePromises.push(analyzeOverdueTasks(workspaceId, projectId, settings));
+  if (!standupOnly) {
+    modulePromises.push(analyzeOverdueTasks(workspaceId, projectId, settings));
+  }
 
   const moduleResults = await Promise.all(modulePromises);
   const actions = moduleResults.flat().filter(Boolean);
@@ -446,7 +447,7 @@ async function analyzeOverdueTasks(workspaceId, projectId, settings) {
  * and time-in-state analysis drawn from task_activity_logs.
  * When projectId is null, generates one standup per active project in the workspace.
  */
-async function generateStandupSummary(workspaceId, projectId, settings, sinceTimestamp = null, periodLabel = null) {
+async function generateStandupSummaryLegacy(workspaceId, projectId, settings, sinceTimestamp = null, periodLabel = null) {
   // Default lookback: 24 hours
   const since = sinceTimestamp || new Date(Date.now() - 24 * 60 * 60 * 1000);
   const period = periodLabel || "since yesterday";
@@ -748,6 +749,536 @@ RULES:
           delivery_channel: 'daily-standups',
         },
         confidence: 0.92,
+      });
+    } catch (err) {
+      console.error(`Failed to generate standup for project ${project.id}:`, err);
+    }
+  }
+
+  return allActions;
+}
+
+const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "http://localhost:5173";
+const DEFAULT_PROJECT_STATUSES = [
+  { key: "backlog", label: "Backlog", sort_order: 1 },
+  { key: "pending", label: "Pending", sort_order: 2 },
+  { key: "in-progress", label: "In Progress", sort_order: 3 },
+  { key: "completed", label: "Completed", sort_order: 4 },
+];
+const TERMINAL_STATUS_KEYS = new Set(["completed", "cancelled", "done", "closed"]);
+
+function normalizeStatusKey(value = "") {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/[^a-z0-9-]+/g, "")
+    .replace(/-+/g, "-");
+}
+
+function titleCase(value = "") {
+  return String(value)
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function parseDateOnly(value) {
+  if (value instanceof Date) return new Date(value);
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    return new Date(year, month - 1, day);
+  }
+  return new Date(value);
+}
+
+function formatLocalDateIso(value) {
+  const date = parseDateOnly(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatStatusLabel(value, statusMap = new Map()) {
+  const key = normalizeStatusKey(value);
+  return statusMap.get(key)?.label || titleCase(key || value || "Unknown");
+}
+
+function isTerminalStatusKey(key) {
+  return TERMINAL_STATUS_KEYS.has(normalizeStatusKey(key));
+}
+
+function isPlanningStatusKey(key) {
+  return ["backlog", "pending", "todo", "to-do", "planned", "ready"].includes(normalizeStatusKey(key));
+}
+
+function isInProgressTask(task, orderedStatuses) {
+  const key = normalizeStatusKey(task.status);
+  if (!key || isTerminalStatusKey(key) || isPlanningStatusKey(key)) return false;
+
+  const index = orderedStatuses.findIndex(status => normalizeStatusKey(status.key) === key);
+  if (index > 0 && index < orderedStatuses.length - 1) return true;
+
+  return key.includes("progress") || key.includes("review") || key.includes("qa") || key.includes("test");
+}
+
+function buildTaskUrl(projectId, taskId) {
+  const params = new URLSearchParams();
+  params.set("task", taskId);
+  return `${FRONTEND_BASE_URL}/projects/${projectId}?${params.toString()}`;
+}
+
+function markdownTaskLink(task) {
+  const labelBase = task.display_id ? `${task.display_id}` : "Task";
+  const label = `${labelBase}: ${task.task_name || task.task || "Untitled task"}`;
+  return `[${label}](${buildTaskUrl(task.project_id, task.task_id || task.id)})`;
+}
+
+function formatHandle(username) {
+  return username ? `@${username}` : "unassigned";
+}
+
+function formatTaskDetails(task, statusMap = new Map()) {
+  const details = [];
+  if (task.task_type) details.push(task.task_type);
+  if (task.story_points !== null && task.story_points !== undefined) details.push(`${task.story_points}pts`);
+  if (task.priority) details.push(`priority: ${task.priority}`);
+  if (task.assigned_to_username) details.push(`owner: ${formatHandle(task.assigned_to_username)}`);
+  details.push(`status: ${formatStatusLabel(task.status, statusMap)}`);
+  return details.join(" | ");
+}
+
+function clampList(items, max = 8) {
+  return items.slice(0, max);
+}
+
+function buildSection(title, items, emptyText) {
+  const lines = [`## ${title}`];
+  if (!items.length) {
+    lines.push(`- ${emptyText}`);
+    return lines.join("\n");
+  }
+  lines.push(...items.map(item => `- ${item}`));
+  return lines.join("\n");
+}
+
+function buildBoardSnapshotItems(tasks, orderedStatuses) {
+  const counts = new Map(
+    orderedStatuses.map(status => [normalizeStatusKey(status.key), { label: status.label, count: 0 }])
+  );
+
+  for (const task of tasks) {
+    const key = normalizeStatusKey(task.status);
+    if (!counts.has(key)) counts.set(key, { label: titleCase(task.status), count: 0 });
+    counts.get(key).count += 1;
+  }
+
+  return Array.from(counts.values())
+    .filter(item => item.count > 0)
+    .map(item => `**${item.label}**: ${item.count}`);
+}
+
+function buildBlockerItems(tasks, settings) {
+  const staleThresholdHours = Number(settings?.blocker_threshold_hours || 48);
+  const now = Date.now();
+  const warnings = [];
+
+  for (const task of tasks) {
+    if (isTerminalStatusKey(task.status)) continue;
+
+    const flags = [];
+    if (task.is_blocked) flags.push("blocked");
+    if (task.due_date && new Date(task.due_date).getTime() < now) flags.push("overdue");
+    if (task.updated_at && (now - new Date(task.updated_at).getTime()) >= staleThresholdHours * 3600 * 1000) flags.push("stale");
+    if (!task.assigned_to && !isPlanningStatusKey(task.status)) flags.push("unassigned");
+    if (!flags.length) continue;
+
+    warnings.push({ ...task, flags });
+  }
+
+  return warnings.sort((a, b) => {
+    const aScore = Number(a.flags.includes("blocked")) + Number(a.flags.includes("overdue"));
+    const bScore = Number(b.flags.includes("blocked")) + Number(b.flags.includes("overdue"));
+    return bScore - aScore;
+  });
+}
+
+function buildTeamActivityItems(activityRows) {
+  const grouped = new Map();
+
+  for (const row of activityRows) {
+    const actor = row.actor_name || "Unknown";
+    if (!grouped.has(actor)) grouped.set(actor, []);
+
+    if (row.action_type === "STATUS_CHANGED") {
+      grouped.get(actor).push(`${markdownTaskLink(row)} ${formatStatusLabel(row.from_status)} -> ${formatStatusLabel(row.to_status)}`);
+    } else if (row.action_type === "TASK_CREATED") {
+      grouped.get(actor).push(`created ${markdownTaskLink(row)}`);
+    } else if (row.action_type === "ASSIGNEE_CHANGED") {
+      grouped.get(actor).push(`reassigned ${markdownTaskLink(row)} to ${formatHandle(row.new_assigned_to_username)}`);
+    } else if (row.action_type === "PRIORITY_CHANGED") {
+      grouped.get(actor).push(`changed ${markdownTaskLink(row)} priority to ${row.new_priority || "unspecified"}`);
+    } else if (row.action_type === "COMMENT_ADDED") {
+      grouped.get(actor).push(`commented on ${markdownTaskLink(row)}`);
+    } else {
+      grouped.get(actor).push(`updated ${markdownTaskLink(row)}`);
+    }
+  }
+
+  return clampList(
+    Array.from(grouped.entries()).map(([actor, items]) => `**${formatHandle(actor)}** - ${items.slice(0, 3).join("; ")}`),
+    8
+  );
+}
+
+function formatActivityLine(row, statusMap = new Map()) {
+  if (row.action_type === "STATUS_CHANGED") {
+    const actor = row.actor_name ? ` by ${formatHandle(row.actor_name)}` : "";
+    return `${markdownTaskLink(row)} moved from ${formatStatusLabel(row.from_status, statusMap)} to ${formatStatusLabel(row.to_status, statusMap)}${actor}.`;
+  }
+  if (row.action_type === "TASK_CREATED") {
+    return `${markdownTaskLink(row)} was created${row.actor_name ? ` by ${formatHandle(row.actor_name)}` : ""}.`;
+  }
+  if (row.action_type === "ASSIGNEE_CHANGED") {
+    return `${markdownTaskLink(row)} was reassigned to ${formatHandle(row.new_assigned_to_username)}${row.actor_name ? ` by ${formatHandle(row.actor_name)}` : ""}.`;
+  }
+  if (row.action_type === "PRIORITY_CHANGED") {
+    return `${markdownTaskLink(row)} priority changed to ${row.new_priority || "unspecified"}${row.actor_name ? ` by ${formatHandle(row.actor_name)}` : ""}.`;
+  }
+  if (row.action_type === "COMMENT_ADDED") {
+    return `${markdownTaskLink(row)} received a comment${row.actor_name ? ` from ${formatHandle(row.actor_name)}` : ""}.`;
+  }
+  return `${markdownTaskLink(row)} was updated${row.actor_name ? ` by ${formatHandle(row.actor_name)}` : ""}.`;
+}
+
+function buildFocusItems({ blockers, inProgressTasks, newTasks, activeSprint, sprintStats, statusMap }) {
+  const items = [];
+
+  blockers
+    .filter(task => task.flags.includes("blocked") || task.flags.includes("overdue"))
+    .slice(0, 2)
+    .forEach(task => {
+      const reasons = [];
+      if (task.flags.includes("blocked")) reasons.push("blocked");
+      if (task.flags.includes("overdue")) reasons.push("overdue");
+      items.push(`Unblock ${markdownTaskLink(task)} because it is currently ${reasons.join(" and ")}.`);
+    });
+
+  inProgressTasks.slice(0, 2).forEach(task => {
+    items.push(`Advance ${markdownTaskLink(task)} from ${formatStatusLabel(task.status, statusMap)} to the next workflow column.`);
+  });
+
+  newTasks.slice(0, 1).forEach(task => {
+    items.push(`Clarify ownership and next action on ${markdownTaskLink(task)} so it does not stall in ${formatStatusLabel(task.status, statusMap)}.`);
+  });
+
+  if (activeSprint) {
+    items.push(`Protect sprint ${activeSprint.name} delivery with ${Number(sprintStats.in_progress_count || 0)} task(s) in flight and ${Number(sprintStats.overdue_count || 0)} overdue.`);
+  }
+
+  return clampList(items.filter(Boolean), 5);
+}
+
+function buildStandupMarkdown({
+  projectLabel,
+  activeSprint,
+  sprintStats,
+  period,
+  reportDate,
+  activityItems,
+  boardItems,
+  inProgressItems,
+  teamItems,
+  newTaskItems,
+  blockerItems,
+  focusItems,
+}) {
+  const displayDate = reportDate ? parseDateOnly(reportDate) : new Date();
+  const today = displayDate.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+
+  const scopeLine = activeSprint
+    ? `> Sprint: **${activeSprint.name}** | ${Number(activeSprint.days_remaining || 0)}d remaining | ${Number(sprintStats.completed_count || 0)}/${Number(sprintStats.total_count || 0)} tasks complete`
+    : `> Scope: **Project-wide** | summarising project activity ${period}`;
+
+  return [
+    `# Daily Standup - ${projectLabel}`,
+    `**${today}**`,
+    scopeLine,
+    activeSprint?.goal ? `> Goal: ${activeSprint.goal}` : null,
+    "---",
+    buildSection(`Recorded Activity (${period})`, activityItems, "No recorded activity in this reporting window."),
+    buildSection("Board Snapshot", boardItems, "No active tasks in scope."),
+    buildSection("In Progress", inProgressItems, "No tasks currently in progress."),
+    buildSection("Team Activity", teamItems, "No user activity recorded in this reporting window."),
+    buildSection("Newly Added", newTaskItems, `No new tasks ${period}.`),
+    buildSection("Blockers & Warnings", blockerItems, "No blockers or warnings in the current scope."),
+    buildSection("Focus For Today", focusItems, "Keep current work moving through the next workflow column."),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function generateStandupSummary(workspaceId, projectId, settings, sinceTimestamp = null, periodLabel = null, reportDate = null) {
+  const since = sinceTimestamp || new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const period = periodLabel || "since yesterday";
+  const reportDateValue = reportDate ? parseDateOnly(reportDate) : new Date();
+  const reportDateIso = formatLocalDateIso(reportDateValue);
+
+  let projects = [];
+  if (projectId) {
+    const { rows } = await pool.query(
+      `SELECT id, name FROM projects WHERE id = $1 AND workspace_id = $2`,
+      [projectId, workspaceId]
+    );
+    projects = rows;
+  } else {
+    const { rows } = await pool.query(
+      `
+      SELECT p.id, p.name
+      FROM projects p
+      WHERE p.workspace_id = $1
+        AND (
+          EXISTS (
+            SELECT 1 FROM sprints s
+            WHERE s.workspace_id = $1
+              AND s.project_id = p.id
+              AND s.status = 'active'
+          )
+          OR EXISTS (
+            SELECT 1 FROM tasks t
+            WHERE t.workspace_id = $1
+              AND t.project_id = p.id
+              AND LOWER(COALESCE(t.status, '')) NOT IN ('completed', 'cancelled', 'done', 'closed')
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM task_activity_logs al
+            JOIN tasks t ON t.id = al.task_id
+            WHERE al.workspace_id = $1
+              AND t.project_id = p.id
+              AND al.created_at > $2::timestamptz
+          )
+        )
+      ORDER BY p.name ASC
+      `,
+      [workspaceId, since]
+    );
+    projects = rows;
+  }
+
+  if (!projects.length) return [];
+
+  const allActions = [];
+
+  for (const project of projects) {
+    const projectLabel = project.name || `Project ${project.id}`;
+
+    try {
+      const { rows: sprintRows } = await pool.query(
+        `
+        SELECT id, name, goal, start_date, end_date,
+               GREATEST(0, CEIL(EXTRACT(EPOCH FROM (COALESCE(end_date, NOW()) - NOW())) / 86400)) AS days_remaining
+        FROM sprints
+        WHERE project_id = $1
+          AND workspace_id = $2
+          AND status = 'active'
+        ORDER BY start_date DESC NULLS LAST, created_at DESC
+        LIMIT 1
+        `,
+        [project.id, workspaceId]
+      );
+
+      const activeSprint = sprintRows[0] || null;
+      const activitySinceIndex = activeSprint ? 4 : 3;
+      const activityParams = activeSprint
+        ? [workspaceId, project.id, activeSprint.id, since]
+        : [workspaceId, project.id, since];
+
+      const [{ rows: statusRows }, { rows: scopedTasks }, { rows: activityRows }, { rows: sprintStatsRows }] = await Promise.all([
+        pool.query(
+          `
+          SELECT key, label, sort_order
+          FROM project_statuses
+          WHERE project_id = $1
+          ORDER BY sort_order ASC, created_at ASC
+          `,
+          [project.id]
+        ),
+        pool.query(
+          `
+          SELECT
+            t.id,
+            t.id AS task_id,
+            t.project_id,
+            t.task AS task_name,
+            t.status,
+            t.priority,
+            t.task_type,
+            t.story_points,
+            t.assigned_to,
+            t.is_blocked,
+            t.due_date,
+            t.updated_at,
+            t.created_at,
+            u.username AS assigned_to_username,
+            CASE
+              WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+              THEN p.project_code || '-' || t.ticket_number
+              ELSE NULL
+            END AS display_id
+          FROM tasks t
+          LEFT JOIN users u ON u.id = t.assigned_to
+          LEFT JOIN projects p ON p.id = t.project_id
+          WHERE t.workspace_id = $1
+            AND t.project_id = $2
+            ${activeSprint ? `AND t.sprint_id = $3` : ``}
+          ORDER BY t.updated_at DESC, t.created_at DESC
+          `,
+          activeSprint ? [workspaceId, project.id, activeSprint.id] : [workspaceId, project.id]
+        ),
+        pool.query(
+          `
+          SELECT
+            al.task_id,
+            t.project_id,
+            t.task AS task_name,
+            t.status,
+            t.priority,
+            t.task_type,
+            t.story_points,
+            t.assigned_to,
+            u.username AS assigned_to_username,
+            t.is_blocked,
+            t.due_date,
+            t.updated_at,
+            t.created_at,
+            al.action_type,
+            al.old_value->>'status' AS from_status,
+            al.new_value->>'status' AS to_status,
+            al.new_value->>'priority' AS new_priority,
+            actor.username AS actor_name,
+            new_assignee.username AS new_assigned_to_username,
+            CASE
+              WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
+              THEN p.project_code || '-' || t.ticket_number
+              ELSE NULL
+            END AS display_id
+          FROM task_activity_logs al
+          JOIN tasks t ON t.id = al.task_id
+          LEFT JOIN users u ON u.id = t.assigned_to
+          LEFT JOIN users actor ON actor.id = al.actor_id
+          LEFT JOIN users new_assignee ON new_assignee.id::text = al.new_value->>'assigned_to'
+          LEFT JOIN projects p ON p.id = t.project_id
+          WHERE al.workspace_id = $1
+            AND t.project_id = $2
+            ${activeSprint ? `AND t.sprint_id = $3` : ``}
+            AND al.created_at > $${activitySinceIndex}::timestamptz
+          ORDER BY al.created_at DESC
+          `,
+          activityParams
+        ),
+        pool.query(
+          `
+          SELECT
+            COUNT(*)::int AS total_count,
+            COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) IN ('completed', 'done', 'closed'))::int AS completed_count,
+            COUNT(*) FILTER (WHERE due_date IS NOT NULL AND due_date < NOW() AND LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', 'done', 'closed'))::int AS overdue_count,
+            COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', 'done', 'closed') AND LOWER(COALESCE(status, '')) NOT IN ('backlog', 'pending', 'todo', 'to-do', 'planned', 'ready'))::int AS in_progress_count
+          FROM tasks t
+          WHERE t.workspace_id = $1
+            AND t.project_id = $2
+            ${activeSprint ? `AND t.sprint_id = $3` : ``}
+          `,
+          activeSprint ? [workspaceId, project.id, activeSprint.id] : [workspaceId, project.id]
+        ),
+      ]);
+
+      if (!activeSprint && !scopedTasks.length && !activityRows.length) continue;
+
+      const orderedStatuses = statusRows.length ? statusRows : DEFAULT_PROJECT_STATUSES;
+      const statusMap = new Map(
+        orderedStatuses.map(status => [normalizeStatusKey(status.key), { label: status.label, sortOrder: status.sort_order }])
+      );
+      const sprintStats = sprintStatsRows[0] || {};
+      const recentMoves = activityRows.filter(row => row.action_type === "STATUS_CHANGED");
+      const newTasks = scopedTasks
+        .filter(task => new Date(task.created_at).getTime() > new Date(since).getTime())
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      const inProgressTasks = scopedTasks.filter(task => isInProgressTask(task, orderedStatuses));
+      const blockers = buildBlockerItems(scopedTasks, settings);
+
+      const activityItems = clampList(activityRows.map(row => formatActivityLine(row, statusMap)), 12);
+      const boardItems = buildBoardSnapshotItems(scopedTasks, orderedStatuses);
+      const inProgressItems = clampList(
+        inProgressTasks.map(task => `${markdownTaskLink(task)} - ${formatTaskDetails(task, statusMap)}`),
+        10
+      );
+      const teamItems = buildTeamActivityItems(activityRows);
+      const newTaskItems = clampList(
+        newTasks.map(task => `${markdownTaskLink(task)} - ${formatTaskDetails(task, statusMap)}`),
+        10
+      );
+      const blockerItems = clampList(
+        blockers.map(task => `${markdownTaskLink(task)} - ${task.flags.join(", ")} | ${formatTaskDetails(task, statusMap)}`),
+        10
+      );
+      const focusItems = buildFocusItems({
+        blockers,
+        inProgressTasks,
+        newTasks,
+        activeSprint,
+        sprintStats,
+        statusMap,
+      });
+
+      const summary = buildStandupMarkdown({
+        projectLabel,
+        activeSprint,
+        sprintStats,
+        period,
+        reportDate: reportDateValue,
+        activityItems,
+        boardItems,
+        inProgressItems,
+        teamItems,
+        newTaskItems,
+        blockerItems,
+        focusItems,
+      });
+
+      allActions.push({
+        type: "create_standup",
+        taskId: null,
+        projectId: project.id,
+        reason: `Daily standup for project: ${projectLabel}${activeSprint ? ` (Sprint: ${activeSprint.name})` : " (Project backlog scope)"}`,
+        currentState: {
+          project_name: projectLabel,
+          report_date: reportDateIso,
+          reporting_period: period,
+          activity_count: activityRows.length,
+          status_changes: recentMoves.length,
+          new_tasks: newTasks.length,
+          in_progress_count: inProgressTasks.length,
+          blocker_count: blockers.length,
+          scoped_task_count: scopedTasks.length,
+          sprint_name: activeSprint?.name || null,
+          sprint_days_remaining: activeSprint ? Number(activeSprint.days_remaining || 0) : null,
+        },
+        proposedChanges: {
+          summary,
+          project_name: projectLabel,
+          report_date: reportDateIso,
+          message_temp_id: `standup:${project.id}:${reportDateIso}`,
+          delivery_channel: "daily-standups",
+        },
+        confidence: 0.98,
       });
     } catch (err) {
       console.error(`Failed to generate standup for project ${project.id}:`, err);
@@ -1109,6 +1640,8 @@ function standupMarkdownToHtml(md) {
 
 function applyInlineFormatting(text) {
   return text
+    // [text](url)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
     // **bold**
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     // *italic*
@@ -1124,6 +1657,8 @@ async function executeStandupCreation(action) {
   const workspaceId = action.workspace_id;
   const projectName = changes.project_name || 'Workspace';
   const channelKey = 'daily-standups';
+  const reportDate = changes.report_date ? parseDateOnly(changes.report_date) : new Date();
+  const tempId = changes.message_temp_id || null;
 
   try {
     // Get or create the AI system user
@@ -1147,7 +1682,7 @@ async function executeStandupCreation(action) {
     await ensureChannelMember(channel.id, aiUser.id);
 
     // Format and post the standup message
-    const today = new Date().toLocaleDateString('en-US', {
+    const today = reportDate.toLocaleDateString('en-US', {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     });
     const bodyHtml = standupMarkdownToHtml(changes.summary);
@@ -1156,6 +1691,7 @@ async function executeStandupCreation(action) {
     await createChatMessage({
       channelKey,
       userId: aiUser.id,
+      tempId,
       textHtml: messageText,
       fallbackText: `${projectName} Daily Standup — ${today}\n\n${changes.summary}`,
       workspaceId,

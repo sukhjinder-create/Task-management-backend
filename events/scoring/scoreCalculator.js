@@ -1,70 +1,114 @@
 import { SCORE_WEIGHTS, validateWeights } from "./scoreWeights.js";
 
+function clampRatio(value) {
+  if (value == null || Number.isNaN(Number(value))) return null;
+  return Math.max(0, Math.min(1, Number(value)));
+}
+
+function scoreObservedDimensions(dimensions) {
+  let observedWeight = 0;
+  let weightedScore = 0;
+  const breakdown = {};
+
+  for (const [name, config] of Object.entries(dimensions)) {
+    const ratio = clampRatio(config.ratio);
+    if (ratio == null) {
+      breakdown[name] = null;
+      continue;
+    }
+
+    const points = Math.round(ratio * config.weight);
+    breakdown[name] = points;
+    observedWeight += config.weight;
+    weightedScore += ratio * config.weight;
+  }
+
+  const score = observedWeight > 0
+    ? Math.round((weightedScore / observedWeight) * 100)
+    : null;
+
+  return {
+    score,
+    observedWeight,
+    breakdown,
+  };
+}
+
 /**
  * Deterministic two-sub-score calculator.
  *
- * Attendance score  (0–100) × 40%
- * Productivity score (0–100) × 60%
- * ──────────────────────────────────
- * Overall score     (0–100)
- *
- * NO DB. NO EVENTS. NO AI.
+ * Attendance score is derived only from the attendance signals that were
+ * actually observed. Missing telemetry is kept neutral instead of being treated
+ * as proof of poor behavior.
  */
 export function calculateScore(metrics) {
   validateWeights();
 
   const W = SCORE_WEIGHTS;
-  const clamp = (v) => Math.max(0, Math.min(1, v ?? 0));
 
-  /* ── ATTENDANCE SUB-SCORE (0–100) ────────────────────────── */
   const attNorm = {
-    presence:     clamp(metrics.attendancePresenceRatio),
-    hourQuality:  clamp(metrics.attendanceHourQualityRatio),
-    activeRatio:  clamp(metrics.attendanceActiveTimeRatio),
-    consistency:  clamp(metrics.attendanceConsistencyRatio),
+    presence: clampRatio(metrics.attendancePresenceRatio),
+    hourQuality: clampRatio(metrics.attendanceHourQualityRatio),
+    availability: clampRatio(metrics.attendanceAvailabilityRatio),
+    awsDiscipline: clampRatio(metrics.attendanceAwsDisciplineRatio),
+    lunchDiscipline: clampRatio(metrics.attendanceLunchDisciplineRatio),
+    consistency: clampRatio(metrics.attendanceConsistencyRatio),
   };
 
-  const attendanceBreakdown = {
-    presence:    Math.round(attNorm.presence    * W.attendancePresence),
-    hourQuality: Math.round(attNorm.hourQuality * W.attendanceHourQuality),
-    activeRatio: Math.round(attNorm.activeRatio * W.attendanceActiveRatio),
-    consistency: Math.round(attNorm.consistency * W.attendanceConsistency),
-  };
+  const attendanceResult = scoreObservedDimensions({
+    presence: {
+      ratio: attNorm.presence,
+      weight: W.attendancePresence,
+    },
+    hourQuality: {
+      ratio: attNorm.hourQuality,
+      weight: W.attendanceHourQuality,
+    },
+    availability: {
+      ratio: attNorm.availability,
+      weight: W.attendanceAvailability,
+    },
+    awsDiscipline: {
+      ratio: attNorm.awsDiscipline,
+      weight: W.attendanceAwsDiscipline,
+    },
+    lunchDiscipline: {
+      ratio: attNorm.lunchDiscipline,
+      weight: W.attendanceLunchDiscipline,
+    },
+    consistency: {
+      ratio: attNorm.consistency,
+      weight: W.attendanceConsistency,
+    },
+  });
 
-  const attendanceScore = Object.values(attendanceBreakdown).reduce((a, b) => a + b, 0);
-
-  /* ── PRODUCTIVITY SUB-SCORE (0–100) ──────────────────────── */
   const prodNorm = {
-    taskCompletion:      clamp(metrics.taskCompletionRatio),
-    timeliness:          clamp(metrics.timelinessRatio),
-    storyPoints:         clamp(metrics.storyPointVelocityRatio),
-    estimation:          clamp(metrics.estimationAccuracyRatio),
-    collaboration:       clamp(metrics.collaborationRatio),
-    blockerResolution:   clamp(metrics.blockerResolutionRatio),
+    taskCompletion: clampRatio(metrics.taskCompletionRatio) ?? 0,
+    timeliness: clampRatio(metrics.timelinessRatio) ?? 0,
+    storyPoints: clampRatio(metrics.storyPointVelocityRatio) ?? 0,
+    estimation: clampRatio(metrics.estimationAccuracyRatio) ?? 0,
+    collaboration: clampRatio(metrics.collaborationRatio) ?? 0,
+    blockerResolution: clampRatio(metrics.blockerResolutionRatio) ?? 0,
   };
 
   const productivityBreakdown = {
-    taskCompletion:    Math.round(prodNorm.taskCompletion    * W.productivityTaskCompletion),
-    timeliness:        Math.round(prodNorm.timeliness        * W.productivityTimeliness),
-    storyPoints:       Math.round(prodNorm.storyPoints       * W.productivityStoryPoints),
-    estimation:        Math.round(prodNorm.estimation        * W.productivityEstimation),
-    collaboration:     Math.round(prodNorm.collaboration     * W.productivityCollaboration),
+    taskCompletion: Math.round(prodNorm.taskCompletion * W.productivityTaskCompletion),
+    timeliness: Math.round(prodNorm.timeliness * W.productivityTimeliness),
+    storyPoints: Math.round(prodNorm.storyPoints * W.productivityStoryPoints),
+    estimation: Math.round(prodNorm.estimation * W.productivityEstimation),
+    collaboration: Math.round(prodNorm.collaboration * W.productivityCollaboration),
     blockerResolution: Math.round(prodNorm.blockerResolution * W.productivityBlockerResolution),
   };
 
-  const productivityScore = Object.values(productivityBreakdown).reduce((a, b) => a + b, 0);
+  const productivityScore = Object.values(productivityBreakdown).reduce((sum, value) => sum + value, 0);
 
-  /* ── ATTENDANCE SCORING ──────────────────────────────────── */
-  // Attendance is always scored against the work calendar (Mon–Fri by default,
-  // minus holidays + approved leave). Absence on a working day is penalised.
-  // Only fall back to neutral (50) if no expected working days exist in the
-  // month (e.g., the month hasn't started yet or a misconfigured schedule).
-  const hasAttendanceTracking = metrics.hasAttendanceTracking ?? true;
-  const effectiveAttScore = hasAttendanceTracking ? attendanceScore : 50;
+  const hasAttendanceTracking = metrics.hasAttendanceTracking ?? false;
+  const effectiveAttScore = hasAttendanceTracking
+    ? (attendanceResult.score ?? 50)
+    : 50;
 
-  /* ── OVERALL SCORE ───────────────────────────────────────── */
   const finalScore = Math.round(
-    (effectiveAttScore * W.attendanceWeight   / 100) +
+    (effectiveAttScore * W.attendanceWeight / 100) +
     (productivityScore * W.productivityWeight / 100)
   );
 
@@ -73,15 +117,27 @@ export function calculateScore(metrics) {
     attendanceScore: effectiveAttScore,
     productivityScore,
     breakdown: {
-      // Top-level sub-scores
       attendanceScore: effectiveAttScore,
       productivityScore,
       hasAttendanceTracking,
-      // Attendance detail
-      ...attendanceBreakdown,
-      // Productivity detail
-      ...productivityBreakdown,
+      attendanceObservedWeight: attendanceResult.observedWeight,
+      attendanceTelemetryStatus: metrics.attendanceTelemetryStatus ?? "missing",
+      presence: attendanceResult.breakdown.presence,
+      hourQuality: attendanceResult.breakdown.hourQuality,
+      availability: attendanceResult.breakdown.availability,
+      awsDiscipline: attendanceResult.breakdown.awsDiscipline,
+      lunchDiscipline: attendanceResult.breakdown.lunchDiscipline,
+      consistency: attendanceResult.breakdown.consistency,
+      taskCompletion: productivityBreakdown.taskCompletion,
+      timeliness: productivityBreakdown.timeliness,
+      storyPoints: productivityBreakdown.storyPoints,
+      estimation: productivityBreakdown.estimation,
+      collaboration: productivityBreakdown.collaboration,
+      blockerResolution: productivityBreakdown.blockerResolution,
     },
-    normalizedMetrics: { ...attNorm, ...prodNorm },
+    normalizedMetrics: {
+      ...attNorm,
+      ...prodNorm,
+    },
   };
 }

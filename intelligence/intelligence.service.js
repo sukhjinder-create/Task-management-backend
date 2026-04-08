@@ -15,12 +15,25 @@ class IntelligenceService {
    * USER — Monthly performance
    */
   async getUserPerformance({ workspaceId, userId, month }) {
-  const record =
+  const requestedMonth = month || new Date().toISOString().slice(0, 7);
+  let effectiveMonth = requestedMonth;
+  let record =
     await intelligenceRepository.getMonthlyUserScore({
       workspaceId,
       userId,
-      month,
+      month: requestedMonth,
     });
+
+  if (!record) {
+    const latestRecord = await intelligenceRepository.getLatestMonthlyUserScore({
+      workspaceId,
+      userId,
+    });
+    if (latestRecord) {
+      record = latestRecord;
+      effectiveMonth = latestRecord.month;
+    }
+  }
 
   // 🔹 Real-time behavioral metrics
   const { rows } = await pool.query(
@@ -351,6 +364,9 @@ const externalExecution =
   );
 
   return {
+  requestedMonth,
+  effectiveMonth,
+  scoreSource: record ? "workspace_monthly_scores" : "live_computed",
   score: record?.score ?? computedScore,
   explanation: record?.reasoning?.summary || "",
 

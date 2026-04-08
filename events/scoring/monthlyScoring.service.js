@@ -1,63 +1,42 @@
 import pool from "../../db.js";
 import { saveMonthlyScore } from "./monthlyScore.store.js";
 import { buildMonthlyEvidence } from "./evidenceBuilder.service.js";
-import { getExecutionSnapshot }
-  from "../../intelligence/executionSnapshot.service.js";
+import { buildUserEvidence } from "./evidenceBuilder.js";
+import { calculateScore } from "./scoreCalculator.js";
 
 /**
- * Generates monthly score + evidence for ONE user
- * Deterministic, auditable, enterprise-safe
+ * Generates monthly score + evidence for ONE user.
+ * Deterministic, auditable, and aligned with the authoritative manual scorer.
  */
 export async function generateMonthlyScore({
   workspaceId,
   userId,
   month, // YYYY-MM
 }) {
-  // 1️⃣ Fetch raw events for this user & month
-  const { rows: events } = await pool.query(
-    `
-    SELECT event_type
-    FROM workspace_events
-    WHERE workspace_id = $1
-      AND actor_user_id = $2
-      AND to_char(created_at, 'YYYY-MM') = $3
-    `,
-    [workspaceId, userId, month]
-  );
+  const { metrics, evidence } = await buildUserEvidence({
+    workspaceId,
+    userId,
+    month,
+  });
 
-  // 2️⃣ Build breakdown (pure facts)
-  const breakdown = {
-    activity: events.length,
-    taskUpdates: events.filter(e =>
-      e.event_type.startsWith("TASK")
-    ).length,
-  };
-  // 🔥 execution productivity (cross-platform)
-const execution =
-  await getExecutionSnapshot(workspaceId);
+  if (metrics.isInactive) {
+    await pool.query(
+      `
+      DELETE FROM workspace_monthly_scores
+      WHERE workspace_id = $1
+        AND user_id = $2
+        AND month = $3
+      `,
+      [workspaceId, userId, month]
+    );
+    return;
+  }
 
-const executionScore =
-  Math.round(execution.completionRate * 100);
+  const scoreResult = calculateScore(metrics);
+  let score = scoreResult.score;
+  const breakdown = { ...scoreResult.breakdown };
 
-  // 3️⃣ Deterministic scoring (NO AI here)
-  let activityScore = 50;
-
-if (breakdown.activity >= 50) activityScore += 10;
-if (breakdown.activity < 20) activityScore -= 8;
-
-if (breakdown.taskUpdates >= 20) activityScore += 10;
-if (breakdown.taskUpdates < 10) activityScore -= 6;
-
-// clamp
-activityScore = Math.max(0, Math.min(100, activityScore));
-
-let score = Math.round(
-  activityScore * 0.6 +
-  executionScore * 0.4
-);
-
-  // 3b. Self-review compliance penalty (-15 per missed review in cycles that
-  //     closed during this month). This enforces the mandatory review policy.
+  // Mandatory self-review compliance penalty.
   const { rows: missedReviews } = await pool.query(
     `SELECT COUNT(*) AS missed_count
      FROM performance_reviews pr
@@ -69,37 +48,35 @@ let score = Math.round(
        AND to_char(rc.end_date, 'YYYY-MM') = $3`,
     [userId, workspaceId, month]
   );
+
   const missedCount = Number(missedReviews[0]?.missed_count ?? 0);
   if (missedCount > 0) {
-    score = Math.max(0, score - missedCount * 15);
-    breakdown.missedReviewPenalty = -(missedCount * 15);
-    breakdown.missedReviewCount  = missedCount;
-    console.log(`[monthly-score] User ${userId} penalised ${missedCount * 15} pts for ${missedCount} missed self-review(s) in ${month}`);
+    const penalty = missedCount * 15;
+    score = Math.max(0, score - penalty);
+    breakdown.missedReviewPenalty = -penalty;
+    breakdown.missedReviewCount = missedCount;
   }
 
-  // 4️⃣ Build structured evidence (THIS is explanation quality)
-  const evidence = buildMonthlyEvidence({
+  const explanation = buildMonthlyEvidence({
     month,
     baselineScore: 50,
     breakdown,
     score,
   });
 
-  // 5️⃣ Reasoning stored as structured object (NOT free text)
   const reasoning = {
     scoreComputation: {
       baseline: 50,
-      activity: breakdown.activity,
-      taskUpdates: breakdown.taskUpdates,
+      attendanceScore: scoreResult.attendanceScore,
+      productivityScore: scoreResult.productivityScore,
+      missedReviewCount: missedCount,
       finalScore: score,
     },
+    metrics,
     evidence,
+    explanation,
   };
 
-  // 6️⃣ Improvements come from evidence (not generic)
-  const improvements = evidence.improvementLevers;
-
-  // 7️⃣ Persist monthly score
   await saveMonthlyScore({
     workspaceId,
     userId,
@@ -107,6 +84,6 @@ let score = Math.round(
     score,
     breakdown,
     reasoning,
-    improvements,
+    improvements: explanation.improvementLevers,
   });
 }

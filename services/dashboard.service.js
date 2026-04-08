@@ -21,6 +21,57 @@ function getTrendDirection(points) {
   return "stable";
 }
 
+async function getAuthoritativeScoreCard({ workspaceId, userId, role, month, projectIds }) {
+  let scoreQuery = `
+    SELECT
+      ROUND(AVG(score), 2) AS unified_score,
+      ROUND(AVG((breakdown->>'productivityScore')::numeric), 2) AS productivity_score,
+      ROUND(AVG((breakdown->>'attendanceScore')::numeric), 2) AS attendance_score
+    FROM workspace_monthly_scores
+    WHERE workspace_id = $1
+      AND month = $2
+  `;
+  const params = [workspaceId, month];
+
+  if (role === "user") {
+    scoreQuery += ` AND user_id = $3`;
+    params.push(userId);
+  } else if (role === "manager") {
+    const { rows: scopeUsers } = await pool.query(
+      `
+      SELECT DISTINCT assigned_to AS user_id
+      FROM tasks
+      WHERE workspace_id = $1
+        AND project_id = ANY($2)
+        AND assigned_to IS NOT NULL
+      `,
+      [workspaceId, projectIds]
+    );
+
+    const scopedUserIds = Array.from(new Set([userId, ...scopeUsers.map((u) => u.user_id)]));
+    if (scopedUserIds.length === 0) {
+      return null;
+    }
+
+    scoreQuery += ` AND user_id = ANY($3)`;
+    params.push(scopedUserIds);
+  }
+
+  const { rows } = await pool.query(scoreQuery, params);
+  const row = rows[0];
+
+  if (row?.unified_score == null) {
+    return null;
+  }
+
+  return {
+    unifiedScore: Number(row.unified_score) || 0,
+    productivityScore: Number(row.productivity_score) || 0,
+    attendanceScore: Number(row.attendance_score) || 0,
+    band: getScoreBand(Number(row.unified_score) || 0),
+  };
+}
+
 async function resolveScope({ workspaceId, userId, role }) {
   if (role === "admin") {
     const { rows } = await pool.query(
@@ -391,12 +442,20 @@ export async function getDashboardOverview({ workspaceId, userId, role }) {
     points: trendRows.map((r) => ({ month: r.month, score: Number(r.score) || 0 })),
   };
 
-  const scoreCard = {
+  const liveScoreCard = {
     unifiedScore,
     productivityScore: productivity.score,
     attendanceScore: attendance.score,
     band: getScoreBand(unifiedScore),
   };
+
+  const scoreCard = await getAuthoritativeScoreCard({
+    workspaceId,
+    userId,
+    role,
+    month,
+    projectIds: scope.projectIds,
+  }) || liveScoreCard;
 
   const executiveSummary = buildExecutiveSummary({
     role,

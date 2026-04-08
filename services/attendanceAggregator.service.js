@@ -65,11 +65,17 @@ function addDurationBuckets(buckets, state, from, to) {
   }
 }
 
+function buildScopeClause(column, value, values) {
+  if (!value) return "";
+  values.push(value);
+  return ` AND ${column} = $${values.length}`;
+}
+
 /**
- * Aggregate attendance for a given date
- * Default: yesterday (safe for cron)
+ * Aggregate attendance for a given date.
+ * Default: yesterday (safe for cron).
  */
-export async function aggregateDailyAttendance(targetDate = null) {
+export async function aggregateDailyAttendance(targetDate = null, scope = {}) {
   const client = await pool.connect();
 
   try {
@@ -85,6 +91,10 @@ export async function aggregateDailyAttendance(targetDate = null) {
     const dayStart = new Date(`${date}T00:00:00.000Z`);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
 
+    const participantParams = [dayStart, dayEnd];
+    const participantWorkspaceClause = buildScopeClause("workspace_id", scope.workspaceId, participantParams);
+    const participantUserClause = buildScopeClause("user_id", scope.userId, participantParams);
+
     const { rows: participants } = await client.query(
       `
       SELECT DISTINCT workspace_id, user_id
@@ -93,6 +103,8 @@ export async function aggregateDailyAttendance(targetDate = null) {
         FROM attendance_sessions
         WHERE sign_in_at < $2
           AND COALESCE(sign_off_at, $2) > $1
+          ${participantWorkspaceClause}
+          ${participantUserClause}
 
         UNION
 
@@ -100,9 +112,11 @@ export async function aggregateDailyAttendance(targetDate = null) {
         FROM attendance_events
         WHERE started_at >= $1
           AND started_at < $2
+          ${participantWorkspaceClause}
+          ${participantUserClause}
       ) p
       `,
-      [dayStart, dayEnd]
+      participantParams
     );
 
     for (const p of participants) {
@@ -115,47 +129,47 @@ export async function aggregateDailyAttendance(targetDate = null) {
         screenOn: false,
       };
 
-      const { rows: priorStates } = await client.query(
-        `
-        SELECT DISTINCT ON (category) category, event_type
-        FROM (
-          SELECT
-            CASE
-              WHEN event_type IN ('SCREEN_ON', 'SCREEN_OFF') THEN 'screen'
-              ELSE 'presence'
-            END AS category,
-            event_type,
-            started_at
-          FROM attendance_events
-          WHERE workspace_id = $1
-            AND user_id = $2
-            AND started_at < $3
-            AND (
-              event_type = ANY($4::text[])
-              OR event_type = ANY($5::text[])
-            )
-        ) s
-        ORDER BY category, started_at DESC
-        `,
-        [workspaceId, userId, dayStart, Array.from(PRESENCE_EVENTS), Array.from(SCREEN_EVENTS)]
-      );
+        const { rows: priorStates } = await client.query(
+          `
+          SELECT DISTINCT ON (category) category, event_type
+          FROM (
+            SELECT
+              CASE
+                WHEN event_type IN ('SCREEN_ON', 'SCREEN_OFF') THEN 'screen'
+                ELSE 'presence'
+              END AS category,
+              event_type,
+              started_at
+            FROM attendance_events
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND started_at < $3
+              AND (
+                event_type = ANY($4::text[])
+                OR event_type = ANY($5::text[])
+              )
+          ) s
+          ORDER BY category, started_at DESC
+          `,
+          [workspaceId, userId, dayStart, Array.from(PRESENCE_EVENTS), Array.from(SCREEN_EVENTS)]
+        );
 
       for (const ps of priorStates) {
         applyEvent(state, ps.event_type);
       }
 
-      const { rows: dayEvents } = await client.query(
-        `
-        SELECT event_type, started_at
-        FROM attendance_events
-        WHERE workspace_id = $1
-          AND user_id = $2
-          AND started_at >= $3
-          AND started_at < $4
-        ORDER BY started_at ASC
-        `,
-        [workspaceId, userId, dayStart, dayEnd]
-      );
+        const { rows: dayEvents } = await client.query(
+          `
+          SELECT event_type, started_at
+          FROM attendance_events
+          WHERE workspace_id = $1
+            AND user_id = $2
+            AND started_at >= $3
+            AND started_at < $4
+          ORDER BY started_at ASC
+          `,
+          [workspaceId, userId, dayStart, dayEnd]
+        );
 
       const buckets = {
         signed_in_minutes: 0,
