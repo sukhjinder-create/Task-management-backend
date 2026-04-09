@@ -24,6 +24,7 @@ import subtaskRoutes from "./routes/subtask.routes.js";
 import projectStatusRoutes from "./routes/projectStatus.routes.js";
 import reportRoutes from "./routes/report.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
+import operationsRoutes from "./routes/operations.routes.js";
 import testingAgentRoutes from "./routes/testingAgent.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
@@ -41,6 +42,7 @@ import { initSocket } from "./realtime/socket.js";
 import { authMiddleware } from "./middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "./middleware/workspace.middleware.js";
 import { requirePlanFeature } from "./middleware/plan.middleware.js";
+import { allowRoles } from "./middleware/role.middleware.js";
 
 import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
@@ -231,6 +233,7 @@ app.use(
 // 🤖 Autopilot AI — plan-gated
 app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
 app.use("/dashboard",     dashboardRoutes);
+app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
 // 🧪 Testing Agent — plan-gated
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
 

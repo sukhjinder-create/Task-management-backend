@@ -103,6 +103,29 @@ router.get("/me", async (req, res) => {
 });
 
 /**
+ * 🔹 GET /users/:id – workspace-scoped member profile
+ * Any authenticated workspace user can view profiles of members in the same workspace.
+ */
+router.get("/:id", async (req, res) => {
+  try {
+    const targetUser = await getUserById(req.params.id);
+
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (String(targetUser.workspace_id) !== String(req.workspaceId)) {
+      return res.status(403).json({ error: "Workspace access denied" });
+    }
+
+    res.json(targetUser);
+  } catch (err) {
+    console.error("Error fetching user profile:", err);
+    res.status(500).json({ error: "Failed to fetch user profile" });
+  }
+});
+
+/**
  * 🔹 GET /users/:id/ai-preference
  * 🔐 User can read ONLY their own AI preference (workspace scoped)
  */

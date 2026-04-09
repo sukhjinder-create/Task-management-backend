@@ -34,6 +34,7 @@ This is a **full-stack, multi-tenant workforce management SaaS platform** built 
 ### Core Value Propositions
 - **AI-First Operations**: An Autopilot engine proactively monitors work and takes actions (reassign overdue tasks, flag blockers, generate standups)
 - **All-in-One**: Tasks, chat, attendance, leave, reviews, goals, wiki, and video huddles in one product — no tool juggling
+- **Admin Control Layer**: Workspace Search + Memory gives admins one place to search modules, records, AI surfaces, and durable workspace knowledge
 - **Every Platform**: Single codebase ships to Web, Windows, macOS, Linux (Electron), iOS, and Android (Capacitor)
 - **Self-Serve SaaS**: Workspace signup, plan selection, Razorpay payments, and instant onboarding without admin involvement
 - **Real-Time**: WebSocket-powered live updates across all features
@@ -137,6 +138,9 @@ This is a **full-stack, multi-tenant workforce management SaaS platform** built 
                                          └────────────────────────────────────┘
 ```
 
+Recent addition:
+- `operations.routes.js` now powers the admin Operations / Workspace Search + Memory surface, including unified search, clicked-result history, workspace memory, digest preferences, and AI action workflows.
+
 ### Database Tables (40+)
 ```
 CORE           : users, workspaces, workspace_members
@@ -149,6 +153,10 @@ LEAVE          : leave_policies, leave_balances, leave_requests, leave_approvals
 REVIEWS        : review_cycles, review_assignments, review_responses, review_scores
 GOALS (OKR)    : goals, key_results, goal_updates
 WIKI           : wiki_pages, wiki_versions, wiki_access
+OPERATIONS     : workspace_memory_entries, workspace_search_history,
+                 operations_ai_actions, operations_ai_action_decisions,
+                 workspace_digest_preferences, workspace_digest_runs,
+                 operations_automation_rules
 NOTIFICATIONS  : notifications
 AUTOPILOT      : autopilot_settings, autopilot_actions, autopilot_logs
 AI             : chat_ai_logs, system_users, ai_conversation_context
@@ -256,6 +264,11 @@ These roles exist inside a workspace. None of them can create workspaces or conf
 | Update key results | ✅ | ✅ | Own only |
 | View workspace goal health | ✅ | ✅ | ❌ |
 | View all goals | ✅ | ✅ | Own + public |
+| **WORKSPACE SEARCH + MEMORY** | | | |
+| Access Workspace Search + Memory | ✅ | ❌ | ❌ |
+| Search across modules, records, AI tools, goals, chat, wiki, and memory | ✅ | ❌ | ❌ |
+| Open deep-links from search history | ✅ | ❌ | ❌ |
+| Create / edit / archive workspace memory entries | ✅ | ❌ | ❌ |
 | **WIKI** | | | |
 | Create pages | ✅ | ✅ | ✅ |
 | Edit pages | ✅ | ✅ | ✅ |
@@ -773,6 +786,38 @@ Full version history with diff capability
 - Embed images/files (encrypted storage)
 - Version restore
 
+### Workspace Search + Memory (Admin Ops Layer)
+```text
+Frontend page:
+  /admin/workspace-search
+
+Backend routes:
+  /operations/search
+  /operations/search/click
+  /operations/search/history
+  /operations/memory
+
+Access control:
+  • Role-gated: ADMIN only
+  • Plan-gated: requirePlanFeature("workspace_search_memory")
+
+What it searches:
+  • Navigation targets (Dashboard, AI Hub, AI Features tabs, Strategic Intelligence tabs,
+    Autopilot tabs, Testing Agent modes/sections, Workspace Intelligence tabs, Leave, Reviews, Billing, etc.)
+  • Workspace records (users, tasks, projects, chat, wiki, goals)
+  • Shared admin memory entries
+
+Search behavior:
+  • Unified ranked result set with direct deep-links
+  • Goal results open the correct OKR period and scroll to the exact goal
+  • Search history stores clicked destinations only, not every typed query
+  • History can reopen the exact destination in one click
+
+Persistence:
+  • workspace_search_history stores query history + clicked result metadata
+  • workspace_memory_entries stores durable admin knowledge, tags, visibility, and pinned state
+```
+
 ---
 
 ## 13. AI AUTOPILOT ENGINE
@@ -1050,6 +1095,7 @@ Feature keys (used by requirePlanFeature middleware):
   "goals"         → OKR / Goals module
   "analytics"     → Advanced Analytics
   "wiki"          → Knowledge Base
+  "workspace_search_memory" → Admin Workspace Search + Memory
   "integrations"  → Slack, GitHub, Webhooks
   "unlimited_members" → No member cap
 ```
@@ -1336,7 +1382,7 @@ Body: { workspaceData, projectData, period: "since Friday (Apr 3)" }
 | Desktop — Linux (AppImage + .deb) | ✅ Complete |
 | Mobile — iOS (Capacitor, Xcode project) | ✅ Complete |
 | Mobile — Android (Capacitor, Gradle project) | ✅ Complete |
-| Backend API (54 route groups) | ✅ Complete |
+| Backend API (57 route groups) | ✅ Complete |
 | AI Microservice (autopilot, chat, standup, intelligence) | ✅ Complete |
 | Real-time (Socket.IO across all features) | ✅ Complete |
 | Video / Voice — built-in WebRTC huddle | ✅ Complete |
@@ -1346,6 +1392,7 @@ Body: { workspaceData, projectData, period: "since Friday (Apr 3)" }
 | Asana import + Slack migration tools | ✅ Complete |
 | Time tracking per task | ✅ Complete |
 | SLA management | ✅ Complete |
+| Workspace Search + Memory (admin-only unified search + durable knowledge layer) | ✅ Complete |
 | Automated test suite | ❌ None |
 
 ---
@@ -1356,6 +1403,7 @@ Body: { workspaceData, projectData, period: "since Friday (Apr 3)" }
 - The 6-platform distribution (Web + 3 desktop + 2 mobile) from one codebase — hard to architect even with AI
 - WebRTC video/voice built in — no Zoom/Meet dependency
 - AI features that are native to real workflows, not a chatbot bolted on
+- Workspace Search + Memory adds real operational polish for admins: faster navigation, rediscovery, onboarding, and institutional memory retention
 - Razorpay with recurring mandates, grace periods, and webhook HMAC — always messy to get right
 - SAML/SSO — unlocks enterprise sales
 - The complete HR stack (leave, reviews, OKR, attendance) alongside task management
@@ -1423,6 +1471,7 @@ Condition: product must be live with real users and credible traction.
 |---|---|
 | First 10 paying customers | Single biggest jump — from ₹35L to ₹1 crore+ |
 | Add automated test suite | Removes the #1 technical red flag for investors |
+| Workspace Search + Memory | Improves admin polish, demos, and enterprise readiness, but does not materially change valuation without customers |
 | Switch default LLM to OpenAI/Anthropic | Makes it production-deployable immediately |
 | 30 customers + ₹2L MRR | Fundable / acquirable territory |
 | Real case studies with named clients | Unlocks enterprise pipeline |
