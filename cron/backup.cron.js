@@ -12,7 +12,7 @@ import { runBackup } from "../backup/backup.service.js";
 export function startBackupCron() {
   console.log("🗄️  Starting Backup cron job...");
 
-  // Daily at 2:00 AM
+  // Daily at 2:00 AM (fixed schedule for predictable backup load)
   cron.schedule("0 2 * * *", async () => {
     console.log("\n🗄️  [CRON] Running scheduled database backup...");
     try {
@@ -29,8 +29,9 @@ export function startBackupCron() {
     } catch (err) {
       console.error("❌ [CRON] Backup cron threw:", err.message);
     }
-  });
+  }, { timezone: "Asia/Kolkata" });
 
   console.log("✅ Backup cron job started");
   console.log("  - Schedule: Every day at 2:00 AM");
+  console.log("  - Timezone: Asia/Kolkata");
 }

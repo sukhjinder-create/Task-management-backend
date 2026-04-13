@@ -28,6 +28,7 @@ import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from 
 import { createGzip } from "zlib";
 import path from "path";
 import { fileURLToPath } from "url";
+import { randomUUID } from "crypto";
 import pool from "../db.js";
 import {
   S3Client,
@@ -37,12 +38,53 @@ import { createReadStream } from "fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+let backupLogsReady = false;
+let backupLogsInitPromise = null;
+
+async function ensureBackupLogsTable() {
+  if (backupLogsReady) return;
+  if (backupLogsInitPromise) {
+    await backupLogsInitPromise;
+    return;
+  }
+
+  backupLogsInitPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS backup_logs (
+        id              UUID        PRIMARY KEY,
+        status          TEXT        NOT NULL CHECK (status IN ('running', 'success', 'failed')),
+        triggered_by    TEXT        NOT NULL DEFAULT 'cron',
+        file_name       TEXT,
+        file_size_bytes BIGINT,
+        storage_type    TEXT,
+        storage_path    TEXT,
+        error_message   TEXT,
+        started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at    TIMESTAMPTZ,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_backup_logs_started_at
+      ON backup_logs(started_at DESC);
+    `);
+    backupLogsReady = true;
+  })();
+
+  try {
+    await backupLogsInitPromise;
+  } finally {
+    backupLogsInitPromise = null;
+  }
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 const BACKUP_DIR      = process.env.BACKUP_LOCAL_DIR
   ? path.resolve(process.env.BACKUP_LOCAL_DIR)
   : path.join(__dirname, "..", "backups");
 
 const RETENTION_DAYS  = parseInt(process.env.BACKUP_RETENTION_DAYS || "30", 10);
+const RUNNING_TIMEOUT_MINUTES = parseInt(process.env.BACKUP_RUNNING_TIMEOUT_MINUTES || "180", 10);
 
 const S3_BUCKET       = process.env.BACKUP_S3_BUCKET || null;
 const S3_REGION       = process.env.BACKUP_S3_REGION || "us-east-1";
@@ -74,12 +116,14 @@ function timestamp() {
 
 async function logBackup(fields) {
   try {
+    await ensureBackupLogsTable();
     await pool.query(
       `INSERT INTO backup_logs
          (id, status, triggered_by, file_name, file_size_bytes, storage_type,
-          storage_path, error_message, started_at, completed_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+           storage_path, error_message, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
+        randomUUID(),
         fields.status,
         fields.triggeredBy || "cron",
         fields.fileName    || null,
@@ -98,6 +142,38 @@ async function logBackup(fields) {
 
 function getFileSizeBytes(filePath) {
   try { return statSync(filePath).size; } catch { return null; }
+}
+
+async function markStaleRunningBackupsAsFailed() {
+  const timeout = Math.max(5, RUNNING_TIMEOUT_MINUTES);
+  const { rowCount } = await pool.query(
+    `UPDATE backup_logs
+        SET status = 'failed',
+            error_message = COALESCE(error_message, 'Backup marked failed automatically (stale running state).'),
+            completed_at = now()
+      WHERE status = 'running'
+        AND completed_at IS NULL
+        AND started_at < now() - ($1::int * interval '1 minute')`,
+    [timeout]
+  );
+  if (rowCount > 0) {
+    console.warn(`[backup] Marked ${rowCount} stale running backup(s) as failed (>${timeout} min).`);
+  }
+}
+
+export async function getActiveRunningBackup() {
+  const timeout = Math.max(5, RUNNING_TIMEOUT_MINUTES);
+  const { rows } = await pool.query(
+    `SELECT *
+       FROM backup_logs
+      WHERE status = 'running'
+        AND completed_at IS NULL
+        AND started_at >= now() - ($1::int * interval '1 minute')
+      ORDER BY started_at DESC
+      LIMIT 1`,
+    [timeout]
+  );
+  return rows[0] || null;
 }
 
 // ── Core: run pg_dump and write compressed file ───────────────────────────────
@@ -165,8 +241,19 @@ function pruneOldBackups() {
 
 // ── Public: run a full backup ─────────────────────────────────────────────────
 export async function runBackup(triggeredBy = "cron") {
+  await ensureBackupLogsTable();
+  await markStaleRunningBackupsAsFailed();
+
+  const activeRunning = await getActiveRunningBackup();
+  if (activeRunning) {
+    return {
+      success: false,
+      error: `A backup is already running since ${activeRunning.started_at}. Please wait for it to finish.`,
+    };
+  }
+
   const startedAt = new Date();
-  const fileName  = `proxima_backup_${timestamp()}.sql.gz`;
+  const fileName  = `asystence_backup_${timestamp()}.sql.gz`;
   const localPath = path.join(BACKUP_DIR, fileName);
 
   // Ensure backup dir exists
@@ -175,15 +262,14 @@ export async function runBackup(triggeredBy = "cron") {
   console.log(`[backup] Starting backup → ${fileName} (triggered by: ${triggeredBy})`);
 
   // Mark as running
-  const { rows } = await pool.query(
+  const logId = randomUUID();
+  await pool.query(
     `INSERT INTO backup_logs
-       (status, triggered_by, file_name, started_at)
-     VALUES ('running', $1, $2, $3)
+       (id, status, triggered_by, file_name, started_at)
+     VALUES ($1, 'running', $2, $3, $4)
      RETURNING id`,
-    [triggeredBy, fileName, startedAt]
-  ).catch(() => ({ rows: [{ id: null }] }));
-
-  const logId = rows[0]?.id;
+    [logId, triggeredBy, fileName, startedAt]
+  ).catch(() => {});
 
   try {
     // 1. Run pg_dump
@@ -240,6 +326,8 @@ export async function runBackup(triggeredBy = "cron") {
 
 // ── Public: get recent backup logs ───────────────────────────────────────────
 export async function getBackupLogs(limit = 50) {
+  await ensureBackupLogsTable();
+  await markStaleRunningBackupsAsFailed();
   const { rows } = await pool.query(
     `SELECT * FROM backup_logs ORDER BY started_at DESC LIMIT $1`,
     [limit]
@@ -249,6 +337,8 @@ export async function getBackupLogs(limit = 50) {
 
 // ── Public: get latest successful backup info ────────────────────────────────
 export async function getLastSuccessfulBackup() {
+  await ensureBackupLogsTable();
+  await markStaleRunningBackupsAsFailed();
   const { rows } = await pool.query(
     `SELECT * FROM backup_logs WHERE status = 'success' ORDER BY completed_at DESC LIMIT 1`
   );

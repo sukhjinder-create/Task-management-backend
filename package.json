@@ -14,7 +14,11 @@
     "migrate:payments": "node run-payments-migration.js",
     "migrate:operations-os": "node run-operations-os-migration.js",
     "migrate:workspace-search-history": "node run-workspace-search-history-migration.js",
-    "migrate:workspace-search-click-history": "node run-workspace-search-click-history-migration.js"
+    "migrate:workspace-search-click-history": "node run-workspace-search-click-history-migration.js",
+    "migrate:backup-logs": "node run-backup-logs-migration.js",
+    "migrate:workspace-recovery-jobs": "node run-workspace-recovery-jobs-migration.js",
+    "recover:workspace:dry": "node run-workspace-recovery.js --dry-run",
+    "recover:workspace": "node run-workspace-recovery.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",
