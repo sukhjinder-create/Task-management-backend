@@ -152,7 +152,7 @@ export function startAutopilotCron() {
     } catch (err) {
       console.error("❌ Autopilot cron job failed:", err);
     }
-  });
+  }, { timezone: "Asia/Kolkata" });
 
   // ============================================
   // JOB 2: Process auto-approvals every 15 minutes
@@ -172,7 +172,7 @@ export function startAutopilotCron() {
     } catch (err) {
       console.error("❌ Auto-approval cron job failed:", err);
     }
-  });
+  }, { timezone: "Asia/Kolkata" });
 
   // ============================================
   // JOB 3: Generate & deliver daily standups at 11:00 AM every day
@@ -222,7 +222,7 @@ export function startAutopilotCron() {
     } catch (err) {
       console.error("❌ Daily standup cron failed:", err);
     }
-  });
+  }, { timezone: "Asia/Kolkata" });
 
   console.log("✅ Autopilot cron jobs started");
   console.log("  - Analysis: Every 4 hours (no standups)");

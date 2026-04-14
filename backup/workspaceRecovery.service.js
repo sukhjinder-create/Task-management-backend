@@ -944,11 +944,35 @@ export async function recoverWorkspaceFromSource({
         continue;
       }
 
-      const countRes = await source.query(
-        `SELECT count(*)::bigint AS cnt FROM ${qIdent(table)} WHERE ${where}`,
-        [workspaceId]
-      );
-      const total = Number(countRes.rows[0]?.cnt || 0);
+      let total = 0;
+      try {
+        const countRes = await source.query(
+          `SELECT count(*)::bigint AS cnt FROM ${qIdent(table)} WHERE ${where}`,
+          [workspaceId]
+        );
+        total = Number(countRes.rows[0]?.cnt || 0);
+      } catch (err) {
+        // If the WHERE clause references columns that don't exist in the source database,
+        // skip this table (e.g., workspace_id column missing in older backups)
+        if (err.message && err.message.includes('column') && err.message.includes('does not exist')) {
+          console.warn(`Skipping table ${table}: ${err.message}`);
+          tableSummary.push({ table, scanned: 0, written: 0, skipped: true });
+          completedTables += 1;
+          await sendProgress({
+            rowsScanned,
+            rowsWritten: totalWritten,
+            tableSummary,
+            progressPct: getProgressPct(0),
+            currentTable: table,
+            progressMessage: `Skipped ${table} (schema mismatch: ${err.message.split('\n')[0]}).`,
+            event: true,
+            force: true,
+          });
+          continue;
+        }
+        // Re-throw other errors
+        throw err;
+      }
       if (total === 0) {
         tableSummary.push({ table, scanned: 0, written: 0, skipped: false });
         completedTables += 1;
