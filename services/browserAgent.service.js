@@ -1776,13 +1776,29 @@ Plain text only, no markdown.`;
 async function aiIdentifySelector(page, description) {
   // Guard: prevent crash when description is undefined/null/non-string
   if (!description || typeof description !== "string" || description.trim() === "") {
-    return `[aria-label*="button" i]`; // safe generic fallback
+    return null; // Return null to indicate no valid selector
   }
   const desc = description.toLowerCase();
 
   // ── Determine intent: is this about a BUTTON/LINK or an INPUT? ──
   const isButtonIntent = /\b(button|click|link|tap|next|submit|sign.?in|log.?in|continue|proceed|confirm|ok)\b/.test(desc);
   const isInputIntent = !isButtonIntent || /\b(input|field|box|bar|type|enter|fill)\b/.test(desc);
+
+  // Helper function to validate selector exists and is visible
+  async function validateSelector(selector) {
+    if (!selector) return null;
+    try {
+      const exists = await page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        return el && el.offsetParent !== null && 
+               el.getBoundingClientRect().width > 0 && 
+               el.getBoundingClientRect().height > 0;
+      }, selector);
+      return exists ? selector : null;
+    } catch (e) {
+      return null;
+    }
+  }
 
   // ── Submit / action buttons (sign in, next, continue, login, ok) ──
   if (isButtonIntent && (
@@ -1791,22 +1807,47 @@ async function aiIdentifySelector(page, description) {
     desc.includes("ok button") || desc.includes("proceed")
   )) {
     const found = await page.evaluate(() => {
-      const el =
-        document.querySelector("#passwordNext button") ||
-        document.querySelector("#identifierNext button") ||
-        document.querySelector("#next") ||
-        document.querySelector('button[type="submit"]') ||
-        document.querySelector('input[type="submit"]') ||
-        document.querySelector('[data-action="save"]') ||
-        // Google sign-in spinner buttons
-        document.querySelector('.VfPpkd-LgbsSe[jsname]') ||
-        null;
-      if (!el) return null;
+      // Try to find the most specific selector first
+      const candidates = [
+        document.querySelector("#passwordNext button"),
+        document.querySelector("#identifierNext button"),
+        document.querySelector("#next"),
+        document.querySelector('button[type="submit"]'),
+        document.querySelector('input[type="submit"]'),
+        document.querySelector('[data-action="save"]'),
+        document.querySelector('.VfPpkd-LgbsSe[jsname]'),
+        document.querySelector('button[aria-label*="sign in" i]'),
+        document.querySelector('button[aria-label*="log in" i]'),
+        document.querySelector('button:has-text("Sign In")'),
+        document.querySelector('button:has-text("Log In")'),
+        document.querySelector('button:has-text("Next")'),
+        document.querySelector('button:has-text("Continue")'),
+        document.querySelector('button:has-text("Submit")'),
+      ].filter(Boolean);
+      
+      if (candidates.length === 0) return null;
+      
+      // Return the most specific selector for the first candidate
+      const el = candidates[0];
       if (el.id) return `#${el.id}`;
       if (el.getAttribute("jsname")) return `[jsname="${el.getAttribute("jsname")}"]`;
+      if (el.getAttribute("data-testid")) return `[data-testid="${el.getAttribute("data-testid")}"]`;
+      if (el.getAttribute("aria-label")) return `[aria-label="${el.getAttribute("aria-label")}"]`;
+      if (el.type === "submit") return 'button[type="submit"]';
+      
+      // Try to get text content for text-based selector
+      const text = el.textContent?.trim();
+      if (text && text.length < 50) {
+        return `button:has-text("${text}")`;
+      }
+      
       return 'button[type="submit"]';
     }).catch(() => null);
-    if (found) return found;
+    
+    if (found) {
+      const validated = await validateSelector(found);
+      if (validated) return validated;
+    }
   }
 
   // ── Search inputs (works on YouTube, Google, Amazon, GitHub, etc.) ──

@@ -113,16 +113,15 @@ async function ensureWorkspaceAIUser(client, workspaceId) {
     throw new Error("workspaceId is required for AI user");
   }
 
-  // 🔒 Force UUID typing (THIS FIXES 42P18)
+  // system_users schema: (workspace_id PK, user_id) — no id or display_name columns
   const res = await client.query(
     `
     SELECT
       su.user_id,
-      su.id AS system_user_id,
-      COALESCE(ws.ai_name, su.display_name, 'AI Assistant') AS ai_name
+      COALESCE(ws.ai_name, u.username, 'AI Assistant') AS ai_name
     FROM system_users su
-    LEFT JOIN workspace_ai_settings ws
-      ON ws.workspace_id = su.workspace_id
+    LEFT JOIN workspace_ai_settings ws ON ws.workspace_id = su.workspace_id
+    LEFT JOIN users u ON u.id = su.user_id
     WHERE su.workspace_id = $1::uuid
     LIMIT 1
     `,
@@ -132,40 +131,31 @@ async function ensureWorkspaceAIUser(client, workspaceId) {
   if (res.rows.length > 0) {
     const aiName = res.rows[0].ai_name;
     const aiUserId = res.rows[0].user_id;
-    // Keep users.username in sync so history queries always show the current AI name
     await client.query(
       `UPDATE users SET username = $1 WHERE id = $2 AND username != $1`,
       [aiName, aiUserId]
     );
-    return {
-      userId: aiUserId,
-      username: aiName,
-    };
+    return { userId: aiUserId, username: aiName };
   }
 
-  // 🧠 Lazy-create AI user (once per workspace)
+  // Lazy-create AI user (once per workspace)
   const userRes = await client.query(
     `
-    INSERT INTO users (id, username, email, role)
-    VALUES (gen_random_uuid(), 'AI Assistant', NULL, 'system')
+    INSERT INTO users (id, username, email, role, workspace_id, is_system, created_at)
+    VALUES (gen_random_uuid(), 'AI Assistant', $1, 'system', $2::uuid, true, now())
     RETURNING id
-    `
+    `,
+    [`ai+${workspaceId}@example.com`, workspaceId]
   );
 
   const aiUserId = userRes.rows[0].id;
 
   await client.query(
-    `
-    INSERT INTO system_users (id, user_id, workspace_id, display_name)
-    VALUES (gen_random_uuid(), $1, $2::uuid, 'AI Assistant')
-    `,
-    [aiUserId, workspaceId]
+    `INSERT INTO system_users (workspace_id, user_id) VALUES ($1::uuid, $2) ON CONFLICT (workspace_id) DO NOTHING`,
+    [workspaceId, aiUserId]
   );
 
-  return {
-    userId: aiUserId,
-    username: "AI Assistant",
-  };
+  return { userId: aiUserId, username: "AI Assistant" };
 }
 
 /* -------------------------------------------------------

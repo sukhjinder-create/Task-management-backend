@@ -1073,9 +1073,15 @@ async function generateStandupSummary(workspaceId, projectId, settings, sinceTim
     projects = rows;
   }
 
-  if (!projects.length) return [];
+  if (!projects.length) {
+    console.log(`[standup] No qualifying projects found for workspace=${workspaceId}`);
+    return [];
+  }
+
+  console.log(`[standup] Generating standups for ${projects.length} project(s) in workspace=${workspaceId} (${period})`);
 
   const allActions = [];
+  const projectErrors = [];
 
   for (const project of projects) {
     const projectLabel = project.name || `Project ${project.id}`;
@@ -1281,9 +1287,16 @@ async function generateStandupSummary(workspaceId, projectId, settings, sinceTim
         confidence: 0.98,
       });
     } catch (err) {
-      console.error(`Failed to generate standup for project ${project.id}:`, err);
+      console.error(`[standup] ❌ Failed to generate standup for project "${projectLabel}" (${project.id}):`, err.message);
+      console.error(err.stack);
+      projectErrors.push({ projectId: project.id, projectLabel, error: err.message });
     }
   }
+
+  if (projectErrors.length > 0) {
+    console.error(`[standup] ${projectErrors.length} project(s) failed standup generation for workspace=${workspaceId}:`, JSON.stringify(projectErrors));
+  }
+  console.log(`[standup] Generated ${allActions.length} standup action(s) for workspace=${workspaceId}`);
 
   return allActions;
 }
@@ -1329,11 +1342,23 @@ async function createAutopilotAction({
   };
   const dedupeHours = dedupeHoursByType[actionType] || 6;
 
-  // Prevent duplicate pending actions with identical intent over short windows.
-  const dedupe = await pool.query(
-    `
-    SELECT *
-    FROM autopilot_actions
+  // For standups, deduplicate by report_date (not full content) so a new day always gets a new standup.
+  // For other action types, deduplicate by exact proposed_changes content.
+  let dedupeQuery, dedupeParams;
+  if (actionType === 'create_standup' && proposedChanges?.report_date) {
+    dedupeQuery = `
+    SELECT id FROM autopilot_actions
+    WHERE workspace_id = $1
+      AND COALESCE(project_id::text, '') = COALESCE($2::text, '')
+      AND action_type = 'create_standup'
+      AND status IN ('pending', 'approved', 'auto_approved', 'executed')
+      AND proposed_changes->>'report_date' = $3
+    LIMIT 1
+    `;
+    dedupeParams = [workspaceId, projectId, proposedChanges.report_date];
+  } else {
+    dedupeQuery = `
+    SELECT id FROM autopilot_actions
     WHERE workspace_id = $1
       AND COALESCE(project_id::text, '') = COALESCE($2::text, '')
       AND COALESCE(task_id::text, '') = COALESCE($3::text, '')
@@ -1341,20 +1366,15 @@ async function createAutopilotAction({
       AND status IN ('pending', 'approved', 'auto_approved', 'executed')
       AND proposed_changes::jsonb = $5::jsonb
       AND created_at > NOW() - ($6::int * INTERVAL '1 hour')
-    ORDER BY created_at DESC
     LIMIT 1
-    `,
-    [
-      workspaceId,
-      projectId,
-      taskId,
-      actionType,
-      JSON.stringify(proposedChanges || {}),
-      dedupeHours,
-    ]
-  );
+    `;
+    dedupeParams = [workspaceId, projectId, taskId, actionType, JSON.stringify(proposedChanges || {}), dedupeHours];
+  }
+
+  const dedupe = await pool.query(dedupeQuery, dedupeParams);
 
   if (dedupe.rows.length > 0) {
+    console.log(`[autopilot] Dedup: skipping ${actionType} for workspace=${workspaceId} project=${projectId} (already exists)`);
     return null;
   }
 
@@ -1697,9 +1717,10 @@ async function executeStandupCreation(action) {
       workspaceId,
     });
 
-    console.log(`Standup posted to #daily-standups for project: ${projectName}`);
+    console.log(`✅ [standup] Posted to #daily-standups for project: ${projectName} (workspace=${workspaceId})`);
   } catch (err) {
-    console.error('Failed to post standup to channel:', err);
+    console.error(`❌ [standup] Failed to post to #daily-standups for project "${projectName}" (workspace=${workspaceId}):`, err.message);
+    console.error(err.stack);
     throw err;
   }
 }

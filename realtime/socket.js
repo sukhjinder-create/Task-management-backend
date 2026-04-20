@@ -1005,3 +1005,18 @@ export function emitAiTyping(channelKey, workspaceId) {
   io.to(legacyRoomName(channelKey)).emit("chat:ai-typing", payload);
   io.to(workspaceRoomName(channelKey, workspaceId)).emit("chat:ai-typing", payload);
 }
+
+/**
+ * Emitted when the smart browser test agent hits a login wall and needs
+ * the user to provide credentials before it can continue testing.
+ * Frontend should listen for this event and show a credential prompt modal.
+ */
+export function emitTestingCredentialRequest(workspaceId, runId, loginUrl) {
+  if (!io || !workspaceId || !runId) return;
+  io.to(`workspace:${workspaceId}`).emit("testing:credential_request", {
+    runId,
+    loginUrl,
+    message: "The testing agent reached a login page and needs credentials to continue.",
+    timestamp: new Date().toISOString(),
+  });
+}

@@ -27,6 +27,10 @@ import {
   previewMultiScenarioRun,
   previewDeepExplorationRun,
 } from "../services/browserAgent.service.js";
+import {
+  runSmartBrowserTest,
+  provideRunCredentials,
+} from "../services/smartBrowserTest.service.js";
 
 const router = express.Router();
 
@@ -288,21 +292,62 @@ function buildDeepExploreInstructions(body = {}) {
   return lines.join("\n").trim();
 }
 
-// Browser agent run
-router.post("/tasks/:taskId/browser-preview", async (req, res) => {
+// Smart browser test — DOM-first, no hallucination, live credential prompting
+// Primary browser test endpoint: just give it a URL and it tests everything.
+router.post("/tasks/:taskId/browser-run", (req, res) => {
+  const { url, email, password, timeoutMs } = req.body || {};
+
+  // Legacy path: if caller provides `instructions` (old API), extract URL from it
+  let targetUrl = url ? String(url).trim() : null;
+  if (!targetUrl) {
+    const instructions = String(req.body?.instructions || "").trim();
+    const match = instructions.match(/https?:\/\/[^\s,'"]+/);
+    if (match) targetUrl = match[0];
+  }
+
+  if (!targetUrl || !targetUrl.startsWith("http")) {
+    return res.status(400).json({ error: "url is required (e.g. { \"url\": \"https://myapp.com\" })" });
+  }
+
+  runAsync(
+    ({ onRunCreated }) => runSmartBrowserTest({
+      workspaceId: req.workspaceId,
+      taskId: req.params.taskId,
+      url: targetUrl,
+      email: email ? String(email).trim() : null,
+      password: password ? String(password).trim() : null,
+      triggeredBy: req.user?.id || null,
+      triggerSource: "manual",
+      timeoutMs: normalizeRequestedTimeout(timeoutMs, 10000),
+      onRunCreated,
+    }),
+    res,
+    "Browser test failed"
+  );
+});
+
+// Provide credentials for a paused run (called by frontend when user submits the credential modal)
+router.post("/runs/:runId/provide-credentials", async (req, res) => {
   try {
-    const { instructions } = req.body || {};
-    const preview = await previewBrowserRun({
-      instructions: String(instructions || "").trim(),
-    });
-    res.json(preview);
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: "email and password are required" });
+    }
+    const result = await provideRunCredentials(
+      req.params.runId,
+      req.workspaceId,
+      String(email).trim(),
+      String(password).trim()
+    );
+    res.json(result);
   } catch (error) {
-    console.error("Browser agent preview failed:", error);
-    res.status(400).json({ error: "Browser agent preview failed", details: error.message });
+    console.error("Provide credentials failed:", error);
+    res.status(400).json({ error: "Failed to provide credentials", details: error.message });
   }
 });
 
-router.post("/tasks/:taskId/browser-run", (req, res) => {
+// Legacy browser agent (kept for backward compatibility)
+router.post("/tasks/:taskId/browser-run-legacy", (req, res) => {
   const { instructions, timeoutMs } = req.body || {};
   if (!instructions || !String(instructions).trim()) {
     return res.status(400).json({ error: "instructions are required" });
@@ -320,6 +365,20 @@ router.post("/tasks/:taskId/browser-run", (req, res) => {
     res,
     "Browser agent run failed"
   );
+});
+
+// Browser preview (kept as-is)
+router.post("/tasks/:taskId/browser-preview", async (req, res) => {
+  try {
+    const { instructions } = req.body || {};
+    const preview = await previewBrowserRun({
+      instructions: String(instructions || "").trim(),
+    });
+    res.json(preview);
+  } catch (error) {
+    console.error("Browser agent preview failed:", error);
+    res.status(400).json({ error: "Browser agent preview failed", details: error.message });
+  }
 });
 
 // Auto-discover: give URL → AI explores page → builds & runs its own test plan

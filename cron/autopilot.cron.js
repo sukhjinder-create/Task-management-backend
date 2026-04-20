@@ -120,11 +120,11 @@ export function startAutopilotCron() {
     console.log("\n🤖 [CRON] Running autopilot analysis...");
 
     try {
-      // Get all workspaces with autopilot enabled
       const { rows: workspaces } = await pool.query(`
         SELECT DISTINCT workspace_id
         FROM autopilot_settings
         WHERE enabled = true
+          AND project_id IS NULL
       `);
 
       console.log(`Found ${workspaces.length} workspaces with autopilot enabled`);
@@ -186,10 +186,16 @@ export function startAutopilotCron() {
       const { rows: workspaces } = await pool.query(`
         SELECT DISTINCT workspace_id
         FROM autopilot_settings
-        WHERE enabled = true AND auto_generate_standup = true
+        WHERE enabled = true
+          AND auto_generate_standup = true
+          AND project_id IS NULL
       `);
 
-      console.log(`Checking standups for ${workspaces.length} workspaces`);
+      console.log(`📋 [STANDUP] Found ${workspaces.length} workspace(s) with auto_generate_standup=true`);
+
+      if (workspaces.length === 0) {
+        console.log("📋 [STANDUP] No workspaces configured for standup — ensure autopilot_settings has enabled=true, auto_generate_standup=true, project_id IS NULL");
+      }
 
       const today = new Date();
 
@@ -198,25 +204,26 @@ export function startAutopilotCron() {
           // Skip if today is not a working day for this workspace
           const isWorking = await isWorkingDayForWorkspace(ws.workspace_id, today);
           if (!isWorking) {
-            console.log(`⏭️  Workspace ${ws.workspace_id}: today is not a working day — skipping standup`);
+            console.log(`⏭️  [STANDUP] Workspace ${ws.workspace_id}: today is not a working day — skipping`);
             continue;
           }
 
           // Dynamic lookback: covers activity since the last working day standup
           const { sinceTimestamp, periodLabel } = await getStandupLookbackSince(ws.workspace_id, 11);
-          console.log(`📋 Workspace ${ws.workspace_id}: generating standup (${periodLabel})`);
+          console.log(`📋 [STANDUP] Workspace ${ws.workspace_id}: generating standup (${periodLabel}, since ${sinceTimestamp.toISOString()})`);
 
           const result = await runAutopilotAnalysis({
             workspaceId: ws.workspace_id,
             projectId: null,
-            skipStandup: false,   // Only standups run here
+            skipStandup: false,
             sinceTimestamp,
             periodLabel,
             standupOnly: true,
           });
-          console.log(`✅ Standups for workspace ${ws.workspace_id}: ${result.actionsCreated} created`);
+          console.log(`✅ [STANDUP] Workspace ${ws.workspace_id}: ${result.actionsCreated} action(s) created`);
         } catch (err) {
-          console.error(`❌ Standup failed for workspace ${ws.workspace_id}:`, err.message);
+          console.error(`❌ [STANDUP] Workspace ${ws.workspace_id} failed:`, err.message);
+          console.error(err.stack);
         }
       }
     } catch (err) {
