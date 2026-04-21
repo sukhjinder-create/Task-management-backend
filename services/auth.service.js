@@ -43,6 +43,8 @@ function normalizeUserRow(user) {
     projects: user.projects || [],
     workspaceId: role === "superadmin" ? WORKSPACE_GLOBAL : workspaceId,
     workspace_id: role === "superadmin" ? WORKSPACE_GLOBAL : workspaceId,
+    workspace_slug: user.workspace_slug || null,
+    workspace_name: user.workspace_name || null,
   };
 }
 

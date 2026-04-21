@@ -96,7 +96,8 @@ export async function getUserById(id) {
       u.avatar_url,
       u.created_at,
       u.updated_at,
-      w.name AS workspace_name
+      w.name AS workspace_name,
+      w.slug AS workspace_slug
     FROM users u
     LEFT JOIN workspaces w ON w.id = u.workspace_id
     WHERE u.id = $1
