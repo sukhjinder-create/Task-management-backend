@@ -75,7 +75,12 @@ export async function addUserToWorkspaceRepo(userId, workspaceId, billingStatus 
    ⚠️ Email is globally unique → keep unchanged
 ===================================================== */
 export async function getUserByEmail(email) {
-  const q = `SELECT * FROM users WHERE email = $1`;
+  const q = `
+    SELECT u.*, w.name AS workspace_name, w.slug AS workspace_slug
+    FROM users u
+    LEFT JOIN workspaces w ON w.id = u.workspace_id
+    WHERE u.email = $1
+  `;
   const { rows } = await pool.query(q, [email]);
   return rows[0] || null;
 }
