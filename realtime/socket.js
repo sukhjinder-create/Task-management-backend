@@ -700,14 +700,31 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       persisted: true,
     };
 
-    io.to(legacyRoomName(channelId)).emit(
-      "huddle:started",
-      out
-    );
-    io.to(workspaceRoomName(channelId, workspaceId)).emit(
-      "huddle:started",
-      out
-    );
+    // Broadcast to channel rooms AND entire workspace so all members get the invite
+    io.to(legacyRoomName(channelId)).emit("huddle:started", out);
+    io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:started", out);
+    io.to(`workspace:${workspaceId}`).emit("huddle:started", out);
+
+    // Send FCM push notification to all workspace members (except starter)
+    try {
+      const { rows: members } = await pool.query(
+        "SELECT user_id FROM workspace_users WHERE workspace_id = $1 AND user_id != $2",
+        [workspaceId, userId]
+      );
+      const channelLabel = channelId.startsWith("dm:") ? "Direct Message" : `#${channelId}`;
+      for (const member of members) {
+        sendPushToUser({
+          userId: member.user_id,
+          title: `📞 ${username} is calling`,
+          body: `Incoming huddle in ${channelLabel}`,
+          url: "/chat",
+          type: "huddle",
+          extraData: { huddleId, channelId, startedByName: username, startedBy: String(userId) },
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.error("[push:huddle] error:", e.message);
+    }
   });
 
   socket.on("huddle:end", async ({ channelId, huddleId }) => {

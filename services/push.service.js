@@ -143,17 +143,25 @@ async function sendWebPushToSubscription(subscription, payload) {
 async function sendFCMNotification(fcmToken, payload) {
   if (!fcmReady || !firebaseAdmin) return;
   try {
+    const extraStringified = {};
+    if (payload.extraData) {
+      for (const [k, v] of Object.entries(payload.extraData)) {
+        extraStringified[k] = String(v);
+      }
+    }
+    const channelId = payload.type === "chat" ? "chat" : payload.type === "huddle" ? "huddle" : "tasks";
     await firebaseAdmin.messaging().send({
       token: fcmToken,
       notification: { title: payload.title, body: payload.body },
       data: {
         url:  payload.url  || "/",
         type: payload.type || "general",
+        ...extraStringified,
       },
       android: {
         priority: "high",
         notification: {
-          channelId: payload.type === "chat" ? "chat" : "tasks",
+          channelId,
           sound: "default",
           defaultVibrateTimings: true,
           defaultSound: true,
@@ -181,7 +189,7 @@ async function sendFCMNotification(fcmToken, payload) {
  * @param {string}  opts.url        - deep link path (e.g. "/projects/123?task=456")
  * @param {string}  opts.type       - 'task' | 'chat' | 'general'
  */
-export async function sendPushToUser({ userId, title, body, url = "/", type = "general" }) {
+export async function sendPushToUser({ userId, title, body, url = "/", type = "general", extraData = null }) {
   try {
     // Check preferences
     const prefs = await getPreferences(userId);
@@ -195,7 +203,7 @@ export async function sendPushToUser({ userId, title, body, url = "/", type = "g
       [userId]
     );
 
-    const payload = { title, body, url, type };
+    const payload = { title, body, url, type, extraData };
 
     await Promise.allSettled(
       rows.map((row) => {
