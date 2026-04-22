@@ -473,7 +473,6 @@ socket.emit("chat:history", {
     try {
       let targetUserIds = [];
       if (isDM) {
-        // DM channel key: "dm:userId1:userId2"
         targetUserIds = channelId.split(":").slice(1).filter((id) => id !== String(userId));
       } else {
         const { rows: members } = await pool.query(
@@ -482,18 +481,16 @@ socket.emit("chat:history", {
         );
         targetUserIds = members.map((m) => m.user_id);
       }
-      const senderName = saved?.username || "Someone";
-      const preview = saved?.fallback_text
-        ? (saved.fallback_text.length > 80 ? saved.fallback_text.slice(0, 77) + "…" : saved.fallback_text)
-        : "Sent a message";
+      console.log(`[push:chat:socket] isDM=${isDM} channelId=${channelId} sender=${userId} targets=${JSON.stringify(targetUserIds)}`);
+      const senderName = saved?.username || username || "Someone";
       for (const targetId of targetUserIds) {
         sendPushToUser({
           userId: targetId,
-          title: isDM ? `${senderName}` : `${senderName} in #${channelId}`,
-          body: preview,
+          title: isDM ? senderName : `${senderName} in #${channelId}`,
+          body: "Sent a message",
           url: "/chat",
           type: "chat",
-        }).catch(() => {});
+        }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
       }
     } catch (e) {
       console.error("[push:chat:socket] error:", e.message);
