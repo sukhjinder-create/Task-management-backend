@@ -19,6 +19,8 @@ import {
   getRecentMessagesResolved,
 } from "../services/chat.service.js";
 
+import { sendPushToUser } from "../services/push.service.js";
+
 
 import {
   createHuddle,
@@ -454,7 +456,7 @@ socket.emit("chat:history", {
     console.log("🔥 SAVING MESSAGE", { channelId, workspaceId, isDM });
 
     // 🔥 SINGLE SOURCE OF TRUTH (DB → socket emit happens elsewhere)
-    await createChatMessage({
+    const saved = await createChatMessage({
       channelKey: channelId,
       userId,
       tempId: tempId || null,
@@ -466,6 +468,36 @@ socket.emit("chat:history", {
 
     // ✅ Confirm save to sender — frontend uses this to cancel its fallback timer
     if (typeof ack === "function") ack({ ok: true, tempId: tempId || null });
+
+    // Push notification to other channel members (non-blocking)
+    try {
+      let targetUserIds = [];
+      if (isDM) {
+        // DM channel key: "dm:userId1:userId2"
+        targetUserIds = channelId.split(":").slice(1).filter((id) => id !== String(userId));
+      } else {
+        const { rows: members } = await pool.query(
+          "SELECT user_id FROM chat_channel_members WHERE channel_id = (SELECT id FROM chat_channels WHERE key = $1 LIMIT 1) AND user_id != $2",
+          [channelId, userId]
+        );
+        targetUserIds = members.map((m) => m.user_id);
+      }
+      const senderName = saved?.username || "Someone";
+      const preview = saved?.fallback_text
+        ? (saved.fallback_text.length > 80 ? saved.fallback_text.slice(0, 77) + "…" : saved.fallback_text)
+        : "Sent a message";
+      for (const targetId of targetUserIds) {
+        sendPushToUser({
+          userId: targetId,
+          title: isDM ? `${senderName}` : `${senderName} in #${channelId}`,
+          body: preview,
+          url: "/chat",
+          type: "chat",
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.error("[push:chat:socket] error:", e.message);
+    }
   } catch (err) {
     console.error("chat:message error:", err);
     if (typeof ack === "function") ack({ ok: false, error: err.message });
