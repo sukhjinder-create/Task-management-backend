@@ -253,12 +253,8 @@ router.get("/google/callback", async (req, res) => {
   try {
     const { token, user } = await loginWithGoogle(code);
 
-    // Pass token + user to frontend via redirect
-    const params = new URLSearchParams({
-      token,
-      user: JSON.stringify(user),
-    });
-    res.redirect(`${FRONTEND_URL}/auth/callback?${params}`);
+    // Pass only token — frontend fetches user from /users/me
+    res.redirect(`${FRONTEND_URL}/auth/callback?token=${token}`);
   } catch (err) {
     console.error("Google SSO callback error:", err.message);
     const msg = encodeURIComponent(err.message);

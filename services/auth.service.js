@@ -6,6 +6,16 @@ import {
   getUserByEmail,
   getUserById,
 } from "../repositories/user.repository.js";
+
+async function ensureWorkspaceUser(userId, workspaceId) {
+  if (!userId || !workspaceId || workspaceId === "GLOBAL") return;
+  await pool.query(
+    `INSERT INTO workspace_users (user_id, workspace_id, billing_status)
+     VALUES ($1, $2, 'active')
+     ON CONFLICT (user_id) DO NOTHING`,
+    [userId, workspaceId]
+  );
+}
 import { verifyMagicToken } from "./magicLink.service.js";
 import { verifyMfaToken } from "./mfa.service.js";
 import { sendPasswordResetEmail } from "./email.service.js";
@@ -105,6 +115,7 @@ export async function loginWithEmail(email, password) {
   }
 
   const safeUser = normalizeUserRow(user);
+  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
   const token = generateToken(safeUser);
   return { token, user: safeUser };
 }
@@ -128,6 +139,7 @@ export async function loginWithMfa(mfaSessionToken, totpCode) {
   if (!user) throw new Error("User not found");
 
   const safeUser = normalizeUserRow(user);
+  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
   const token = generateToken(safeUser);
   return { token, user: safeUser };
 }
@@ -149,6 +161,7 @@ export async function getCurrentUser(userId) {
 export async function loginWithMagicToken(token) {
   const user     = await verifyMagicToken(token);
   const safeUser = normalizeUserRow(user);
+  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
   const jwt      = generateToken(safeUser);
   return { token: jwt, user: safeUser };
 }
@@ -415,6 +428,7 @@ export async function loginWithGoogle(code) {
   }
 
   const safeUser = normalizeUserRow(user);
+  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
   const jwtToken = generateToken(safeUser);
   return { token: jwtToken, user: safeUser };
 }

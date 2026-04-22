@@ -180,8 +180,7 @@ router.post("/:channelId/members", async (req, res) => {
 router.get("/for-user", async (req, res) => {
   try {
     const userId = req.user.id;
-    const channels = await chatSvc.getChannelsForUserInWorkspace(userId, workspaceId)
-;
+    const channels = await chatSvc.getChannelsForUserInWorkspace(userId, req.workspaceId);
     return res.json(channels);
   } catch (err) {
     console.error("GET /chat/for-user error:", err);
