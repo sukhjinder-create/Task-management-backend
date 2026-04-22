@@ -142,21 +142,25 @@ router.post("/", async (req, res) => {
         "SELECT user_id FROM channel_members WHERE channel_id = $1 AND user_id != $2",
         [channel.id, userId]
       );
+      console.log(`[push:chat] channel=${channel.id} members=${members.length}`);
       const senderName = saved.username || "Someone";
       const preview = fallbackText
         ? (fallbackText.length > 80 ? fallbackText.slice(0, 77) + "…" : fallbackText)
         : "Sent a message";
       const chatUrl = `/chat`;
       for (const { user_id } of members) {
+        console.log(`[push:chat] sending to user_id=${user_id}`);
         sendPushToUser({
           userId: user_id,
           title: `${senderName} in #${channel.name || channel.key || "chat"}`,
           body: preview,
           url: chatUrl,
           type: "chat",
-        }).catch(() => {});
+        }).catch((e) => console.error("[push:chat] sendPushToUser error:", e.message));
       }
-    } catch {}
+    } catch (e) {
+      console.error("[push:chat] member query error:", e.message);
+    }
 
     return res.status(201).json(saved);
   } catch (err) {

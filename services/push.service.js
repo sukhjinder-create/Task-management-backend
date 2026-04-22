@@ -150,7 +150,15 @@ async function sendFCMNotification(fcmToken, payload) {
         url:  payload.url  || "/",
         type: payload.type || "general",
       },
-      android: { priority: "high" },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: payload.type === "chat" ? "chat" : "tasks",
+          sound: "default",
+          defaultVibrateTimings: true,
+          defaultSound: true,
+        },
+      },
     });
   } catch (err) {
     if (err.code === "messaging/registration-token-not-registered") {
