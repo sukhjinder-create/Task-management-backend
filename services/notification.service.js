@@ -9,6 +9,7 @@ import { getIO } from "../realtime/socket.js";
 import nodemailer from "nodemailer";
 import { getUserById } from "../repositories/user.repository.js";
 import { mirrorProjectNotificationToChat } from "./systemChatBot.service.js";
+import { sendPushToUser } from "./push.service.js";
 
 // ─────────────────────────────
 // Config
@@ -222,6 +223,21 @@ export async function notifyUser({
     project_id,
     comment_id,
   });
+
+  // 5️⃣ Push notification (web + mobile)
+  const pushType = type.startsWith("chat") ? "chat" : "task";
+  let pushUrl = "/notifications";
+  if (project_id && task_id) pushUrl = `/projects/${project_id}?task=${task_id}`;
+  else if (project_id) pushUrl = `/projects/${project_id}`;
+  else if (task_id) pushUrl = `/my-tasks`;
+
+  sendPushToUser({
+    userId: user_id,
+    title: pushType === "chat" ? "New message" : "Task update",
+    body: message,
+    url: pushUrl,
+    type: pushType,
+  }).catch(() => {});
 
   return notification;
 }

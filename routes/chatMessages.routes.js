@@ -12,6 +12,8 @@ import {
 import { getIO } from "../realtime/socket.js";
 
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+import { sendPushToUser } from "../services/push.service.js";
+import pool from "../db.js";
 
 const router = express.Router();
 
@@ -133,6 +135,28 @@ router.post("/", async (req, res) => {
     } catch (e) {
       console.warn("Failed to emit chat:message:", e.message);
     }
+
+    // Push notification to other channel members (non-blocking)
+    try {
+      const { rows: members } = await pool.query(
+        "SELECT user_id FROM channel_members WHERE channel_id = $1 AND user_id != $2",
+        [channel.id, userId]
+      );
+      const senderName = saved.username || "Someone";
+      const preview = fallbackText
+        ? (fallbackText.length > 80 ? fallbackText.slice(0, 77) + "…" : fallbackText)
+        : "Sent a message";
+      const chatUrl = `/chat`;
+      for (const { user_id } of members) {
+        sendPushToUser({
+          userId: user_id,
+          title: `${senderName} in #${channel.name || channel.key || "chat"}`,
+          body: preview,
+          url: chatUrl,
+          type: "chat",
+        }).catch(() => {});
+      }
+    } catch {}
 
     return res.status(201).json(saved);
   } catch (err) {
