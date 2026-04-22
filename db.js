@@ -12,20 +12,25 @@ const { Pool, types } = pkg;
 types.setTypeParser(1082, val => val); // 1082 = PostgreSQL DATE oid
 
 const pool = new Pool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT,
+  ...(process.env.DATABASE_URL
+    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    : {
+        host: process.env.DB_HOST,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        port: process.env.DB_PORT,
+      }),
 
-  // ✅ CONNECTION REUSE SETTINGS
-  max: 10,                             // max open connections
-  idleTimeoutMillis: 20000,            // close idle clients after 20s
-                                       // (shorter than typical NAT/firewall TCP idle timeout)
-  connectionTimeoutMillis: 10000,      // wait up to 10s for a free connection
-  keepAlive: true,                     // enable TCP keepalives
-  keepAliveInitialDelayMillis: 0,      // send first keepalive immediately on idle
-                                       // (prevents NAT devices from killing the socket)
+  // Production-grade pool — sized for high concurrency via a connection pooler
+  // (Supabase PgBouncer sits in front, so the DB sees far fewer actual connections)
+  max: 20,                             // max connections this process holds open
+  min: 2,                              // keep 2 warm so first requests are instant
+  idleTimeoutMillis: 30000,            // release idle connections after 30s
+  connectionTimeoutMillis: 8000,       // fail fast if pool is exhausted (don't queue forever)
+  allowExitOnIdle: false,              // keep pool alive for long-running servers
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 // 🔐 PRODUCTION SAFETY: Prevent hard crashes on idle pool clients

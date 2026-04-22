@@ -1,0 +1,33 @@
+node_modules
+.env
+.env.*
+npm-debug.log*
+
+# Large/unnecessary files
+schema_dump.sql
+backups/
+uploads/
+*.sql.gz
+*.backup
+*.bak
+
+# Test/debug scripts
+test-*.js
+check-*.js
+debug-*.js
+get-test-data.js
+replay-*.js
+
+# Docs
+*.md
+!README.md
+
+# Dev tools
+.git
+.gitignore
+.vscode
+.idea
+
+# Temp
+tmp/
+temp/
