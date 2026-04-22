@@ -112,6 +112,7 @@ import webhooksRoutes    from "./routes/webhooks.routes.js";
 import aiFeaturesRoutes from "./routes/aiFeatures.routes.js";
 import paymentsRoutes, { webhookRouter as paymentsWebhookRouter } from "./routes/payments.routes.js";
 import pushRoutes from "./routes/push.routes.js";
+import appVersionRoutes from "./routes/appVersion.routes.js";
 
 
 
@@ -286,7 +287,8 @@ app.use("/goals",     authMiddleware, requireWorkspaceForUser, requirePlanFeatur
 app.use("/reviews",   authMiddleware, requireWorkspaceForUser, requirePlanFeature("performance_reviews"),  reviewsRoutes);
 app.use("/ai-features", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_hub"),            aiFeaturesRoutes);
 app.use("/payments",  authMiddleware, requireWorkspaceForUser, paymentsRoutes);
-app.use("/push",      pushRoutes); // VAPID public key is public; subscribe/prefs use authMiddleware inside
+app.use("/push",       pushRoutes);
+app.use("/app-version", appVersionRoutes); // VAPID public key is public; subscribe/prefs use authMiddleware inside
 
 app.use("/integration-debug", integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);
