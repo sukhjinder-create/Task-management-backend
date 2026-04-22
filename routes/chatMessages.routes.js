@@ -139,7 +139,7 @@ router.post("/", async (req, res) => {
     // Push notification to other channel members (non-blocking)
     try {
       const { rows: members } = await pool.query(
-        "SELECT user_id FROM channel_members WHERE channel_id = $1 AND user_id != $2",
+        "SELECT user_id FROM chat_channel_members WHERE channel_id = $1 AND user_id != $2",
         [channel.id, userId]
       );
       console.log(`[push:chat] channel=${channel.id} members=${members.length}`);
