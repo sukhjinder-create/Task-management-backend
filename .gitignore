@@ -154,3 +154,6 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+cloud-run-env.yaml
+DEPLOY_INSTRUCTIONS.md
+PUSH_AND_DEPLOY.bat
