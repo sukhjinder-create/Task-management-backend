@@ -1,8 +1,8 @@
 import express from "express";
 import multer from "multer";
+import { fileURLToPath } from "url";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 import pool from "../db.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
@@ -22,14 +22,9 @@ const __dirname = path.dirname(__filename);
 const uploadDir = path.join(__dirname, "..", "uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
+// Use memory storage — file is uploaded to Supabase Storage, URL stored in DB
 const avatarUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      cb(null, "avatar-" + unique + path.extname(file.originalname));
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("image/")) cb(null, true);
@@ -69,7 +64,37 @@ router.post("/me/avatar", avatarUpload.single("avatar"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    const avatarUrl = `/uploads/${req.file.filename}`;
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(500).json({ error: "Storage not configured" });
+    }
+
+    const ext = path.extname(req.file.originalname) || ".jpg";
+    const objectPath = `avatars/${req.user.id}${ext}`;
+
+    // Upload to Supabase Storage (upsert so re-uploads overwrite)
+    const uploadRes = await fetch(
+      `${SUPABASE_URL}/storage/v1/object/${objectPath}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          "Content-Type": req.file.mimetype,
+          "x-upsert": "true",
+        },
+        body: req.file.buffer,
+      }
+    );
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.text();
+      throw new Error(`Supabase Storage upload failed: ${err}`);
+    }
+
+    // Public URL (bucket must be public — set in Supabase dashboard)
+    const avatarUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
     const updated = await updateAvatarUrl(req.user.id, avatarUrl);
 
     res.json({ avatar_url: updated.avatar_url });

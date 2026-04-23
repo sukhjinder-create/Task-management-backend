@@ -254,6 +254,7 @@ export async function updateUserRepo(id, { username, email, role, projects }) {
       role,
       projects,
       workspace_id,
+      avatar_url,
       created_at,
       updated_at;
   `;
