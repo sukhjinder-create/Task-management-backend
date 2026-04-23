@@ -749,6 +749,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
   socket.on("huddle:join", ({ channelId, huddleId }) => {
     const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    // Join channel rooms so this socket receives huddle signaling and
+    // media-state events (mute, screen-share) for the duration of the call.
+    socket.join(legacyRoomName(channelId));
+    socket.join(workspaceRoomName(channelId, workspaceId));
     const out = {
       channelId,
       workspaceId,
