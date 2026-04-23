@@ -11,7 +11,7 @@ import axios from "axios";
 
 const PROVIDER     = process.env.LLM_PROVIDER  || "ollama";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "llama3.2:1b";
-const OLLAMA_URL   = "http://localhost:11434";
+const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
 const OLLAMA_NUM_GPU = parseInt(process.env.OLLAMA_NUM_GPU ?? "0");
 
 /**
@@ -26,12 +26,14 @@ const OLLAMA_NUM_GPU = parseInt(process.env.OLLAMA_NUM_GPU ?? "0");
  */
 export async function generateText({ prompt, maxTokens = 900, json = false, signal } = {}) {
   switch (PROVIDER) {
-    case "ollama":      return _ollama(prompt, maxTokens, signal);
+    case "ollama":
+    case "local":       return _ollama(prompt, maxTokens, signal);
     case "openai":      return _openai(prompt, maxTokens, json);
     case "grok":        return _grok(prompt, maxTokens);
     case "groq":        return _groq(prompt, maxTokens);
     case "huggingface": return _huggingface(prompt, maxTokens);
-    default: throw new Error(`Unsupported LLM_PROVIDER: "${PROVIDER}"`);
+    default:
+      throw new Error(`Unsupported LLM_PROVIDER: "${PROVIDER}". Valid values: ollama, openai, grok, groq, huggingface`);
   }
 }
 
