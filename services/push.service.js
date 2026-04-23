@@ -64,23 +64,28 @@ initFirebase();
 export async function registerPushToken({ userId, platform, endpoint, p256dh, auth, fcmToken, workspaceId }) {
   if (platform === "web") {
     await pool.query(
+      "DELETE FROM user_push_tokens WHERE user_id = $1 AND endpoint = $2",
+      [userId, endpoint]
+    );
+    await pool.query(
       `INSERT INTO user_push_tokens (user_id, workspace_id, platform, endpoint, keys_p256dh, keys_auth, updated_at)
        VALUES ($1, $2, 'web', $3, $4, $5, now())
-       ON CONFLICT (endpoint) DO UPDATE
-         SET user_id = $1, workspace_id = $2, keys_p256dh = $4, keys_auth = $5, updated_at = now()`,
+       ON CONFLICT DO NOTHING`,
       [userId, workspaceId || null, endpoint, p256dh, auth]
     );
     console.log(`[push] web token registered for user ${userId}`);
   } else {
-    // Upsert by fcm_token — one row per device token, always up to date
+    // Delete any existing row for this user+token, then re-insert fresh
+    await pool.query(
+      "DELETE FROM user_push_tokens WHERE fcm_token = $1",
+      [fcmToken]
+    );
     await pool.query(
       `INSERT INTO user_push_tokens (user_id, workspace_id, platform, fcm_token, updated_at)
-       VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT (fcm_token) DO UPDATE
-         SET user_id = $1, workspace_id = $2, platform = $3, updated_at = now()`,
+       VALUES ($1, $2, $3, $4, now())`,
       [userId, workspaceId || null, platform, fcmToken]
     );
-    console.log(`[push] FCM token registered for user ${userId} platform=${platform} token=${fcmToken?.slice(0, 20)}...`);
+    console.log(`[push] FCM token registered user=${userId} platform=${platform} token=${fcmToken?.slice(0, 20)}...`);
   }
 }
 
