@@ -63,28 +63,24 @@ initFirebase();
 
 export async function registerPushToken({ userId, platform, endpoint, p256dh, auth, fcmToken, workspaceId }) {
   if (platform === "web") {
-    // Delete stale entry with same endpoint if it exists (different keys)
-    await pool.query(
-      "DELETE FROM user_push_tokens WHERE user_id = $1 AND endpoint = $2",
-      [userId, endpoint]
-    );
     await pool.query(
       `INSERT INTO user_push_tokens (user_id, workspace_id, platform, endpoint, keys_p256dh, keys_auth, updated_at)
        VALUES ($1, $2, 'web', $3, $4, $5, now())
-       ON CONFLICT DO NOTHING`,
+       ON CONFLICT (endpoint) DO UPDATE
+         SET user_id = $1, workspace_id = $2, keys_p256dh = $4, keys_auth = $5, updated_at = now()`,
       [userId, workspaceId || null, endpoint, p256dh, auth]
     );
+    console.log(`[push] web token registered for user ${userId}`);
   } else {
-    await pool.query(
-      "DELETE FROM user_push_tokens WHERE user_id = $1 AND fcm_token = $2",
-      [userId, fcmToken]
-    );
+    // Upsert by fcm_token — one row per device token, always up to date
     await pool.query(
       `INSERT INTO user_push_tokens (user_id, workspace_id, platform, fcm_token, updated_at)
        VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT DO NOTHING`,
+       ON CONFLICT (fcm_token) DO UPDATE
+         SET user_id = $1, workspace_id = $2, platform = $3, updated_at = now()`,
       [userId, workspaceId || null, platform, fcmToken]
     );
+    console.log(`[push] FCM token registered for user ${userId} platform=${platform} token=${fcmToken?.slice(0, 20)}...`);
   }
 }
 
@@ -141,7 +137,10 @@ async function sendWebPushToSubscription(subscription, payload) {
 }
 
 async function sendFCMNotification(fcmToken, payload) {
-  if (!fcmReady || !firebaseAdmin) return;
+  if (!fcmReady || !firebaseAdmin) {
+    console.warn("[push] FCM not ready — skipping. fcmReady:", fcmReady);
+    return;
+  }
   try {
     const extraStringified = {};
     if (payload.extraData) {
@@ -170,10 +169,13 @@ async function sendFCMNotification(fcmToken, payload) {
     });
   } catch (err) {
     if (err.code === "messaging/registration-token-not-registered") {
+      console.warn("[push] FCM token expired, removing:", fcmToken?.slice(0, 20));
       await pool.query(
         "DELETE FROM user_push_tokens WHERE fcm_token = $1",
         [fcmToken]
       );
+    } else {
+      console.error("[push] FCM send error:", err.code || err.message, "token:", fcmToken?.slice(0, 20));
     }
   }
 }
