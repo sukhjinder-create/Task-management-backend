@@ -783,6 +783,20 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       .emit("huddle:user-left", out);
   });
 
+  // When a recipient declines a huddle invite, notify the initiator so they
+  // can show a "declined" toast and auto-end if they are the only participant.
+  socket.on("huddle:decline", ({ channelId, huddleId, initiatorUserId }) => {
+    if (!initiatorUserId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    io.to(String(initiatorUserId)).emit("huddle:declined", {
+      channelId,
+      workspaceId,
+      huddleId,
+      declinedBy: { userId, username },
+      at: new Date().toISOString(),
+    });
+  });
+
   /* -----------------------------------------------------
      HUDDLE SIGNALING
   ----------------------------------------------------- */
