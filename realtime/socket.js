@@ -783,18 +783,27 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       .emit("huddle:user-left", out);
   });
 
-  // When a recipient declines a huddle invite, notify the initiator so they
-  // can show a "declined" toast and auto-end if they are the only participant.
-  socket.on("huddle:decline", ({ channelId, huddleId, initiatorUserId }) => {
+  // When a recipient declines a huddle invite: notify the initiator and end
+  // the huddle so the caller's GlobalHuddleWindow closes via huddle:ended.
+  socket.on("huddle:decline", async ({ channelId, huddleId, initiatorUserId }) => {
     if (!initiatorUserId) return;
     const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const at = new Date().toISOString();
+
+    // Tell the initiator who declined (for the toast)
     io.to(String(initiatorUserId)).emit("huddle:declined", {
       channelId,
       workspaceId,
       huddleId,
       declinedBy: { userId, username },
-      at: new Date().toISOString(),
+      at,
     });
+
+    // End the huddle in DB so the caller's onEnded handler closes the window
+    try { await endHuddle({ channelKey: channelId, huddleId }); } catch (_) {}
+    const ended = { channelId, workspaceId, huddleId, endedBy: { userId, username }, at };
+    io.to(legacyRoomName(channelId)).emit("huddle:ended", ended);
+    io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:ended", ended);
   });
 
   /* -----------------------------------------------------
