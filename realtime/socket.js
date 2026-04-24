@@ -36,6 +36,10 @@ let io;
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const WORKSPACE_GLOBAL = "GLOBAL";
 
+// Track live participants per huddle so we can auto-end when everyone leaves.
+// Map<huddleId, { channelId, workspaceId, participants: Set<userId> }>
+const huddleRooms = new Map();
+
 /**
  * For DM channels we use key pattern:
  *   dm:<uidSmall>:<uidBig>
@@ -690,8 +694,18 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   socket.on("huddle:start", async ({ channelId, huddleId }) => {
     if (!channelId || !huddleId) return;
 
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+
+    // Clear any stale/zombie huddle so a new one can always start.
+    // A huddle becomes stale when everyone left without pressing "End for all".
     const existing = await getActiveHuddle(channelId);
-    if (existing) return;
+    if (existing) {
+      try { await endHuddle({ channelKey: channelId, huddleId: existing.huddle_id }); } catch (_) {}
+      huddleRooms.delete(existing.huddle_id);
+      const staleEnded = { channelId, workspaceId, huddleId: existing.huddle_id, endedBy: { userId, username }, at: new Date().toISOString() };
+      io.to(legacyRoomName(channelId)).emit("huddle:ended", staleEnded);
+      io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:ended", staleEnded);
+    }
 
     await createHuddle({
       channelKey: channelId,
@@ -699,7 +713,6 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       startedBy: userId,
     });
 
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
     const out = {
       channelId,
       workspaceId,
@@ -738,6 +751,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
   socket.on("huddle:end", async ({ channelId, huddleId }) => {
     if (!channelId || !huddleId) return;
+    huddleRooms.delete(huddleId);
     await endHuddle({ channelKey: channelId, huddleId });
 
     const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
@@ -762,6 +776,13 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     // media-state events (mute, screen-share) for the duration of the call.
     socket.join(legacyRoomName(channelId));
     socket.join(workspaceRoomName(channelId, workspaceId));
+
+    // Track participant for auto-end-on-empty logic
+    if (!huddleRooms.has(huddleId)) {
+      huddleRooms.set(huddleId, { channelId, workspaceId, participants: new Set() });
+    }
+    huddleRooms.get(huddleId).participants.add(String(userId));
+
     const out = {
       channelId,
       workspaceId,
@@ -778,22 +799,27 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       .emit("huddle:user-joined", out);
   });
 
+  async function handleHuddleLeave(channelId, huddleId, workspaceId) {
+    const room = huddleRooms.get(huddleId);
+    if (room) {
+      room.participants.delete(String(userId));
+      if (room.participants.size === 0) {
+        huddleRooms.delete(huddleId);
+        try { await endHuddle({ channelKey: channelId, huddleId }); } catch (_) {}
+        const ended = { channelId, workspaceId, huddleId, endedBy: { userId, username }, at: new Date().toISOString() };
+        io.to(legacyRoomName(channelId)).emit("huddle:ended", ended);
+        io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:ended", ended);
+        return; // already emitted huddle:ended, skip huddle:user-left
+      }
+    }
+    const out = { channelId, workspaceId, huddleId, userId, username, at: new Date().toISOString() };
+    socket.to(legacyRoomName(channelId)).emit("huddle:user-left", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:user-left", out);
+  }
+
   socket.on("huddle:leave", ({ channelId, huddleId }) => {
     const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = {
-      channelId,
-      workspaceId,
-      huddleId,
-      userId,
-      username,
-      at: new Date().toISOString(),
-    };
-    socket
-      .to(legacyRoomName(channelId))
-      .emit("huddle:user-left", out);
-    socket
-      .to(workspaceRoomName(channelId, workspaceId))
-      .emit("huddle:user-left", out);
+    handleHuddleLeave(channelId, huddleId, workspaceId).catch((e) => console.error("[huddle:leave]", e.message));
   });
 
   // When a recipient declines a huddle invite: notify the initiator and end
@@ -924,7 +950,6 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   ----------------------------------------------------- */
   socket.on("disconnect", () => {
     socket._isCleanedUp = true;
-
     console.log("Socket disconnected:", userId);
 
     io.emit("presence:update", {
@@ -934,6 +959,21 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       at: new Date().toISOString(),
       workspaceId: socket.workspaceId,
     });
+
+    // Clean up any huddles this user was in
+    for (const [huddleId, room] of huddleRooms.entries()) {
+      if (room.participants.has(String(userId))) {
+        room.participants.delete(String(userId));
+        if (room.participants.size === 0) {
+          huddleRooms.delete(huddleId);
+          const ws = room.workspaceId || WORKSPACE_GLOBAL;
+          endHuddle({ channelKey: room.channelId, huddleId }).catch(() => {});
+          const ended = { channelId: room.channelId, workspaceId: ws, huddleId, endedBy: { userId, username }, at: new Date().toISOString() };
+          io.to(legacyRoomName(room.channelId)).emit("huddle:ended", ended);
+          io.to(workspaceRoomName(room.channelId, ws)).emit("huddle:ended", ended);
+        }
+      }
+    }
   });
 });
 
