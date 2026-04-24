@@ -361,13 +361,22 @@ socket.emit("chat:history", {
         const resolvedWorkspaceId = socket.workspaceId;
         const active = await getActiveHuddle(channelKey);
         if (active && !socket.disconnected && !socket._isCleanedUp) {
+          // Resolve the actual username of the huddle starter from the DB
+          let starterUsername = "User";
+          try {
+            const { rows: urows } = await pool.query(
+              "SELECT username FROM users WHERE id = $1 LIMIT 1",
+              [active.started_by]
+            );
+            if (urows[0]?.username) starterUsername = urows[0].username;
+          } catch (_) {}
           socket.emit("huddle:started", {
             channelId: channelKey,
             workspaceId: channel.workspaceId || resolvedWorkspaceId,
             huddleId: active.huddle_id,
             startedBy: {
               userId: active.started_by,
-              username: active.started_by ? "User" : "Unknown",
+              username: starterUsername,
             },
             at: active.started_at,
             persisted: true,
@@ -846,6 +855,30 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     const out = { channelId, userId, username };
     socket.to(legacyRoomName(channelId)).emit("huddle:unmute", out);
     socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:unmute", out);
+  });
+
+  socket.on("huddle:camera-off", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, userId, username };
+    socket.to(legacyRoomName(channelId)).emit("huddle:camera-off", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:camera-off", out);
+  });
+
+  socket.on("huddle:camera-on", ({ channelId }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, userId, username };
+    socket.to(legacyRoomName(channelId)).emit("huddle:camera-on", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:camera-on", out);
+  });
+
+  socket.on("huddle:subtitle", ({ channelId, text, isFinal }) => {
+    if (!channelId) return;
+    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const out = { channelId, fromUserId: userId, username, text, isFinal };
+    socket.to(legacyRoomName(channelId)).emit("huddle:subtitle", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:subtitle", out);
   });
 
   socket.on("huddle:screen-start", ({ channelId }) => {
