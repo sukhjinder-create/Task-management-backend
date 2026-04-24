@@ -722,6 +722,15 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       persisted: true,
     };
 
+    // Track in huddleRooms with startedBy so huddle:sync can replay it
+    huddleRooms.set(huddleId, {
+      channelId,
+      workspaceId,
+      participants: new Set([String(userId)]),
+      startedBy: { userId, username },
+      startedAt: out.at,
+    });
+
     // Broadcast to channel rooms AND entire workspace so all members get the invite
     io.to(legacyRoomName(channelId)).emit("huddle:started", out);
     io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:started", out);
@@ -820,6 +829,57 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   socket.on("huddle:leave", ({ channelId, huddleId }) => {
     const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
     handleHuddleLeave(channelId, huddleId, workspaceId).catch((e) => console.error("[huddle:leave]", e.message));
+  });
+
+  // Frontend emits this on socket connect/reconnect to re-receive any active invitation
+  // they may have missed while disconnected.
+  socket.on("huddle:sync", async () => {
+    const ws = socket.workspaceId || WORKSPACE_GLOBAL;
+    try {
+      // 1️⃣ Check in-memory map first (most accurate while server is running)
+      for (const [huddleId, room] of huddleRooms.entries()) {
+        if (room.workspaceId !== ws) continue;
+        if (room.participants.has(String(userId))) continue; // already in this call
+        socket.emit("huddle:started", {
+          channelId: room.channelId,
+          workspaceId: ws,
+          huddleId,
+          startedBy: room.startedBy || { userId: "unknown", username: "Someone" },
+          at: room.startedAt || new Date().toISOString(),
+          persisted: true,
+        });
+        return; // only send one invitation at a time
+      }
+
+      // 2️⃣ Fallback: query DB for any recently-started active huddle in workspace channels
+      // (handles the case where the server restarted and huddleRooms is empty)
+      const { rows } = await pool.query(
+        `SELECT h.huddle_id, h.channel_key, h.started_by, h.started_at, u.username AS starter_username
+         FROM chat_huddles h
+         JOIN users u ON u.id = h.started_by
+         JOIN chat_channels c ON c.key = h.channel_key
+         WHERE c.workspace_id = $1
+           AND h.ended_at IS NULL
+           AND h.started_by != $2
+           AND h.started_at > NOW() - INTERVAL '5 minutes'
+         ORDER BY h.started_at DESC
+         LIMIT 1`,
+        [ws, userId]
+      );
+      if (rows.length > 0) {
+        const h = rows[0];
+        socket.emit("huddle:started", {
+          channelId: h.channel_key,
+          workspaceId: ws,
+          huddleId: h.huddle_id,
+          startedBy: { userId: h.started_by, username: h.starter_username },
+          at: h.started_at,
+          persisted: true,
+        });
+      }
+    } catch (e) {
+      console.error("[huddle:sync]", e.message);
+    }
   });
 
   // When a recipient declines a huddle invite: notify the initiator and end
