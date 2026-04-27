@@ -239,6 +239,37 @@ app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("a
 // 🧪 Testing Agent — plan-gated
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
 
+// Public — must be before the catch-all "/" auth middleware below
+app.get("/ice-servers", (req, res) => {
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun.relay.metered.ca:80" },
+    {
+      urls: [
+        "turn:openrelay.metered.ca:80",
+        "turn:openrelay.metered.ca:443",
+        "turn:openrelay.metered.ca:443?transport=tcp",
+        "turn:openrelay.metered.ca:80?transport=tcp",
+      ],
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+  ];
+  const turnUser = process.env.TURN_USERNAME;
+  const turnCred = process.env.TURN_CREDENTIAL;
+  const turnUrl  = process.env.TURN_URL || "global.relay.metered.ca";
+  if (turnUser && turnCred) {
+    iceServers.push(
+      { urls: `turn:${turnUrl}:80`,                  username: turnUser, credential: turnCred },
+      { urls: `turn:${turnUrl}:80?transport=tcp`,     username: turnUser, credential: turnCred },
+      { urls: `turn:${turnUrl}:443`,                  username: turnUser, credential: turnCred },
+      { urls: `turns:${turnUrl}:443?transport=tcp`,   username: turnUser, credential: turnCred },
+    );
+  }
+  res.json({ iceServers });
+});
+
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
 app.use("/", authMiddleware, requireWorkspaceForUser, sprintRoutes);
@@ -290,41 +321,6 @@ app.use("/payments",  authMiddleware, requireWorkspaceForUser, paymentsRoutes);
 app.use("/push",       pushRoutes);
 app.use("/app-version", appVersionRoutes); // VAPID public key is public; subscribe/prefs use authMiddleware inside
 
-// ICE server configuration — returned to frontend for WebRTC TURN relay
-// No auth required: these are public-facing STUN/TURN endpoints
-app.get("/ice-servers", (req, res) => {
-  const iceServers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun.relay.metered.ca:80" },
-    // Free public TURN relay — works without auth, for fallback NAT traversal
-    {
-      urls: [
-        "turn:openrelay.metered.ca:80",
-        "turn:openrelay.metered.ca:443",
-        "turn:openrelay.metered.ca:443?transport=tcp",
-        "turn:openrelay.metered.ca:80?transport=tcp",
-      ],
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-  ];
-
-  // Override/supplement with configured TURN credentials (set in Cloud Run env)
-  const turnUser = process.env.TURN_USERNAME;
-  const turnCred = process.env.TURN_CREDENTIAL;
-  const turnUrl  = process.env.TURN_URL || "global.relay.metered.ca";
-  if (turnUser && turnCred) {
-    iceServers.push(
-      { urls: `turn:${turnUrl}:80`,                      username: turnUser, credential: turnCred },
-      { urls: `turn:${turnUrl}:80?transport=tcp`,         username: turnUser, credential: turnCred },
-      { urls: `turn:${turnUrl}:443`,                      username: turnUser, credential: turnCred },
-      { urls: `turns:${turnUrl}:443?transport=tcp`,       username: turnUser, credential: turnCred },
-    );
-  }
-
-  res.json({ iceServers });
-});
 
 app.use("/integration-debug", integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);
