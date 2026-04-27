@@ -727,6 +727,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       channelId,
       workspaceId,
       participants: new Set([String(userId)]),
+      participantNames: new Map([[String(userId), username]]),
       startedBy: { userId, username },
       startedAt: out.at,
     });
@@ -788,9 +789,20 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
     // Track participant for auto-end-on-empty logic
     if (!huddleRooms.has(huddleId)) {
-      huddleRooms.set(huddleId, { channelId, workspaceId, participants: new Set() });
+      huddleRooms.set(huddleId, { channelId, workspaceId, participants: new Set(), participantNames: new Map() });
     }
-    huddleRooms.get(huddleId).participants.add(String(userId));
+    const room = huddleRooms.get(huddleId);
+    if (!room.participantNames) room.participantNames = new Map();
+
+    // Collect existing participants BEFORE adding the new joiner
+    // so we can send them to the joiner (fixes race condition where
+    // huddle:user-joined is missed if the caller hasn't joined the room yet)
+    const existingParticipants = Array.from(room.participants)
+      .filter(uid => uid !== String(userId))
+      .map(uid => ({ userId: uid, username: room.participantNames.get(uid) || "" }));
+
+    room.participants.add(String(userId));
+    room.participantNames.set(String(userId), username);
 
     const out = {
       channelId,
@@ -800,12 +812,20 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       username,
       at: new Date().toISOString(),
     };
-    socket
-      .to(legacyRoomName(channelId))
-      .emit("huddle:user-joined", out);
-    socket
-      .to(workspaceRoomName(channelId, workspaceId))
-      .emit("huddle:user-joined", out);
+
+    // Tell existing participants that someone new joined (they create offers)
+    socket.to(legacyRoomName(channelId)).emit("huddle:user-joined", out);
+    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:user-joined", out);
+
+    // Tell the joiner who's already in the call — the joiner creates offers to them.
+    // This eliminates the race where huddle:user-joined is missed by the caller.
+    if (existingParticipants.length > 0) {
+      socket.emit("huddle:participants", {
+        channelId,
+        huddleId,
+        participants: existingParticipants,
+      });
+    }
   });
 
   async function handleHuddleLeave(channelId, huddleId, workspaceId) {
