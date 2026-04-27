@@ -224,22 +224,7 @@ app.use("/superadmin/plans", superadminPlansRoutes);
 app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin", superadminRoutes);
 
-app.use(authMiddleware, requireWorkspaceForUser, reportsRouter);
-// 🧠 Intelligence APIs (READ-ONLY, UI-facing)
-app.use(
-  "/intelligence",
-  authMiddleware,
-  requireWorkspaceForUser,
-  intelligenceRoutes
-);
-// 🤖 Autopilot AI — plan-gated
-app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
-app.use("/dashboard",     dashboardRoutes);
-app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
-// 🧪 Testing Agent — plan-gated
-app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
-
-// Public — must be before the catch-all "/" auth middleware below
+// Public endpoint — no auth required (must be before any catch-all authMiddleware)
 app.get("/ice-servers", (req, res) => {
   const iceServers = [
     { urls: "stun:stun.l.google.com:19302" },
@@ -269,6 +254,23 @@ app.get("/ice-servers", (req, res) => {
   }
   res.json({ iceServers });
 });
+
+app.use(authMiddleware, requireWorkspaceForUser, reportsRouter);
+// 🧠 Intelligence APIs (READ-ONLY, UI-facing)
+app.use(
+  "/intelligence",
+  authMiddleware,
+  requireWorkspaceForUser,
+  intelligenceRoutes
+);
+// 🤖 Autopilot AI — plan-gated
+app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
+app.use("/dashboard",     dashboardRoutes);
+app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
+// 🧪 Testing Agent — plan-gated
+app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
+
+
 
 app.use("/projects", authMiddleware, requireWorkspaceForUser, projectRoutes);
 app.use("/tasks", authMiddleware, requireWorkspaceForUser, taskRoutes);
