@@ -503,10 +503,51 @@ Instructions:
       throw new Error("Context too large. Please narrow your query scope.");
     }
 
-    const answer = await generateText({ prompt });
-    return String(answer || "").trim();
+    try {
+      const answer = await generateText({ prompt });
+      if (answer) return String(answer).trim();
+    } catch (llmErr) {
+      console.warn("AI Intelligence LLM unavailable, using deterministic fallback:", llmErr.message);
+    }
+
+    // LLM unavailable — build a deterministic answer from context data
+    return buildFallbackAnswer({ context, scope });
   } catch (error) {
     console.error("AI Intelligence Query Failed:", error.message);
     throw error;
   }
+}
+
+function buildFallbackAnswer({ context, scope }) {
+  const lines = [];
+  const ws = context.workspaceSummary || {};
+  const proj = context.projectSummary || {};
+  const task = context.taskFacts || {};
+
+  if (scope === "task") {
+    lines.push(`Task: "${context.task?.task || "Untitled"}"`);
+    lines.push(`Status: ${task.status || "unknown"} | Priority: ${task.priority || "unset"} | Assignee: ${task.assignee || "unassigned"}`);
+    if (task.isOverdue) lines.push(`Overdue by ${task.overdueDays || "?"} day(s).`);
+    if (task.dueDate) lines.push(`Due: ${task.dueDate}`);
+    if (context.task?.description) lines.push(`Description: ${String(context.task.description).slice(0, 200)}`);
+  } else if (scope === "project") {
+    const p = context.project || {};
+    lines.push(`Project: ${p.name || "Unknown"}`);
+    lines.push(`Tasks: ${proj.total || 0} total — ${proj.completed || 0} done, ${proj.inProgress || 0} in progress, ${proj.pending || 0} pending, ${proj.overdueOpen || 0} overdue.`);
+    if ((context.topOverdueTasks || []).length) {
+      lines.push(`Top overdue: "${context.topOverdueTasks[0].task}" (${context.topOverdueTasks[0].overdueDays}d overdue${context.topOverdueTasks[0].assignee ? `, ${context.topOverdueTasks[0].assignee}` : ""}).`);
+    }
+  } else {
+    lines.push(`Workspace tasks: ${ws.total || 0} total — ${ws.completed || 0} done, ${ws.inProgress || 0} in progress, ${ws.pending || 0} pending, ${ws.overdueOpen || 0} overdue.`);
+    if ((context.projectHealth || []).length) {
+      const sorted = [...context.projectHealth].sort((a, b) => b.overdueTasks - a.overdueTasks);
+      lines.push(`Highest risk project: ${sorted[0].projectName} (${sorted[0].overdueTasks} overdue, ${sorted[0].completionRate}% complete).`);
+    }
+    if ((context.topOverdueTasks || []).length) {
+      lines.push(`Most overdue task: "${context.topOverdueTasks[0].task}" (${context.topOverdueTasks[0].overdueDays}d${context.topOverdueTasks[0].assignee ? `, ${context.topOverdueTasks[0].assignee}` : ""}).`);
+    }
+  }
+
+  if (!lines.length) return "No data available for the requested scope.";
+  return lines.join("\n");
 }

@@ -367,7 +367,14 @@ Write a professional 3-4 paragraph report covering:
 
 Be specific and data-driven.`;
 
-  const report = await llm(prompt, 600) || "Report generation temporarily unavailable.";
+  let report;
+  try {
+    report = await llm(prompt, 600);
+  } catch {}
+
+  if (!report) {
+    report = buildDeterministicReport({ type, scope, statusMap, overdue, topMembers });
+  }
 
   return {
     type,
@@ -378,6 +385,36 @@ Be specific and data-driven.`;
     report,
     generatedAt: new Date().toISOString(),
   };
+}
+
+function buildDeterministicReport({ type, scope, statusMap, overdue, topMembers }) {
+  const done = parseInt(statusMap.done || 0);
+  const inProgress = parseInt(statusMap.in_progress || 0);
+  const todo = parseInt(statusMap.todo || 0);
+  const total = done + inProgress + todo;
+  const completionRate = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  const topLine = topMembers.length > 0
+    ? topMembers.map(m => `${m.username} (${m.completed}/${m.total} completed)`).join(", ")
+    : "No assignee data available";
+
+  const riskLine = overdue > 0
+    ? `${overdue} task${overdue > 1 ? "s are" : " is"} overdue and require immediate attention.`
+    : "No overdue tasks — the team is on track.";
+
+  const recommendation = overdue > 0
+    ? `Prioritize resolving the ${overdue} overdue item${overdue > 1 ? "s" : ""} before starting new work.`
+    : `Continue current momentum and review in-progress tasks for blockers.`;
+
+  return `${type.charAt(0).toUpperCase() + type.slice(1)} Report — ${scope}
+
+Executive Summary: ${total} total task${total !== 1 ? "s" : ""} tracked this period. ${done} completed (${completionRate}% completion rate), ${inProgress} in progress, ${todo} pending.
+
+Progress Highlights: The team completed ${done} task${done !== 1 ? "s" : ""} this period. ${inProgress > 0 ? `${inProgress} task${inProgress !== 1 ? "s are" : " is"} currently in progress.` : "All active tasks have been resolved."} Top contributors: ${topLine}.
+
+Risks & Concerns: ${riskLine}${todo > 0 ? ` ${todo} task${todo !== 1 ? "s" : ""} remain in the backlog.` : ""}
+
+Recommended Next Steps: ${recommendation} Ensure all team members have a balanced workload and that sprint goals remain achievable.`;
 }
 
 // ─── 5. AI Task Summarizer ────────────────────────────────────────────────────
