@@ -1196,6 +1196,17 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
   };
 
 io.to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)).emit("chat:message", payload);
+
+  // For DM channels: also emit to each participant's personal room so they
+  // receive the notification even when they're not on the chat page (and
+  // therefore haven't joined the channel room via chat:join/chat:open).
+  if (resolvedChannelKey.startsWith("dm:")) {
+    const parts = resolvedChannelKey.split(":");
+    for (let i = 1; i < parts.length; i++) {
+      const uid = parts[i];
+      if (uid) io.to(uid).emit("chat:message", payload);
+    }
+  }
 }
 
 /**
