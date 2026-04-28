@@ -121,7 +121,7 @@ async function _groq(prompt, maxTokens) {
   const res = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
-      model: process.env.GROQ_MODEL || "llama-3.1-70b-versatile",
+      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.4,
       max_tokens: maxTokens,
