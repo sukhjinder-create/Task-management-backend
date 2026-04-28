@@ -24,13 +24,13 @@ const OLLAMA_NUM_GPU = parseInt(process.env.OLLAMA_NUM_GPU ?? "0");
  * @param {AbortSignal} [opts.signal]       — optional abort signal (Ollama only)
  * @returns {Promise<string>}
  */
-export async function generateText({ prompt, maxTokens = 900, json = false, signal } = {}) {
+export async function generateText({ prompt, messages, maxTokens = 900, json = false, signal } = {}) {
   switch (PROVIDER) {
     case "ollama":
     case "local":       return _ollama(prompt, maxTokens, signal);
     case "openai":      return _openai(prompt, maxTokens, json);
     case "grok":        return _grok(prompt, maxTokens);
-    case "groq":        return _groq(prompt, maxTokens);
+    case "groq":        return _groq(prompt, maxTokens, messages);
     case "huggingface": return _huggingface(prompt, maxTokens);
     default:
       throw new Error(`Unsupported LLM_PROVIDER: "${PROVIDER}". Valid values: ollama, openai, grok, groq, huggingface`);
@@ -117,12 +117,13 @@ async function _grok(prompt, maxTokens) {
 
 // ─── Groq ─────────────────────────────────────────────────────────────────────
 
-async function _groq(prompt, maxTokens) {
+async function _groq(prompt, maxTokens, messages) {
+  const msgs = messages || [{ role: "user", content: prompt }];
   const res = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
       model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }],
+      messages: msgs,
       temperature: 0.4,
       max_tokens: maxTokens,
     },

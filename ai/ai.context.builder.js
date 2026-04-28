@@ -340,8 +340,7 @@ export async function buildAIContext({
     scope,
     entityId
   };
-  const includeDetailedUsers =
-    /who|names?|list|which users?|which people|tell me.*names?/i.test(question || "");
+  const includeDetailedUsers = true; // always needed for person-specific queries
 
   // ==========================
   // TASK CONTEXT
@@ -537,7 +536,7 @@ export async function buildAIContext({
     context.scoreHistory = scoreHistory;
     context.execution = executionSnapshot;
     context.forecast = forecast;
-    const [workspaceTasksRes, projectHealthRes] = await Promise.all([
+    const [workspaceTasksRes, projectHealthRes, membersRes, recentActivityRes] = await Promise.all([
       pool.query(
         `
         SELECT
@@ -577,6 +576,33 @@ export async function buildAIContext({
         `,
         [workspaceId]
       ),
+      pool.query(
+        `SELECT u.id, u.username, u.email, u.role,
+           COUNT(t.id)::int AS total_tasks,
+           COUNT(t.id) FILTER (WHERE t.status = 'completed')::int AS completed_tasks,
+           COUNT(t.id) FILTER (WHERE t.status = 'in-progress')::int AS in_progress_tasks,
+           COUNT(t.id) FILTER (WHERE t.status = 'pending')::int AS pending_tasks,
+           COUNT(t.id) FILTER (
+             WHERE t.status NOT IN ('completed','cancelled')
+               AND t.due_date IS NOT NULL AND t.due_date < NOW()
+           )::int AS overdue_tasks
+         FROM users u
+         LEFT JOIN tasks t ON t.assigned_to = u.id AND t.workspace_id = $1
+         WHERE u.workspace_id = $1
+         GROUP BY u.id, u.username, u.email, u.role
+         ORDER BY u.username ASC`,
+        [workspaceId]
+      ),
+      pool.query(
+        `SELECT t.task, t.status, t.priority, t.updated_at,
+           u.username AS assignee, p.name AS project
+         FROM tasks t
+         LEFT JOIN users u ON u.id = t.assigned_to
+         LEFT JOIN projects p ON p.id = t.project_id
+         WHERE t.workspace_id = $1
+         ORDER BY t.updated_at DESC LIMIT 25`,
+        [workspaceId]
+      ),
     ]);
     const workspaceTasks = workspaceTasksRes.rows || [];
     context.workspaceSummary = summarizeTaskRows(workspaceTasks);
@@ -606,12 +632,31 @@ export async function buildAIContext({
           ? Number((((Number(p.completed_tasks || 0) / Number(p.total_tasks || 0)) * 100)).toFixed(1))
           : 0,
     }));
+    context.members = (membersRes.rows || []).map((m) => ({
+      username: m.username,
+      role: m.role,
+      tasks: {
+        total: m.total_tasks,
+        completed: m.completed_tasks,
+        inProgress: m.in_progress_tasks,
+        pending: m.pending_tasks,
+        overdue: m.overdue_tasks,
+      },
+    }));
+    context.recentActivity = (recentActivityRes.rows || []).map((r) => ({
+      task: r.task,
+      status: r.status,
+      priority: r.priority,
+      assignee: r.assignee,
+      project: r.project,
+      updatedAt: toIso(r.updated_at),
+    }));
     context.attendance = {
       live: await getLiveAttendanceSnapshot({
         workspaceId,
         userIds: null,
         nameLimit: 60,
-        includeDetailedUsers,
+        includeDetailedUsers: true,
       }),
       todaySignIns: await getTodaySignInsSnapshot({
         workspaceId,
