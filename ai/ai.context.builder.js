@@ -124,7 +124,7 @@ async function getLiveAttendanceSnapshot({
         COALESCE(ev.event_type, 'SIGN_IN') AS latest_event_type,
         COALESCE(ev.started_at, s.sign_in_at) AS latest_event_started_at
       FROM attendance_sessions s
-      INNER JOIN users u ON u.id = s.user_id
+      INNER JOIN users u ON u.id = s.user_id AND LOWER(u.username) != 'autopilot'
       LEFT JOIN LATERAL (
         SELECT e.event_type, e.started_at
         FROM attendance_events e
@@ -547,7 +547,7 @@ export async function buildAIContext({
           t.due_date,
           t.project_id,
           p.name AS project_name,
-          u.username AS assignee_username
+          CASE WHEN LOWER(u.username) = 'autopilot' THEN NULL ELSE u.username END AS assignee_username
         FROM tasks t
         LEFT JOIN projects p ON p.id = t.project_id
         LEFT JOIN users u ON u.id = t.assigned_to
@@ -577,7 +577,7 @@ export async function buildAIContext({
         [workspaceId]
       ),
       pool.query(
-        `SELECT u.id, u.username, u.email, u.role,
+        `SELECT u.id, u.username, u.email, u.role, u.created_at AS joined_at,
            COUNT(t.id)::int AS total_tasks,
            COUNT(t.id) FILTER (WHERE t.status = 'completed')::int AS completed_tasks,
            COUNT(t.id) FILTER (WHERE t.status = 'in-progress')::int AS in_progress_tasks,
@@ -589,13 +589,15 @@ export async function buildAIContext({
          FROM users u
          LEFT JOIN tasks t ON t.assigned_to = u.id AND t.workspace_id = $1
          WHERE u.workspace_id = $1
-         GROUP BY u.id, u.username, u.email, u.role
-         ORDER BY u.username ASC`,
+           AND LOWER(u.username) != 'autopilot'
+         GROUP BY u.id, u.username, u.email, u.role, u.created_at
+         ORDER BY u.created_at ASC`,
         [workspaceId]
       ),
       pool.query(
         `SELECT t.task, t.status, t.priority, t.updated_at,
-           u.username AS assignee, p.name AS project
+           CASE WHEN LOWER(u.username) = 'autopilot' THEN NULL ELSE u.username END AS assignee,
+           p.name AS project
          FROM tasks t
          LEFT JOIN users u ON u.id = t.assigned_to
          LEFT JOIN projects p ON p.id = t.project_id
@@ -635,6 +637,7 @@ export async function buildAIContext({
     context.members = (membersRes.rows || []).map((m) => ({
       username: m.username,
       role: m.role,
+      joinedAt: toIso(m.joined_at),
       tasks: {
         total: m.total_tasks,
         completed: m.completed_tasks,
