@@ -345,7 +345,13 @@ export async function generateNlReport({ workspaceId, type = "weekly", projectId
 
   const [taskStats, memberStats, overdueRow] = await Promise.all([taskStatsQuery, memberStatsQuery, overdueQuery]);
 
-  const statusMap = Object.fromEntries(taskStats.rows.map(r => [r.status, parseInt(r.count)]));
+  // Normalize DB status keys (pending/in-progress/completed) → (todo/in_progress/done)
+  const rawStatus = Object.fromEntries(taskStats.rows.map(r => [r.status, parseInt(r.count)]));
+  const statusMap = {
+    done:        rawStatus.done        ?? rawStatus.completed   ?? 0,
+    in_progress: rawStatus.in_progress ?? rawStatus["in-progress"] ?? 0,
+    todo:        rawStatus.todo        ?? rawStatus.pending     ?? 0,
+  };
   const overdue = parseInt(overdueRow.rows[0]?.count || 0);
   const topMembers = memberStats.rows;
 
