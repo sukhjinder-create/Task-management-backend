@@ -432,6 +432,61 @@ function shouldUseDeterministicOpsAnswer(intent) {
   );
 }
 
+async function buildPersonAnswer({ workspaceId, user, question }) {
+  const [taskRes, recentRes] = await Promise.all([
+    pool.query(
+      `SELECT status, COUNT(*)::int AS count
+       FROM tasks WHERE workspace_id = $1 AND assigned_to = $2
+       GROUP BY status`,
+      [workspaceId, user.id]
+    ),
+    pool.query(
+      `SELECT t.task, t.status, t.priority, t.due_date, p.name AS project_name
+       FROM tasks t
+       LEFT JOIN projects p ON p.id = t.project_id
+       WHERE t.workspace_id = $1 AND t.assigned_to = $2
+       ORDER BY t.updated_at DESC LIMIT 5`,
+      [workspaceId, user.id]
+    ),
+  ]);
+
+  const statusCounts = Object.fromEntries(taskRes.rows.map(r => [r.status, r.count]));
+  const total = taskRes.rows.reduce((s, r) => s + r.count, 0);
+  const completed = (statusCounts.completed || 0) + (statusCounts.done || 0);
+  const inProgress = statusCounts["in-progress"] || statusCounts.in_progress || 0;
+  const pending = statusCounts.pending || statusCounts.todo || 0;
+
+  const overdueRes = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM tasks
+     WHERE workspace_id = $1 AND assigned_to = $2
+       AND due_date < NOW() AND status NOT IN ('done','completed')`,
+    [workspaceId, user.id]
+  );
+  const overdue = overdueRes.rows[0]?.count || 0;
+
+  const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  const lines = [
+    `${user.username}: ${total} total tasks assigned (${completionRate}% completion rate).`,
+    `Status — Completed: ${completed}, In Progress: ${inProgress}, Pending: ${pending}, Overdue: ${overdue}.`,
+  ];
+
+  if (recentRes.rows.length > 0) {
+    const recent = recentRes.rows.map(t =>
+      `"${t.task}" (${t.status}${t.project_name ? `, ${t.project_name}` : ""}${t.due_date ? `, due ${new Date(t.due_date).toDateString()}` : ""})`
+    ).join("; ");
+    lines.push(`Recent tasks: ${recent}.`);
+  }
+
+  if (overdue > 0) {
+    lines.push(`⚠️ ${overdue} overdue task${overdue > 1 ? "s" : ""} need attention.`);
+  } else if (total === 0) {
+    lines.push(`No tasks assigned to ${user.username} in this workspace.`);
+  }
+
+  return lines.join("\n");
+}
+
 /**
  * Strategic Intelligence Query Service
  * Analyzes operational data and provides executive-level insights
@@ -465,6 +520,15 @@ export async function runAIIntelligenceQuery({
         return buildProjectHealthAnswer({ context });
       }
       return buildTaskStatusAnswer({ context, intent, scope });
+    }
+
+    // Person-specific question in workspace scope — resolve and return member summary
+    if (scope === "workspace" || scope === "project") {
+      const targetUser = await resolveTargetUser(workspaceId, question);
+      if (targetUser) {
+        const answer = await buildPersonAnswer({ workspaceId, user: targetUser, question });
+        if (answer) return answer;
+      }
     }
 
     const contextForLlm = sanitizeForReadableLLM(context);

@@ -144,16 +144,20 @@ router.post("/", async (req, res) => {
       );
       console.log(`[push:chat] channel=${channel.id} members=${members.length}`);
       const senderName = saved.username || "Someone";
-      const preview = fallbackText
-        ? (fallbackText.length > 80 ? fallbackText.slice(0, 77) + "…" : fallbackText)
-        : "Sent a message";
+      // Sanitize fallbackText — never send encrypted JSON as notification body
+      const isEncrypted = (s) => typeof s === "string" && s.trim().startsWith("{");
+      const safePreview = (!fallbackText || isEncrypted(fallbackText))
+        ? "Sent a message"
+        : (fallbackText.length > 80 ? fallbackText.slice(0, 77) + "…" : fallbackText);
+      const isDMChannel = channel.is_dm || (channel.key || "").startsWith("dm:");
+      const notifTitle = isDMChannel ? senderName : `${senderName} in #${channel.name || channel.key || "chat"}`;
       const chatUrl = `/chat`;
       for (const { user_id } of members) {
         console.log(`[push:chat] sending to user_id=${user_id}`);
         sendPushToUser({
           userId: user_id,
-          title: `${senderName} in #${channel.name || channel.key || "chat"}`,
-          body: preview,
+          title: notifTitle,
+          body: safePreview,
           url: chatUrl,
           type: "chat",
         }).catch((e) => console.error("[push:chat] sendPushToUser error:", e.message));

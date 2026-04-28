@@ -310,7 +310,7 @@ export async function generateNlReport({ workspaceId, type = "weekly", projectId
   const memberStatsQuery = isProject
     ? db.query(
         `SELECT u.username,
-                COUNT(*) FILTER (WHERE t.status = 'done') AS completed,
+                COUNT(*) FILTER (WHERE t.status IN ('done','completed')) AS completed,
                 COUNT(*) AS total
          FROM tasks t
          JOIN users u ON u.id = t.assigned_to
@@ -321,7 +321,7 @@ export async function generateNlReport({ workspaceId, type = "weekly", projectId
       )
     : db.query(
         `SELECT u.username,
-                COUNT(*) FILTER (WHERE t.status = 'done') AS completed,
+                COUNT(*) FILTER (WHERE t.status IN ('done','completed')) AS completed,
                 COUNT(*) AS total
          FROM tasks t
          JOIN users u ON u.id = t.assigned_to
@@ -334,12 +334,12 @@ export async function generateNlReport({ workspaceId, type = "weekly", projectId
   const overdueQuery = isProject
     ? db.query(
         `SELECT COUNT(*) AS count FROM tasks
-         WHERE workspace_id = $1 AND project_id = $2 AND due_date < NOW() AND status != 'done'`,
+         WHERE workspace_id = $1 AND project_id = $2 AND due_date < NOW() AND status NOT IN ('done','completed')`,
         [workspaceId, projectId]
       )
     : db.query(
         `SELECT COUNT(*) AS count FROM tasks
-         WHERE workspace_id = $1 AND due_date < NOW() AND status != 'done'`,
+         WHERE workspace_id = $1 AND due_date < NOW() AND status NOT IN ('done','completed')`,
         [workspaceId]
       );
 

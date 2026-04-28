@@ -503,6 +503,7 @@ socket.emit("chat:history", {
           body: "Sent a message",
           url: "/chat",
           type: "chat",
+          extraData: { channelId },
         }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
       }
     } catch (e) {
