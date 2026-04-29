@@ -71,4 +71,11 @@ router.patch("/preferences", authMiddleware, async (req, res) => {
   }
 });
 
+// Diagnostic endpoint — logs push registration steps from the native app
+router.post("/diag", authMiddleware, async (req, res) => {
+  const { msg, ts } = req.body || {};
+  console.log(`[push:diag] user=${req.user?.id?.slice(0,8)} ${msg} (client_ts=${ts})`);
+  res.json({ ok: true });
+});
+
 export default router;

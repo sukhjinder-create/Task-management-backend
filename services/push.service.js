@@ -153,28 +153,40 @@ async function sendFCMNotification(fcmToken, payload) {
         extraStringified[k] = String(v);
       }
     }
-    const channelId = payload.type === "chat" ? "chat" : payload.type === "huddle" ? "huddle" : "tasks";
-    await firebaseAdmin.messaging().send({
+    const type = payload.type || "general";
+    console.log(`[push] FCM sending to token=${fcmToken?.slice(0, 20)} type=${type} title="${payload.title}"`);
+    const msgId = await firebaseAdmin.messaging().send({
       token: fcmToken,
       notification: { title: payload.title, body: payload.body },
       data: {
         url:  payload.url  || "/",
-        type: payload.type || "general",
+        type,
         ...extraStringified,
       },
       android: {
         priority: "high",
         notification: {
-          channelId,
+          channelId: "default",
           sound: "default",
           defaultVibrateTimings: true,
           defaultSound: true,
         },
       },
+      apns: {
+        headers: { "apns-priority": "10" },
+        payload: {
+          aps: {
+            alert: { title: payload.title, body: payload.body },
+            sound: "default",
+            badge: 1,
+          },
+        },
+      },
     });
+    console.log(`[push] FCM success msgId=${msgId} token=${fcmToken?.slice(0, 20)}`);
   } catch (err) {
     if (err.code === "messaging/registration-token-not-registered") {
-      console.warn("[push] FCM token expired, removing:", fcmToken?.slice(0, 20));
+      console.warn("[push] FCM token expired/invalid, removing:", fcmToken?.slice(0, 20));
       await pool.query(
         "DELETE FROM user_push_tokens WHERE fcm_token = $1",
         [fcmToken]

@@ -81,6 +81,35 @@ router.post("/avatar", upload.single("file"), async (req, res) => {
 });
 
 /**
+ * GET /upload/proxy?url=<encoded-cdn-url>
+ * Server-side proxy for R2/CDN assets — bypasses browser CORS restrictions.
+ * Only allows URLs from our configured CDN domain.
+ */
+const CDN_ORIGIN = process.env.AWS_CDN_URL || "https://pub-5e8d0742f1224c3dbf01efc7851e96f5.r2.dev";
+
+router.get("/proxy", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: "url required" });
+  if (url.startsWith("/uploads/") || url.includes("/uploads/")) {
+    return res.status(410).json({ error: "File no longer available (legacy storage)" });
+  }
+  if (!url.startsWith(CDN_ORIGIN + "/")) {
+    return res.status(403).json({ error: "URL not allowed" });
+  }
+  try {
+    const upstream = await fetch(url);
+    if (!upstream.ok) return res.status(upstream.status).end();
+    const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    res.set("Content-Type", contentType);
+    const buf = await upstream.arrayBuffer();
+    res.send(Buffer.from(buf));
+  } catch (err) {
+    console.error("[proxy] fetch failed:", err.message);
+    res.status(502).json({ error: "Proxy fetch failed" });
+  }
+});
+
+/**
  * GET /upload/storage-mode
  * Returns whether S3 or local storage is active.
  */

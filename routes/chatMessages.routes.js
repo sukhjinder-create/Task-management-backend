@@ -8,6 +8,8 @@ import {
   createChatMessage,
   getRecentMessagesResolved,
   getRecentMessagesByChannelKey,
+  markChannelRead,
+  getUnreadCounts,
 } from "../services/chat.service.js";
 import { getIO } from "../realtime/socket.js";
 
@@ -116,13 +118,15 @@ router.post("/", async (req, res) => {
     // emit via socket
     try {
       const io = getIO();
-      io.to(`channel:${channel.key || channelId}`).emit("chat:message", {
+      const channelKey = channel.key || channelId;
+      const msgPayload = {
         id: saved.id,
         tempId,
-        channelId: channel.key || channelId,
+        channelId: channelKey,
         userId,
         username: saved.username || null,
-        encrypted,
+        textHtml: encryptedJson,   // recipients need this to decrypt
+        encrypted: encryptedJson,
         senderPublicKeyJwk,
         fallbackText,
         createdAt: saved.created_at,
@@ -131,7 +135,29 @@ router.post("/", async (req, res) => {
         parentId: saved.parent_id,
         reactions: saved.reactions || {},
         attachments: saved.attachments || [],
-      });
+      };
+      io.to(`channel:${channelKey}`).emit("chat:message", msgPayload);
+
+      // Also emit to each member's personal room (DMs + users not in the channel room)
+      // so their unread badge updates in real-time
+      const { rows: members } = await pool.query(
+        "SELECT user_id FROM chat_channel_members WHERE channel_id = $1 AND user_id != $2",
+        [channel.id, userId]
+      );
+      for (const { user_id } of members) {
+        io.to(user_id).emit("chat:unread-bump", { channelKey });
+      }
+      // For DMs emit to both participant personal rooms
+      if (channelKey.startsWith("dm:")) {
+        const parts = channelKey.split(":");
+        for (let i = 1; i < parts.length; i++) {
+          const uid = parts[i];
+          if (uid && uid !== String(userId)) {
+            io.to(uid).emit("chat:message", msgPayload);
+            io.to(uid).emit("chat:unread-bump", { channelKey });
+          }
+        }
+      }
     } catch (e) {
       console.warn("Failed to emit chat:message:", e.message);
     }
@@ -151,7 +177,7 @@ router.post("/", async (req, res) => {
         : (fallbackText.length > 80 ? fallbackText.slice(0, 77) + "…" : fallbackText);
       const isDMChannel = channel.is_dm || (channel.key || "").startsWith("dm:");
       const notifTitle = isDMChannel ? senderName : `${senderName} in #${channel.name || channel.key || "chat"}`;
-      const chatUrl = `/chat`;
+      const chatUrl = `/chat?channel=${encodeURIComponent(channel.key || channel.id)}`;
       for (const { user_id } of members) {
         console.log(`[push:chat] sending to user_id=${user_id}`);
         sendPushToUser({
@@ -230,6 +256,30 @@ router.get("/for-channel/:channelId", async (req, res) => {
   } catch (err) {
     console.error("GET /chat/for-channel error:", err);
     return res.status(500).json({ message: "Failed to fetch messages" });
+  }
+});
+
+// GET /chat/unread-counts — returns { channelKey: count } for unread messages
+router.get("/unread-counts", async (req, res) => {
+  try {
+    const counts = await getUnreadCounts(req.user.id, req.workspaceId);
+    res.json(counts);
+  } catch (err) {
+    console.error("[unread] getUnreadCounts error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /chat/mark-read — mark a channel as fully read
+router.post("/mark-read", async (req, res) => {
+  try {
+    const { channelKey } = req.body;
+    if (!channelKey) return res.status(400).json({ error: "channelKey required" });
+    await markChannelRead(req.user.id, channelKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[unread] markChannelRead error:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 

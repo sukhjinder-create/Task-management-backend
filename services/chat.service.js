@@ -1071,3 +1071,79 @@ const exported = {
 };
 
 export default exported;
+
+// ─── Unread count tracking ────────────────────────────────────────────────────
+
+// Ensure the table exists (idempotent, runs once at startup)
+pool.query(`
+  CREATE TABLE IF NOT EXISTS chat_channel_read_status (
+    user_id      UUID         NOT NULL,
+    channel_key  VARCHAR(500) NOT NULL,
+    last_read_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, channel_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ccrs_user ON chat_channel_read_status(user_id);
+`).catch((e) => console.warn("[chat] chat_channel_read_status init:", e.message));
+
+export async function markChannelRead(userId, channelKey) {
+  await pool.query(
+    `INSERT INTO chat_channel_read_status (user_id, channel_key, last_read_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (user_id, channel_key)
+     DO UPDATE SET last_read_at = now()`,
+    [userId, channelKey]
+  );
+}
+
+export async function getUnreadCounts(userId, workspaceId) {
+  // Returns { channelKey: unreadCount } for all channels + DMs this user receives messages in.
+  // Public/system channels are included without requiring a membership record.
+  // Private channels require membership. DM channels require user to be a participant.
+  const { rows } = await pool.query(
+    `
+    WITH unread_msgs AS (
+      SELECT
+        m.channel_key,
+        COUNT(*) AS cnt
+      FROM chat_messages m
+      WHERE m.user_id != $1
+        AND m.deleted_at IS NULL
+        AND (m.system IS NULL OR m.system = false)
+        AND m.created_at > COALESCE(
+          (SELECT rs.last_read_at FROM chat_channel_read_status rs
+           WHERE rs.user_id = $1 AND rs.channel_key = m.channel_key),
+          '1970-01-01'::timestamptz
+        )
+      GROUP BY m.channel_key
+      HAVING COUNT(*) > 0
+    )
+    SELECT u.channel_key, u.cnt AS unread_count
+    FROM unread_msgs u
+    WHERE
+      -- DM channels: only if this user is a participant
+      (u.channel_key LIKE 'dm:%' AND (
+        u.channel_key LIKE $2
+        OR u.channel_key LIKE $3
+      ))
+      OR
+      -- Non-DM channels: public channels always; private channels only if member
+      (u.channel_key NOT LIKE 'dm:%' AND (
+        NOT EXISTS (
+          SELECT 1 FROM chat_channels c
+          WHERE c.key = u.channel_key AND c.is_private = true
+        )
+        OR EXISTS (
+          SELECT 1 FROM chat_channels c
+          JOIN chat_channel_members cm ON cm.channel_id = c.id
+          WHERE c.key = u.channel_key AND cm.user_id = $1
+        )
+      ))
+    `,
+    [userId, `dm:${userId}:%`, `dm:%:${userId}`]
+  );
+  const result = {};
+  for (const row of rows) {
+    result[row.channel_key] = parseInt(row.unread_count, 10);
+  }
+  return result;
+}

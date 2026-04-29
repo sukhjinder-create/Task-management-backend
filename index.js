@@ -202,7 +202,9 @@ app.use(
 
 // NEW universal adapter routes (SAFE ADDITION)
 app.use("/integrations", universalIntegrationRoutes);
-app.use("/uploads", express.static("uploads"));
+app.use("/uploads", express.static("uploads"), (req, res) => {
+  res.status(404).json({ error: "File not found" });
+});
 app.use("/upload", uploadRoutes);
 
 // ---------------- ROUTES ----------------

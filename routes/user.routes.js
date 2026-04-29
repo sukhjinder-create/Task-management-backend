@@ -74,7 +74,6 @@ router.post("/me/avatar", avatarUpload.single("avatar"), async (req, res) => {
     const ext = path.extname(req.file.originalname) || ".jpg";
     const objectPath = `avatars/${req.user.id}${ext}`;
 
-    // Upload to Supabase Storage (upsert so re-uploads overwrite)
     const uploadRes = await fetch(
       `${SUPABASE_URL}/storage/v1/object/${objectPath}`,
       {
@@ -93,10 +92,8 @@ router.post("/me/avatar", avatarUpload.single("avatar"), async (req, res) => {
       throw new Error(`Supabase Storage upload failed: ${err}`);
     }
 
-    // Public URL (bucket must be public — set in Supabase dashboard)
     const avatarUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
     const updated = await updateAvatarUrl(req.user.id, avatarUrl);
-
     res.json({ avatar_url: updated.avatar_url });
   } catch (err) {
     console.error("Error uploading avatar:", err);

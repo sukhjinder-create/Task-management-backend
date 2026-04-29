@@ -496,12 +496,14 @@ socket.emit("chat:history", {
       }
       console.log(`[push:chat:socket] isDM=${isDM} channelId=${channelId} sender=${userId} targets=${JSON.stringify(targetUserIds)}`);
       const senderName = saved?.username || username || "Someone";
+      const channelUrl = `/chat?channel=${encodeURIComponent(channelId)}`;
       for (const targetId of targetUserIds) {
+        io.to(targetId).emit("chat:unread-bump", { channelKey: channelId });
         sendPushToUser({
           userId: targetId,
           title: isDM ? senderName : `${senderName} in #${channelId}`,
           body: "Sent a message",
-          url: "/chat",
+          url: channelUrl,
           type: "chat",
           extraData: { channelId },
         }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
