@@ -484,30 +484,58 @@ socket.emit("chat:history", {
 
     // Push notification to other channel members (non-blocking)
     try {
-      let targetUserIds = [];
+      const senderName = saved?.username || username || "Someone";
+      const channelUrl = `/chat?channel=${encodeURIComponent(channelId)}`;
+
       if (isDM) {
-        targetUserIds = channelId.split(":").slice(1).filter((id) => id !== String(userId));
+        // DM: unread-bump + push to each participant
+        const dmTargets = channelId.split(":").slice(1).filter((id) => id !== String(userId));
+        for (const targetId of dmTargets) {
+          io.to(targetId).emit("chat:unread-bump", { channelKey: channelId });
+          sendPushToUser({
+            userId: targetId,
+            title: senderName,
+            body: "Sent a message",
+            url: channelUrl,
+            type: "chat",
+            extraData: { channelId },
+          }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
+        }
       } else {
-        const { rows: members } = await pool.query(
+        // Channel: fetch members for push notifications
+        const { rows: chMembers } = await pool.query(
           "SELECT user_id FROM chat_channel_members WHERE channel_id = (SELECT id FROM chat_channels WHERE key = $1 LIMIT 1) AND user_id != $2",
           [channelId, userId]
         );
-        targetUserIds = members.map((m) => m.user_id);
+        // Unread-bump: workspace-wide for public channels, per-member for private
+        const { rows: chInfo } = await pool.query(
+          "SELECT is_private FROM chat_channels WHERE key = $1 LIMIT 1",
+          [channelId]
+        );
+        const isPrivate = chInfo[0]?.is_private;
+        if (isPrivate) {
+          for (const { user_id } of chMembers) {
+            io.to(user_id).emit("chat:unread-bump", { channelKey: channelId });
+          }
+        } else {
+          io.to(`workspace:${workspaceId}`).emit("chat:unread-bump", {
+            channelKey: channelId,
+            fromUserId: String(userId),
+          });
+        }
+        // Push notifications go to explicit members only
+        for (const { user_id } of chMembers) {
+          sendPushToUser({
+            userId: user_id,
+            title: `${senderName} in #${channelId}`,
+            body: "Sent a message",
+            url: channelUrl,
+            type: "chat",
+            extraData: { channelId },
+          }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
+        }
       }
-      console.log(`[push:chat:socket] isDM=${isDM} channelId=${channelId} sender=${userId} targets=${JSON.stringify(targetUserIds)}`);
-      const senderName = saved?.username || username || "Someone";
-      const channelUrl = `/chat?channel=${encodeURIComponent(channelId)}`;
-      for (const targetId of targetUserIds) {
-        io.to(targetId).emit("chat:unread-bump", { channelKey: channelId });
-        sendPushToUser({
-          userId: targetId,
-          title: isDM ? senderName : `${senderName} in #${channelId}`,
-          body: "Sent a message",
-          url: channelUrl,
-          type: "chat",
-          extraData: { channelId },
-        }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
-      }
+      console.log(`[push:chat:socket] isDM=${isDM} channelId=${channelId} sender=${userId}`);
     } catch (e) {
       console.error("[push:chat:socket] error:", e.message);
     }

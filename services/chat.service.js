@@ -1108,7 +1108,7 @@ export async function getUnreadCounts(userId, workspaceId) {
       FROM chat_messages m
       WHERE m.user_id != $1
         AND m.deleted_at IS NULL
-        AND (m.system IS NULL OR m.system = false)
+        AND m.channel_key != 'availability-updates'
         AND m.created_at > COALESCE(
           (SELECT rs.last_read_at FROM chat_channel_read_status rs
            WHERE rs.user_id = $1 AND rs.channel_key = m.channel_key),

@@ -138,17 +138,11 @@ router.post("/", async (req, res) => {
       };
       io.to(`channel:${channelKey}`).emit("chat:message", msgPayload);
 
-      // Also emit to each member's personal room (DMs + users not in the channel room)
-      // so their unread badge updates in real-time
-      const { rows: members } = await pool.query(
-        "SELECT user_id FROM chat_channel_members WHERE channel_id = $1 AND user_id != $2",
-        [channel.id, userId]
-      );
-      for (const { user_id } of members) {
-        io.to(user_id).emit("chat:unread-bump", { channelKey });
-      }
-      // For DMs emit to both participant personal rooms
-      if (channelKey.startsWith("dm:")) {
+      const isDMChannel = channelKey.startsWith("dm:");
+      const isPrivateChannel = channel.is_private;
+
+      if (isDMChannel) {
+        // DM: emit message + unread-bump to each participant's personal room
         const parts = channelKey.split(":");
         for (let i = 1; i < parts.length; i++) {
           const uid = parts[i];
@@ -156,6 +150,21 @@ router.post("/", async (req, res) => {
             io.to(uid).emit("chat:message", msgPayload);
             io.to(uid).emit("chat:unread-bump", { channelKey });
           }
+        }
+      } else if (!isPrivateChannel) {
+        // Public channel: workspace-wide broadcast so ALL connected users see the badge
+        io.to(`workspace:${req.workspaceId}`).emit("chat:unread-bump", {
+          channelKey,
+          fromUserId: String(userId),
+        });
+      } else {
+        // Private channel: only explicit members
+        const { rows: privMembers } = await pool.query(
+          "SELECT user_id FROM chat_channel_members WHERE channel_id = $1 AND user_id != $2",
+          [channel.id, userId]
+        );
+        for (const { user_id } of privMembers) {
+          io.to(user_id).emit("chat:unread-bump", { channelKey });
         }
       }
     } catch (e) {
