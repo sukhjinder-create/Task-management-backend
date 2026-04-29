@@ -11,6 +11,8 @@ import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   getAllChannelsForWorkspace,
   getAllDMsForWorkspace,
+  markChannelRead,
+  getUnreadCounts,
 } from "../services/chat.service.js";
 
 
@@ -417,5 +419,29 @@ router.get("/conversations", async (req, res) => {
   }
 });
 
+
+// GET /chat/unread-counts
+router.get("/unread-counts", async (req, res) => {
+  try {
+    const counts = await getUnreadCounts(req.user.id, req.workspaceId);
+    res.json(counts);
+  } catch (err) {
+    console.error("[unread] getUnreadCounts error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /chat/mark-read
+router.post("/mark-read", async (req, res) => {
+  try {
+    const { channelKey } = req.body;
+    if (!channelKey) return res.status(400).json({ error: "channelKey required" });
+    await markChannelRead(req.user.id, channelKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[unread] markChannelRead error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default router;
