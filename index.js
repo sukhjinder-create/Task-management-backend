@@ -36,6 +36,7 @@ import { startBackupCron } from "./cron/backup.cron.js";
 import chatMessagesRoutes from "./routes/chatMessages.routes.js";
 import chatChannelRoutes from "./routes/chatChannels.routes.js";
 import cryptoRoutes from "./routes/crypto.routes.js";
+import { markChannelRead, getUnreadCounts } from "./services/chat.service.js";
 
 import { initSocket } from "./realtime/socket.js";
 
@@ -286,6 +287,28 @@ app.use("/attendance", authMiddleware, requireWorkspaceForUser, attendanceRoutes
 app.use("/settings", authMiddleware, requireWorkspaceForUser, settingsAttendanceRoutes);
 app.use("/users", authMiddleware, requireWorkspaceForUser, userRoutes);
 app.use("/workspaces", authMiddleware, requireWorkspaceForUser, workspaceRoutes);
+
+// Direct handlers — avoids router mounting ambiguity
+app.get("/chat/unread-counts", authMiddleware, requireWorkspaceForUser, async (req, res) => {
+  try {
+    const counts = await getUnreadCounts(req.user.id, req.workspaceId);
+    res.json(counts);
+  } catch (err) {
+    console.error("[unread] getUnreadCounts error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+app.post("/chat/mark-read", authMiddleware, requireWorkspaceForUser, async (req, res) => {
+  try {
+    const { channelKey } = req.body;
+    if (!channelKey) return res.status(400).json({ error: "channelKey required" });
+    await markChannelRead(req.user.id, channelKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[unread] markChannelRead error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.use("/chat/messages", authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatMessagesRoutes);
 app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatChannelRoutes);
