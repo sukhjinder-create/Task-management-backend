@@ -763,21 +763,42 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       startedAt: out.at,
     });
 
-    // Broadcast to channel rooms AND entire workspace so all members get the invite
-    io.to(legacyRoomName(channelId)).emit("huddle:started", out);
-    io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:started", out);
-    io.to(`workspace:${workspaceId}`).emit("huddle:started", out);
+    const isDM = channelId.startsWith("dm:");
 
-    // Send FCM push notification to all workspace members (except starter)
+    if (isDM) {
+      // DM huddle: only notify the other participant, not the whole workspace
+      const dmParts = channelId.split(":");
+      for (let i = 1; i < dmParts.length; i++) {
+        const uid = dmParts[i];
+        if (uid !== String(userId)) {
+          io.to(uid).emit("huddle:started", out);
+        }
+      }
+    } else {
+      // Channel huddle: broadcast to channel rooms and entire workspace
+      io.to(legacyRoomName(channelId)).emit("huddle:started", out);
+      io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:started", out);
+      io.to(`workspace:${workspaceId}`).emit("huddle:started", out);
+    }
+
+    // Send FCM push notification only to relevant participants (not entire workspace for DMs)
     try {
-      const { rows: members } = await pool.query(
-        "SELECT user_id FROM workspace_users WHERE workspace_id = $1 AND user_id != $2",
-        [workspaceId, userId]
-      );
-      const channelLabel = channelId.startsWith("dm:") ? "Direct Message" : `#${channelId}`;
-      for (const member of members) {
+      let pushTargetIds;
+      if (isDM) {
+        // Only push to the other DM participant
+        const dmParts = channelId.split(":");
+        pushTargetIds = dmParts.slice(1).filter(uid => uid !== String(userId));
+      } else {
+        const { rows: members } = await pool.query(
+          "SELECT user_id FROM workspace_users WHERE workspace_id = $1 AND user_id != $2",
+          [workspaceId, userId]
+        );
+        pushTargetIds = members.map(m => String(m.user_id));
+      }
+      const channelLabel = isDM ? "Direct Message" : `#${channelId}`;
+      for (const uid of pushTargetIds) {
         sendPushToUser({
-          userId: member.user_id,
+          userId: uid,
           title: `📞 ${username} is calling`,
           body: `Incoming huddle in ${channelLabel}`,
           url: "/chat",
