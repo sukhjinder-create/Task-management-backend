@@ -1106,7 +1106,7 @@ export async function getUnreadCounts(userId, workspaceId) {
         m.channel_key,
         COUNT(*) AS cnt
       FROM chat_messages m
-      WHERE m.user_id != $1
+      WHERE m.user_id::text != $1
         AND m.deleted_at IS NULL
         AND m.channel_key != 'availability-updates'
         AND m.created_at > COALESCE(
@@ -1135,7 +1135,7 @@ export async function getUnreadCounts(userId, workspaceId) {
         OR EXISTS (
           SELECT 1 FROM chat_channels c
           JOIN chat_channel_members cm ON cm.channel_id = c.id
-          WHERE c.key = u.channel_key AND cm.user_id = $1
+          WHERE c.key = u.channel_key AND cm.user_id::text = $1
         )
       ))
     `,
