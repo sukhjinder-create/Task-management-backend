@@ -212,6 +212,7 @@ app.use("/upload", uploadRoutes);
 app.get("/", (req, res) => {
   res.send("Task Management API is running 🚀");
 });
+app.get("/version", (req, res) => res.json({ commit: "1aa8be5", built: "2026-04-30" }));
 
 app.use("/auth", authRoutes);
 app.use("/payments/webhook", paymentsWebhookRouter);
