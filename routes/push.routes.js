@@ -1,11 +1,13 @@
 // routes/push.routes.js
 import express from "express";
+import pool from "../db.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import {
   registerPushToken,
   unregisterPushToken,
   getPreferences,
   updatePreferences,
+  sendPushToUser,
   VAPID_PUBLIC_KEY,
 } from "../services/push.service.js";
 
@@ -76,6 +78,35 @@ router.post("/diag", authMiddleware, async (req, res) => {
   const { msg, ts } = req.body || {};
   console.log(`[push:diag] user=${req.user?.id?.slice(0,8)} ${msg} (client_ts=${ts})`);
   res.json({ ok: true });
+});
+
+// Status — shows registered tokens for the current user (for debugging)
+router.get("/status", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT platform, LEFT(endpoint,60) AS endpoint_preview, LEFT(fcm_token,30) AS fcm_preview, updated_at FROM user_push_tokens WHERE user_id::text = $1 ORDER BY updated_at DESC",
+      [String(req.user.id)]
+    );
+    res.json({ userId: req.user.id, tokens: rows, count: rows.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Test — send a test notification to the current user
+router.post("/test", authMiddleware, async (req, res) => {
+  try {
+    await sendPushToUser({
+      userId: req.user.id,
+      title: "Test notification",
+      body: "Push is working!",
+      url: "/chat",
+      type: "general",
+    });
+    res.json({ ok: true, userId: req.user.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;

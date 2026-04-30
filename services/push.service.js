@@ -42,8 +42,19 @@ let fcmReady = false;
 
 async function initFirebase() {
   if (fcmReady) return;
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!raw) return;
+  // Support both plain JSON and base64-encoded JSON (FIREBASE_SERVICE_ACCOUNT_B64)
+  let raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_B64;
+  if (!raw) {
+    console.warn("[push] Firebase not configured — FCM disabled (set FIREBASE_SERVICE_ACCOUNT_B64 secret)");
+    return;
+  }
+  // Decode base64 if the value doesn't start with '{'
+  if (!raw.trim().startsWith("{")) {
+    try { raw = Buffer.from(raw.trim(), "base64").toString("utf-8"); } catch (e) {
+      console.warn("[push] Firebase base64 decode failed:", e.message);
+      return;
+    }
+  }
   try {
     const { default: admin } = await import("firebase-admin");
     if (!admin.apps.length) {
@@ -52,6 +63,7 @@ async function initFirebase() {
     }
     firebaseAdmin = admin;
     fcmReady = true;
+    console.log("[push] Firebase Admin initialized successfully");
   } catch (e) {
     console.warn("[push] firebase-admin not installed or service account invalid:", e.message);
   }
@@ -63,14 +75,14 @@ initFirebase();
 
 export async function registerPushToken({ userId, platform, endpoint, p256dh, auth, fcmToken, workspaceId }) {
   if (platform === "web") {
+    // Delete-then-insert to reliably refresh keys (no race-condition silent failure)
     await pool.query(
-      "DELETE FROM user_push_tokens WHERE user_id = $1 AND endpoint = $2",
-      [userId, endpoint]
+      "DELETE FROM user_push_tokens WHERE user_id::text = $1 AND endpoint = $2",
+      [String(userId), endpoint]
     );
     await pool.query(
       `INSERT INTO user_push_tokens (user_id, workspace_id, platform, endpoint, keys_p256dh, keys_auth, updated_at)
-       VALUES ($1, $2, 'web', $3, $4, $5, now())
-       ON CONFLICT DO NOTHING`,
+       VALUES ($1::uuid, $2, 'web', $3, $4, $5, now())`,
       [userId, workspaceId || null, endpoint, p256dh, auth]
     );
     console.log(`[push] web token registered for user ${userId}`);
@@ -216,10 +228,10 @@ export async function sendPushToUser({ userId, title, body, url = "/", type = "g
     if (type === "task" && prefs.mute_tasks) return;
     if (type === "chat" && prefs.mute_chat) return;
 
-    // Fetch all tokens
+    // Fetch all tokens (cast to text to avoid UUID vs text type mismatch)
     const { rows } = await pool.query(
-      "SELECT platform, endpoint, keys_p256dh, keys_auth, fcm_token FROM user_push_tokens WHERE user_id = $1",
-      [userId]
+      "SELECT platform, endpoint, keys_p256dh, keys_auth, fcm_token FROM user_push_tokens WHERE user_id::text = $1",
+      [String(userId)]
     );
 
     const payload = { title, body, url, type, extraData };
