@@ -5,8 +5,8 @@ WORKDIR /app
 # Copy package files first (better layer caching)
 COPY package*.json ./
 
-# Install production dependencies only
-RUN npm ci --only=production
+# Install production dependencies only (clean cache first to avoid Cloud Build stale cache issues)
+RUN npm cache clean --force && npm ci --omit=dev
 
 # Install Playwright's Chromium + all its system dependencies
 # (used by the Testing Agent feature)
