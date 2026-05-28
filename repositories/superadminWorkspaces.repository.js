@@ -4,10 +4,12 @@ import crypto from "crypto";
 import { ensureDefaultChannelsForWorkspace } from "../services/workspace.service.js";
 import { ensureSystemUser } from "../services/ai.system.service.js";
 
-/** SHA-256 of the lowercased email domain — used for trial anti-abuse tracking */
-function emailDomainFingerprint(email) {
-  const domain = (email.split("@")[1] || email).toLowerCase().trim();
-  return crypto.createHash("sha256").update(domain).digest("hex");
+/** Non-identifying per-trial marker; email uniqueness is enforced from users.email. */
+function trialRecordFingerprint(email, workspaceId) {
+  return crypto
+    .createHash("sha256")
+    .update(`${String(email || "").toLowerCase().trim()}:${workspaceId}`)
+    .digest("hex");
 }
 
 export async function createWorkspace({
@@ -34,19 +36,9 @@ export async function createWorkspace({
       throw new Error("An account already exists with this email. Please sign in.");
     }
 
-    // ── Anti-abuse: each email domain gets ONE free trial ───────────────────
+    // ── Anti-abuse: an existing platform email cannot create another workspace.
+    // Same company/domain is allowed; multiple teams at one company can trial.
     if (isTrial) {
-      const fingerprint = emailDomainFingerprint(normalizedOwnerEmail);
-      const existing = await client.query(
-        `SELECT id FROM trial_fingerprints WHERE fingerprint_hash = $1 LIMIT 1`,
-        [fingerprint]
-      );
-      if (existing.rows.length > 0) {
-        throw new Error(
-          "This email domain has already used a free trial. Please select a paid plan."
-        );
-      }
-
       // ── Anti-abuse: each IP address gets ONE free trial ──────────────────
       if (ipHash) {
         const ipUsed = await client.query(
@@ -88,9 +80,9 @@ export async function createWorkspace({
       [name, billingPlan, memberLimit, billingPlan, trialStart, trialEnd]
     );
 
-    // ── Store trial fingerprint so the domain/IP can't claim another trial ───
+    // ── Store trial fingerprint + IP marker for future audit/IP protection ───
     if (isTrial) {
-      const fingerprint = emailDomainFingerprint(normalizedOwnerEmail);
+      const fingerprint = trialRecordFingerprint(normalizedOwnerEmail, workspace.id);
       await client.query(
         `INSERT INTO trial_fingerprints (workspace_id, fingerprint_hash, ip_hash) VALUES ($1, $2, $3)`,
         [workspace.id, fingerprint, ipHash || null]
