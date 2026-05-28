@@ -5,8 +5,21 @@
 -- =============================================================================
 
 -- ── workspace_users: billing status per user ──────────────────────────────────
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'workspace_users'
+      AND column_name = 'billing_status'
+  ) THEN
+    ALTER TABLE workspace_users
+      ADD COLUMN billing_status VARCHAR(20) NOT NULL DEFAULT 'active';
+  END IF;
+END $$;
+
 ALTER TABLE workspace_users
-  ADD COLUMN IF NOT EXISTS billing_status VARCHAR(20) NOT NULL DEFAULT 'pending';
+  ALTER COLUMN billing_status SET DEFAULT 'pending';
 
 ALTER TABLE workspace_users
   DROP CONSTRAINT IF EXISTS workspace_users_billing_status_check;
@@ -24,10 +37,10 @@ ALTER TABLE workspace_users
 ALTER TABLE workspace_users
   ADD COLUMN IF NOT EXISTS cycle_end TIMESTAMPTZ;
 
--- All existing workspace_users were active before this migration
 UPDATE workspace_users
-  SET billing_status = 'active', activated_at = NOW()
-  WHERE billing_status = 'pending';
+  SET activated_at = NOW()
+  WHERE billing_status = 'active'
+    AND activated_at IS NULL;
 
 -- ── workspaces: trial + billing cycle fields ──────────────────────────────────
 ALTER TABLE workspaces
@@ -54,9 +67,9 @@ CREATE TABLE IF NOT EXISTS user_activation_payments (
   workspace_id        UUID        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   user_ids            UUID[]      NOT NULL,
   amount_paise        INTEGER     NOT NULL,
-  razorpay_order_id   TEXT,
-  razorpay_payment_id TEXT,
-  razorpay_signature  TEXT,
+  provider            TEXT        NOT NULL DEFAULT 'stripe',
+  checkout_session_id TEXT,
+  payment_intent_id   TEXT,
   status              VARCHAR(20) NOT NULL DEFAULT 'created',
   pro_rated_days      INTEGER,
   cycle_start         TIMESTAMPTZ,
@@ -65,7 +78,7 @@ CREATE TABLE IF NOT EXISTS user_activation_payments (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT user_activation_payments_status_check
-    CHECK (status IN ('created', 'paid', 'failed'))
+    CHECK (status IN ('created', 'paid', 'failed', 'expired'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_activation_payments_workspace

@@ -1,24 +1,22 @@
 // routes/payments.routes.js
 // =============================================================================
-// Workspace billing endpoints (Razorpay — UPI AutoPay, Cards, NACH)
+// Workspace billing endpoints (Stripe — hosted checkout, subscriptions, portal)
 // =============================================================================
 import express from "express";
 import pool from "../db.js";
 import { listPlans } from "../repositories/billingPlans.repository.js";
 import {
-  getPublicConfig,
-  createSubscription,
-  verifyPaymentSignature,
-  confirmSubscription,
+  getPublicBillingConfig,
+  getWorkspaceBillingSummary,
+  createCheckoutSession,
+  createBillingPortalSession,
   cancelSubscription,
-  getBillingSummary,
-  verifyWebhookSignature,
-  handleWebhookEvent,
   listPendingUsers,
   calculateActivationCost,
-  createActivationOrder,
-  verifyAndActivateUsers,
-} from "../services/razorpay.service.js";
+  createActivationCheckoutSession,
+  syncStripeSubscriptionSeatQuantity,
+  processStripeWebhook,
+} from "../services/payments.service.js";
 
 const router = express.Router();
 
@@ -29,10 +27,9 @@ webhookRouter.post(
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
-      const sig   = req.headers["x-razorpay-signature"];
-      const event = verifyWebhookSignature(req.body, sig);
-      await handleWebhookEvent(event);
-      return res.json({ received: true });
+      const sig    = req.headers["stripe-signature"];
+      const result = await processStripeWebhook(req.body, sig);
+      return res.json(result);
     } catch (err) {
       console.error("[payments] webhook error:", err.message);
       return res.status(err.statusCode || 400).json({ error: err.message });
@@ -40,7 +37,7 @@ webhookRouter.post(
   }
 );
 
-// ── Guard: billing admin only (admin role) ────────────────────────────────────
+// ── Guard: billing admin only ─────────────────────────────────────────────────
 function requireBillingAdmin(req, res, next) {
   if (!["admin", "owner"].includes(req.user?.role)) {
     return res.status(403).json({ error: "Admin access required for billing" });
@@ -48,19 +45,20 @@ function requireBillingAdmin(req, res, next) {
   next();
 }
 
-// ── Public: plan catalog (workspace users see this to pick a plan) ────────────
+// ── Public: plan catalog ──────────────────────────────────────────────────────
+
 /**
  * GET /payments/plans
- * Returns active plans from DB (no auth required within workspace context)
+ * Active plans from DB — no auth required within workspace context.
  */
 router.get("/plans", async (_req, res) => {
   try {
     const plans = await listPlans({ includeInactive: false });
-    // Convert paise → rupees for frontend convenience
-    const formatted = plans.map(p => ({
+    const formatted = plans.map((p) => ({
       ...p,
-      price_monthly: p.price_monthly_paise / 100,
-      price_yearly:  p.price_yearly_paise  / 100,
+      price_monthly: (p.price_monthly_paise || 0) / 100,
+      price_yearly:  (p.price_yearly_paise  || 0) / 100,
+      stripe_ready:  !!(p.stripe_price_monthly_id || p.stripe_price_yearly_id),
     }));
     return res.json(formatted);
   } catch (err) {
@@ -70,49 +68,44 @@ router.get("/plans", async (_req, res) => {
 
 /**
  * GET /payments/config
- * Razorpay public key + feature flags
+ * Stripe publishable key + feature flags.
  */
 router.get("/config", (_req, res) => {
-  return res.json(getPublicConfig());
+  return res.json(getPublicBillingConfig());
 });
 
 /**
  * GET /payments/summary
- * Current workspace billing state
+ * Current workspace billing state.
  */
 router.get("/summary", async (req, res) => {
   try {
-    const summary = await getBillingSummary(req.workspaceId);
-    // Convert paise → rupees
-    if (summary.subscription) {
-      summary.subscription.price_monthly = (summary.subscription.price_monthly_paise || 0) / 100;
-      summary.subscription.price_yearly  = (summary.subscription.price_yearly_paise  || 0) / 100;
-    }
+    const summary = await getWorkspaceBillingSummary(req.workspaceId);
     return res.json(summary);
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
 
+// ── Subscription checkout ─────────────────────────────────────────────────────
+
 /**
  * POST /payments/subscribe
- * Create a Razorpay subscription for the workspace.
- * Returns subscriptionId + keyId → frontend opens Razorpay Checkout.
+ * Creates a Stripe Checkout Session for the workspace.
+ * Returns { url } — frontend redirects the user to Stripe's hosted page.
  *
- * Body: { planId, interval: "monthly"|"yearly" }
+ * Body: { planId, interval: "monthly"|"yearly", successUrl?, cancelUrl? }
  */
 router.post("/subscribe", requireBillingAdmin, async (req, res) => {
   try {
-    const { planId, interval = "monthly" } = req.body;
+    const { planId, interval = "monthly", successUrl, cancelUrl } = req.body;
     if (!planId) return res.status(400).json({ error: "planId is required" });
 
-    const result = await createSubscription({
-      workspaceId:   req.workspaceId,
-      workspaceName: req.workspace?.name || "",
-      planId,
-      interval,
-      userEmail: req.user?.email || "",
-      userName:  req.user?.username || "",
+    const workspace = { id: req.workspaceId, name: req.workspace?.name || "" };
+    const user      = { id: req.user?.id,   email: req.user?.email || "" };
+
+    const result = await createCheckoutSession({
+      workspace, user, planId, interval, successUrl, cancelUrl,
     });
 
     return res.status(201).json(result);
@@ -122,43 +115,29 @@ router.post("/subscribe", requireBillingAdmin, async (req, res) => {
 });
 
 /**
- * POST /payments/verify
- * Called by frontend after Razorpay Checkout success handler fires.
- * Verifies HMAC signature and marks subscription as confirmed.
+ * POST /payments/portal
+ * Opens a Stripe Billing Portal session so the customer can manage or cancel.
+ * Returns { url } — frontend redirects the user.
  *
- * Body: { razorpay_payment_id, razorpay_subscription_id, razorpay_signature, planSlug }
+ * Body: { returnUrl? }
  */
-router.post("/verify", requireBillingAdmin, async (req, res) => {
+router.post("/portal", requireBillingAdmin, async (req, res) => {
   try {
-    const {
-      razorpay_payment_id:      paymentId,
-      razorpay_subscription_id: subscriptionId,
-      razorpay_signature:       signature,
-      planSlug,
-    } = req.body;
-
-    if (!paymentId || !subscriptionId || !signature) {
-      return res.status(400).json({ error: "payment_id, subscription_id, and signature are required" });
-    }
-
-    verifyPaymentSignature({ paymentId, subscriptionId, signature });
-
-    await confirmSubscription({
-      workspaceId:    req.workspaceId,
-      paymentId,
-      subscriptionId,
-      planSlug: planSlug || "pro",
+    const { returnUrl } = req.body;
+    const result = await createBillingPortalSession({
+      workspaceId: req.workspaceId,
+      returnUrl,
     });
-
-    return res.json({ success: true, message: "Subscription activated" });
+    return res.json(result);
   } catch (err) {
-    return res.status(err.statusCode || 400).json({ error: err.message });
+    return res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
 
 /**
  * POST /payments/cancel
- * Cancel at end of current billing period.
+ * Cancel at end of current billing period (access continues until period end).
+ * Cancellation is also available via the billing portal.
  */
 router.post("/cancel", requireBillingAdmin, async (req, res) => {
   try {
@@ -169,18 +148,31 @@ router.post("/cancel", requireBillingAdmin, async (req, res) => {
   }
 });
 
-// ── Per-user billing endpoints ────────────────────────────────────────────────
+// ── Per-user billing ──────────────────────────────────────────────────────────
+
+/**
+ * POST /payments/sync-seats
+ * Repairs recurring Stripe seat quantity to match billable workspace users.
+ */
+router.post("/sync-seats", requireBillingAdmin, async (req, res) => {
+  try {
+    const result = await syncStripeSubscriptionSeatQuantity(req.workspaceId, {
+      prorationBehavior: "none",
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });
+  }
+});
 
 /**
  * GET /payments/pending-users
- * Lists all workspace users with billing_status = 'pending'.
- * Also returns per-user price and next cycle info for cost preview.
+ * Lists workspace users with billing_status = 'pending'.
  */
 router.get("/pending-users", requireBillingAdmin, async (req, res) => {
   try {
     const users = await listPendingUsers(req.workspaceId);
 
-    // Attach billing context for the frontend cost preview
     const { rows: wsRows } = await pool.query(
       `SELECT billing_cycle_anchor, per_user_price_paise FROM workspaces WHERE id = $1`,
       [req.workspaceId]
@@ -189,7 +181,7 @@ router.get("/pending-users", requireBillingAdmin, async (req, res) => {
 
     return res.json({
       users,
-      perUserPricePaise: ws.per_user_price_paise || null,
+      perUserPricePaise:  ws.per_user_price_paise || null,
       billingCycleAnchor: ws.billing_cycle_anchor || null,
     });
   } catch (err) {
@@ -217,47 +209,29 @@ router.post("/activation-cost", requireBillingAdmin, async (req, res) => {
 
 /**
  * POST /payments/create-activation-order
- * Creates a Razorpay Order for pro-rated user activation payment.
- * Body: { userIds: string[] }
+ * Creates a Stripe Checkout Session (one-time payment) to activate pending users.
+ * Returns { url } — frontend redirects the user to Stripe's hosted page.
+ * On checkout.session.completed webhook, users are automatically activated.
+ *
+ * Body: { userIds: string[], successUrl?, cancelUrl? }
  */
 router.post("/create-activation-order", requireBillingAdmin, async (req, res) => {
   try {
-    const { userIds } = req.body;
+    const { userIds, successUrl, cancelUrl } = req.body;
     if (!Array.isArray(userIds) || userIds.length === 0) {
       return res.status(400).json({ error: "userIds array is required" });
     }
-    const result = await createActivationOrder(req.workspaceId, userIds, req.user?.id);
+
+    const workspace = { id: req.workspaceId, name: req.workspace?.name || "" };
+    const user      = { id: req.user?.id,   email: req.user?.email || "" };
+
+    const result = await createActivationCheckoutSession({
+      workspace, user, userIds, successUrl, cancelUrl,
+    });
+
     return res.status(201).json(result);
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });
-  }
-});
-
-/**
- * POST /payments/verify-activation
- * Verify Razorpay Order payment signature and activate users.
- * Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature, userIds }
- */
-router.post("/verify-activation", requireBillingAdmin, async (req, res) => {
-  try {
-    const {
-      razorpay_order_id:   orderId,
-      razorpay_payment_id: paymentId,
-      razorpay_signature:  signature,
-      userIds,
-    } = req.body;
-
-    if (!orderId || !paymentId || !signature) {
-      return res.status(400).json({ error: "order_id, payment_id, and signature are required" });
-    }
-
-    const result = await verifyAndActivateUsers(req.workspaceId, {
-      orderId, paymentId, signature, userIds,
-    });
-
-    return res.json({ success: true, ...result });
-  } catch (err) {
-    return res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 

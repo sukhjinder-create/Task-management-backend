@@ -12,6 +12,8 @@
     "migrate:testing-agent": "node run-testing-agent-migration.js",
     "migrate:sprint-goal-sync": "node run-sprint-goal-sync-migration.js",
     "migrate:payments": "node run-payments-migration.js",
+    "migrate:billing-plans": "node run-billing-plans-migration.js",
+    "stripe:sync-plans": "node sync-stripe-plans.js",
     "migrate:operations-os": "node run-operations-os-migration.js",
     "migrate:workspace-search-history": "node run-workspace-search-history-migration.js",
     "migrate:workspace-search-click-history": "node run-workspace-search-click-history-migration.js",

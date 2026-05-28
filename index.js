@@ -160,6 +160,9 @@ app.use(
 // OLD integrations (existing — DO NOT TOUCH)
 app.use("/integrations", integrationRoutes);
 
+// Stripe webhooks must see the untouched raw body for signature verification.
+app.use("/payments/webhook", paymentsWebhookRouter);
+
 app.use(express.json({
   limit: "50mb",
   verify: (req, _res, buf) => { req.rawBody = buf; },
@@ -215,7 +218,6 @@ app.get("/", (req, res) => {
 app.get("/version", (req, res) => res.json({ commit: "1aa8be5", built: "2026-04-30" }));
 
 app.use("/auth", authRoutes);
-app.use("/payments/webhook", paymentsWebhookRouter);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
 app.use("/internal", internalRoutes);

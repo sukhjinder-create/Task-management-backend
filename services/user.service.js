@@ -14,6 +14,7 @@ import pool from "../db.js";
 import { notifyUser } from "./notification.service.js";
 import { sendWelcomeMagicLink } from "./magicLink.service.js";
 import { countWorkspaceMembers, getWorkspaceById } from "../repositories/workspace.repository.js";
+import { syncStripeSubscriptionSeatQuantity } from "./payments.service.js";
 
 const WORKSPACE_GLOBAL = "GLOBAL";
 
@@ -262,6 +263,12 @@ export async function deleteUserService(id, workspaceId) {
   if (!ok) {
     throw new Error("User not found");
   }
+
+  syncStripeSubscriptionSeatQuantity(workspaceId, { prorationBehavior: "none" }).catch((err) => {
+    if (err.statusCode !== 404 && err.statusCode !== 503) {
+      console.warn("[billing] recurring seat sync after user delete failed:", err.message);
+    }
+  });
 
   return true;
 }

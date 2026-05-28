@@ -8,7 +8,7 @@ import {
   updatePlan,
   hardDeletePlan,
 } from "../repositories/billingPlans.repository.js";
-import { syncPlanToRazorpay } from "../services/razorpay.service.js";
+import { syncPlanToStripe } from "../services/payments.service.js";
 
 const router = express.Router();
 router.use(requireSuperadmin);
@@ -133,17 +133,45 @@ router.delete("/:id", async (req, res) => {
 });
 
 /**
- * POST /superadmin/plans/:id/sync-razorpay
- * Push this plan to Razorpay and save the Razorpay plan IDs.
- * Must be done once before workspaces can subscribe to this plan.
+ * POST /superadmin/plans/:id/sync-stripe
+ * Link this plan to Stripe Price IDs created in the Stripe Dashboard.
+ * Must be called once before workspaces can subscribe to this plan.
+ *
+ * Body: {
+ *   monthlyPriceId?: string  — e.g. "price_1OAbc123..."
+ *   yearlyPriceId?:  string  — e.g. "price_1OAbc456..."
+ *   productId?:      string  — e.g. "prod_1OAbc..."
+ *   currency?:       string  — ISO 4217, e.g. "usd" or "inr" (default "usd")
+ * }
+ *
+ * To get these IDs: Stripe Dashboard → Products → create a product with
+ * monthly and yearly recurring prices, then copy the price IDs here.
  */
-router.post("/:id/sync-razorpay", async (req, res) => {
+router.post("/:id/sync-stripe", async (req, res) => {
   try {
-    const updated = await syncPlanToRazorpay(req.params.id);
+    const {
+      monthlyPriceId,
+      yearlyPriceId,
+      productId,
+      currency,
+      createMissing,
+      replaceExisting,
+    } = req.body;
+    const updated = await syncPlanToStripe(req.params.id, {
+      monthlyPriceId,
+      yearlyPriceId,
+      productId,
+      currency,
+      createMissing,
+      replaceExisting,
+    });
     return res.json({
-      success: true,
-      razorpay_monthly_plan_id: updated.razorpay_monthly_plan_id,
-      razorpay_yearly_plan_id:  updated.razorpay_yearly_plan_id,
+      success:                  true,
+      stripe_product_id:        updated.stripe_product_id,
+      stripe_price_monthly_id:  updated.stripe_price_monthly_id,
+      stripe_price_yearly_id:   updated.stripe_price_yearly_id,
+      stripe_currency:          updated.stripe_currency,
+      stripe_sync:              updated.stripe_sync,
     });
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });

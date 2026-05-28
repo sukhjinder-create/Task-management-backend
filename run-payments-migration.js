@@ -5,12 +5,21 @@ async function runMigration() {
   try {
     console.log("Running payments migration...");
 
-    const sql = fs.readFileSync(
+    const files = [
       "./migrations/20260325_workspace_payments.sql",
-      "utf8"
-    );
+      "./migrations/20260325_billing_plans.sql",
+      "./migrations/20260326_user_billing_status.sql",
+      "./migrations/20260505_billing_plans_stripe.sql",
+      "./migrations/20260527_stripe_only_billing_cleanup.sql",
+      "./migrations/20260528_stripe_subscription_seats.sql",
+    ];
 
-    await pool.query(sql);
+    for (const file of files) {
+      if (!fs.existsSync(file)) continue;
+      const sql = fs.readFileSync(file, "utf8");
+      await pool.query(sql);
+      console.log(`Applied ${file}`);
+    }
 
     const { rows: subscriptionCols } = await pool.query(`
       SELECT column_name
