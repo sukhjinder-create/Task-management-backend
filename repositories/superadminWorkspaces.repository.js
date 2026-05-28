@@ -24,10 +24,19 @@ export async function createWorkspace({
     await client.query("BEGIN");
 
     const isTrial = plan === "trial";
+    const normalizedOwnerEmail = String(ownerEmail || "").trim().toLowerCase();
+
+    const existingOwner = await client.query(
+      `SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [normalizedOwnerEmail]
+    );
+    if (existingOwner.rows.length > 0) {
+      throw new Error("An account already exists with this email. Please sign in.");
+    }
 
     // ── Anti-abuse: each email domain gets ONE free trial ───────────────────
     if (isTrial) {
-      const fingerprint = emailDomainFingerprint(ownerEmail);
+      const fingerprint = emailDomainFingerprint(normalizedOwnerEmail);
       const existing = await client.query(
         `SELECT id FROM trial_fingerprints WHERE fingerprint_hash = $1 LIMIT 1`,
         [fingerprint]
@@ -81,7 +90,7 @@ export async function createWorkspace({
 
     // ── Store trial fingerprint so the domain/IP can't claim another trial ───
     if (isTrial) {
-      const fingerprint = emailDomainFingerprint(ownerEmail);
+      const fingerprint = emailDomainFingerprint(normalizedOwnerEmail);
       await client.query(
         `INSERT INTO trial_fingerprints (workspace_id, fingerprint_hash, ip_hash) VALUES ($1, $2, $3)`,
         [workspace.id, fingerprint, ipHash || null]
@@ -95,7 +104,31 @@ export async function createWorkspace({
        ) VALUES (
          gen_random_uuid(), $1, $2, $3, 'admin', $4, now()
        ) RETURNING id, username, email, role, workspace_id`,
-      [ownerName || ownerEmail.split("@")[0], ownerEmail, ownerPasswordHash, workspace.id]
+      [ownerName || normalizedOwnerEmail.split("@")[0], normalizedOwnerEmail, ownerPasswordHash || null, workspace.id]
+    );
+
+    await client.query(
+      `INSERT INTO workspace_users (
+         workspace_id, user_id, role, billing_status, activated_at, cycle_start, cycle_end
+       ) VALUES (
+         $1, $2, 'admin', $3, $4, $4, NULL
+       )
+       ON CONFLICT (user_id) DO NOTHING`,
+      [
+        workspace.id,
+        owner.id,
+        isTrial ? "trial" : "active",
+        isTrial ? null : new Date(),
+      ]
+    );
+
+    await client.query(
+      `UPDATE workspaces
+       SET owner_user_id = $2,
+           created_by = COALESCE(created_by, $2),
+           updated_at = now()
+       WHERE id = $1`,
+      [workspace.id, owner.id]
     );
 
     // ── Ensure system (AI) user ──────────────────────────────────────────────

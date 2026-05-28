@@ -1,9 +1,12 @@
 // routes/auth.routes.js
 import express from "express";
+import crypto from "crypto";
 import {
   loginWithEmail,
   loginWithMagicToken,
   loginWithGoogle,
+  signupWorkspaceWithEmail,
+  signupWorkspaceWithGoogle,
   loginWithMfa,
   getCurrentUser,
   requestPasswordReset,
@@ -21,6 +24,102 @@ const router = express.Router();
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const GOOGLE_CLIENT_ID    = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL;
+const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
+const GOOGLE_STATE_TTL_MS = 15 * 60 * 1000;
+
+function getRequestIpHash(req) {
+  const rawIp = req.ip || req.socket?.remoteAddress || "";
+  return rawIp ? crypto.createHash("sha256").update(rawIp).digest("hex") : null;
+}
+
+function buildFrontendRedirect(path, params = {}) {
+  const url = new URL(path, FRONTEND_URL);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+function signGoogleState(payload) {
+  const body = Buffer.from(
+    JSON.stringify({ ...payload, iat: Date.now() })
+  ).toString("base64url");
+  const sig = crypto.createHmac("sha256", JWT_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function verifyGoogleState(state) {
+  if (!state) return null;
+  const [body, sig] = String(state).split(".");
+  if (!body || !sig) throw new Error("Invalid Google signup state");
+
+  const expected = crypto.createHmac("sha256", JWT_SECRET).update(body).digest("base64url");
+  const actualBuffer = Buffer.from(sig);
+  const expectedBuffer = Buffer.from(expected);
+  if (
+    actualBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+  ) {
+    throw new Error("Invalid Google signup state");
+  }
+
+  const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  if (!payload.iat || Date.now() - Number(payload.iat) > GOOGLE_STATE_TTL_MS) {
+    throw new Error("Google signup session expired. Please try again.");
+  }
+  return payload;
+}
+
+function mapSignupStatus(message = "") {
+  const lower = message.toLowerCase();
+  if (lower.includes("already") || lower.includes("free trial")) return 409;
+  return 400;
+}
+
+router.post("/signup/workspace", async (req, res) => {
+  try {
+    const { workspaceName, name, email, password } = req.body || {};
+    const data = await signupWorkspaceWithEmail({
+      workspaceName,
+      name,
+      email,
+      password,
+      ipHash: getRequestIpHash(req),
+    });
+
+    data.refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId,
+      req.ip,
+      req.headers["user-agent"]
+    );
+
+    logAudit({
+      workspaceId: data.user.workspaceId || data.user.workspace_id,
+      userId: data.user.id,
+      action: "workspace.signup",
+      entityType: "workspace",
+      entityId: data.workspace?.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "email" },
+    });
+
+    return res.status(201).json(data);
+  } catch (err) {
+    logAudit({
+      workspaceId: null,
+      userId: null,
+      action: "workspace.signup.failed",
+      entityType: "workspace",
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { email: req.body?.email, reason: err.message },
+    });
+    console.error("Signup error:", err);
+    return res.status(mapSignupStatus(err.message)).json({ error: err.message });
+  }
+});
 
 // ─── EMAIL + PASSWORD LOGIN ───────────────────────────────────────────────────
 router.post("/login", async (req, res) => {
@@ -230,6 +329,16 @@ router.get("/google", (req, res) => {
     return res.status(503).json({ error: "Google SSO is not configured" });
   }
 
+  const mode = String(req.query.mode || "").trim().toLowerCase();
+  const isSignup = ["signup", "register", "trial"].includes(mode);
+  const workspaceName = String(req.query.workspaceName || "").trim();
+
+  if (isSignup && !workspaceName) {
+    return res.redirect(
+      buildFrontendRedirect("/signup", { error: "workspace_required" })
+    );
+  }
+
   const params = new URLSearchParams({
     client_id:     GOOGLE_CLIENT_ID,
     redirect_uri:  GOOGLE_CALLBACK_URL,
@@ -239,26 +348,72 @@ router.get("/google", (req, res) => {
     prompt:        "select_account",
   });
 
+  if (isSignup) {
+    params.set("state", signGoogleState({
+      mode: "signup",
+      workspaceName,
+    }));
+  }
+
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 });
 
 // ─── GOOGLE SSO: CALLBACK ─────────────────────────────────────────────────────
 router.get("/google/callback", async (req, res) => {
-  const { code, error } = req.query;
+  const { code, error, state } = req.query;
+  let googleState = null;
+
+  try {
+    googleState = verifyGoogleState(state);
+  } catch (stateErr) {
+    return res.redirect(
+      buildFrontendRedirect("/signup", { error: stateErr.message })
+    );
+  }
+
+  const isSignup = googleState?.mode === "signup";
+  const errorPath = isSignup ? "/signup" : "/login";
 
   if (error || !code) {
-    return res.redirect(`${FRONTEND_URL}/login?error=google_cancelled`);
+    return res.redirect(buildFrontendRedirect(errorPath, { error: "google_cancelled" }));
   }
 
   try {
-    const { token, user } = await loginWithGoogle(code);
+    const data = isSignup
+      ? await signupWorkspaceWithGoogle(code, {
+          workspaceName: googleState.workspaceName,
+          ipHash: getRequestIpHash(req),
+        })
+      : await loginWithGoogle(code);
 
     // Pass only token — frontend fetches user from /users/me
-    res.redirect(`${FRONTEND_URL}/auth/callback?token=${token}`);
+    const refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId,
+      req.ip,
+      req.headers["user-agent"]
+    );
+
+    logAudit({
+      workspaceId: data.user.workspaceId || data.user.workspace_id,
+      userId: data.user.id,
+      action: isSignup ? "workspace.signup" : "user.login",
+      entityType: isSignup ? "workspace" : "user",
+      entityId: isSignup ? data.workspace?.id : data.user.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "google" },
+    });
+
+    res.redirect(
+      buildFrontendRedirect("/auth/callback", {
+        token: data.token,
+        refreshToken,
+      })
+    );
   } catch (err) {
     console.error("Google SSO callback error:", err.message);
-    const msg = encodeURIComponent(err.message);
-    res.redirect(`${FRONTEND_URL}/login?error=${msg}`);
+    res.redirect(buildFrontendRedirect(errorPath, { error: err.message }));
   }
 });
 

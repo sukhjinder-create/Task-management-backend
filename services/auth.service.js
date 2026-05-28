@@ -6,14 +6,29 @@ import {
   getUserByEmail,
   getUserById,
 } from "../repositories/user.repository.js";
+import { createWorkspace as createWorkspaceWithOwner } from "../repositories/superadminWorkspaces.repository.js";
 
-async function ensureWorkspaceUser(userId, workspaceId) {
+async function getDefaultMembershipBillingStatus(workspaceId) {
+  const { rows } = await pool.query(
+    `SELECT trial_ends_at
+     FROM workspaces
+     WHERE id = $1
+     LIMIT 1`,
+    [workspaceId]
+  );
+
+  const trialEndsAt = rows[0]?.trial_ends_at ? new Date(rows[0].trial_ends_at) : null;
+  return trialEndsAt && trialEndsAt > new Date() ? "trial" : "active";
+}
+
+async function ensureWorkspaceUser(userId, workspaceId, billingStatus = null) {
   if (!userId || !workspaceId || workspaceId === "GLOBAL") return;
+  const status = billingStatus || (await getDefaultMembershipBillingStatus(workspaceId));
   await pool.query(
     `INSERT INTO workspace_users (user_id, workspace_id, billing_status)
-     VALUES ($1, $2, 'active')
+     VALUES ($1, $2, $3)
      ON CONFLICT (user_id) DO NOTHING`,
-    [userId, workspaceId]
+    [userId, workspaceId, status]
   );
 }
 import { verifyMagicToken } from "./magicLink.service.js";
@@ -385,12 +400,34 @@ export async function changePassword(userId, currentPassword, newPassword) {
   await revokeAllUserSessions(userId);
 }
 
-/**
- * LOGIN WITH GOOGLE SSO
- * Exchanges OAuth2 code for Google user info, finds user by email.
- * Option 1 (invite-only): user must already exist in DB.
- */
-export async function loginWithGoogle(code) {
+function cleanRequiredString(value, fieldName, { min = 1, max = 255 } = {}) {
+  const cleaned = String(value || "").trim();
+  if (cleaned.length < min) {
+    throw new Error(`${fieldName} is required`);
+  }
+  if (cleaned.length > max) {
+    throw new Error(`${fieldName} is too long`);
+  }
+  return cleaned;
+}
+
+function normalizeSignupEmail(email) {
+  const cleaned = cleanRequiredString(email, "Email", { min: 3, max: 255 }).toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) {
+    throw new Error("Enter a valid email address");
+  }
+  return cleaned;
+}
+
+function validateSignupPassword(password) {
+  const raw = String(password || "");
+  if (raw.length < 8) {
+    throw new Error("Password must be at least 8 characters");
+  }
+  return raw;
+}
+
+function getGoogleOAuthConfig() {
   const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
   const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
   const GOOGLE_CALLBACK_URL  = process.env.GOOGLE_CALLBACK_URL;
@@ -399,7 +436,14 @@ export async function loginWithGoogle(code) {
     throw new Error("Google SSO is not configured on this server");
   }
 
-  // Exchange authorization code for access token
+  return { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL };
+}
+
+async function fetchGoogleProfileFromCode(code) {
+  if (!code) throw new Error("Google authorization code is required");
+
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL } = getGoogleOAuthConfig();
+
   const tokenRes = await axios.post(
     "https://oauth2.googleapis.com/token",
     {
@@ -412,7 +456,6 @@ export async function loginWithGoogle(code) {
     { headers: { "Content-Type": "application/json" } }
   );
 
-  // Fetch Google user profile
   const profileRes = await axios.get(
     "https://www.googleapis.com/oauth2/v3/userinfo",
     { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
@@ -421,8 +464,99 @@ export async function loginWithGoogle(code) {
   const googleEmail = profileRes.data.email;
   if (!googleEmail) throw new Error("Could not retrieve email from Google");
 
+  return {
+    email: String(googleEmail).trim().toLowerCase(),
+    name: profileRes.data.name || profileRes.data.given_name || null,
+    picture: profileRes.data.picture || null,
+    emailVerified: profileRes.data.email_verified !== false,
+  };
+}
+
+async function createSelfServeTrialWorkspace({
+  workspaceName,
+  ownerName,
+  ownerEmail,
+  ownerPasswordHash = null,
+  ipHash = null,
+  avatarUrl = null,
+}) {
+  const name = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
+  const email = normalizeSignupEmail(ownerEmail);
+  const username = cleanRequiredString(ownerName || email.split("@")[0], "Name", { min: 2, max: 120 });
+
+  const existing = await getUserByEmail(email);
+  if (existing) {
+    throw new Error("An account already exists with this email. Please sign in.");
+  }
+
+  const result = await createWorkspaceWithOwner({
+    name,
+    plan: "trial",
+    ownerEmail: email,
+    ownerPasswordHash,
+    ownerName: username,
+    ipHash,
+  });
+
+  if (avatarUrl) {
+    await pool.query(
+      `UPDATE users SET avatar_url = $1, updated_at = now() WHERE id = $2`,
+      [avatarUrl, result.owner.id]
+    ).catch(() => {});
+  }
+
+  const userRow = await getUserById(result.owner.id);
+  const safeUser = normalizeUserRow(userRow);
+  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id, "trial");
+  const token = generateToken(safeUser);
+
+  return { token, user: safeUser, workspace: result.workspace };
+}
+
+export async function signupWorkspaceWithEmail({
+  workspaceName,
+  name,
+  email,
+  password,
+  ipHash = null,
+}) {
+  const passwordHash = await bcrypt.hash(validateSignupPassword(password), 10);
+
+  return createSelfServeTrialWorkspace({
+    workspaceName,
+    ownerName: name,
+    ownerEmail: email,
+    ownerPasswordHash: passwordHash,
+    ipHash,
+  });
+}
+
+export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = null } = {}) {
+  const profile = await fetchGoogleProfileFromCode(code);
+  if (!profile.emailVerified) {
+    throw new Error("Your Google account email is not verified.");
+  }
+
+  return createSelfServeTrialWorkspace({
+    workspaceName,
+    ownerName: profile.name,
+    ownerEmail: profile.email,
+    ownerPasswordHash: null,
+    ipHash,
+    avatarUrl: profile.picture,
+  });
+}
+
+/**
+ * LOGIN WITH GOOGLE SSO
+ * Exchanges OAuth2 code for Google user info, finds user by email.
+ * Option 1 (invite-only): user must already exist in DB.
+ */
+export async function loginWithGoogle(code) {
+  const profile = await fetchGoogleProfileFromCode(code);
+
   // Must already exist (invite-only model)
-  const user = await getUserByEmail(googleEmail);
+  const user = await getUserByEmail(profile.email);
   if (!user) {
     throw new Error("No account found for this Google email. Contact your admin.");
   }
