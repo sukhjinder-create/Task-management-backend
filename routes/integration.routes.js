@@ -16,6 +16,8 @@ const router = express.Router();
 
 // 🔐 Workspace isolation (same pattern as other routes)
 router.use(authMiddleware, requireWorkspaceForUser);
+router.use(express.json({ limit: "50mb" }));
+router.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 /**
  * Connect integration

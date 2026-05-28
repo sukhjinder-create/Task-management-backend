@@ -12,7 +12,7 @@ router.post(
       const userId = req.user.id;
       const { projectId } = req.params;
 
-      const { mode = "skip" } = req.body;
+      const { mode = "skip" } = req.body || {};
       const result = await migrateAsanaProject({
         workspaceId,
         projectId,
@@ -25,7 +25,7 @@ router.post(
     } catch (err) {
       console.error("Migration failed:", err);
       res.status(500).json({
-        error: "Migration failed"
+        error: err.message || "Migration failed"
       });
     }
   }

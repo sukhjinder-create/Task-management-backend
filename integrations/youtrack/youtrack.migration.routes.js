@@ -9,7 +9,7 @@ router.post("/youtrack/projects/:projectId/migrate", async (req, res) => {
     const userId = req.user.id;
     const { projectId } = req.params;
 
-    const { mode = "skip" } = req.body;
+    const { mode = "skip" } = req.body || {};
     const result = await migrateYouTrackProject({
       workspaceId,
       projectId,
@@ -20,7 +20,7 @@ router.post("/youtrack/projects/:projectId/migrate", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("YouTrack migration failed:", err);
-    res.status(500).json({ error: "Migration failed" });
+    res.status(500).json({ error: err.message || "Migration failed" });
   }
 });
 

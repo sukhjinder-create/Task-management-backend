@@ -4,7 +4,6 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import taskRepository from "../../repositories/task.repository.js";
-import { fetchYouTrackProjectTasks } from "./youtrack.viewer.service.js";
 import youtrackAdapter from "./youtrack.adapter.js";
 import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
 import { EVENT_TYPES } from "../../events/eventTypes.js";
@@ -149,8 +148,12 @@ export async function migrateYouTrackProject({
     projectId
   );
 
-  const result = await fetchYouTrackProjectTasks(workspaceId, projectKey);
-  const sourceTasks = Array.isArray(result) ? result : [];
+  const result = await youtrackAdapter.listTasks(workspaceId, projectKey);
+  const sourceTasks = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.data)
+      ? result.data
+      : [];
 
   if (!sourceTasks.length) {
     throw new Error("No tasks found in YouTrack project");
