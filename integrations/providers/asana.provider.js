@@ -1,18 +1,90 @@
-console.log("🔥 ASANA PROVIDER FILE EXECUTED");
+import axios from "axios";
+import qs from "qs";
 
 import BaseProvider from "./base.provider.js";
 import { registerProvider } from "../integration.registry.js";
 import { emitIntegrationEvent } from "../integration.events.js";
-import { IntegrationEvents } from "../integration.event.types.js";
-
-import axios from "axios";
 import pool from "../../db.js";
-import qs from "qs";
 import { hashIntegrationState } from "../../events/utils/hashState.js";
 
-/* =====================================================
-   TOKEN REFRESH (ASANA REQUIRES URLENCODED BODY)
-===================================================== */
+const ASANA_API_BASE = "https://app.asana.com/api/1.0";
+const TASK_FIELDS =
+  "gid,name,completed,assignee,assignee.gid,modified_at,created_at";
+const DEFAULT_PROJECT_CACHE_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_INCREMENTAL_LOOKBACK_MS = 2 * 60 * 1000;
+
+function readPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function toIsoString(value) {
+  const date = parseDate(value);
+  return date ? date.toISOString() : null;
+}
+
+function withLookback(value) {
+  const date = parseDate(value);
+  if (!date) return null;
+
+  const lookbackMs = readPositiveInt(
+    process.env.INTEGRATION_INCREMENTAL_LOOKBACK_MS,
+    DEFAULT_INCREMENTAL_LOOKBACK_MS
+  );
+
+  return new Date(Math.max(0, date.getTime() - lookbackMs)).toISOString();
+}
+
+function normalizeProjects(projects = []) {
+  return projects
+    .filter((project) => project?.gid)
+    .map((project) => ({
+      gid: project.gid,
+      name: project.name || project.gid,
+    }));
+}
+
+function getProjectCache(state) {
+  const cache = state?.projectCache;
+  if (!cache || !Array.isArray(cache.projects)) return null;
+  return cache;
+}
+
+function isProjectCacheFresh(state) {
+  const cache = getProjectCache(state);
+  const syncedAt = parseDate(cache?.syncedAt);
+  if (!cache || !syncedAt) return false;
+
+  const ttlMs = readPositiveInt(
+    process.env.INTEGRATION_PROJECT_CACHE_TTL_MS,
+    DEFAULT_PROJECT_CACHE_TTL_MS
+  );
+
+  return Date.now() - syncedAt.getTime() < ttlMs;
+}
+
+function isTokenExpiredError(err) {
+  const messages = err.response?.data?.errors
+    ?.map((error) => error?.message)
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    err.response?.status === 401 &&
+    /expired|invalid.*token|token.*invalid/i.test(messages || err.message || "")
+  );
+}
+
+function isProjectAccessError(err) {
+  return err.response?.status === 403 || err.response?.status === 404;
+}
+
 async function refreshAsanaToken(refreshToken) {
   const res = await axios.post(
     "https://app.asana.com/-/oauth_token",
@@ -32,39 +104,61 @@ async function refreshAsanaToken(refreshToken) {
   return res.data;
 }
 
-/* =====================================================
-   FETCH ALL TASKS (PAGINATION SAFE)
-===================================================== */
-async function fetchAllTasks(projectId, headers) {
-  let offset = null;
-  const allTasks = [];
-
-  do {
-    const res = await axios.get(
-      `https://app.asana.com/api/1.0/projects/${projectId}/tasks`,
-      {
-        headers,
-        params: {
-          limit: 100, // Asana max
-          offset,
-          opt_fields:
-            "gid,name,completed,assignee,modified_at,created_at"
-        }
-      }
-    );
-
-    allTasks.push(...(res.data?.data || []));
-
-    offset = res.data?.next_page?.offset || null;
-
-  } while (offset);
-
-  return allTasks;
+async function fetchAsanaWorkspaces(headers) {
+  const res = await axios.get(`${ASANA_API_BASE}/workspaces`, { headers });
+  return res.data?.data || [];
 }
 
-/* =====================================================
-   STATE TRACKING (ENTERPRISE DIFFING)
-===================================================== */
+async function fetchProjects(workspaceGid, headers) {
+  let offset = null;
+  const projects = [];
+
+  do {
+    const res = await axios.get(`${ASANA_API_BASE}/projects`, {
+      headers,
+      params: {
+        workspace: workspaceGid,
+        archived: false,
+        limit: 100,
+        offset,
+        opt_fields: "gid,name",
+      },
+    });
+
+    projects.push(...(res.data?.data || []));
+    offset = res.data?.next_page?.offset || null;
+  } while (offset);
+
+  return normalizeProjects(projects);
+}
+
+async function fetchTasks(projectGid, headers, { modifiedSince } = {}) {
+  let offset = null;
+  const tasks = [];
+
+  do {
+    const params = {
+      project: projectGid,
+      limit: 100,
+      offset,
+      opt_fields: TASK_FIELDS,
+    };
+
+    if (modifiedSince) {
+      params.modified_since = modifiedSince;
+    }
+
+    const res = await axios.get(`${ASANA_API_BASE}/tasks`, {
+      headers,
+      params,
+    });
+
+    tasks.push(...(res.data?.data || []));
+    offset = res.data?.next_page?.offset || null;
+  } while (offset);
+
+  return tasks;
+}
 
 async function getPreviousState(workspaceId, externalId) {
   const { rows } = await pool.query(
@@ -97,10 +191,6 @@ async function saveState(workspaceId, externalId, hash) {
   );
 }
 
-/* =====================================================
-   BOOTSTRAP DETECTION (PREVENT EVENT FLOOD)
-===================================================== */
-
 async function hasWorkspaceBootstrapped(workspaceId) {
   const { rows } = await pool.query(
     `
@@ -127,191 +217,205 @@ class AsanaProvider extends BaseProvider {
     return true;
   }
 
-  /* =====================================================
-     MAIN SYNC WORKER
-  ===================================================== */
-  async sync({ workspaceId }) {
-    console.log(`🔄 Asana sync running for workspace ${workspaceId}`);
+  async loadIntegrationConfig(workspaceId) {
+    const result = await pool.query(
+      `
+      SELECT config
+      FROM workspace_integrations
+      WHERE workspace_id = $1
+        AND provider = 'asana'
+      LIMIT 1
+      `,
+      [workspaceId]
+    );
 
+    return result.rows[0]?.config || null;
+  }
+
+  async resolveProjects({ headers, state, syncStartedAt, isBootstrap }) {
+    if (!isBootstrap && isProjectCacheFresh(state)) {
+      return {
+        projects: getProjectCache(state).projects,
+        projectCache: getProjectCache(state),
+        refreshed: false,
+      };
+    }
+
+    const workspaces = await fetchAsanaWorkspaces(headers);
+    const asanaWorkspace = workspaces[0];
+
+    if (!asanaWorkspace) {
+      return {
+        projects: [],
+        projectCache: {
+          workspaceGid: null,
+          projects: [],
+          syncedAt: syncStartedAt,
+        },
+        refreshed: true,
+      };
+    }
+
+    const projects = await fetchProjects(asanaWorkspace.gid, headers);
+
+    return {
+      projects,
+      projectCache: {
+        workspaceGid: asanaWorkspace.gid,
+        projects,
+        syncedAt: syncStartedAt,
+      },
+      refreshed: true,
+    };
+  }
+
+  async sync({
+    workspaceId,
+    state = {},
+    lastSyncedAt = null,
+    syncStartedAt = new Date().toISOString(),
+    retryTokenRefresh = false,
+  }) {
+    const startedAt = toIsoString(syncStartedAt) || new Date().toISOString();
     let integrationConfig = null;
 
     try {
-      /* ---------------- LOAD TOKENS ---------------- */
-      const result = await pool.query(
-        `
-        SELECT config
-        FROM workspace_integrations
-        WHERE workspace_id = $1
-          AND provider = 'asana'
-        LIMIT 1
-      `,
-        [workspaceId]
-      );
+      integrationConfig = await this.loadIntegrationConfig(workspaceId);
 
-      if (!result.rows.length) return;
-
-      integrationConfig = result.rows[0].config;
-
-      const accessToken = integrationConfig?.access_token;
-      if (!accessToken) {
-        console.log("No access token found");
-        return;
+      if (!integrationConfig?.access_token) {
+        throw new Error("Asana access token missing");
       }
 
       const headers = {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${integrationConfig.access_token}`,
       };
 
-      // ✅ Detect if this is first sync (bootstrap)
-    const isBootstrapped = await hasWorkspaceBootstrapped(workspaceId);
+      const entityStateExists = await hasWorkspaceBootstrapped(workspaceId);
+      const bootstrapComplete =
+        state.bootstrapComplete === true || entityStateExists;
+      const isBootstrap = !bootstrapComplete;
+      const cursor =
+        state.lastCursorAt || state.lastSuccessfulSyncAt || lastSyncedAt;
+      const modifiedSince = isBootstrap ? null : withLookback(cursor);
 
-      /* ---------------- STEP 1: WORKSPACES ---------------- */
-      const wsRes = await axios.get(
-        "https://app.asana.com/api/1.0/workspaces",
-        { headers }
-      );
+      const { projects, projectCache, refreshed } = await this.resolveProjects({
+        headers,
+        state,
+        syncStartedAt: startedAt,
+        isBootstrap,
+      });
 
-      const asanaWorkspace = wsRes.data?.data?.[0];
-      console.log("✅ Workspaces response:", wsRes.data);
+      const stats = {
+        mode: isBootstrap ? "bootstrap" : "incremental",
+        incrementalSince: modifiedSince,
+        projectCacheRefreshed: refreshed,
+        projectsChecked: projects.length,
+        projectsSkipped: 0,
+        tasksObserved: 0,
+        statesChanged: 0,
+        eventsEmitted: 0,
+      };
 
-      if (!asanaWorkspace) return;
+      for (const project of projects) {
+        let tasks = [];
 
-      /* ---------------- STEP 2: PROJECTS ---------------- */
-      const projectRes = await axios.get(
-        "https://app.asana.com/api/1.0/projects",
-        {
-          headers,
-          params: {
-            workspace: asanaWorkspace.gid,
-            archived: false,
-            opt_fields: "gid,name",
-          },
+        try {
+          tasks = await fetchTasks(project.gid, headers, { modifiedSince });
+        } catch (err) {
+          if (isTokenExpiredError(err)) {
+            throw err;
+          }
+
+          if (!isProjectAccessError(err)) {
+            throw err;
+          }
+
+          stats.projectsSkipped += 1;
+          console.log(`Skipping Asana project without task access: ${project.name}`);
+          continue;
         }
-      );
 
-      const projects = projectRes.data?.data || [];
+        stats.tasksObserved += tasks.length;
 
-      if (!projects.length) {
-        console.log("No Asana projects found");
-        return;
+        for (const task of tasks) {
+          const snapshot = {
+            completed: task.completed,
+            assignee: task.assignee?.gid || null,
+          };
+
+          const newHash = hashIntegrationState(snapshot);
+          const previousHash = await getPreviousState(workspaceId, task.gid);
+
+          if (previousHash === newHash) {
+            continue;
+          }
+
+          await saveState(workspaceId, task.gid, newHash);
+          stats.statesChanged += 1;
+
+          if (isBootstrap) {
+            continue;
+          }
+
+          await emitIntegrationEvent("integration.activity.observed", {
+            origin: "integration",
+            provider: "asana",
+            workspaceId,
+            entityType: "task",
+            externalId: task.gid,
+            action: task.completed ? "task_completed" : "task_active",
+            title: task.name,
+            projectName: project.name,
+            observedAt: new Date().toISOString(),
+            modifiedAt: task.modified_at,
+            createdAt: task.created_at,
+          });
+
+          stats.eventsEmitted += 1;
+        }
       }
 
-      /* ---------------- STEP 3: ACTIVITY SUPERVISION ---------------- */
-for (const project of projects) {
-
-  console.log("👁 Observing project:", project.name);
-
-  let tasks;
-
-  try {
-    // ✅ FULL PAGINATION (NO 20 LIMIT ANYMORE)
-    tasks = await fetchAllTasks(project.gid, headers);
-
-  } catch {
-    console.log(
-      `⚠️ Skipping project (no task access): ${project.name}`
-    );
-    continue;
-  }
-
-  console.log(
-    `✅ Tasks observed from ${project.name}: ${tasks.length}`
-  );
-
-  for (const task of tasks) {
-
-  // ---- CREATE STATE SNAPSHOT ----
-  const state = {
-    completed: task.completed,
-    assignee: task.assignee?.gid || null,
-  };
-
-  const newHash = hashIntegrationState(state);
-
-  const previousHash = await getPreviousState(
-    workspaceId,
-    task.gid
-  );
-
-  // ✅ NOTHING CHANGED → SKIP
-  if (previousHash === newHash) {
-    continue;
-  }
-
-  // ---- SAVE NEW STATE ----
-await saveState(workspaceId, task.gid, newHash);
-
-// 🚨 During bootstrap we DO NOT emit events
-if (!isBootstrapped) {
-  continue;
-}
-
-// ---- EMIT EVENT ONLY AFTER BOOTSTRAP ----
-await emitIntegrationEvent(
-  "integration.activity.observed",
-  {
-    origin: "integration",
-    provider: "asana",
-    workspaceId,
-
-    entityType: "task",
-    externalId: task.gid,
-
-    action: task.completed
-      ? "task_completed"
-      : "task_active",
-
-    title: task.name,
-    projectName: project.name,
-
-    observedAt: new Date().toISOString(),
-    modifiedAt: task.modified_at,
-    createdAt: task.created_at,
-  }
-);
-}
-}
-
+      return {
+        state: {
+          bootstrapComplete: true,
+          lastCursorAt: startedAt,
+          projectCache,
+        },
+        stats,
+      };
     } catch (err) {
-      const errorData = err.response?.data;
-
-      /* ---------------- TOKEN EXPIRED ---------------- */
-      if (
-        errorData?.errors?.[0]?.message?.includes("token has expired")
-      ) {
-        console.log("🔄 Refreshing Asana token...");
-
+      if (isTokenExpiredError(err) && !retryTokenRefresh) {
         const refreshToken = integrationConfig?.refresh_token;
         if (!refreshToken) {
-          console.log("No refresh token available");
-          return;
+          throw new Error("Asana token expired and refresh token is missing");
         }
 
         const newTokens = await refreshAsanaToken(refreshToken);
+        const nextRefreshToken = newTokens.refresh_token || refreshToken;
 
         await pool.query(
           `
           UPDATE workspace_integrations
           SET config = jsonb_set(
-            jsonb_set(config,'{access_token}',to_jsonb($2::text)),
-            '{refresh_token}',to_jsonb($3::text)
+            jsonb_set(config, '{access_token}', to_jsonb($2::text)),
+            '{refresh_token}', to_jsonb($3::text)
           )
           WHERE workspace_id = $1
             AND provider = 'asana'
-        `,
-          [workspaceId, newTokens.access_token, newTokens.refresh_token]
+          `,
+          [workspaceId, newTokens.access_token, nextRefreshToken]
         );
 
-        console.log("✅ Asana token refreshed");
-
-        // retry once with fresh token
-        return this.sync({ workspaceId });
+        return this.sync({
+          workspaceId,
+          state,
+          lastSyncedAt,
+          syncStartedAt: startedAt,
+          retryTokenRefresh: true,
+        });
       }
 
-      console.error(
-        "❌ ASANA FULL ERROR:",
-        JSON.stringify(errorData, null, 2)
-      );
+      throw err;
     }
   }
 

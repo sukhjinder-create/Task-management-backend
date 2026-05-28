@@ -80,3 +80,24 @@ export async function getAllActiveIntegrations() {
     client.release();
   }
 }
+
+/**
+ * Mark a connected integration after a successful worker sync.
+ */
+export async function markIntegrationSynced({
+  workspaceId,
+  provider,
+  syncedAt = new Date(),
+}) {
+  await pool.query(
+    `
+    UPDATE workspace_integrations
+    SET
+      last_synced_at = $3,
+      updated_at = NOW()
+    WHERE workspace_id = $1
+      AND provider = $2
+    `,
+    [workspaceId, provider, syncedAt]
+  );
+}

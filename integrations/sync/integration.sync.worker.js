@@ -1,20 +1,39 @@
 import { runIntegrationSyncCycle } from "./integration.sync.manager.js";
 
+const DEFAULT_SYNC_INTERVAL_MS = 60_000;
+const MIN_SYNC_INTERVAL_MS = 15_000;
+
 let intervalHandle = null;
-let isRunning = false; // guard against overlapping cycles
+let isRunning = false;
+
+function getSyncIntervalMs() {
+  const configured = Number.parseInt(
+    process.env.INTEGRATION_SYNC_INTERVAL_MS || "",
+    10
+  );
+
+  if (Number.isFinite(configured) && configured >= MIN_SYNC_INTERVAL_MS) {
+    return configured;
+  }
+
+  return DEFAULT_SYNC_INTERVAL_MS;
+}
 
 /**
- * Starts background integration polling
+ * Starts background integration polling.
  */
 export function startIntegrationSyncWorker() {
-  if (intervalHandle) return; // already started
+  if (intervalHandle) return;
 
-  console.log("🔄 Integration sync worker started");
+  const intervalMs = getSyncIntervalMs();
+
+  console.log(
+    `Integration sync worker started (${Math.round(intervalMs / 1000)}s interval)`
+  );
 
   intervalHandle = setInterval(async () => {
-    // Skip if previous cycle is still running
     if (isRunning) {
-      console.warn("⏭️  Integration sync: previous cycle still running, skipping");
+      console.warn("Integration sync skipped: previous cycle still running");
       return;
     }
 
@@ -23,11 +42,10 @@ export function startIntegrationSyncWorker() {
       process.env.INTEGRATION_SYNC_CONTEXT = "worker";
       await runIntegrationSyncCycle();
     } catch (err) {
-      // Log but never crash the worker
-      console.error("⚠️  Integration sync worker error:", err.message);
+      console.error("Integration sync worker error:", err.message);
     } finally {
       delete process.env.INTEGRATION_SYNC_CONTEXT;
       isRunning = false;
     }
-  }, 60000);
+  }, intervalMs);
 }
