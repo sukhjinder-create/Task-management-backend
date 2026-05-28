@@ -2,11 +2,17 @@ import express from "express";
 import axios from "axios";
 import pool from "../../db.js";
 import qs from "qs";   // add at top of file
+import {
+  resolveIntegrationWebhookBaseUrl,
+  setupAsanaWebhooks,
+} from "../webhooks/integration.webhook.service.js";
 
 const router = express.Router();
 
 const AUTH_URL = "https://app.asana.com/-/oauth_authorize";
 const TOKEN_URL = "https://app.asana.com/-/oauth_token";
+const ASANA_OAUTH_SCOPE =
+  "tasks:read projects:read workspaces:read users:read webhooks:read webhooks:write";
 
 /**
  * Redirect user to Asana consent
@@ -44,6 +50,7 @@ router.get("/connect", async (req, res) => {
       redirect_uri: process.env.ASANA_REDIRECT_URI,
       response_type: "code",
       state: workspaceId,
+      scope: ASANA_OAUTH_SCOPE,
     });
 
   res.redirect(redirectUrl);
@@ -110,8 +117,25 @@ router.get("/callback", async (req, res) => {
 
     console.log("✅ Asana connected successfully");
 
+    let webhookStatus = "not_setup";
+    try {
+      const publicBaseUrl = resolveIntegrationWebhookBaseUrl(req);
+      const webhookResult = await setupAsanaWebhooks({
+        workspaceId,
+        publicBaseUrl,
+      });
+      webhookStatus = webhookResult.status || "active";
+    } catch (webhookErr) {
+      webhookStatus = "setup_failed";
+      console.warn(
+        "Asana webhook setup failed:",
+        webhookErr.response?.data || webhookErr.message
+      );
+    }
+
     return res.redirect(
-      (process.env.FRONTEND_BASE_URL || "http://localhost:5173") + "/admin/migrations?source=asana&connected=true"
+      (process.env.FRONTEND_BASE_URL || "http://localhost:5173") +
+        `/admin/migrations?source=asana&connected=true&webhooks=${webhookStatus}`
     );
 
   } catch (err) {

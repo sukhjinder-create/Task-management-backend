@@ -251,6 +251,33 @@ async function listTasks(workspaceId, projectKey, { updatedAfter = null } = {}) 
   return issues.map(mapIssue);
 }
 
+async function getTask(workspaceId, issueId) {
+  const config = await getConfig(workspaceId);
+  const { base_url, token } = config;
+
+  const res = await axios.get(
+    `${base_url}/api/issues/${encodeURIComponent(issueId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      params: {
+        fields:
+          "id,idReadable,summary,resolved,description,created,updated,project(id,shortName,name),customFields(name,value(name,fullName,login))",
+      },
+    }
+  );
+
+  const issue = mapIssue(res.data);
+
+  return {
+    ...issue,
+    projectName: res.data?.project?.name || null,
+    projectKey: res.data?.project?.shortName || null,
+  };
+}
+
 async function updateTaskStatus(workspaceId, issueId, completed) {
   const config = await getConfig(workspaceId);
   const { base_url, token } = config;
@@ -331,6 +358,7 @@ export default {
   provider: "youtrack",
   connectWorkspace,
   listProjects,
+  getTask,
   listTasks,
   listTasksPaginated,
   updateTaskStatus,

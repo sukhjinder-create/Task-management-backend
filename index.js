@@ -88,6 +88,10 @@ import {
   gitAutomationRoutes,
   gitAutomationWebhookRoutes,
 } from "./integrations/git/git.automation.routes.js";
+import {
+  integrationWebhookReceiverRoutes,
+  integrationWebhookSetupRoutes,
+} from "./integrations/webhooks/integration.webhook.routes.js";
 import slackMigrationRoutes from "./integrations/slack/slack.migration.routes.js";
 import migrationHistoryRoutes from "./routes/migrationHistory.routes.js";
 import tagsRoutes from "./routes/tags.routes.js";
@@ -168,6 +172,14 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+app.use("/integration-webhooks", integrationWebhookReceiverRoutes);
+app.use(
+  "/integrations/webhooks",
+  authMiddleware,
+  requireWorkspaceForUser,
+  integrationWebhookSetupRoutes
+);
 
 app.use("/oauth/asana", asanaOAuthRoutes);
 app.use("/integrations/asana", asanaViewerRoutes);
