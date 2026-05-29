@@ -30,9 +30,18 @@ import {
   getPlanByStripePriceId,
   saveStripePriceIds,
 } from "../repositories/billingPlans.repository.js";
+import { getUserByEmail, getUserById } from "../repositories/user.repository.js";
+import {
+  cleanRequiredString,
+  createSelfServeTrialWorkspace,
+  generateToken,
+  normalizeSignupEmail,
+  validateSignupPassword,
+} from "./auth.service.js";
 
 const STRIPE_API_BASE = "https://api.stripe.com";
 const DEFAULT_FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const TRIAL_SIGNUP_SESSION_TYPE = "trial_signup";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -106,6 +115,152 @@ async function stripeRequest(method, path, { data, headers } = {}) {
 function stripeTimestampToIso(value) {
   if (!value) return null;
   return new Date(value * 1000).toISOString();
+}
+
+function getBackendPublicUrl() {
+  if (process.env.API_PUBLIC_URL) return process.env.API_PUBLIC_URL.replace(/\/+$/, "");
+  if (process.env.BACKEND_PUBLIC_URL) return process.env.BACKEND_PUBLIC_URL.replace(/\/+$/, "");
+  if (process.env.GOOGLE_CALLBACK_URL) {
+    try {
+      return new URL(process.env.GOOGLE_CALLBACK_URL).origin;
+    } catch {}
+  }
+  return "http://localhost:3000";
+}
+
+function resolveTrialSignupSuccessUrl(overrideUrl) {
+  return (
+    overrideUrl ||
+    process.env.TRIAL_SIGNUP_SUCCESS_URL ||
+    `${getBackendPublicUrl()}/auth/signup/workspace/complete/redirect?session_id={CHECKOUT_SESSION_ID}`
+  );
+}
+
+function resolveTrialSignupCancelUrl(overrideUrl) {
+  return (
+    overrideUrl ||
+    process.env.TRIAL_SIGNUP_CANCEL_URL ||
+    `${DEFAULT_FRONTEND_URL}/signup?cancelled=1`
+  );
+}
+
+function normalizeBillingInterval(interval) {
+  return interval === "yearly" ? "yearly" : "monthly";
+}
+
+function getTrialSignupCurrency(plan) {
+  return String(process.env.TRIAL_SIGNUP_CURRENCY || plan?.stripe_currency || "inr")
+    .trim()
+    .toLowerCase();
+}
+
+function getTrialSignupVerificationAmount(currency) {
+  const parsed = Number.parseInt(process.env.TRIAL_SIGNUP_VERIFICATION_AMOUNT || "", 10);
+  const amount = Number.isFinite(parsed) && parsed > 0 ? parsed : 100;
+  if (currency === "inr") return Math.max(amount, 50);
+  return amount;
+}
+
+function getTrialSignupPlanSlug() {
+  return String(process.env.TRIAL_SIGNUP_PLAN_SLUG || "pro").trim().toLowerCase();
+}
+
+function assertTrialSignupConsent(consentAccepted) {
+  if (consentAccepted !== true) {
+    throw Object.assign(
+      new Error("You must consent to automatic billing after the trial and the refundable card verification charge."),
+      { statusCode: 400 }
+    );
+  }
+}
+
+async function findActivePendingTrialSignup({ email, ipHash }) {
+  const values = [email];
+  const ipClause = ipHash ? "OR consent_ip_hash = $2" : "";
+  if (ipHash) values.push(ipHash);
+
+  const { rows } = await db.query(
+    `SELECT id, checkout_session_id, status, owner_email, created_at
+     FROM trial_signup_checkout_sessions
+     WHERE created_at > now() - interval '24 hours'
+       AND status IN ('created', 'open', 'complete')
+       AND (lower(owner_email) = lower($1) ${ipClause})
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    values
+  );
+  return rows[0] || null;
+}
+
+async function ensurePlanStripePricesForCurrency(plan, currency) {
+  const monthlyAmount = Math.round(Number(plan.price_monthly_paise) || 0);
+  const yearlyAmount  = Math.round(Number(plan.price_yearly_paise) || 0);
+  if (monthlyAmount <= 0 && yearlyAmount <= 0) {
+    throw Object.assign(new Error("Trial signup requires a paid Stripe plan."), { statusCode: 400 });
+  }
+
+  const currentCurrency = String(plan.stripe_currency || "").toLowerCase();
+  const needsCurrencyRefresh = currentCurrency !== currency;
+  let productId = plan.stripe_product_id || null;
+  let monthlyPriceId = needsCurrencyRefresh ? null : plan.stripe_price_monthly_id || null;
+  let yearlyPriceId = needsCurrencyRefresh ? null : plan.stripe_price_yearly_id || null;
+  const created = { product: false, monthlyPrice: false, yearlyPrice: false };
+
+  if (!productId) {
+    const product = await createStripeProductForPlan(plan);
+    productId = product.id;
+    created.product = true;
+  }
+
+  if (monthlyAmount > 0 && !monthlyPriceId) {
+    const price = await createStripeRecurringPriceForPlan({
+      plan,
+      productId,
+      interval: "monthly",
+      amount: monthlyAmount,
+      currency,
+    });
+    monthlyPriceId = price.id;
+    created.monthlyPrice = true;
+  }
+
+  if (yearlyAmount > 0 && !yearlyPriceId) {
+    const price = await createStripeRecurringPriceForPlan({
+      plan,
+      productId,
+      interval: "yearly",
+      amount: yearlyAmount,
+      currency,
+    });
+    yearlyPriceId = price.id;
+    created.yearlyPrice = true;
+  }
+
+  if (created.product || created.monthlyPrice || created.yearlyPrice || needsCurrencyRefresh) {
+    await saveStripePriceIds(plan.id, {
+      productId,
+      monthly: monthlyPriceId,
+      yearly: yearlyPriceId,
+      currency,
+    });
+  }
+
+  return {
+    monthlyPriceId,
+    yearlyPriceId,
+    created,
+  };
+}
+
+function getExpandedSubscriptionFromSession(session) {
+  return typeof session?.subscription === "object" ? session.subscription : null;
+}
+
+function getPaymentIntentIdFromSubscription(subscription) {
+  const invoice = subscription?.latest_invoice;
+  const paymentIntent = invoice?.payment_intent;
+  if (!paymentIntent) return null;
+  return typeof paymentIntent === "string" ? paymentIntent : paymentIntent.id || null;
 }
 
 // ── Customer management ───────────────────────────────────────────────────────
@@ -236,7 +391,9 @@ async function getStoredStripeSubscription(workspaceId) {
 async function getStripeSubscriptionWithItems(subscriptionId) {
   return stripeRequest(
     "get",
-    `/v1/subscriptions/${subscriptionId}?expand[]=items.data.price`
+    `/v1/subscriptions/${subscriptionId}` +
+      `?expand[]=items.data.price` +
+      `&expand[]=latest_invoice.payment_intent`
   );
 }
 
@@ -681,6 +838,538 @@ export async function createCheckoutSession({
     priceId,
     seatQuantity,
     trialDays: dbPlan.trial_days || 0,
+  };
+}
+
+export async function createTrialSignupCheckoutSession({
+  workspaceName,
+  name,
+  email,
+  password,
+  ownerPasswordHash,
+  authProvider = "email",
+  avatarUrl = null,
+  planId = null,
+  plan = null,
+  interval = "monthly",
+  successUrl,
+  cancelUrl,
+  ipHash = null,
+  userAgent = null,
+  consentAccepted = false,
+}) {
+  ensureStripeConfigured();
+  assertTrialSignupConsent(consentAccepted);
+
+  const normalizedEmail = normalizeSignupEmail(email);
+  const cleanedWorkspaceName = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
+  const cleanedName = cleanRequiredString(name || normalizedEmail.split("@")[0], "Name", { min: 2, max: 120 });
+  const provider = authProvider === "google" ? "google" : "email";
+  const passwordHash =
+    provider === "email"
+      ? await bcryptHashForTrialSignup(password, ownerPasswordHash)
+      : null;
+
+  const existingUser = await getUserByEmail(normalizedEmail);
+  if (existingUser) {
+    throw Object.assign(new Error("An account already exists with this email. Please sign in."), { statusCode: 409 });
+  }
+
+  if (ipHash) {
+    const usedIp = await db.query(
+      `SELECT id FROM trial_fingerprints WHERE ip_hash = $1 LIMIT 1`,
+      [ipHash]
+    );
+    if (usedIp.rows.length > 0) {
+      throw Object.assign(
+        new Error("A free trial has already been created from this IP address. Please select a paid plan."),
+        { statusCode: 409 }
+      );
+    }
+  }
+
+  const activePending = await findActivePendingTrialSignup({ email: normalizedEmail, ipHash });
+  if (activePending) {
+    throw Object.assign(
+      new Error("A trial signup checkout is already pending. Please finish or wait for it to expire."),
+      { statusCode: 409, checkoutSessionId: activePending.checkout_session_id }
+    );
+  }
+
+  let dbPlan = null;
+  if (planId) dbPlan = await getPlanById(planId);
+  else dbPlan = await getPlanBySlug(plan || getTrialSignupPlanSlug());
+  if (!dbPlan || !dbPlan.is_active) {
+    throw Object.assign(new Error("Selected trial plan is not available."), { statusCode: 404 });
+  }
+  if ((Number(dbPlan.trial_days) || 0) <= 0) {
+    throw Object.assign(new Error("Selected plan does not include a free trial."), { statusCode: 400 });
+  }
+
+  const billingInterval = normalizeBillingInterval(interval);
+  const currency = getTrialSignupCurrency(dbPlan);
+  const prices = await ensurePlanStripePricesForCurrency(dbPlan, currency);
+  const priceId = billingInterval === "yearly" ? prices.yearlyPriceId : prices.monthlyPriceId;
+  if (!priceId) {
+    throw Object.assign(new Error(`No ${billingInterval} Stripe price is available for trial signup.`), {
+      statusCode: 503,
+    });
+  }
+
+  const verificationAmount = getTrialSignupVerificationAmount(currency);
+  const customer = await stripeRequest("post", "/v1/customers", {
+    data: qs.stringify(
+      {
+        email: normalizedEmail,
+        name: cleanedName,
+        "metadata[purpose]": "trial_signup",
+        "metadata[owner_email]": normalizedEmail,
+        "metadata[workspace_name]": cleanedWorkspaceName,
+        "metadata[auth_provider]": provider,
+      },
+      { encode: true }
+    ),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+
+  const pendingInsert = await db.query(
+    `INSERT INTO trial_signup_checkout_sessions (
+       provider, customer_id, status, workspace_name, owner_name, owner_email,
+       owner_password_hash, auth_provider, avatar_url, billing_plan_id,
+       billing_plan, billing_interval, verification_amount, currency,
+       consent_ip_hash, consent_user_agent, metadata, created_at, updated_at
+     )
+     VALUES (
+       'stripe', $1, 'created', $2, $3, $4,
+       $5, $6, $7, $8,
+       $9, $10, $11, $12,
+       $13, $14, $15, now(), now()
+     )
+     RETURNING id`,
+    [
+      customer.id,
+      cleanedWorkspaceName,
+      cleanedName,
+      normalizedEmail,
+      passwordHash,
+      provider,
+      avatarUrl,
+      dbPlan.id,
+      dbPlan.slug,
+      billingInterval,
+      verificationAmount,
+      currency,
+      ipHash,
+      userAgent,
+      {
+        priceId,
+        planName: dbPlan.name,
+        trialDays: dbPlan.trial_days,
+        stripePriceCreated: prices.created,
+      },
+    ]
+  );
+
+  const pendingId = pendingInsert.rows[0].id;
+  const consentMessage =
+    `By starting your ${dbPlan.trial_days}-day trial, you authorize automatic ${billingInterval} ` +
+    `billing after the trial unless you cancel first. The ${(verificationAmount / 100).toFixed(2)} ` +
+    `${currency.toUpperCase()} card verification charge is refunded automatically after confirmation.`;
+
+  const session = await stripeRequest("post", "/v1/checkout/sessions", {
+    data: qs.stringify(
+      {
+        mode: "subscription",
+        success_url: resolveTrialSignupSuccessUrl(successUrl),
+        cancel_url: resolveTrialSignupCancelUrl(cancelUrl),
+        customer: customer.id,
+        payment_method_collection: "always",
+        "payment_method_types[0]": "card",
+        billing_address_collection: "required",
+        allow_promotion_codes: true,
+        client_reference_id: pendingId,
+        "line_items[0][price]": priceId,
+        "line_items[0][quantity]": 1,
+        "line_items[1][quantity]": 1,
+        "line_items[1][price_data][currency]": currency,
+        "line_items[1][price_data][unit_amount]": verificationAmount,
+        "line_items[1][price_data][product_data][name]": "Refundable card verification",
+        "line_items[1][price_data][product_data][description]": "Refunded automatically after trial signup confirmation.",
+        "subscription_data[trial_period_days]": dbPlan.trial_days,
+        "subscription_data[metadata][pending_signup_id]": pendingId,
+        "subscription_data[metadata][billing_plan]": dbPlan.slug,
+        "subscription_data[metadata][billing_plan_id]": dbPlan.id,
+        "subscription_data[metadata][billing_interval]": billingInterval,
+        "subscription_data[trial_settings][end_behavior][missing_payment_method]": "cancel",
+        "metadata[session_type]": TRIAL_SIGNUP_SESSION_TYPE,
+        "metadata[pending_signup_id]": pendingId,
+        "metadata[billing_plan]": dbPlan.slug,
+        "metadata[billing_plan_id]": dbPlan.id,
+        "metadata[billing_interval]": billingInterval,
+        "metadata[verification_amount]": verificationAmount,
+        "metadata[verification_currency]": currency,
+        "custom_text[submit][message]": consentMessage,
+      },
+      { encode: true }
+    ),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET checkout_session_id = $2,
+         subscription_id     = COALESCE($3, subscription_id),
+         status              = $4,
+         metadata            = metadata || $5,
+         updated_at          = now()
+     WHERE id = $1`,
+    [
+      pendingId,
+      session.id,
+      session.subscription ? String(session.subscription) : null,
+      session.status || "open",
+      { checkoutSession: session },
+    ]
+  );
+
+  return {
+    id: session.id,
+    url: session.url,
+    checkoutRequired: true,
+    provider: "stripe",
+    plan: dbPlan.slug,
+    planName: dbPlan.name,
+    interval: billingInterval,
+    trialDays: dbPlan.trial_days,
+    verificationAmount,
+    currency,
+    livemode: !!session.livemode,
+  };
+}
+
+async function bcryptHashForTrialSignup(password, existingHash = undefined) {
+  if (existingHash !== undefined) return existingHash;
+  const bcrypt = await import("bcryptjs");
+  return bcrypt.default.hash(validateSignupPassword(password), 10);
+}
+
+async function fetchCheckoutSessionForTrialSignup(sessionId) {
+  return stripeRequest(
+    "get",
+    `/v1/checkout/sessions/${sessionId}` +
+      `?expand[]=subscription.items.data.price` +
+      `&expand[]=subscription.latest_invoice.payment_intent`
+  );
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function getPendingTrialSignupById(id) {
+  const { rows } = await db.query(
+    `SELECT *
+     FROM trial_signup_checkout_sessions
+     WHERE id = $1
+     LIMIT 1`,
+    [id]
+  );
+  return rows[0] || null;
+}
+
+async function buildProvisionedTrialSignupResult(pending) {
+  if (!pending?.workspace_id || !pending?.owner_user_id) return null;
+  const user = await getUserById(pending.owner_user_id);
+  return {
+    workspaceId: pending.workspace_id,
+    user,
+    alreadyProvisioned: true,
+    refundId: pending.refund_id || null,
+    verificationAmount: pending.verification_amount,
+    currency: pending.currency,
+  };
+}
+
+async function refundTrialSignupVerification({ pending, session, subscription, workspaceId }) {
+  if (pending.refund_id) {
+    return { refundId: pending.refund_id, paymentIntentId: pending.payment_intent_id || null };
+  }
+
+  const paymentIntentId =
+    (session.payment_intent ? String(session.payment_intent) : null) ||
+    getPaymentIntentIdFromSubscription(subscription);
+
+  if (!paymentIntentId) {
+    await db.query(
+      `UPDATE trial_signup_checkout_sessions
+       SET status = 'provisioned_refund_pending',
+           metadata = metadata || $2,
+           updated_at = now()
+       WHERE id = $1`,
+      [pending.id, { refundWarning: "No PaymentIntent found for verification charge yet." }]
+    );
+    return { refundId: null, paymentIntentId: null };
+  }
+
+  const refund = await stripeRequest("post", "/v1/refunds", {
+    data: qs.stringify(
+      {
+        payment_intent: paymentIntentId,
+        amount: pending.verification_amount,
+        reason: "requested_by_customer",
+        "metadata[purpose]": "trial_signup_card_verification_refund",
+        "metadata[workspace_id]": workspaceId,
+        "metadata[pending_signup_id]": pending.id,
+        "metadata[checkout_session_id]": session.id,
+      },
+      { encode: true }
+    ),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+
+  return { refundId: refund.id, paymentIntentId };
+}
+
+export async function provisionTrialSignupCheckoutSession(sessionOrId) {
+  ensureStripeConfigured();
+
+  const session =
+    typeof sessionOrId === "string"
+      ? await fetchCheckoutSessionForTrialSignup(sessionOrId)
+      : sessionOrId;
+  if (!session?.id) {
+    throw Object.assign(new Error("Stripe Checkout session not found."), { statusCode: 404 });
+  }
+
+  const { rows } = await db.query(
+    `SELECT *
+     FROM trial_signup_checkout_sessions
+     WHERE provider = 'stripe' AND checkout_session_id = $1
+     LIMIT 1`,
+    [session.id]
+  );
+  let pending = rows[0] || null;
+  if (!pending) {
+    throw Object.assign(new Error("Signup checkout session was not found."), { statusCode: 404 });
+  }
+
+  const alreadyProvisioned = await buildProvisionedTrialSignupResult(pending);
+  if (alreadyProvisioned) return alreadyProvisioned;
+
+  if (session.status !== "complete") {
+    throw Object.assign(new Error("Signup checkout is not complete yet."), { statusCode: 409 });
+  }
+  if (session.payment_status && !["paid", "no_payment_required"].includes(session.payment_status)) {
+    throw Object.assign(new Error("Signup checkout payment has not completed yet."), { statusCode: 409 });
+  }
+
+  const subscription =
+    getExpandedSubscriptionFromSession(session) ||
+    (session.subscription
+      ? await getStripeSubscriptionWithItems(String(session.subscription))
+      : null);
+
+  const claim = await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = 'provisioning', updated_at = now()
+     WHERE id = $1
+       AND workspace_id IS NULL
+       AND owner_user_id IS NULL
+       AND status <> 'provisioning'
+     RETURNING *`,
+    [pending.id]
+  );
+
+  if (!claim.rows[0]) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await wait(500);
+      const latest = await getPendingTrialSignupById(pending.id);
+      const provisioned = await buildProvisionedTrialSignupResult(latest);
+      if (provisioned) return provisioned;
+    }
+    throw Object.assign(
+      new Error("Signup checkout is still being completed. Please try again in a few seconds."),
+      { statusCode: 409 }
+    );
+  }
+  pending = claim.rows[0];
+
+  const result = await createSelfServeTrialWorkspace({
+    workspaceName: pending.workspace_name,
+    ownerName: pending.owner_name,
+    ownerEmail: pending.owner_email,
+    ownerPasswordHash: pending.owner_password_hash || null,
+    ipHash: pending.consent_ip_hash || null,
+    avatarUrl: pending.avatar_url || null,
+    skipTrialIpCheck: true,
+  });
+
+  if (session.customer) {
+    await upsertPaymentCustomer({
+      workspaceId: result.workspace.id,
+      customerId: String(session.customer),
+      email: session.customer_details?.email || pending.owner_email,
+      currency: session.currency || pending.currency,
+      metadata: {
+        pending_signup_id: pending.id,
+        checkout_session_id: session.id,
+        auth_provider: pending.auth_provider,
+      },
+    });
+  }
+
+  let syncedSubscription = subscription;
+  if (subscription?.id) {
+    await stripeRequest("post", `/v1/subscriptions/${subscription.id}`, {
+      data: qs.stringify(
+        {
+          "metadata[workspace_id]": result.workspace.id,
+          "metadata[user_id]": result.user.id,
+          "metadata[pending_signup_id]": pending.id,
+          "metadata[billing_plan]": pending.billing_plan,
+          "metadata[billing_plan_id]": pending.billing_plan_id,
+          "metadata[billing_interval]": pending.billing_interval,
+          "metadata[seat_quantity]": 1,
+        },
+        { encode: true }
+      ),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+    syncedSubscription = await getStripeSubscriptionWithItems(subscription.id);
+    await upsertSubscriptionFromStripe(syncedSubscription, result.workspace.id);
+  }
+
+  await db.query(
+    `INSERT INTO payment_checkout_sessions (
+       workspace_id, user_id, provider, checkout_session_id, customer_id,
+       subscription_id, price_id, billing_plan, status, session_type,
+       seat_quantity, success_url, cancel_url, metadata, completed_at, created_at, updated_at
+     )
+     VALUES ($1,$2,'stripe',$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$12,now(),now(),now())
+     ON CONFLICT (provider, checkout_session_id)
+     DO UPDATE SET
+       workspace_id     = EXCLUDED.workspace_id,
+       user_id          = EXCLUDED.user_id,
+       customer_id      = EXCLUDED.customer_id,
+       subscription_id  = EXCLUDED.subscription_id,
+       price_id         = COALESCE(EXCLUDED.price_id, payment_checkout_sessions.price_id),
+       billing_plan     = EXCLUDED.billing_plan,
+       status           = EXCLUDED.status,
+       session_type     = EXCLUDED.session_type,
+       completed_at     = COALESCE(payment_checkout_sessions.completed_at, now()),
+       metadata         = payment_checkout_sessions.metadata || EXCLUDED.metadata,
+       updated_at       = now()`,
+    [
+      result.workspace.id,
+      result.user.id,
+      session.id,
+      session.customer ? String(session.customer) : null,
+      syncedSubscription?.id || (session.subscription ? String(session.subscription) : null),
+      getPrimarySubscriptionItem(syncedSubscription)?.price?.id || null,
+      pending.billing_plan,
+      session.status || "complete",
+      TRIAL_SIGNUP_SESSION_TYPE,
+      resolveTrialSignupSuccessUrl(),
+      resolveTrialSignupCancelUrl(),
+      session,
+    ]
+  );
+
+  let refundResult = {
+    refundId: null,
+    paymentIntentId:
+      (session.payment_intent ? String(session.payment_intent) : null) ||
+      getPaymentIntentIdFromSubscription(syncedSubscription),
+  };
+  let completionStatus = "provisioned_refund_pending";
+  let completionMetadata = { provisionedFromCheckout: true };
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = 'provisioned_refund_pending',
+         workspace_id = $2,
+         owner_user_id = $3,
+         owner_password_hash = NULL,
+         subscription_id = COALESCE($4, subscription_id),
+         payment_intent_id = COALESCE($5, payment_intent_id),
+         metadata = metadata || $6,
+         completed_at = COALESCE(completed_at, now()),
+         updated_at = now()
+     WHERE id = $1`,
+    [
+      pending.id,
+      result.workspace.id,
+      result.user.id,
+      syncedSubscription?.id || (session.subscription ? String(session.subscription) : null),
+      refundResult.paymentIntentId,
+      completionMetadata,
+    ]
+  );
+
+  try {
+    refundResult = await refundTrialSignupVerification({
+      pending,
+      session,
+      subscription: syncedSubscription,
+      workspaceId: result.workspace.id,
+    });
+    completionStatus = refundResult.refundId ? "provisioned" : "provisioned_refund_pending";
+  } catch (refundErr) {
+    completionStatus = "provisioned_refund_failed";
+    completionMetadata = {
+      ...completionMetadata,
+      refundError: refundErr.message,
+    };
+    console.error("[billing] trial signup verification refund failed:", refundErr.message);
+  }
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = $8,
+         workspace_id = $2,
+         owner_user_id = $3,
+         owner_password_hash = NULL,
+         subscription_id = COALESCE($4, subscription_id),
+         payment_intent_id = COALESCE($5, payment_intent_id),
+         refund_id = COALESCE($6, refund_id),
+         metadata = metadata || $7,
+         completed_at = COALESCE(completed_at, now()),
+         updated_at = now()
+     WHERE id = $1`,
+    [
+      pending.id,
+      result.workspace.id,
+      result.user.id,
+      syncedSubscription?.id || (session.subscription ? String(session.subscription) : null),
+      refundResult.paymentIntentId,
+      refundResult.refundId,
+      completionMetadata,
+      completionStatus,
+    ]
+  );
+
+  return {
+    workspaceId: result.workspace.id,
+    workspace: result.workspace,
+    user: result.user,
+    token: result.token,
+    refundId: refundResult.refundId,
+    verificationAmount: pending.verification_amount,
+    currency: pending.currency,
+  };
+}
+
+export async function completeTrialSignupCheckoutSession(sessionId) {
+  const provisioned = await provisionTrialSignupCheckoutSession(sessionId);
+  const user = provisioned.user || (await getUserById(provisioned.userId));
+  const token = provisioned.token || generateToken(user);
+  return {
+    token,
+    user,
+    workspace: provisioned.workspace || { id: provisioned.workspaceId },
+    refundId: provisioned.refundId,
+    verificationAmount: provisioned.verificationAmount,
+    currency: provisioned.currency,
   };
 }
 
@@ -1324,6 +2013,11 @@ async function handleCheckoutSessionCompleted(event) {
 
   await updateCheckoutSessionRecord(session);
 
+  if (sessionType === TRIAL_SIGNUP_SESSION_TYPE) {
+    await provisionTrialSignupCheckoutSession(session);
+    return;
+  }
+
   if (workspaceId && session.customer) {
     await upsertPaymentCustomer({
       workspaceId,
@@ -1378,6 +2072,17 @@ async function handleCheckoutSessionExpired(event) {
   const session = event.data?.object;
   if (!session?.id) return;
   await updateCheckoutSessionRecord(session, "expired");
+  if ((session.metadata?.session_type || "") === TRIAL_SIGNUP_SESSION_TYPE) {
+    await db.query(
+      `UPDATE trial_signup_checkout_sessions
+       SET status = 'expired',
+           owner_password_hash = NULL,
+           updated_at = now()
+       WHERE provider = 'stripe' AND checkout_session_id = $1`,
+      [session.id]
+    );
+    return;
+  }
   await db.query(
     `UPDATE user_activation_payments
      SET status = 'expired', updated_at = now()

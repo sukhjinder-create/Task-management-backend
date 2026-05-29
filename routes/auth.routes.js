@@ -7,6 +7,7 @@ import {
   loginWithGoogle,
   signupWorkspaceWithEmail,
   signupWorkspaceWithGoogle,
+  fetchGoogleProfileFromCode,
   loginWithMfa,
   getCurrentUser,
   requestPasswordReset,
@@ -16,6 +17,10 @@ import {
   revokeSession,
   changePassword,
 } from "../services/auth.service.js";
+import {
+  completeTrialSignupCheckoutSession,
+  createTrialSignupCheckoutSession,
+} from "../services/payments.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { logAudit } from "../services/audit.service.js";
 
@@ -76,9 +81,49 @@ function mapSignupStatus(message = "") {
   return 400;
 }
 
+function trialSignupRequiresStripe() {
+  return String(process.env.TRIAL_SIGNUP_REQUIRE_STRIPE || "true").toLowerCase() !== "false";
+}
+
+function isConsentAccepted(value) {
+  return value === true || value === "true" || value === "1" || value === 1;
+}
+
 router.post("/signup/workspace", async (req, res) => {
   try {
     const { workspaceName, name, email, password } = req.body || {};
+
+    if (trialSignupRequiresStripe()) {
+      const data = await createTrialSignupCheckoutSession({
+        workspaceName,
+        name,
+        email,
+        password,
+        planId: req.body?.planId,
+        plan: req.body?.plan,
+        interval: req.body?.interval,
+        successUrl: req.body?.successUrl,
+        cancelUrl: req.body?.cancelUrl,
+        ipHash: getRequestIpHash(req),
+        userAgent: req.headers["user-agent"],
+        consentAccepted:
+          isConsentAccepted(req.body?.consentAccepted) ||
+          isConsentAccepted(req.body?.trialBillingConsent),
+      });
+
+      logAudit({
+        workspaceId: null,
+        userId: null,
+        action: "workspace.signup.checkout.created",
+        entityType: "workspace",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+        metadata: { email, provider: "stripe", checkoutSessionId: data.id },
+      });
+
+      return res.status(201).json(data);
+    }
+
     const data = await signupWorkspaceWithEmail({
       workspaceName,
       name,
@@ -117,7 +162,79 @@ router.post("/signup/workspace", async (req, res) => {
       metadata: { email: req.body?.email, reason: err.message },
     });
     console.error("Signup error:", err);
-    return res.status(mapSignupStatus(err.message)).json({ error: err.message });
+    return res.status(err.statusCode || mapSignupStatus(err.message)).json({
+      error: err.message,
+      checkoutSessionId: err.checkoutSessionId,
+    });
+  }
+});
+
+router.get("/signup/workspace/complete", async (req, res) => {
+  try {
+    const { session_id: sessionId } = req.query;
+    if (!sessionId) return res.status(400).json({ error: "session_id is required" });
+
+    const data = await completeTrialSignupCheckoutSession(String(sessionId));
+    data.refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId || data.user.workspace_id,
+      req.ip,
+      req.headers["user-agent"]
+    );
+
+    logAudit({
+      workspaceId: data.user.workspaceId || data.user.workspace_id,
+      userId: data.user.id,
+      action: "workspace.signup",
+      entityType: "workspace",
+      entityId: data.workspace?.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "stripe_checkout", refundId: data.refundId || null },
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Trial signup completion error:", err);
+    return res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+router.get("/signup/workspace/complete/redirect", async (req, res) => {
+  try {
+    const { session_id: sessionId } = req.query;
+    if (!sessionId) {
+      return res.redirect(buildFrontendRedirect("/signup", { error: "missing_checkout_session" }));
+    }
+
+    const data = await completeTrialSignupCheckoutSession(String(sessionId));
+    const refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId || data.user.workspace_id,
+      req.ip,
+      req.headers["user-agent"]
+    );
+
+    logAudit({
+      workspaceId: data.user.workspaceId || data.user.workspace_id,
+      userId: data.user.id,
+      action: "workspace.signup",
+      entityType: "workspace",
+      entityId: data.workspace?.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "stripe_checkout", refundId: data.refundId || null },
+    });
+
+    return res.redirect(
+      buildFrontendRedirect("/auth/callback", {
+        token: data.token,
+        refreshToken,
+      })
+    );
+  } catch (err) {
+    console.error("Trial signup redirect completion error:", err);
+    return res.redirect(buildFrontendRedirect("/signup", { error: err.message }));
   }
 });
 
@@ -332,10 +449,18 @@ router.get("/google", (req, res) => {
   const mode = String(req.query.mode || "").trim().toLowerCase();
   const isSignup = ["signup", "register", "trial"].includes(mode);
   const workspaceName = String(req.query.workspaceName || "").trim();
+  const trialBillingConsent =
+    isConsentAccepted(req.query.trialBillingConsent) ||
+    isConsentAccepted(req.query.consentAccepted);
 
   if (isSignup && !workspaceName) {
     return res.redirect(
       buildFrontendRedirect("/signup", { error: "workspace_required" })
+    );
+  }
+  if (isSignup && trialSignupRequiresStripe() && !trialBillingConsent) {
+    return res.redirect(
+      buildFrontendRedirect("/signup", { error: "billing_consent_required" })
     );
   }
 
@@ -352,6 +477,7 @@ router.get("/google", (req, res) => {
     params.set("state", signGoogleState({
       mode: "signup",
       workspaceName,
+      trialBillingConsent,
     }));
   }
 
@@ -379,6 +505,41 @@ router.get("/google/callback", async (req, res) => {
   }
 
   try {
+    if (isSignup && trialSignupRequiresStripe()) {
+      const profile = await fetchGoogleProfileFromCode(code);
+      if (!profile.emailVerified) {
+        throw new Error("Your Google account email is not verified.");
+      }
+
+      const checkout = await createTrialSignupCheckoutSession({
+        workspaceName: googleState.workspaceName,
+        name: profile.name,
+        email: profile.email,
+        authProvider: "google",
+        avatarUrl: profile.picture,
+        ipHash: getRequestIpHash(req),
+        userAgent: req.headers["user-agent"],
+        consentAccepted: googleState.trialBillingConsent === true,
+      });
+
+      logAudit({
+        workspaceId: null,
+        userId: null,
+        action: "workspace.signup.checkout.created",
+        entityType: "workspace",
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+        metadata: {
+          email: profile.email,
+          method: "google",
+          provider: "stripe",
+          checkoutSessionId: checkout.id,
+        },
+      });
+
+      return res.redirect(checkout.url);
+    }
+
     const data = isSignup
       ? await signupWorkspaceWithGoogle(code, {
           workspaceName: googleState.workspaceName,

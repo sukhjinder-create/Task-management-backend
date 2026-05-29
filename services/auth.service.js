@@ -400,7 +400,7 @@ export async function changePassword(userId, currentPassword, newPassword) {
   await revokeAllUserSessions(userId);
 }
 
-function cleanRequiredString(value, fieldName, { min = 1, max = 255 } = {}) {
+export function cleanRequiredString(value, fieldName, { min = 1, max = 255 } = {}) {
   const cleaned = String(value || "").trim();
   if (cleaned.length < min) {
     throw new Error(`${fieldName} is required`);
@@ -411,7 +411,7 @@ function cleanRequiredString(value, fieldName, { min = 1, max = 255 } = {}) {
   return cleaned;
 }
 
-function normalizeSignupEmail(email) {
+export function normalizeSignupEmail(email) {
   const cleaned = cleanRequiredString(email, "Email", { min: 3, max: 255 }).toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) {
     throw new Error("Enter a valid email address");
@@ -419,7 +419,7 @@ function normalizeSignupEmail(email) {
   return cleaned;
 }
 
-function validateSignupPassword(password) {
+export function validateSignupPassword(password) {
   const raw = String(password || "");
   if (raw.length < 8) {
     throw new Error("Password must be at least 8 characters");
@@ -439,7 +439,7 @@ function getGoogleOAuthConfig() {
   return { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL };
 }
 
-async function fetchGoogleProfileFromCode(code) {
+export async function fetchGoogleProfileFromCode(code) {
   if (!code) throw new Error("Google authorization code is required");
 
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL } = getGoogleOAuthConfig();
@@ -472,13 +472,14 @@ async function fetchGoogleProfileFromCode(code) {
   };
 }
 
-async function createSelfServeTrialWorkspace({
+export async function createSelfServeTrialWorkspace({
   workspaceName,
   ownerName,
   ownerEmail,
   ownerPasswordHash = null,
   ipHash = null,
   avatarUrl = null,
+  skipTrialIpCheck = false,
 }) {
   const name = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
   const email = normalizeSignupEmail(ownerEmail);
@@ -496,6 +497,7 @@ async function createSelfServeTrialWorkspace({
     ownerPasswordHash,
     ownerName: username,
     ipHash,
+    skipTrialIpCheck,
   });
 
   if (avatarUrl) {

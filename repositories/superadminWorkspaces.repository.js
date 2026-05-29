@@ -19,6 +19,7 @@ export async function createWorkspace({
   ownerPasswordHash,
   ownerName = null,
   ipHash = null,
+  skipTrialIpCheck = false,
 }) {
   const client = await pool.connect();
 
@@ -40,7 +41,7 @@ export async function createWorkspace({
     // Same company/domain is allowed; multiple teams at one company can trial.
     if (isTrial) {
       // ── Anti-abuse: each IP address gets ONE free trial ──────────────────
-      if (ipHash) {
+      if (ipHash && !skipTrialIpCheck) {
         const ipUsed = await client.query(
           `SELECT id FROM trial_fingerprints WHERE ip_hash = $1 LIMIT 1`,
           [ipHash]
