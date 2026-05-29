@@ -19,6 +19,7 @@
     "migrate:workspace-search-click-history": "node run-workspace-search-click-history-migration.js",
     "migrate:backup-logs": "node run-backup-logs-migration.js",
     "migrate:workspace-recovery-jobs": "node run-workspace-recovery-jobs-migration.js",
+    "migrate:username-scope": "node run-username-scope-migration.js",
     "recover:workspace:dry": "node run-workspace-recovery.js --dry-run",
     "recover:workspace": "node run-workspace-recovery.js",
     "migrate:supabase": "node migrate-to-supabase.js"

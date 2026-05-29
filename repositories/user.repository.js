@@ -123,7 +123,11 @@ export async function updateAvatarUrl(id, avatarUrl) {
    GET USER BY USERNAME (for @mentions)
    🔐 Workspace-aware variant added
 ===================================================== */
-export async function getUserByUsername(username) {
+export async function getUserByUsername(username, workspaceId = null) {
+  const params = [username];
+  const workspaceFilter = workspaceId ? "AND workspace_id = $2" : "";
+  if (workspaceId) params.push(workspaceId);
+
   const q = `
     SELECT
       id,
@@ -135,8 +139,11 @@ export async function getUserByUsername(username) {
       created_at
     FROM users
     WHERE username = $1
+      ${workspaceFilter}
+      AND (is_system IS NULL OR is_system = false)
+    LIMIT 1
   `;
-  const { rows } = await pool.query(q, [username]);
+  const { rows } = await pool.query(q, params);
   return rows[0] || null;
 }
 

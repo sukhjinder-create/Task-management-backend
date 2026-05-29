@@ -130,7 +130,7 @@ export async function createComment({ task_id, comment_text, user, workspaceId }
 
     for (const username of mentionedUsernames) {
       try {
-        const mentionedUser = await getUserByUsername(username);
+        const mentionedUser = await getUserByUsername(username, workspaceId);
         if (!mentionedUser) continue;
         if (alreadyNotified.has(mentionedUser.id)) continue;
         await notifyUser({
