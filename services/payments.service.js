@@ -174,20 +174,16 @@ function assertTrialSignupConsent(consentAccepted) {
   }
 }
 
-async function findActivePendingTrialSignup({ email, ipHash }) {
-  const values = [email];
-  const ipClause = ipHash ? "OR consent_ip_hash = $2" : "";
-  if (ipHash) values.push(ipHash);
-
+async function findActivePendingTrialSignup({ email }) {
   const { rows } = await db.query(
     `SELECT id, checkout_session_id, status, owner_email, created_at
      FROM trial_signup_checkout_sessions
      WHERE created_at > now() - interval '24 hours'
        AND status IN ('created', 'open', 'complete')
-       AND (lower(owner_email) = lower($1) ${ipClause})
+       AND lower(owner_email) = lower($1)
      ORDER BY created_at DESC
      LIMIT 1`,
-    values
+    [email]
   );
   return rows[0] || null;
 }
@@ -875,20 +871,7 @@ export async function createTrialSignupCheckoutSession({
     throw Object.assign(new Error("An account already exists with this email. Please sign in."), { statusCode: 409 });
   }
 
-  if (ipHash) {
-    const usedIp = await db.query(
-      `SELECT id FROM trial_fingerprints WHERE ip_hash = $1 LIMIT 1`,
-      [ipHash]
-    );
-    if (usedIp.rows.length > 0) {
-      throw Object.assign(
-        new Error("A free trial has already been created from this IP address. Please select a paid plan."),
-        { statusCode: 409 }
-      );
-    }
-  }
-
-  const activePending = await findActivePendingTrialSignup({ email: normalizedEmail, ipHash });
+  const activePending = await findActivePendingTrialSignup({ email: normalizedEmail });
   if (activePending) {
     throw Object.assign(
       new Error("A trial signup checkout is already pending. Please finish or wait for it to expire."),
