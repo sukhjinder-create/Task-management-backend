@@ -1963,7 +1963,8 @@ export async function createRazorpayTrialSignupCheckoutSession({
       {
         planName: dbPlan.name,
         trialDays: dbPlan.trial_days,
-        razorpayPlanCreated: razorpayPlan.created,
+        razorpayPlanCreated: razorpayPlan?.created || false,
+        razorpayOrderFallback: useOrderFallback,
       },
     ]
   );
