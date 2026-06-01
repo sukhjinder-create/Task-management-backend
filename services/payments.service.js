@@ -1669,6 +1669,33 @@ function verifyRazorpaySubscriptionCheckoutSignature({ subscriptionId, paymentId
   }
 }
 
+function verifyRazorpayOrderCheckoutSignature({ orderId, paymentId, signature }) {
+  ensureRazorpayConfigured();
+  if (!orderId || !paymentId || !signature) {
+    throw Object.assign(new Error("Missing Razorpay payment verification details."), { statusCode: 400 });
+  }
+
+  const expected = crypto
+    .createHmac("sha256", getRazorpayKeySecret())
+    .update(`${orderId}|${paymentId}`)
+    .digest("hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+  const actualBuffer = Buffer.from(String(signature), "hex");
+  if (
+    expectedBuffer.length !== actualBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    throw Object.assign(new Error("Razorpay payment signature verification failed."), { statusCode: 400 });
+  }
+}
+
+function shouldUseRazorpayOrderFallback(error) {
+  return (
+    isRazorpayLiveMode() === false &&
+    (error?.statusCode === 401 || /unauthorized|not enabled|not activated/i.test(error?.message || ""))
+  );
+}
+
 function getRazorpaySubscriptionTotalCount(interval) {
   const envKey =
     normalizeBillingInterval(interval) === "yearly"
@@ -1687,6 +1714,18 @@ async function getPendingRazorpayTrialSignupBySubscription(subscriptionId) {
        AND subscription_id = $1
      LIMIT 1`,
     [subscriptionId]
+  );
+  return rows[0] || null;
+}
+
+async function getPendingRazorpayTrialSignupByOrder(orderId) {
+  const { rows } = await db.query(
+    `SELECT *
+     FROM trial_signup_checkout_sessions
+     WHERE provider = 'razorpay'
+       AND provider_order_id = $1
+     LIMIT 1`,
+    [orderId]
   );
   return rows[0] || null;
 }
@@ -1882,8 +1921,15 @@ export async function createRazorpayTrialSignupCheckoutSession({
 
   const billingInterval = normalizeBillingInterval(interval);
   const currency = getTrialSignupCurrency(dbPlan, "razorpay");
-  const razorpayPlan = await ensurePlanRazorpayPlanForCurrency(dbPlan, currency, billingInterval);
   const verificationAmount = getTrialSignupVerificationAmount(currency, "razorpay");
+  let razorpayPlan = null;
+  let useOrderFallback = false;
+  try {
+    razorpayPlan = await ensurePlanRazorpayPlanForCurrency(dbPlan, currency, billingInterval);
+  } catch (planErr) {
+    if (!shouldUseRazorpayOrderFallback(planErr)) throw planErr;
+    useOrderFallback = true;
+  }
 
   const pendingInsert = await db.query(
     `INSERT INTO trial_signup_checkout_sessions (
@@ -1911,7 +1957,7 @@ export async function createRazorpayTrialSignupCheckoutSession({
       billingInterval,
       verificationAmount,
       currency,
-      razorpayPlan.planId,
+      razorpayPlan?.planId || null,
       ipHash,
       userAgent,
       {
@@ -1923,6 +1969,67 @@ export async function createRazorpayTrialSignupCheckoutSession({
   );
 
   const pendingId = pendingInsert.rows[0].id;
+  if (useOrderFallback) {
+    const order = await razorpayRequest("post", "/orders", {
+      data: {
+        amount: verificationAmount,
+        currency: String(currency).toUpperCase(),
+        receipt: `trial_${String(pendingId).replace(/-/g, "").slice(0, 24)}`,
+        notes: {
+          pending_signup_id: pendingId,
+          billing_plan: dbPlan.slug,
+          billing_plan_id: dbPlan.id,
+          billing_interval: billingInterval,
+          owner_email: normalizedEmail,
+          workspace_name: cleanedWorkspaceName,
+          source: "asystence_trial_signup_order_fallback",
+        },
+      },
+    });
+
+    await db.query(
+      `UPDATE trial_signup_checkout_sessions
+       SET checkout_session_id = $2,
+           provider_order_id   = $2,
+           status              = $3,
+           metadata            = metadata || $4,
+           updated_at          = now()
+       WHERE id = $1`,
+      [
+        pendingId,
+        order.id,
+        order.status || "created",
+        { razorpayOrder: order, orderFallbackReason: "subscriptions_api_unavailable_in_test_mode" },
+      ]
+    );
+
+    return {
+      id: order.id,
+      checkoutSessionId: order.id,
+      orderId: order.id,
+      checkoutMode: "order",
+      checkoutRequired: true,
+      provider: "razorpay",
+      keyId: getRazorpayKeyId(),
+      plan: dbPlan.slug,
+      planName: dbPlan.name,
+      interval: billingInterval,
+      trialDays: dbPlan.trial_days,
+      verificationAmount,
+      amount: order.amount,
+      currency,
+      livemode: isRazorpayLiveMode(),
+      prefill: {
+        name: cleanedName,
+        email: normalizedEmail,
+      },
+      notes: {
+        pending_signup_id: pendingId,
+      },
+      testOnlyOrderFallback: true,
+    };
+  }
+
   const nowSeconds = Math.floor(Date.now() / 1000);
   const startAt = nowSeconds + Math.max(1, Number(dbPlan.trial_days) || 1) * 86400;
   const expireBy = nowSeconds + 24 * 60 * 60;
@@ -2252,18 +2359,225 @@ export async function provisionRazorpayTrialSignupCheckout({
   };
 }
 
-export async function completeRazorpayTrialSignupCheckoutSession({
-  subscriptionId,
+export async function provisionRazorpayTrialSignupOrderCheckout({
+  orderId,
   paymentId,
   signature,
   pendingSignupId = null,
 }) {
-  const provisioned = await provisionRazorpayTrialSignupCheckout({
-    subscriptionId,
-    paymentId,
-    signature,
-    pendingSignupId,
+  ensureRazorpayConfigured();
+  if (!orderId || !paymentId) {
+    throw Object.assign(new Error("orderId and paymentId are required."), { statusCode: 400 });
+  }
+
+  let pending = await getPendingRazorpayTrialSignupByOrder(orderId);
+  if (!pending) {
+    throw Object.assign(new Error("Razorpay signup order was not found."), { statusCode: 404 });
+  }
+  if (pendingSignupId && String(pending.id) !== String(pendingSignupId)) {
+    throw Object.assign(new Error("Razorpay signup order does not match this signup attempt."), {
+      statusCode: 400,
+    });
+  }
+
+  const alreadyProvisioned = await buildProvisionedTrialSignupResult(pending);
+  if (alreadyProvisioned) return alreadyProvisioned;
+
+  verifyRazorpayOrderCheckoutSignature({ orderId, paymentId, signature });
+  const payment = await fetchRazorpayPayment(paymentId);
+
+  if (payment.order_id && payment.order_id !== orderId) {
+    throw Object.assign(new Error("Razorpay order mismatch."), { statusCode: 400 });
+  }
+  if (payment.status !== "captured") {
+    throw Object.assign(new Error("Razorpay verification payment has not been captured yet."), {
+      statusCode: 409,
+    });
+  }
+  if (payment.currency && String(payment.currency).toLowerCase() !== String(pending.currency).toLowerCase()) {
+    throw Object.assign(new Error("Razorpay verification payment currency mismatch."), { statusCode: 400 });
+  }
+  if (Number(payment.amount) < Number(pending.verification_amount)) {
+    throw Object.assign(new Error("Razorpay verification payment amount mismatch."), { statusCode: 400 });
+  }
+
+  const claim = await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = 'provisioning',
+         provider_payment_id = COALESCE($2, provider_payment_id),
+         payment_intent_id = COALESCE($2, payment_intent_id),
+         provider_signature = COALESCE($3, provider_signature),
+         customer_id = COALESCE($4, customer_id),
+         metadata = metadata || $5,
+         updated_at = now()
+     WHERE id = $1
+       AND workspace_id IS NULL
+       AND owner_user_id IS NULL
+       AND status <> 'provisioning'
+     RETURNING *`,
+    [
+      pending.id,
+      paymentId,
+      signature || null,
+      payment.customer_id || null,
+      { razorpayPayment: payment, testOnlyOrderFallback: true },
+    ]
+  );
+
+  if (!claim.rows[0]) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await wait(500);
+      const latest = await getPendingTrialSignupById(pending.id);
+      const provisioned = await buildProvisionedTrialSignupResult(latest);
+      if (provisioned) return provisioned;
+    }
+    throw Object.assign(
+      new Error("Signup checkout is still being completed. Please try again in a few seconds."),
+      { statusCode: 409 }
+    );
+  }
+  pending = claim.rows[0];
+
+  const result = await createSelfServeTrialWorkspace({
+    workspaceName: pending.workspace_name,
+    ownerName: pending.owner_name,
+    ownerEmail: pending.owner_email,
+    ownerPasswordHash: pending.owner_password_hash || null,
+    ipHash: pending.consent_ip_hash || null,
+    avatarUrl: pending.avatar_url || null,
+    skipTrialIpCheck: true,
   });
+
+  await db.query(
+    `INSERT INTO payment_checkout_sessions (
+       workspace_id, user_id, provider, checkout_session_id, customer_id,
+       subscription_id, price_id, billing_plan, status, session_type,
+       seat_quantity, success_url, cancel_url, metadata, completed_at, created_at, updated_at
+     )
+     VALUES ($1,$2,'razorpay',$3,$4,NULL,NULL,$5,$6,$7,1,NULL,NULL,$8,now(),now(),now())
+     ON CONFLICT (provider, checkout_session_id)
+     DO UPDATE SET
+       workspace_id     = EXCLUDED.workspace_id,
+       user_id          = EXCLUDED.user_id,
+       customer_id      = COALESCE(EXCLUDED.customer_id, payment_checkout_sessions.customer_id),
+       billing_plan     = EXCLUDED.billing_plan,
+       status           = EXCLUDED.status,
+       session_type     = EXCLUDED.session_type,
+       completed_at     = COALESCE(payment_checkout_sessions.completed_at, now()),
+       metadata         = payment_checkout_sessions.metadata || EXCLUDED.metadata,
+       updated_at       = now()`,
+    [
+      result.workspace.id,
+      result.user.id,
+      orderId,
+      payment.customer_id ? String(payment.customer_id) : null,
+      pending.billing_plan,
+      payment.status || "captured",
+      TRIAL_SIGNUP_SESSION_TYPE,
+      {
+        razorpayPayment: payment,
+        testOnlyOrderFallback: true,
+      },
+    ]
+  );
+
+  let refundResult = { refundId: null, paymentId };
+  let completionStatus = "provisioned_refund_pending";
+  let completionMetadata = { provisionedFromRazorpayOrderFallback: true };
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = 'provisioned_refund_pending',
+         workspace_id = $2,
+         owner_user_id = $3,
+         owner_password_hash = NULL,
+         provider_payment_id = COALESCE($4, provider_payment_id),
+         payment_intent_id = COALESCE($4, payment_intent_id),
+         metadata = metadata || $5,
+         completed_at = COALESCE(completed_at, now()),
+         updated_at = now()
+     WHERE id = $1`,
+    [
+      pending.id,
+      result.workspace.id,
+      result.user.id,
+      paymentId,
+      completionMetadata,
+    ]
+  );
+
+  try {
+    refundResult = await refundRazorpayTrialSignupVerification({
+      pending: { ...pending, provider_payment_id: paymentId },
+      paymentId,
+      workspaceId: result.workspace.id,
+    });
+    completionStatus = refundResult.refundId ? "provisioned" : "provisioned_refund_pending";
+  } catch (refundErr) {
+    completionStatus = "provisioned_refund_failed";
+    completionMetadata = {
+      ...completionMetadata,
+      refundError: refundErr.message,
+    };
+    console.error("[billing] Razorpay order fallback verification refund failed:", refundErr.message);
+  }
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = $7,
+         workspace_id = $2,
+         owner_user_id = $3,
+         owner_password_hash = NULL,
+         provider_payment_id = COALESCE($4, provider_payment_id),
+         payment_intent_id = COALESCE($4, payment_intent_id),
+         provider_refund_id = COALESCE($5, provider_refund_id),
+         refund_id = COALESCE($5, refund_id),
+         metadata = metadata || $6,
+         completed_at = COALESCE(completed_at, now()),
+         updated_at = now()
+     WHERE id = $1`,
+    [
+      pending.id,
+      result.workspace.id,
+      result.user.id,
+      paymentId,
+      refundResult.refundId,
+      completionMetadata,
+      completionStatus,
+    ]
+  );
+
+  return {
+    workspaceId: result.workspace.id,
+    workspace: result.workspace,
+    user: result.user,
+    token: result.token,
+    refundId: refundResult.refundId,
+    verificationAmount: pending.verification_amount,
+    currency: pending.currency,
+  };
+}
+
+export async function completeRazorpayTrialSignupCheckoutSession({
+  subscriptionId,
+  orderId,
+  paymentId,
+  signature,
+  pendingSignupId = null,
+}) {
+  const provisioned = orderId
+    ? await provisionRazorpayTrialSignupOrderCheckout({
+        orderId,
+        paymentId,
+        signature,
+        pendingSignupId,
+      })
+    : await provisionRazorpayTrialSignupCheckout({
+        subscriptionId,
+        paymentId,
+        signature,
+        pendingSignupId,
+      });
   const user = provisioned.user || (await getUserById(provisioned.userId));
   const token = provisioned.token || generateToken(user);
   return {

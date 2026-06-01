@@ -223,16 +223,18 @@ router.post("/signup/workspace/complete/razorpay", async (req, res) => {
     const {
       razorpay_payment_id: razorpayPaymentId,
       razorpay_subscription_id: razorpaySubscriptionId,
+      razorpay_order_id: razorpayOrderId,
       razorpay_signature: razorpaySignature,
       pendingSignupId,
     } = req.body || {};
 
-    if (!razorpayPaymentId || !razorpaySubscriptionId || !razorpaySignature) {
+    if (!razorpayPaymentId || (!razorpaySubscriptionId && !razorpayOrderId) || !razorpaySignature) {
       return res.status(400).json({ error: "Razorpay payment verification details are required" });
     }
 
     const data = await completeRazorpayTrialSignupCheckoutSession({
-      subscriptionId: String(razorpaySubscriptionId),
+      subscriptionId: razorpaySubscriptionId ? String(razorpaySubscriptionId) : null,
+      orderId: razorpayOrderId ? String(razorpayOrderId) : null,
       paymentId: String(razorpayPaymentId),
       signature: String(razorpaySignature),
       pendingSignupId: pendingSignupId ? String(pendingSignupId) : null,
