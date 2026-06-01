@@ -18,7 +18,9 @@ import {
   changePassword,
 } from "../services/auth.service.js";
 import {
+  completeRazorpayTrialSignupCheckoutSession,
   completeTrialSignupCheckoutSession,
+  createRazorpayTrialSignupCheckoutSession,
   createTrialSignupCheckoutSession,
 } from "../services/payments.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
@@ -81,8 +83,19 @@ function mapSignupStatus(message = "") {
   return 400;
 }
 
-function trialSignupRequiresStripe() {
-  return String(process.env.TRIAL_SIGNUP_REQUIRE_STRIPE || "true").toLowerCase() !== "false";
+function trialSignupRequiresPayment() {
+  const explicit = process.env.TRIAL_SIGNUP_REQUIRE_PAYMENT ?? process.env.TRIAL_SIGNUP_REQUIRE_STRIPE;
+  return String(explicit || "true").toLowerCase() !== "false";
+}
+
+function getTrialSignupPaymentProvider() {
+  const provider = String(
+    process.env.TRIAL_SIGNUP_PAYMENT_PROVIDER ||
+      process.env.PAYMENTS_PROVIDER ||
+      "stripe"
+  ).toLowerCase();
+  const razorpayConfigured = !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+  return provider === "razorpay" && razorpayConfigured ? "razorpay" : "stripe";
 }
 
 function isConsentAccepted(value) {
@@ -93,8 +106,13 @@ router.post("/signup/workspace", async (req, res) => {
   try {
     const { workspaceName, name, email, password } = req.body || {};
 
-    if (trialSignupRequiresStripe()) {
-      const data = await createTrialSignupCheckoutSession({
+    if (trialSignupRequiresPayment()) {
+      const paymentProvider = getTrialSignupPaymentProvider();
+      const createCheckout =
+        paymentProvider === "razorpay"
+          ? createRazorpayTrialSignupCheckoutSession
+          : createTrialSignupCheckoutSession;
+      const data = await createCheckout({
         workspaceName,
         name,
         email,
@@ -118,7 +136,7 @@ router.post("/signup/workspace", async (req, res) => {
         entityType: "workspace",
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-        metadata: { email, provider: "stripe", checkoutSessionId: data.id },
+        metadata: { email, provider: data.provider || paymentProvider, checkoutSessionId: data.id },
       });
 
       return res.status(201).json(data);
@@ -196,6 +214,50 @@ router.get("/signup/workspace/complete", async (req, res) => {
     return res.json(data);
   } catch (err) {
     console.error("Trial signup completion error:", err);
+    return res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+router.post("/signup/workspace/complete/razorpay", async (req, res) => {
+  try {
+    const {
+      razorpay_payment_id: razorpayPaymentId,
+      razorpay_subscription_id: razorpaySubscriptionId,
+      razorpay_signature: razorpaySignature,
+      pendingSignupId,
+    } = req.body || {};
+
+    if (!razorpayPaymentId || !razorpaySubscriptionId || !razorpaySignature) {
+      return res.status(400).json({ error: "Razorpay payment verification details are required" });
+    }
+
+    const data = await completeRazorpayTrialSignupCheckoutSession({
+      subscriptionId: String(razorpaySubscriptionId),
+      paymentId: String(razorpayPaymentId),
+      signature: String(razorpaySignature),
+      pendingSignupId: pendingSignupId ? String(pendingSignupId) : null,
+    });
+    data.refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId || data.user.workspace_id,
+      req.ip,
+      req.headers["user-agent"]
+    );
+
+    logAudit({
+      workspaceId: data.user.workspaceId || data.user.workspace_id,
+      userId: data.user.id,
+      action: "workspace.signup",
+      entityType: "workspace",
+      entityId: data.workspace?.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "razorpay_checkout", refundId: data.refundId || null },
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Razorpay trial signup completion error:", err);
     return res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
@@ -458,7 +520,7 @@ router.get("/google", (req, res) => {
       buildFrontendRedirect("/signup", { error: "workspace_required" })
     );
   }
-  if (isSignup && trialSignupRequiresStripe() && !trialBillingConsent) {
+  if (isSignup && trialSignupRequiresPayment() && !trialBillingConsent) {
     return res.redirect(
       buildFrontendRedirect("/signup", { error: "billing_consent_required" })
     );
@@ -505,13 +567,18 @@ router.get("/google/callback", async (req, res) => {
   }
 
   try {
-    if (isSignup && trialSignupRequiresStripe()) {
+    if (isSignup && trialSignupRequiresPayment()) {
       const profile = await fetchGoogleProfileFromCode(code);
       if (!profile.emailVerified) {
         throw new Error("Your Google account email is not verified.");
       }
 
-      const checkout = await createTrialSignupCheckoutSession({
+      const paymentProvider = getTrialSignupPaymentProvider();
+      const createCheckout =
+        paymentProvider === "razorpay"
+          ? createRazorpayTrialSignupCheckoutSession
+          : createTrialSignupCheckoutSession;
+      const checkout = await createCheckout({
         workspaceName: googleState.workspaceName,
         name: profile.name,
         email: profile.email,
@@ -532,12 +599,19 @@ router.get("/google/callback", async (req, res) => {
         metadata: {
           email: profile.email,
           method: "google",
-          provider: "stripe",
+          provider: checkout.provider || paymentProvider,
           checkoutSessionId: checkout.id,
         },
       });
 
-      return res.redirect(checkout.url);
+      if (checkout.url) return res.redirect(checkout.url);
+      return res.redirect(
+        buildFrontendRedirect("/signup", {
+          checkout_provider: checkout.provider || paymentProvider,
+          razorpay_subscription_id: checkout.subscriptionId,
+          razorpay_pending_signup_id: checkout.notes?.pending_signup_id,
+        })
+      );
     }
 
     const data = isSignup

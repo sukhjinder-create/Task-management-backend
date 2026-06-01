@@ -47,6 +47,20 @@ export async function getPlanByStripePriceId(priceId) {
   return res.rows[0] || null;
 }
 
+export async function getPlanByRazorpayPlanId(planId) {
+  if (!planId) return null;
+
+  const res = await pool.query(
+    `SELECT *
+     FROM billing_plans
+     WHERE is_active = true
+       AND ($1 = razorpay_plan_monthly_id OR $1 = razorpay_plan_yearly_id)
+     LIMIT 1`,
+    [planId]
+  );
+  return res.rows[0] || null;
+}
+
 export async function createPlan({
   name,
   slug,
@@ -159,6 +173,25 @@ export async function saveStripePriceIds(id, { productId, monthly, yearly, curre
     [
       id,
       productId || null,
+      monthly || null,
+      yearly || null,
+      currency ? String(currency).toLowerCase() : null,
+    ]
+  );
+  return res.rows[0];
+}
+
+export async function saveRazorpayPlanIds(id, { monthly, yearly, currency } = {}) {
+  const res = await pool.query(
+    `UPDATE billing_plans
+     SET razorpay_plan_monthly_id = COALESCE($2, razorpay_plan_monthly_id),
+         razorpay_plan_yearly_id  = COALESCE($3, razorpay_plan_yearly_id),
+         razorpay_currency        = COALESCE($4, razorpay_currency),
+         updated_at               = now()
+     WHERE id = $1
+     RETURNING *`,
+    [
+      id,
       monthly || null,
       yearly || null,
       currency ? String(currency).toLowerCase() : null,

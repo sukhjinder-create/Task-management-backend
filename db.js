@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const { Pool, types } = pkg;
+const DATABASE_URL = process.env.DATABASE_URL?.trim();
 
 // Prevent node-postgres from converting DATE columns to JS Date objects.
 // Without this, "2026-03-26" becomes "2026-03-25T18:30:00.000Z" in IST (UTC+5:30),
@@ -12,14 +13,14 @@ const { Pool, types } = pkg;
 types.setTypeParser(1082, val => val); // 1082 = PostgreSQL DATE oid
 
 const pool = new Pool({
-  ...(process.env.DATABASE_URL
-    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+  ...(DATABASE_URL
+    ? { connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } }
     : {
-        host: process.env.DB_HOST,
-        user: process.env.DB_USER,
+        host: process.env.DB_HOST?.trim(),
+        user: process.env.DB_USER?.trim(),
         password: process.env.DB_PASSWORD,
-        database: process.env.DB_NAME,
-        port: process.env.DB_PORT,
+        database: process.env.DB_NAME?.trim(),
+        port: process.env.DB_PORT?.trim(),
       }),
 
   // Production-grade pool — sized for high concurrency via a connection pooler

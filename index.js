@@ -115,7 +115,10 @@ import gdprRoutes     from "./routes/gdpr.routes.js";
 import apiKeysRoutes  from "./routes/apiKeys.routes.js";
 import webhooksRoutes    from "./routes/webhooks.routes.js";
 import aiFeaturesRoutes from "./routes/aiFeatures.routes.js";
-import paymentsRoutes, { webhookRouter as paymentsWebhookRouter } from "./routes/payments.routes.js";
+import paymentsRoutes, {
+  razorpayWebhookRouter,
+  webhookRouter as paymentsWebhookRouter,
+} from "./routes/payments.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
 
@@ -164,8 +167,9 @@ app.use(
 // OLD integrations (existing — DO NOT TOUCH)
 app.use("/integrations", integrationRoutes);
 
-// Stripe webhooks must see the untouched raw body for signature verification.
+// Payment webhooks must see the untouched raw body for signature verification.
 app.use("/payments/webhook", paymentsWebhookRouter);
+app.use("/payments/razorpay/webhook", razorpayWebhookRouter);
 
 app.use(express.json({
   limit: "50mb",

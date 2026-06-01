@@ -26,8 +26,10 @@ import qs from "qs";
 import db from "../db.js";
 import {
   getPlanById,
+  getPlanByRazorpayPlanId,
   getPlanBySlug,
   getPlanByStripePriceId,
+  saveRazorpayPlanIds,
   saveStripePriceIds,
 } from "../repositories/billingPlans.repository.js";
 import { getUserByEmail, getUserById } from "../repositories/user.repository.js";
@@ -40,6 +42,7 @@ import {
 } from "./auth.service.js";
 
 const STRIPE_API_BASE = "https://api.stripe.com";
+const RAZORPAY_API_BASE = "https://api.razorpay.com/v1";
 const DEFAULT_FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const TRIAL_SIGNUP_SESSION_TYPE = "trial_signup";
 
@@ -53,12 +56,36 @@ function getStripeWebhookSecret() {
   return process.env.STRIPE_WEBHOOK_SECRET || null;
 }
 
+function getRazorpayKeyId() {
+  return process.env.RAZORPAY_KEY_ID || null;
+}
+
+function getRazorpayKeySecret() {
+  return process.env.RAZORPAY_KEY_SECRET || null;
+}
+
+function getRazorpayWebhookSecret() {
+  return process.env.RAZORPAY_WEBHOOK_SECRET || null;
+}
+
 function ensureStripeConfigured() {
   if (!getStripeSecretKey()) {
     const err = new Error("Stripe is not configured. Set STRIPE_SECRET_KEY.");
     err.statusCode = 503;
     throw err;
   }
+}
+
+function ensureRazorpayConfigured() {
+  if (!getRazorpayKeyId() || !getRazorpayKeySecret()) {
+    const err = new Error("Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.");
+    err.statusCode = 503;
+    throw err;
+  }
+}
+
+function isRazorpayLiveMode() {
+  return String(getRazorpayKeyId() || "").startsWith("rzp_live_");
 }
 
 function resolveSuccessUrl(overrideUrl) {
@@ -112,9 +139,47 @@ async function stripeRequest(method, path, { data, headers } = {}) {
   return response.data;
 }
 
+async function razorpayRequest(method, path, { data, headers } = {}) {
+  ensureRazorpayConfigured();
+
+  const response = await axios({
+    method,
+    url: `${RAZORPAY_API_BASE}${path}`,
+    auth: {
+      username: getRazorpayKeyId(),
+      password: getRazorpayKeySecret(),
+    },
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    data,
+    validateStatus: () => true,
+  });
+
+  if (response.status >= 400) {
+    const message =
+      response.data?.error?.description ||
+      response.data?.error?.reason ||
+      response.data?.error?.code ||
+      `Razorpay request failed with status ${response.status}`;
+    const err = new Error(message);
+    err.statusCode = response.status;
+    err.details = response.data;
+    throw err;
+  }
+
+  return response.data;
+}
+
 function stripeTimestampToIso(value) {
   if (!value) return null;
   return new Date(value * 1000).toISOString();
+}
+
+function razorpayTimestampToIso(value) {
+  if (!value) return null;
+  return new Date(Number(value) * 1000).toISOString();
 }
 
 function getBackendPublicUrl() {
@@ -148,21 +213,36 @@ function normalizeBillingInterval(interval) {
   return interval === "yearly" ? "yearly" : "monthly";
 }
 
-function getTrialSignupCurrency(plan) {
-  return String(process.env.TRIAL_SIGNUP_CURRENCY || plan?.stripe_currency || "inr")
+function getTrialSignupCurrency(plan, provider = "stripe") {
+  const planCurrency =
+    provider === "razorpay"
+      ? plan?.razorpay_currency || plan?.stripe_currency
+      : plan?.stripe_currency;
+  return String(process.env.TRIAL_SIGNUP_CURRENCY || planCurrency || "inr")
     .trim()
     .toLowerCase();
 }
 
-function getTrialSignupVerificationAmount(currency) {
+function getTrialSignupVerificationAmount(currency, provider = "stripe") {
   const parsed = Number.parseInt(process.env.TRIAL_SIGNUP_VERIFICATION_AMOUNT || "", 10);
   const amount = Number.isFinite(parsed) && parsed > 0 ? parsed : 100;
+  if (provider === "razorpay" && currency === "inr") return Math.max(amount, 100);
   if (currency === "inr") return Math.max(amount, 50);
   return amount;
 }
 
 function getTrialSignupPlanSlug() {
   return String(process.env.TRIAL_SIGNUP_PLAN_SLUG || "pro").trim().toLowerCase();
+}
+
+function getConfiguredPaymentsProvider() {
+  const provider = String(
+    process.env.PAYMENTS_PROVIDER ||
+      process.env.TRIAL_SIGNUP_PAYMENT_PROVIDER ||
+      "stripe"
+  ).toLowerCase();
+  if (provider === "razorpay" && getRazorpayKeyId() && getRazorpayKeySecret()) return "razorpay";
+  return "stripe";
 }
 
 function assertTrialSignupConsent(consentAccepted) {
@@ -179,7 +259,7 @@ async function findActivePendingTrialSignup({ email }) {
     `SELECT id, checkout_session_id, status, owner_email, created_at
      FROM trial_signup_checkout_sessions
      WHERE created_at > now() - interval '24 hours'
-       AND status IN ('created', 'open', 'complete')
+       AND status IN ('created', 'open', 'complete', 'authenticated', 'payment_captured')
        AND lower(owner_email) = lower($1)
      ORDER BY created_at DESC
      LIMIT 1`,
@@ -248,6 +328,81 @@ async function ensurePlanStripePricesForCurrency(plan, currency) {
   };
 }
 
+function getRazorpayPlanPeriod(interval) {
+  return normalizeBillingInterval(interval) === "yearly" ? "yearly" : "monthly";
+}
+
+async function createRazorpayPlanForBillingPlan({ plan, interval, amount, currency }) {
+  const billingInterval = normalizeBillingInterval(interval);
+  return razorpayRequest("post", "/plans", {
+    data: {
+      period: getRazorpayPlanPeriod(billingInterval),
+      interval: 1,
+      item: {
+        name: `${plan.name} (${billingInterval})`,
+        amount,
+        currency: String(currency).toUpperCase(),
+        description: plan.description || plan.tagline || `${plan.name} ${billingInterval} subscription`,
+      },
+      notes: {
+        billing_plan_id: plan.id,
+        billing_plan: plan.slug,
+        billing_interval: billingInterval,
+        source: "asystence",
+      },
+    },
+  });
+}
+
+async function ensurePlanRazorpayPlanForCurrency(plan, currency, interval) {
+  const billingInterval = normalizeBillingInterval(interval);
+  const amount =
+    billingInterval === "yearly"
+      ? Math.round(Number(plan.price_yearly_paise) || 0)
+      : Math.round(Number(plan.price_monthly_paise) || 0);
+  if (amount <= 0) {
+    throw Object.assign(new Error("Trial signup requires a paid Razorpay plan."), { statusCode: 400 });
+  }
+
+  const currentCurrency = String(plan.razorpay_currency || "").toLowerCase();
+  const needsCurrencyRefresh = currentCurrency !== currency;
+  let monthlyPlanId = needsCurrencyRefresh ? null : plan.razorpay_plan_monthly_id || null;
+  let yearlyPlanId = needsCurrencyRefresh ? null : plan.razorpay_plan_yearly_id || null;
+  const existingPlanId = billingInterval === "yearly" ? yearlyPlanId : monthlyPlanId;
+
+  if (existingPlanId) {
+    return {
+      planId: existingPlanId,
+      monthlyPlanId,
+      yearlyPlanId,
+      created: false,
+    };
+  }
+
+  const razorpayPlan = await createRazorpayPlanForBillingPlan({
+    plan,
+    interval: billingInterval,
+    amount,
+    currency,
+  });
+
+  if (billingInterval === "yearly") yearlyPlanId = razorpayPlan.id;
+  else monthlyPlanId = razorpayPlan.id;
+
+  await saveRazorpayPlanIds(plan.id, {
+    monthly: monthlyPlanId,
+    yearly: yearlyPlanId,
+    currency,
+  });
+
+  return {
+    planId: razorpayPlan.id,
+    monthlyPlanId,
+    yearlyPlanId,
+    created: true,
+  };
+}
+
 function getExpandedSubscriptionFromSession(session) {
   return typeof session?.subscription === "object" ? session.subscription : null;
 }
@@ -261,10 +416,10 @@ function getPaymentIntentIdFromSubscription(subscription) {
 
 // ── Customer management ───────────────────────────────────────────────────────
 
-async function upsertPaymentCustomer({ workspaceId, customerId, email, currency, metadata = {} }) {
+async function upsertPaymentCustomer({ workspaceId, customerId, email, currency, metadata = {}, provider = "stripe" }) {
   await db.query(
     `INSERT INTO payment_customers (workspace_id, provider, customer_id, email, currency, metadata, created_at, updated_at)
-     VALUES ($1, 'stripe', $2, $3, $4, $5, now(), now())
+     VALUES ($1, $6, $2, $3, $4, $5, now(), now())
      ON CONFLICT (workspace_id, provider)
      DO UPDATE SET
        customer_id = EXCLUDED.customer_id,
@@ -272,16 +427,16 @@ async function upsertPaymentCustomer({ workspaceId, customerId, email, currency,
        currency    = COALESCE(EXCLUDED.currency, payment_customers.currency),
        metadata    = payment_customers.metadata || EXCLUDED.metadata,
        updated_at  = now()`,
-    [workspaceId, customerId, email || null, currency || null, metadata]
+    [workspaceId, customerId, email || null, currency || null, metadata, provider]
   );
 
   await db.query(
     `UPDATE workspaces
-     SET billing_provider    = 'stripe',
+     SET billing_provider    = $3,
          billing_customer_id = $2,
          billing_updated_at  = now()
      WHERE id = $1`,
-    [workspaceId, customerId]
+    [workspaceId, customerId, provider]
   );
 }
 
@@ -346,7 +501,7 @@ async function resolveBillingPlanForSubscription(subscription, price) {
 }
 
 function isSubscriptionEntitled(status) {
-  return ["active", "trialing"].includes(status);
+  return ["active", "trialing", "authenticated"].includes(status);
 }
 
 function getPrimarySubscriptionItem(subscription) {
@@ -492,6 +647,7 @@ async function updateWorkspaceBillingState({
   subscriptionId,
   currentPeriodStart,
   currentPeriodEnd,
+  provider = "stripe",
 }) {
   const isEntitled = isSubscriptionEntitled(status);
   const planSlug = isEntitled ? plan?.slug || null : null;
@@ -502,7 +658,7 @@ async function updateWorkspaceBillingState({
     `UPDATE workspaces
      SET billing_plan               = COALESCE($2, billing_plan),
          billing_status             = $3,
-         billing_provider           = 'stripe',
+         billing_provider           = $10,
          billing_customer_id        = COALESCE($4, billing_customer_id),
          billing_subscription_id    = COALESCE($5, billing_subscription_id),
          billing_current_period_end = COALESCE($6, billing_current_period_end),
@@ -524,6 +680,7 @@ async function updateWorkspaceBillingState({
       memberLimit,
       currentPeriodStart || null,
       perUserPricePaise,
+      provider,
     ]
   );
 }
@@ -635,6 +792,23 @@ async function upsertSubscriptionFromStripe(subscription, explicitWorkspaceId = 
 // ── Public config ─────────────────────────────────────────────────────────────
 
 export function getPublicBillingConfig() {
+  const provider = getConfiguredPaymentsProvider();
+  if (provider === "razorpay") {
+    const keyId = getRazorpayKeyId();
+    const secretConfigured = !!getRazorpayKeySecret();
+    const webhookConfigured = !!getRazorpayWebhookSecret();
+    return {
+      provider: "razorpay",
+      publishableKey: keyId,
+      keyId,
+      checkoutEnabled: !!keyId && secretConfigured,
+      publishableKeySet: !!keyId,
+      webhookConfigured,
+      ready: !!keyId && secretConfigured && webhookConfigured,
+      enabled: !!keyId && secretConfigured,
+    };
+  }
+
   const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY || null;
   const secretConfigured = !!getStripeSecretKey();
   const webhookConfigured = !!getStripeWebhookSecret();
@@ -646,6 +820,7 @@ export function getPublicBillingConfig() {
     publishableKeySet: !!publishableKey,
     webhookConfigured,
     ready: secretConfigured && !!publishableKey && webhookConfigured,
+    enabled: secretConfigured && !!publishableKey,
   };
 }
 
@@ -665,11 +840,13 @@ export async function getWorkspaceBillingSummary(workspaceId) {
       `SELECT ws.*, bp.name AS plan_name, bp.slug AS plan_slug,
               bp.price_monthly_paise, bp.price_yearly_paise,
               bp.member_limit AS plan_member_limit, bp.features, bp.support_level,
-              bp.stripe_currency
+              bp.stripe_currency, bp.razorpay_currency
        FROM workspace_subscriptions ws
        LEFT JOIN billing_plans bp
          ON (ws.billing_plan_id = bp.id OR ws.billing_plan = bp.slug)
-       WHERE ws.workspace_id = $1 AND ws.provider = 'stripe'
+       WHERE ws.workspace_id = $1
+         AND ws.provider IN ('razorpay', 'stripe')
+       ORDER BY CASE ws.provider WHEN 'razorpay' THEN 0 ELSE 1 END
        LIMIT 1`,
       [workspaceId]
     ),
@@ -697,6 +874,113 @@ export async function getWorkspaceBillingSummary(workspaceId) {
 // Creates a Stripe-hosted checkout session.
 // Returns { url } — frontend redirects the user to this URL.
 
+async function createRazorpayWorkspaceSubscriptionCheckout({
+  workspace,
+  user,
+  dbPlan,
+  interval = "monthly",
+}) {
+  ensureRazorpayConfigured();
+
+  const billingInterval = normalizeBillingInterval(interval);
+  const currency = getTrialSignupCurrency(dbPlan, "razorpay");
+  const razorpayPlan = await ensurePlanRazorpayPlanForCurrency(dbPlan, currency, billingInterval);
+  const seatQuantity = await countBillableWorkspaceUsers(workspace.id);
+  const trialDays = Number(dbPlan.trial_days) || 0;
+  const verificationAmount = trialDays > 0 ? getTrialSignupVerificationAmount(currency, "razorpay") : 0;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const subscriptionPayload = {
+    plan_id: razorpayPlan.planId,
+    total_count: getRazorpaySubscriptionTotalCount(billingInterval),
+    quantity: seatQuantity,
+    customer_notify: false,
+    notes: {
+      workspace_id: workspace.id,
+      workspace_name: workspace.name || "",
+      user_id: user?.id || "",
+      billing_plan: dbPlan.slug,
+      billing_plan_id: dbPlan.id,
+      billing_interval: billingInterval,
+      seat_quantity: String(seatQuantity),
+      source: "asystence_workspace_billing",
+    },
+  };
+
+  if (trialDays > 0) {
+    subscriptionPayload.start_at = nowSeconds + trialDays * 86400;
+    subscriptionPayload.expire_by = nowSeconds + 24 * 60 * 60;
+    subscriptionPayload.addons = [
+      {
+        item: {
+          name: "Refundable card verification",
+          amount: verificationAmount,
+          currency: String(currency).toUpperCase(),
+          description: "Refunded automatically after billing confirmation.",
+        },
+      },
+    ];
+  }
+
+  const subscription = await razorpayRequest("post", "/subscriptions", {
+    data: subscriptionPayload,
+  });
+
+  await db.query(
+    `INSERT INTO payment_checkout_sessions (
+       workspace_id, user_id, provider, checkout_session_id, customer_id,
+       subscription_id, price_id, billing_plan, status, session_type,
+       seat_quantity, success_url, cancel_url, metadata, created_at, updated_at
+     )
+     VALUES ($1,$2,'razorpay',$3,NULL,$3,$4,$5,$6,'subscription',$7,NULL,NULL,$8,now(),now())
+     ON CONFLICT (provider, checkout_session_id)
+     DO UPDATE SET
+       user_id          = EXCLUDED.user_id,
+       subscription_id  = EXCLUDED.subscription_id,
+       price_id         = EXCLUDED.price_id,
+       billing_plan     = EXCLUDED.billing_plan,
+       status           = EXCLUDED.status,
+       seat_quantity    = EXCLUDED.seat_quantity,
+       metadata         = payment_checkout_sessions.metadata || EXCLUDED.metadata,
+       updated_at       = now()`,
+    [
+      workspace.id,
+      user?.id || null,
+      subscription.id,
+      razorpayPlan.planId,
+      dbPlan.slug,
+      subscription.status || "created",
+      seatQuantity,
+      {
+        razorpaySubscription: subscription,
+        verificationAmount,
+        currency,
+        trialDays,
+        billingInterval,
+      },
+    ]
+  );
+
+  return {
+    id: subscription.id,
+    provider: "razorpay",
+    keyId: getRazorpayKeyId(),
+    subscriptionId: subscription.id,
+    planSlug: dbPlan.slug,
+    plan: dbPlan.slug,
+    planName: dbPlan.name,
+    interval: billingInterval,
+    seatQuantity,
+    trialDays,
+    verificationAmount,
+    currency,
+    prefill: {
+      name: user?.username || user?.name || "",
+      email: user?.email || "",
+    },
+    livemode: isRazorpayLiveMode(),
+  };
+}
+
 export async function createCheckoutSession({
   workspace,
   user,
@@ -706,8 +990,6 @@ export async function createCheckoutSession({
   successUrl,
   cancelUrl,
 }) {
-  ensureStripeConfigured();
-
   // Resolve plan and price ID from DB
   let dbPlan = null;
   if (planId) {
@@ -736,6 +1018,17 @@ export async function createCheckoutSession({
     err.statusCode = 400;
     throw err;
   }
+
+  if (getConfiguredPaymentsProvider() === "razorpay") {
+    return createRazorpayWorkspaceSubscriptionCheckout({
+      workspace,
+      user,
+      dbPlan,
+      interval,
+    });
+  }
+
+  ensureStripeConfigured();
 
   const priceId = interval === "yearly"
     ? dbPlan.stripe_price_yearly_id
@@ -1356,6 +1649,768 @@ export async function completeTrialSignupCheckoutSession(sessionId) {
   };
 }
 
+function verifyRazorpaySubscriptionCheckoutSignature({ subscriptionId, paymentId, signature }) {
+  ensureRazorpayConfigured();
+  if (!subscriptionId || !paymentId || !signature) {
+    throw Object.assign(new Error("Missing Razorpay payment verification details."), { statusCode: 400 });
+  }
+
+  const expected = crypto
+    .createHmac("sha256", getRazorpayKeySecret())
+    .update(`${paymentId}|${subscriptionId}`)
+    .digest("hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+  const actualBuffer = Buffer.from(String(signature), "hex");
+  if (
+    expectedBuffer.length !== actualBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    throw Object.assign(new Error("Razorpay payment signature verification failed."), { statusCode: 400 });
+  }
+}
+
+function getRazorpaySubscriptionTotalCount(interval) {
+  const envKey =
+    normalizeBillingInterval(interval) === "yearly"
+      ? "RAZORPAY_SUBSCRIPTION_TOTAL_COUNT_YEARLY"
+      : "RAZORPAY_SUBSCRIPTION_TOTAL_COUNT_MONTHLY";
+  const parsed = Number.parseInt(process.env[envKey] || "", 10);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return normalizeBillingInterval(interval) === "yearly" ? 10 : 120;
+}
+
+async function getPendingRazorpayTrialSignupBySubscription(subscriptionId) {
+  const { rows } = await db.query(
+    `SELECT *
+     FROM trial_signup_checkout_sessions
+     WHERE provider = 'razorpay'
+       AND subscription_id = $1
+     LIMIT 1`,
+    [subscriptionId]
+  );
+  return rows[0] || null;
+}
+
+async function fetchRazorpaySubscription(subscriptionId) {
+  return razorpayRequest("get", `/subscriptions/${encodeURIComponent(subscriptionId)}`);
+}
+
+async function fetchRazorpayPayment(paymentId) {
+  return razorpayRequest("get", `/payments/${encodeURIComponent(paymentId)}`);
+}
+
+function normalizeRazorpayWorkspaceStatus(subscription) {
+  if (subscription?.status === "authenticated") return "trialing";
+  return subscription?.status || "created";
+}
+
+async function upsertSubscriptionFromRazorpay(subscription, explicitWorkspaceId = null, pending = null) {
+  const plan =
+    pending?.billing_plan_id
+      ? await getPlanById(pending.billing_plan_id)
+      : await getPlanByRazorpayPlanId(subscription.plan_id);
+  const workspaceId =
+    explicitWorkspaceId ||
+    subscription.notes?.workspace_id ||
+    pending?.workspace_id ||
+    null;
+
+  if (!workspaceId) {
+    throw new Error(`Unable to resolve workspace for Razorpay subscription ${subscription.id}`);
+  }
+
+  const billingPlan = plan?.slug || pending?.billing_plan || subscription.notes?.billing_plan || null;
+  const billingInterval =
+    pending?.billing_interval ||
+    subscription.notes?.billing_interval ||
+    (plan?.razorpay_plan_yearly_id === subscription.plan_id ? "yearly" : "monthly");
+  const customerId = subscription.customer_id || pending?.customer_id || null;
+  const currentPeriodEnd =
+    razorpayTimestampToIso(subscription.current_end) ||
+    razorpayTimestampToIso(subscription.start_at) ||
+    null;
+
+  await db.query(
+    `INSERT INTO workspace_subscriptions (
+       workspace_id, provider, customer_id, subscription_id, status,
+       billing_plan, billing_plan_id, billing_interval,
+       price_id, product_id, currency, interval, cancel_at_period_end, trial_ends_at,
+       current_period_start, current_period_end, subscription_item_id, seat_quantity,
+       metadata, created_at, updated_at
+     )
+     VALUES ($1,'razorpay',$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11,$12,$13,$14,NULL,1,$15,now(),now())
+     ON CONFLICT (workspace_id, provider)
+     DO UPDATE SET
+       customer_id          = COALESCE(EXCLUDED.customer_id, workspace_subscriptions.customer_id),
+       subscription_id      = EXCLUDED.subscription_id,
+       status               = EXCLUDED.status,
+       billing_plan         = COALESCE(EXCLUDED.billing_plan, workspace_subscriptions.billing_plan),
+       billing_plan_id      = COALESCE(EXCLUDED.billing_plan_id, workspace_subscriptions.billing_plan_id),
+       billing_interval     = COALESCE(EXCLUDED.billing_interval, workspace_subscriptions.billing_interval),
+       price_id             = EXCLUDED.price_id,
+       currency             = COALESCE(EXCLUDED.currency, workspace_subscriptions.currency),
+       interval             = COALESCE(EXCLUDED.interval, workspace_subscriptions.interval),
+       cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+       trial_ends_at        = COALESCE(EXCLUDED.trial_ends_at, workspace_subscriptions.trial_ends_at),
+       current_period_start = COALESCE(EXCLUDED.current_period_start, workspace_subscriptions.current_period_start),
+       current_period_end   = COALESCE(EXCLUDED.current_period_end, workspace_subscriptions.current_period_end),
+       seat_quantity        = EXCLUDED.seat_quantity,
+       metadata             = workspace_subscriptions.metadata || EXCLUDED.metadata,
+       updated_at           = now()`,
+    [
+      workspaceId,
+      customerId,
+      subscription.id,
+      subscription.status || "created",
+      billingPlan,
+      plan?.id || pending?.billing_plan_id || null,
+      billingInterval,
+      subscription.plan_id || null,
+      pending?.currency || plan?.razorpay_currency || null,
+      billingInterval,
+      !!subscription.cancel_at_cycle_end,
+      razorpayTimestampToIso(subscription.start_at),
+      razorpayTimestampToIso(subscription.current_start) || new Date().toISOString(),
+      currentPeriodEnd,
+      {
+        ...(subscription.notes || {}),
+        razorpay_subscription: subscription,
+      },
+    ]
+  );
+
+  await updateWorkspaceBillingState({
+    workspaceId,
+    plan,
+    status: normalizeRazorpayWorkspaceStatus(subscription),
+    customerId,
+    subscriptionId: subscription.id,
+    currentPeriodStart: razorpayTimestampToIso(subscription.current_start) || new Date().toISOString(),
+    currentPeriodEnd,
+    provider: "razorpay",
+  });
+
+  if (isSubscriptionEntitled(normalizeRazorpayWorkspaceStatus(subscription))) {
+    await db.query(
+      `UPDATE workspace_users
+       SET billing_status = 'active',
+           activated_at = now(),
+           cycle_start = $2,
+           cycle_end = $3
+       WHERE workspace_id = $1 AND billing_status = 'trial'`,
+      [
+        workspaceId,
+        razorpayTimestampToIso(subscription.current_start) || new Date().toISOString(),
+        currentPeriodEnd,
+      ]
+    );
+  }
+
+  return { workspaceId };
+}
+
+async function refundRazorpayTrialSignupVerification({ pending, paymentId, workspaceId }) {
+  const existingRefundId = pending.provider_refund_id || pending.refund_id || null;
+  if (existingRefundId) return { refundId: existingRefundId, paymentId };
+
+  const refund = await razorpayRequest("post", `/payments/${encodeURIComponent(paymentId)}/refund`, {
+    data: {
+      amount: pending.verification_amount,
+      speed: "optimum",
+      receipt: `trial_${String(pending.id).replace(/-/g, "").slice(0, 24)}`,
+      notes: {
+        purpose: "trial_signup_card_verification_refund",
+        workspace_id: workspaceId,
+        pending_signup_id: pending.id,
+        razorpay_subscription_id: pending.subscription_id,
+      },
+    },
+  });
+
+  return { refundId: refund.id, paymentId };
+}
+
+export async function createRazorpayTrialSignupCheckoutSession({
+  workspaceName,
+  name,
+  email,
+  password,
+  ownerPasswordHash,
+  authProvider = "email",
+  avatarUrl = null,
+  planId = null,
+  plan = null,
+  interval = "monthly",
+  ipHash = null,
+  userAgent = null,
+  consentAccepted = false,
+}) {
+  ensureRazorpayConfigured();
+  assertTrialSignupConsent(consentAccepted);
+
+  const normalizedEmail = normalizeSignupEmail(email);
+  const cleanedWorkspaceName = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
+  const cleanedName = cleanRequiredString(name || normalizedEmail.split("@")[0], "Name", { min: 2, max: 120 });
+  const provider = authProvider === "google" ? "google" : "email";
+  const passwordHash =
+    provider === "email"
+      ? await bcryptHashForTrialSignup(password, ownerPasswordHash)
+      : null;
+
+  const existingUser = await getUserByEmail(normalizedEmail);
+  if (existingUser) {
+    throw Object.assign(new Error("An account already exists with this email. Please sign in."), { statusCode: 409 });
+  }
+
+  const activePending = await findActivePendingTrialSignup({ email: normalizedEmail });
+  if (activePending) {
+    throw Object.assign(
+      new Error("A trial signup checkout is already pending. Please finish or wait for it to expire."),
+      { statusCode: 409, checkoutSessionId: activePending.checkout_session_id }
+    );
+  }
+
+  let dbPlan = null;
+  if (planId) dbPlan = await getPlanById(planId);
+  else dbPlan = await getPlanBySlug(plan || getTrialSignupPlanSlug());
+  if (!dbPlan || !dbPlan.is_active) {
+    throw Object.assign(new Error("Selected trial plan is not available."), { statusCode: 404 });
+  }
+  if ((Number(dbPlan.trial_days) || 0) <= 0) {
+    throw Object.assign(new Error("Selected plan does not include a free trial."), { statusCode: 400 });
+  }
+
+  const billingInterval = normalizeBillingInterval(interval);
+  const currency = getTrialSignupCurrency(dbPlan, "razorpay");
+  const razorpayPlan = await ensurePlanRazorpayPlanForCurrency(dbPlan, currency, billingInterval);
+  const verificationAmount = getTrialSignupVerificationAmount(currency, "razorpay");
+
+  const pendingInsert = await db.query(
+    `INSERT INTO trial_signup_checkout_sessions (
+       provider, status, workspace_name, owner_name, owner_email,
+       owner_password_hash, auth_provider, avatar_url, billing_plan_id,
+       billing_plan, billing_interval, verification_amount, currency,
+       provider_plan_id, consent_ip_hash, consent_user_agent, metadata, created_at, updated_at
+     )
+     VALUES (
+       'razorpay', 'created', $1, $2, $3,
+       $4, $5, $6, $7,
+       $8, $9, $10, $11,
+       $12, $13, $14, $15, now(), now()
+     )
+     RETURNING id`,
+    [
+      cleanedWorkspaceName,
+      cleanedName,
+      normalizedEmail,
+      passwordHash,
+      provider,
+      avatarUrl,
+      dbPlan.id,
+      dbPlan.slug,
+      billingInterval,
+      verificationAmount,
+      currency,
+      razorpayPlan.planId,
+      ipHash,
+      userAgent,
+      {
+        planName: dbPlan.name,
+        trialDays: dbPlan.trial_days,
+        razorpayPlanCreated: razorpayPlan.created,
+      },
+    ]
+  );
+
+  const pendingId = pendingInsert.rows[0].id;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const startAt = nowSeconds + Math.max(1, Number(dbPlan.trial_days) || 1) * 86400;
+  const expireBy = nowSeconds + 24 * 60 * 60;
+  const subscription = await razorpayRequest("post", "/subscriptions", {
+    data: {
+      plan_id: razorpayPlan.planId,
+      total_count: getRazorpaySubscriptionTotalCount(billingInterval),
+      quantity: 1,
+      customer_notify: false,
+      start_at: startAt,
+      expire_by: expireBy,
+      addons: [
+        {
+          item: {
+            name: "Refundable card verification",
+            amount: verificationAmount,
+            currency: String(currency).toUpperCase(),
+            description: "Refunded automatically after trial signup confirmation.",
+          },
+        },
+      ],
+      notes: {
+        pending_signup_id: pendingId,
+        billing_plan: dbPlan.slug,
+        billing_plan_id: dbPlan.id,
+        billing_interval: billingInterval,
+        owner_email: normalizedEmail,
+        workspace_name: cleanedWorkspaceName,
+        source: "asystence_trial_signup",
+      },
+    },
+  });
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET checkout_session_id = $2,
+         subscription_id     = $2,
+         status              = $3,
+         metadata            = metadata || $4,
+         updated_at          = now()
+     WHERE id = $1`,
+    [
+      pendingId,
+      subscription.id,
+      subscription.status || "created",
+      { razorpaySubscription: subscription },
+    ]
+  );
+
+  return {
+    id: subscription.id,
+    url: subscription.short_url || null,
+    shortUrl: subscription.short_url || null,
+    checkoutSessionId: subscription.id,
+    subscriptionId: subscription.id,
+    checkoutRequired: true,
+    provider: "razorpay",
+    keyId: getRazorpayKeyId(),
+    plan: dbPlan.slug,
+    planName: dbPlan.name,
+    interval: billingInterval,
+    trialDays: dbPlan.trial_days,
+    verificationAmount,
+    currency,
+    livemode: isRazorpayLiveMode(),
+    prefill: {
+      name: cleanedName,
+      email: normalizedEmail,
+    },
+    notes: {
+      pending_signup_id: pendingId,
+    },
+  };
+}
+
+export async function provisionRazorpayTrialSignupCheckout({
+  subscriptionId,
+  paymentId,
+  signature,
+  pendingSignupId = null,
+  trustedWebhook = false,
+}) {
+  ensureRazorpayConfigured();
+  if (!subscriptionId || !paymentId) {
+    throw Object.assign(new Error("subscriptionId and paymentId are required."), { statusCode: 400 });
+  }
+
+  let pending = await getPendingRazorpayTrialSignupBySubscription(subscriptionId);
+  if (!pending) {
+    throw Object.assign(new Error("Razorpay signup subscription was not found."), { statusCode: 404 });
+  }
+  if (pendingSignupId && String(pending.id) !== String(pendingSignupId)) {
+    throw Object.assign(new Error("Razorpay signup subscription does not match this signup attempt."), {
+      statusCode: 400,
+    });
+  }
+
+  const alreadyProvisioned = await buildProvisionedTrialSignupResult(pending);
+  if (alreadyProvisioned) return alreadyProvisioned;
+
+  if (!trustedWebhook) {
+    verifyRazorpaySubscriptionCheckoutSignature({
+      subscriptionId: pending.subscription_id,
+      paymentId,
+      signature,
+    });
+  }
+
+  const [payment, subscription] = await Promise.all([
+    fetchRazorpayPayment(paymentId),
+    fetchRazorpaySubscription(subscriptionId),
+  ]);
+
+  if (payment.status !== "captured") {
+    throw Object.assign(new Error("Razorpay verification payment has not been captured yet."), {
+      statusCode: 409,
+    });
+  }
+  if (payment.currency && String(payment.currency).toLowerCase() !== String(pending.currency).toLowerCase()) {
+    throw Object.assign(new Error("Razorpay verification payment currency mismatch."), { statusCode: 400 });
+  }
+  if (Number(payment.amount) < Number(pending.verification_amount)) {
+    throw Object.assign(new Error("Razorpay verification payment amount mismatch."), { statusCode: 400 });
+  }
+  if (subscription.id !== pending.subscription_id) {
+    throw Object.assign(new Error("Razorpay subscription mismatch."), { statusCode: 400 });
+  }
+  if (!["authenticated", "active"].includes(subscription.status)) {
+    throw Object.assign(new Error(`Razorpay subscription is ${subscription.status}.`), { statusCode: 409 });
+  }
+
+  const claim = await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = 'provisioning',
+         provider_payment_id = COALESCE($2, provider_payment_id),
+         payment_intent_id = COALESCE($2, payment_intent_id),
+         provider_signature = COALESCE($3, provider_signature),
+         customer_id = COALESCE($4, customer_id),
+         metadata = metadata || $5,
+         updated_at = now()
+     WHERE id = $1
+       AND workspace_id IS NULL
+       AND owner_user_id IS NULL
+       AND status <> 'provisioning'
+     RETURNING *`,
+    [
+      pending.id,
+      paymentId,
+      signature || null,
+      subscription.customer_id || payment.customer_id || null,
+      { razorpayPayment: payment, razorpaySubscription: subscription },
+    ]
+  );
+
+  if (!claim.rows[0]) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await wait(500);
+      const latest = await getPendingTrialSignupById(pending.id);
+      const provisioned = await buildProvisionedTrialSignupResult(latest);
+      if (provisioned) return provisioned;
+    }
+    throw Object.assign(
+      new Error("Signup checkout is still being completed. Please try again in a few seconds."),
+      { statusCode: 409 }
+    );
+  }
+  pending = claim.rows[0];
+
+  const result = await createSelfServeTrialWorkspace({
+    workspaceName: pending.workspace_name,
+    ownerName: pending.owner_name,
+    ownerEmail: pending.owner_email,
+    ownerPasswordHash: pending.owner_password_hash || null,
+    ipHash: pending.consent_ip_hash || null,
+    avatarUrl: pending.avatar_url || null,
+    skipTrialIpCheck: true,
+  });
+
+  const customerId = subscription.customer_id || payment.customer_id || null;
+  if (customerId) {
+    await upsertPaymentCustomer({
+      workspaceId: result.workspace.id,
+      provider: "razorpay",
+      customerId: String(customerId),
+      email: subscription.customer_email || payment.email || pending.owner_email,
+      currency: pending.currency,
+      metadata: {
+        pending_signup_id: pending.id,
+        razorpay_subscription_id: subscription.id,
+        auth_provider: pending.auth_provider,
+      },
+    });
+  }
+
+  await upsertSubscriptionFromRazorpay(
+    {
+      ...subscription,
+      notes: {
+        ...(subscription.notes || {}),
+        workspace_id: result.workspace.id,
+        user_id: result.user.id,
+        pending_signup_id: pending.id,
+        billing_plan: pending.billing_plan,
+        billing_plan_id: pending.billing_plan_id,
+        billing_interval: pending.billing_interval,
+      },
+    },
+    result.workspace.id,
+    pending
+  );
+
+  await db.query(
+    `INSERT INTO payment_checkout_sessions (
+       workspace_id, user_id, provider, checkout_session_id, customer_id,
+       subscription_id, price_id, billing_plan, status, session_type,
+       seat_quantity, success_url, cancel_url, metadata, completed_at, created_at, updated_at
+     )
+     VALUES ($1,$2,'razorpay',$3,$4,$5,$6,$7,$8,$9,1,NULL,NULL,$10,now(),now(),now())
+     ON CONFLICT (provider, checkout_session_id)
+     DO UPDATE SET
+       workspace_id     = EXCLUDED.workspace_id,
+       user_id          = EXCLUDED.user_id,
+       customer_id      = COALESCE(EXCLUDED.customer_id, payment_checkout_sessions.customer_id),
+       subscription_id  = EXCLUDED.subscription_id,
+       price_id         = COALESCE(EXCLUDED.price_id, payment_checkout_sessions.price_id),
+       billing_plan     = EXCLUDED.billing_plan,
+       status           = EXCLUDED.status,
+       session_type     = EXCLUDED.session_type,
+       completed_at     = COALESCE(payment_checkout_sessions.completed_at, now()),
+       metadata         = payment_checkout_sessions.metadata || EXCLUDED.metadata,
+       updated_at       = now()`,
+    [
+      result.workspace.id,
+      result.user.id,
+      subscription.id,
+      customerId ? String(customerId) : null,
+      subscription.id,
+      subscription.plan_id || pending.provider_plan_id || null,
+      pending.billing_plan,
+      subscription.status || "authenticated",
+      TRIAL_SIGNUP_SESSION_TYPE,
+      {
+        razorpayPayment: payment,
+        razorpaySubscription: subscription,
+      },
+    ]
+  );
+
+  let refundResult = { refundId: null, paymentId };
+  let completionStatus = "provisioned_refund_pending";
+  let completionMetadata = { provisionedFromRazorpay: true };
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = 'provisioned_refund_pending',
+         workspace_id = $2,
+         owner_user_id = $3,
+         owner_password_hash = NULL,
+         customer_id = COALESCE($4, customer_id),
+         provider_payment_id = COALESCE($5, provider_payment_id),
+         payment_intent_id = COALESCE($5, payment_intent_id),
+         metadata = metadata || $6,
+         completed_at = COALESCE(completed_at, now()),
+         updated_at = now()
+     WHERE id = $1`,
+    [
+      pending.id,
+      result.workspace.id,
+      result.user.id,
+      customerId ? String(customerId) : null,
+      paymentId,
+      completionMetadata,
+    ]
+  );
+
+  try {
+    refundResult = await refundRazorpayTrialSignupVerification({
+      pending: { ...pending, provider_payment_id: paymentId },
+      paymentId,
+      workspaceId: result.workspace.id,
+    });
+    completionStatus = refundResult.refundId ? "provisioned" : "provisioned_refund_pending";
+  } catch (refundErr) {
+    completionStatus = "provisioned_refund_failed";
+    completionMetadata = {
+      ...completionMetadata,
+      refundError: refundErr.message,
+    };
+    console.error("[billing] Razorpay trial signup verification refund failed:", refundErr.message);
+  }
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET status = $8,
+         workspace_id = $2,
+         owner_user_id = $3,
+         owner_password_hash = NULL,
+         customer_id = COALESCE($4, customer_id),
+         provider_payment_id = COALESCE($5, provider_payment_id),
+         payment_intent_id = COALESCE($5, payment_intent_id),
+         provider_refund_id = COALESCE($6, provider_refund_id),
+         refund_id = COALESCE($6, refund_id),
+         metadata = metadata || $7,
+         completed_at = COALESCE(completed_at, now()),
+         updated_at = now()
+     WHERE id = $1`,
+    [
+      pending.id,
+      result.workspace.id,
+      result.user.id,
+      customerId ? String(customerId) : null,
+      paymentId,
+      refundResult.refundId,
+      completionMetadata,
+      completionStatus,
+    ]
+  );
+
+  return {
+    workspaceId: result.workspace.id,
+    workspace: result.workspace,
+    user: result.user,
+    token: result.token,
+    refundId: refundResult.refundId,
+    verificationAmount: pending.verification_amount,
+    currency: pending.currency,
+  };
+}
+
+export async function completeRazorpayTrialSignupCheckoutSession({
+  subscriptionId,
+  paymentId,
+  signature,
+  pendingSignupId = null,
+}) {
+  const provisioned = await provisionRazorpayTrialSignupCheckout({
+    subscriptionId,
+    paymentId,
+    signature,
+    pendingSignupId,
+  });
+  const user = provisioned.user || (await getUserById(provisioned.userId));
+  const token = provisioned.token || generateToken(user);
+  return {
+    token,
+    user,
+    workspace: provisioned.workspace || { id: provisioned.workspaceId },
+    refundId: provisioned.refundId,
+    verificationAmount: provisioned.verificationAmount,
+    currency: provisioned.currency,
+  };
+}
+
+export async function verifyRazorpayWorkspaceSubscriptionPayment({
+  workspaceId,
+  userId,
+  subscriptionId,
+  paymentId,
+  signature,
+}) {
+  ensureRazorpayConfigured();
+  if (!workspaceId || !subscriptionId || !paymentId || !signature) {
+    throw Object.assign(new Error("Razorpay payment verification details are required."), { statusCode: 400 });
+  }
+
+  const checkoutRes = await db.query(
+    `SELECT *
+     FROM payment_checkout_sessions
+     WHERE workspace_id = $1
+       AND provider = 'razorpay'
+       AND checkout_session_id = $2
+       AND session_type = 'subscription'
+     LIMIT 1`,
+    [workspaceId, subscriptionId]
+  );
+  const checkout = checkoutRes.rows[0] || null;
+  if (!checkout) {
+    throw Object.assign(new Error("Razorpay subscription checkout was not found."), { statusCode: 404 });
+  }
+
+  verifyRazorpaySubscriptionCheckoutSignature({ subscriptionId, paymentId, signature });
+
+  const [payment, subscription] = await Promise.all([
+    fetchRazorpayPayment(paymentId),
+    fetchRazorpaySubscription(subscriptionId),
+  ]);
+
+  if (payment.status !== "captured") {
+    throw Object.assign(new Error("Razorpay payment has not been captured yet."), { statusCode: 409 });
+  }
+  if (!["authenticated", "active"].includes(subscription.status)) {
+    throw Object.assign(new Error(`Razorpay subscription is ${subscription.status}.`), { statusCode: 409 });
+  }
+
+  const customerId = subscription.customer_id || payment.customer_id || null;
+  if (customerId) {
+    await upsertPaymentCustomer({
+      workspaceId,
+      provider: "razorpay",
+      customerId: String(customerId),
+      email: subscription.customer_email || payment.email || null,
+      currency: subscription.currency || payment.currency || checkout.metadata?.currency || null,
+      metadata: {
+        razorpay_subscription_id: subscription.id,
+        user_id: userId || "",
+      },
+    });
+  }
+
+  const dbPlan =
+    checkout.billing_plan
+      ? await getPlanBySlug(checkout.billing_plan)
+      : await getPlanByRazorpayPlanId(subscription.plan_id);
+  await upsertSubscriptionFromRazorpay(
+    {
+      ...subscription,
+      notes: {
+        ...(subscription.notes || {}),
+        workspace_id: workspaceId,
+        user_id: userId || "",
+        billing_plan: dbPlan?.slug || checkout.billing_plan || null,
+        billing_plan_id: dbPlan?.id || null,
+        billing_interval: checkout.metadata?.billingInterval || checkout.metadata?.billing_interval || null,
+      },
+    },
+    workspaceId,
+    {
+      billing_plan: dbPlan?.slug || checkout.billing_plan || null,
+      billing_plan_id: dbPlan?.id || null,
+      billing_interval: checkout.metadata?.billingInterval || checkout.metadata?.billing_interval || null,
+      currency: checkout.metadata?.currency || payment.currency || null,
+    }
+  );
+
+  let refund = null;
+  const verificationAmount = Number(checkout.metadata?.verificationAmount || 0);
+  if (verificationAmount > 0 && Number(payment.amount) >= verificationAmount) {
+    try {
+      refund = await razorpayRequest("post", `/payments/${encodeURIComponent(paymentId)}/refund`, {
+        data: {
+          amount: verificationAmount,
+          speed: "optimum",
+          receipt: `sub_${String(checkout.id).replace(/-/g, "").slice(0, 24)}`,
+          notes: {
+            purpose: "workspace_subscription_card_verification_refund",
+            workspace_id: workspaceId,
+            razorpay_subscription_id: subscriptionId,
+          },
+        },
+      });
+    } catch (refundErr) {
+      console.error("[billing] Razorpay subscription verification refund failed:", refundErr.message);
+    }
+  }
+
+  await db.query(
+    `UPDATE payment_checkout_sessions
+     SET customer_id = COALESCE($2, customer_id),
+         subscription_id = $3,
+         status = $4,
+         completed_at = COALESCE(completed_at, now()),
+         metadata = metadata || $5,
+         updated_at = now()
+     WHERE workspace_id = $1
+       AND provider = 'razorpay'
+       AND checkout_session_id = $3`,
+    [
+      workspaceId,
+      customerId ? String(customerId) : null,
+      subscriptionId,
+      subscription.status || "authenticated",
+      {
+        razorpayPayment: payment,
+        razorpaySubscription: subscription,
+        razorpayRefund: refund,
+      },
+    ]
+  );
+
+  return {
+    verified: true,
+    provider: "razorpay",
+    subscriptionId,
+    status: subscription.status,
+    refundId: refund?.id || null,
+  };
+}
+
 // ── Billing portal ────────────────────────────────────────────────────────────
 // Returns a Stripe billing portal URL so the customer can manage/cancel.
 
@@ -1395,21 +2450,55 @@ export async function createBillingPortalSession({ workspaceId, returnUrl }) {
 // Cancels at period end (not immediately) to preserve access through paid period.
 
 export async function cancelSubscription(workspaceId) {
-  ensureStripeConfigured();
-
   const subRes = await db.query(
-    `SELECT subscription_id, current_period_end
+    `SELECT provider, subscription_id, current_period_end
      FROM workspace_subscriptions
-     WHERE workspace_id = $1 AND provider = 'stripe' LIMIT 1`,
+     WHERE workspace_id = $1
+       AND provider IN ('razorpay', 'stripe')
+     ORDER BY CASE provider WHEN 'razorpay' THEN 0 ELSE 1 END
+     LIMIT 1`,
     [workspaceId]
   );
 
   const subscriptionId = subRes.rows[0]?.subscription_id || null;
   if (!subscriptionId) {
-    const err = new Error("No active Stripe subscription found for this workspace");
+    const err = new Error("No active subscription found for this workspace");
     err.statusCode = 404;
     throw err;
   }
+  const provider = subRes.rows[0].provider;
+
+  if (provider === "razorpay") {
+    const subscription = await razorpayRequest(
+      "post",
+      `/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
+      { data: { cancel_at_cycle_end: true } }
+    );
+
+    await db.query(
+      `UPDATE workspace_subscriptions
+       SET cancel_at_period_end = true,
+           status = COALESCE($2, status),
+           current_period_end = COALESCE($3, current_period_end),
+           metadata = metadata || $4,
+           updated_at = now()
+       WHERE workspace_id = $1 AND provider = 'razorpay'`,
+      [
+        workspaceId,
+        subscription.status || null,
+        razorpayTimestampToIso(subscription.current_end || subscription.end_at),
+        { razorpaySubscription: subscription },
+      ]
+    );
+
+    return {
+      cancelled: true,
+      provider: "razorpay",
+      effectiveDate: razorpayTimestampToIso(subscription.current_end || subscription.end_at),
+    };
+  }
+
+  ensureStripeConfigured();
 
   const payload = qs.stringify({ cancel_at_period_end: "true" }, { encode: true });
   const subscription = await stripeRequest("post", `/v1/subscriptions/${subscriptionId}`, {
@@ -1426,6 +2515,7 @@ export async function cancelSubscription(workspaceId) {
 
   return {
     cancelled:     true,
+    provider:      "stripe",
     effectiveDate: stripeTimestampToIso(subscription.current_period_end),
   };
 }
@@ -2136,6 +3226,232 @@ async function handleSubscriptionDeleted(event) {
   );
 
   console.log(`[billing] subscription.deleted workspace=${workspaceId} — downgraded to Starter`);
+}
+
+function verifyRazorpayWebhookSignature(rawBody, signatureHeader) {
+  const secret = getRazorpayWebhookSecret();
+  if (!secret) {
+    const err = new Error("Razorpay webhook secret is not configured.");
+    err.statusCode = 503;
+    throw err;
+  }
+  if (!signatureHeader) {
+    const err = new Error("Missing Razorpay webhook signature.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+  const actualBuffer = Buffer.from(String(signatureHeader), "hex");
+  if (
+    expectedBuffer.length !== actualBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    const err = new Error("Invalid Razorpay webhook signature.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  return JSON.parse(rawBody.toString("utf8"));
+}
+
+async function persistRazorpayWebhookEvent(event, eventId) {
+  const resolvedEventId =
+    eventId ||
+    event.id ||
+    crypto.createHash("sha256").update(JSON.stringify(event)).digest("hex");
+  const eventType = event.event || event.type || "unknown";
+
+  const inserted = await db.query(
+    `INSERT INTO payment_webhook_events (
+       provider, provider_event_id, event_type, api_version, livemode, payload, created_at
+     )
+     VALUES ('razorpay', $1, $2, NULL, $3, $4, now())
+     ON CONFLICT (provider, provider_event_id) DO NOTHING
+     RETURNING id, processed_at, processing_error`,
+    [resolvedEventId, eventType, isRazorpayLiveMode(), event]
+  );
+
+  if (inserted.rowCount > 0) {
+    return { shouldProcess: true, duplicate: false, eventId: resolvedEventId, eventType };
+  }
+
+  const existing = await db.query(
+    `SELECT processed_at, processing_error
+     FROM payment_webhook_events
+     WHERE provider = 'razorpay' AND provider_event_id = $1
+     LIMIT 1`,
+    [resolvedEventId]
+  );
+  const row = existing.rows[0];
+  return {
+    shouldProcess: !row?.processed_at || !!row?.processing_error,
+    duplicate: true,
+    eventId: resolvedEventId,
+    eventType,
+  };
+}
+
+async function markRazorpayWebhookEventProcessed(eventId) {
+  await db.query(
+    `UPDATE payment_webhook_events
+     SET processed_at = now(), processing_error = null
+     WHERE provider = 'razorpay' AND provider_event_id = $1`,
+    [eventId]
+  );
+}
+
+async function markRazorpayWebhookEventFailed(eventId, processingError) {
+  await db.query(
+    `UPDATE payment_webhook_events
+     SET processed_at = null, processing_error = $2
+     WHERE provider = 'razorpay' AND provider_event_id = $1`,
+    [eventId, processingError]
+  );
+}
+
+function getRazorpayPaymentEntity(event) {
+  return event.payload?.payment?.entity || null;
+}
+
+function getRazorpaySubscriptionEntity(event) {
+  return event.payload?.subscription?.entity || null;
+}
+
+async function handleRazorpayPaymentCaptured(event) {
+  const payment = getRazorpayPaymentEntity(event);
+  if (!payment?.id) return;
+
+  const subscriptionId =
+    payment.subscription_id ||
+    payment.notes?.razorpay_subscription_id ||
+    payment.notes?.subscription_id ||
+    null;
+  if (!subscriptionId) return;
+
+  await db.query(
+    `UPDATE trial_signup_checkout_sessions
+     SET provider_payment_id = COALESCE($2, provider_payment_id),
+         payment_intent_id = COALESCE($2, payment_intent_id),
+         status = CASE
+           WHEN status IN ('created', 'authenticated') THEN 'payment_captured'
+           ELSE status
+         END,
+         metadata = metadata || $3,
+         updated_at = now()
+     WHERE provider = 'razorpay'
+       AND subscription_id = $1`,
+    [subscriptionId, payment.id, { razorpayPaymentCaptured: payment }]
+  );
+
+  const pending = await getPendingRazorpayTrialSignupBySubscription(subscriptionId);
+  if (pending && !pending.workspace_id && pending.status !== "provisioning") {
+    await provisionRazorpayTrialSignupCheckout({
+      subscriptionId,
+      paymentId: payment.id,
+      trustedWebhook: true,
+    });
+  }
+}
+
+async function handleRazorpaySubscriptionEvent(event) {
+  const subscription = getRazorpaySubscriptionEntity(event);
+  if (!subscription?.id) return;
+
+  const pending =
+    (subscription.notes?.pending_signup_id
+      ? await getPendingTrialSignupById(subscription.notes.pending_signup_id)
+      : null) ||
+    (await getPendingRazorpayTrialSignupBySubscription(subscription.id));
+
+  const existing = await db.query(
+    `SELECT workspace_id
+     FROM workspace_subscriptions
+     WHERE provider = 'razorpay' AND subscription_id = $1
+     LIMIT 1`,
+    [subscription.id]
+  );
+
+  const workspaceId =
+    subscription.notes?.workspace_id ||
+    pending?.workspace_id ||
+    existing.rows[0]?.workspace_id ||
+    null;
+
+  if (pending) {
+    await db.query(
+      `UPDATE trial_signup_checkout_sessions
+       SET status = CASE
+             WHEN status IN ('created', 'open', 'payment_captured') THEN $2
+             ELSE status
+           END,
+           customer_id = COALESCE($3, customer_id),
+           metadata = metadata || $4,
+           updated_at = now()
+       WHERE id = $1`,
+      [
+        pending.id,
+        subscription.status || "created",
+        subscription.customer_id || null,
+        { razorpaySubscriptionEvent: subscription },
+      ]
+    );
+  }
+
+  if (workspaceId) {
+    await upsertSubscriptionFromRazorpay(subscription, workspaceId, pending);
+  }
+
+  if (workspaceId && subscription.status === "cancelled") {
+    const starterPlan = await getPlanBySlug("starter");
+    const starterLimit = starterPlan?.member_limit || 10;
+    await db.query(
+      `UPDATE workspaces
+       SET billing_status = 'active',
+           billing_plan = 'starter',
+           plan = 'starter',
+           member_limit = $2,
+           max_members = $2,
+           billing_updated_at = now()
+       WHERE id = $1`,
+      [workspaceId, starterLimit]
+    );
+  }
+}
+
+export async function processRazorpayWebhook(rawBody, signatureHeader, eventIdHeader = null) {
+  const event = verifyRazorpayWebhookSignature(rawBody, signatureHeader);
+  const persisted = await persistRazorpayWebhookEvent(event, eventIdHeader);
+
+  if (!persisted.shouldProcess) {
+    return { duplicate: true, eventId: persisted.eventId, type: persisted.eventType };
+  }
+
+  try {
+    switch (event.event) {
+      case "payment.captured":
+        await handleRazorpayPaymentCaptured(event);
+        break;
+      case "subscription.authenticated":
+      case "subscription.activated":
+      case "subscription.charged":
+      case "subscription.completed":
+      case "subscription.cancelled":
+      case "subscription.pending":
+      case "subscription.halted":
+        await handleRazorpaySubscriptionEvent(event);
+        break;
+      default:
+        break;
+    }
+
+    await markRazorpayWebhookEventProcessed(persisted.eventId);
+    return { received: true, eventId: persisted.eventId, type: persisted.eventType };
+  } catch (error) {
+    await markRazorpayWebhookEventFailed(persisted.eventId, error.message);
+    throw error;
+  }
 }
 
 export async function processStripeWebhook(rawBody, signatureHeader) {

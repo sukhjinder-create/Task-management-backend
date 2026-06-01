@@ -15,7 +15,9 @@ import {
   calculateActivationCost,
   createActivationCheckoutSession,
   syncStripeSubscriptionSeatQuantity,
+  processRazorpayWebhook,
   processStripeWebhook,
+  verifyRazorpayWorkspaceSubscriptionPayment,
 } from "../services/payments.service.js";
 
 const router = express.Router();
@@ -32,6 +34,23 @@ webhookRouter.post(
       return res.json(result);
     } catch (err) {
       console.error("[payments] webhook error:", err.message);
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
+  }
+);
+
+const razorpayWebhookRouter = express.Router();
+razorpayWebhookRouter.post(
+  "/",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const sig = req.headers["x-razorpay-signature"];
+      const eventId = req.headers["x-razorpay-event-id"];
+      const result = await processRazorpayWebhook(req.body, sig, eventId);
+      return res.json(result);
+    } catch (err) {
+      console.error("[payments] Razorpay webhook error:", err.message);
       return res.status(err.statusCode || 400).json({ error: err.message });
     }
   }
@@ -59,6 +78,7 @@ router.get("/plans", async (_req, res) => {
       price_monthly: (p.price_monthly_paise || 0) / 100,
       price_yearly:  (p.price_yearly_paise  || 0) / 100,
       stripe_ready:  !!(p.stripe_price_monthly_id || p.stripe_price_yearly_id),
+      razorpay_ready: !!(p.razorpay_plan_monthly_id || p.razorpay_plan_yearly_id),
     }));
     return res.json(formatted);
   } catch (err) {
@@ -109,6 +129,28 @@ router.post("/subscribe", requireBillingAdmin, async (req, res) => {
     });
 
     return res.status(201).json(result);
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });
+  }
+});
+
+router.post("/verify", requireBillingAdmin, async (req, res) => {
+  try {
+    const {
+      razorpay_payment_id: paymentId,
+      razorpay_subscription_id: subscriptionId,
+      razorpay_signature: signature,
+    } = req.body || {};
+
+    const result = await verifyRazorpayWorkspaceSubscriptionPayment({
+      workspaceId: req.workspaceId,
+      userId: req.user?.id || null,
+      subscriptionId,
+      paymentId,
+      signature,
+    });
+
+    return res.json(result);
   } catch (err) {
     return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });
   }
@@ -235,5 +277,5 @@ router.post("/create-activation-order", requireBillingAdmin, async (req, res) =>
   }
 });
 
-export { webhookRouter };
+export { razorpayWebhookRouter, webhookRouter };
 export default router;

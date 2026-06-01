@@ -21,6 +21,7 @@
     "migrate:workspace-recovery-jobs": "node run-workspace-recovery-jobs-migration.js",
     "migrate:username-scope": "node run-username-scope-migration.js",
     "migrate:trial-signup-checkout": "node run-trial-signup-checkout-migration.js",
+    "migrate:razorpay-trial-signup": "node run-razorpay-trial-signup-migration.js",
     "recover:workspace:dry": "node run-workspace-recovery.js --dry-run",
     "recover:workspace": "node run-workspace-recovery.js",
     "migrate:supabase": "node migrate-to-supabase.js"
