@@ -12,6 +12,8 @@ import {
   updateChatMessage,
   softDeleteChatMessage,
   isChannelMember,
+  isChannelAdmin,
+  getChannelMembers,
 } from "../services/chat.service.js";
 
 import {
@@ -21,24 +23,22 @@ import {
 
 import { sendPushToUser } from "../services/push.service.js";
 
-
+import huddleCompatibilityAdapter from "../services/huddleCompatibilityAdapter.service.js";
+import huddleRealtimeService from "../services/huddleRealtime.service.js";
+import huddleRecoveryService from "../services/huddleRecovery.service.js";
 import {
-  createHuddle,
-  getActiveHuddle,
-  endHuddle,
-} from "../services/huddle.service.js";
+  enforceSocketHuddleProviderLock,
+  getProviderLockDiagnostics,
+} from "../services/huddleProviderLockGuard.service.js";
 
 import workspaceService from "../services/workspace.service.js";
+import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
 import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
 import { recomputeWorkspaceHealth } from "../services/workspaceHealth.service.js";
 
 let io;
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const WORKSPACE_GLOBAL = "GLOBAL";
-
-// Track live participants per huddle so we can auto-end when everyone leaves.
-// Map<huddleId, { channelId, workspaceId, participants: Set<userId> }>
-const huddleRooms = new Map();
 
 /**
  * For DM channels we use key pattern:
@@ -57,6 +57,11 @@ function legacyRoomName(channelKey) {
 function workspaceRoomName(channelKey, workspaceId = WORKSPACE_GLOBAL) {
   const ws = workspaceId || WORKSPACE_GLOBAL;
   return `workspace:${ws}:channel:${channelKey}`;
+}
+
+function dmParticipantIds(channelId) {
+  if (typeof channelId !== "string" || !channelId.startsWith("dm:")) return [];
+  return channelId.split(":").slice(1).filter(Boolean);
 }
 
 function extractPlainText(input) {
@@ -120,6 +125,509 @@ function isUuid(value) {
   );
 }
 
+const HUDDLE_ADMIN_ROLES = new Set(["admin", "owner"]);
+const HUDDLE_ALLOWED_FALLBACK_PLANS = new Set(["basic", "pro", "enterprise"]);
+const HUDDLE_BLOCKED_FALLBACK_PLANS = new Set(["free", "starter"]);
+
+function normalizeSocketId(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeOptionalSocketValue(value) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return String(value);
+  return "";
+}
+
+function getHuddleSocketDeviceContext(socket, payload = {}) {
+  const auth = socket?.handshake?.auth || {};
+  const query = socket?.handshake?.query || {};
+  const deviceId =
+    normalizeOptionalSocketValue(payload.deviceId) ||
+    normalizeOptionalSocketValue(auth.deviceId) ||
+    normalizeOptionalSocketValue(query.deviceId) ||
+    "";
+  const platform =
+    normalizeOptionalSocketValue(payload.platform) ||
+    normalizeOptionalSocketValue(auth.platform) ||
+    normalizeOptionalSocketValue(query.platform) ||
+    "";
+  return {
+    deviceId,
+    platform,
+    socketId: socket?.id || null,
+  };
+}
+
+function getResolvedHuddleSession({ room = null, active = null, session = null, sessionId = null } = {}) {
+  const id =
+    session?.id ||
+    sessionId ||
+    room?.sessionId ||
+    active?.session_id ||
+    active?.sessionId ||
+    null;
+  if (!id) return null;
+  return {
+    id,
+    workspace_id:
+      session?.workspace_id ||
+      room?.workspaceId ||
+      active?.workspace_id ||
+      null,
+    legacy_huddle_id:
+      session?.legacy_huddle_id ||
+      room?.huddleId ||
+      active?.huddle_id ||
+      null,
+    legacy_channel_key:
+      session?.legacy_channel_key ||
+      room?.channelId ||
+      active?.channel_key ||
+      null,
+    state: session?.state || "live",
+  };
+}
+
+function isSocketReconnect(socket) {
+  const auth = socket?.handshake?.auth || {};
+  const query = socket?.handshake?.query || {};
+  return Boolean(
+    socket?.recovered ||
+      auth.recovered ||
+      auth.reconnect ||
+      query.recovered ||
+      query.reconnect
+  );
+}
+
+function isDmChannelKey(channelId) {
+  return typeof channelId === "string" && channelId.startsWith("dm:");
+}
+
+function isThreadChannelKey(channelId) {
+  return typeof channelId === "string" && channelId.startsWith("thread:");
+}
+
+function normalizeFeatures(features) {
+  if (Array.isArray(features)) return features.map((f) => String(f));
+  if (typeof features === "string") {
+    try {
+      const parsed = JSON.parse(features);
+      return Array.isArray(parsed) ? parsed.map((f) => String(f)) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function hasFeature(features, key) {
+  return normalizeFeatures(features).includes(key);
+}
+
+function emitHuddleDenied(socket, action, reason, extra = {}) {
+  socket.emit("huddle:error", {
+    action,
+    reason,
+    ...extra,
+  });
+  console.warn("[huddle:authz:denied]", {
+    socketId: socket.id,
+    userId: socket.user?.id,
+    workspaceId: socket.workspaceId,
+    action,
+    reason,
+    ...extra,
+  });
+}
+
+async function getWorkspaceHuddleContext(socket) {
+  const workspaceId = socket.workspaceId;
+  const userId = String(socket.user?.id || "");
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL || !userId) {
+    return { ok: false, reason: "workspace_required" };
+  }
+
+  const workspace = await workspaceService.getOne(workspaceId);
+  if (!workspace) return { ok: false, reason: "workspace_not_found" };
+  if (workspace.status && workspace.status !== "active") {
+    return { ok: false, reason: "workspace_inactive" };
+  }
+
+  const membership = await workspaceService.getMembership(workspaceId, userId);
+  if (!membership) return { ok: false, reason: "workspace_membership_required" };
+  if (membership.billing_status === "pending") {
+    return { ok: false, reason: "workspace_member_pending" };
+  }
+
+  const trialEndsAt = workspace.trial_ends_at ? new Date(workspace.trial_ends_at) : null;
+  const onTrial = trialEndsAt && trialEndsAt > new Date();
+  if (onTrial) return { ok: true, workspace, membership };
+
+  const planSlug = workspace.billing_plan || workspace.plan || null;
+  const plan = planSlug ? await getPlanBySlug(planSlug).catch(() => null) : null;
+  const features = normalizeFeatures(plan?.features);
+
+  if (hasFeature(features, "video_huddle") || hasFeature(features, "huddle")) {
+    return { ok: true, workspace, membership };
+  }
+
+  const normalizedPlan = String(planSlug || "").toLowerCase();
+  if (HUDDLE_ALLOWED_FALLBACK_PLANS.has(normalizedPlan)) {
+    return { ok: true, workspace, membership };
+  }
+  if (HUDDLE_BLOCKED_FALLBACK_PLANS.has(normalizedPlan)) {
+    return { ok: false, reason: "plan_entitlement_required" };
+  }
+
+  // Preserve legacy workspaces whose plan rows predate machine-readable features.
+  if (!planSlug && features.length === 0) {
+    return { ok: true, workspace, membership };
+  }
+
+  return { ok: false, reason: "plan_entitlement_required" };
+}
+
+async function getActiveWorkspaceUserIds(workspaceId, exceptUserId = null) {
+  const { rows } = await pool.query(
+    `
+    SELECT user_id
+    FROM workspace_users
+    WHERE workspace_id = $1
+      AND (billing_status IS NULL OR billing_status != 'pending')
+    `,
+    [workspaceId]
+  );
+  return rows
+    .map((row) => String(row.user_id))
+    .filter((uid) => !exceptUserId || uid !== String(exceptUserId));
+}
+
+async function resolveDmScope(channelId, workspaceId, actorUserId) {
+  const participantIds = dmParticipantIds(channelId).map(String);
+  if (participantIds.length !== 2) {
+    return { ok: false, reason: "invalid_dm_channel" };
+  }
+  if (participantIds.some((uid) => !isUuid(uid))) {
+    return { ok: false, reason: "invalid_dm_participant" };
+  }
+  if (!participantIds.includes(String(actorUserId))) {
+    return { ok: false, reason: "dm_participation_required" };
+  }
+
+  const { rows } = await pool.query(
+    `
+    SELECT user_id
+    FROM workspace_users
+    WHERE workspace_id = $1
+      AND user_id = ANY($2::uuid[])
+      AND (billing_status IS NULL OR billing_status != 'pending')
+    `,
+    [workspaceId, participantIds]
+  );
+  const activeIds = new Set(rows.map((row) => String(row.user_id)));
+  if (participantIds.some((uid) => !activeIds.has(uid))) {
+    return { ok: false, reason: "dm_workspace_membership_required" };
+  }
+
+  return {
+    ok: true,
+    scope: {
+      type: "dm",
+      channelId,
+      workspaceId,
+      participantIds,
+      isPrivate: true,
+    },
+  };
+}
+
+async function resolveChannelScope(channelId, workspaceId, actorUserId) {
+  const channel = await getChannelByKey(channelId, workspaceId);
+  if (!channel) return { ok: false, reason: "channel_not_found" };
+
+  const isPrivate = Boolean(channel.isPrivate || channel.is_private);
+  if (isPrivate) {
+    const member = await isChannelMember(channel.id, actorUserId);
+    if (!member) return { ok: false, reason: "channel_membership_required" };
+  }
+
+  return {
+    ok: true,
+    scope: {
+      type: "channel",
+      channelId,
+      workspaceId,
+      channel,
+      isPrivate,
+    },
+  };
+}
+
+async function resolveThreadScope(channelId, workspaceId, actorUserId) {
+  const parts = channelId.split(":");
+  const messageId = parts[parts.length - 1];
+  if (!isUuid(messageId)) {
+    return { ok: false, reason: "invalid_thread_channel" };
+  }
+
+  const { rows } = await pool.query(
+    `
+    SELECT channel_key
+    FROM chat_messages
+    WHERE id = $1
+      AND workspace_id = $2
+      AND deleted_at IS NULL
+    LIMIT 1
+    `,
+    [messageId, workspaceId]
+  );
+  const parentChannelKey = rows[0]?.channel_key;
+  if (!parentChannelKey) return { ok: false, reason: "thread_not_found" };
+
+  const parent = isDmChannelKey(parentChannelKey)
+    ? await resolveDmScope(parentChannelKey, workspaceId, actorUserId)
+    : await resolveChannelScope(parentChannelKey, workspaceId, actorUserId);
+
+  if (!parent.ok) return parent;
+
+  return {
+    ok: true,
+    scope: {
+      ...parent.scope,
+      type: "thread",
+      channelId,
+      parentChannelId: parentChannelKey,
+      parentScope: parent.scope,
+      isPrivate: true,
+    },
+  };
+}
+
+async function resolveHuddleScope(channelId, workspaceId, actorUserId) {
+  const safeChannelId = normalizeSocketId(channelId);
+  if (!safeChannelId) return { ok: false, reason: "channel_required" };
+  if (isDmChannelKey(safeChannelId)) {
+    return resolveDmScope(safeChannelId, workspaceId, actorUserId);
+  }
+  if (isThreadChannelKey(safeChannelId)) {
+    return resolveThreadScope(safeChannelId, workspaceId, actorUserId);
+  }
+  return resolveChannelScope(safeChannelId, workspaceId, actorUserId);
+}
+
+async function authorizeHuddleScope(socket, channelId, action) {
+  const workspaceContext = await getWorkspaceHuddleContext(socket);
+  if (!workspaceContext.ok) {
+    emitHuddleDenied(socket, action, workspaceContext.reason);
+    return workspaceContext;
+  }
+
+  const scopeContext = await resolveHuddleScope(
+    channelId,
+    socket.workspaceId,
+    String(socket.user.id)
+  );
+  if (!scopeContext.ok) {
+    emitHuddleDenied(socket, action, scopeContext.reason, { channelId });
+    return scopeContext;
+  }
+
+  return {
+    ok: true,
+    ...workspaceContext,
+    scope: scopeContext.scope,
+  };
+}
+
+async function getRoomOrActiveHuddle({ channelId, huddleId, workspaceId, scope }) {
+  const room = huddleRealtimeService.getPresence({ workspaceId, huddleId });
+  if (room) {
+    if (
+      String(room.channelId) !== String(channelId) ||
+      String(room.workspaceId) !== String(workspaceId)
+    ) {
+      return { ok: false, reason: "huddle_scope_mismatch" };
+    }
+    if (!room.scope) {
+      huddleRealtimeService.updateRoomContext({ workspaceId, huddleId, scope });
+    }
+    return { ok: true, room, active: null };
+  }
+
+  const activeResult = await huddleCompatibilityAdapter.getActiveLegacyHuddle({
+    workspaceId,
+    channelId,
+    huddleId,
+    scope,
+    source: "socket:getRoomOrActiveHuddle",
+  });
+  const active = activeResult?.active || null;
+  if (!active || String(active.huddle_id) !== String(huddleId)) {
+    return { ok: false, reason: "huddle_not_found" };
+  }
+
+  return { ok: true, room: null, active, session: activeResult?.session || null };
+}
+
+function getRecoveryHeartbeatSummary({ workspaceId, huddleId, userId } = {}) {
+  const diagnostics = huddleRealtimeService.getDiagnostics?.() || {};
+  const heartbeats = diagnostics.heartbeats || null;
+  if (!heartbeats) return null;
+
+  const staleDevice = (heartbeats.staleDevices || []).find(
+    (device) =>
+      String(device.workspaceId) === String(workspaceId) &&
+      String(device.huddleId) === String(huddleId) &&
+      String(device.userId) === String(userId)
+  );
+  const staleParticipant = (heartbeats.staleParticipants || []).find(
+    (participant) =>
+      String(participant.workspaceId) === String(workspaceId) &&
+      String(participant.huddleId) === String(huddleId) &&
+      String(participant.userId) === String(userId)
+  );
+
+  return {
+    lastHeartbeatAt: heartbeats.lastHeartbeatAt || null,
+    heartbeatAgeMs: staleDevice?.ageMs ?? null,
+    staleDeviceCount: (heartbeats.staleDevices || []).filter(
+      (device) =>
+        String(device.workspaceId) === String(workspaceId) &&
+        String(device.huddleId) === String(huddleId)
+    ).length,
+    staleParticipantCount: (heartbeats.staleParticipants || []).filter(
+      (participant) =>
+        String(participant.workspaceId) === String(workspaceId) &&
+        String(participant.huddleId) === String(huddleId)
+    ).length,
+    selfStale: Boolean(staleDevice || staleParticipant),
+  };
+}
+
+async function evaluateHuddleRecoveryShadow({
+  source,
+  socket,
+  workspaceId,
+  channelId = null,
+  huddleId = null,
+  userId,
+  username = "",
+  scope = null,
+  localRoom = null,
+  active = null,
+  session = null,
+  access = { ok: true },
+  payload = {},
+}) {
+  try {
+    const evaluate = typeof huddleRecoveryService.evaluateDurable === "function"
+      ? huddleRecoveryService.evaluateDurable.bind(huddleRecoveryService)
+      : huddleRecoveryService.evaluate.bind(huddleRecoveryService);
+    return await evaluate({
+      source,
+      workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId || ""),
+      username,
+      scope: scope || {},
+      localRoom,
+      active,
+      session,
+      access,
+      deviceContext: getHuddleSocketDeviceContext(socket, payload),
+      heartbeatDiagnostics: getRecoveryHeartbeatSummary({ workspaceId, huddleId, userId }),
+    });
+  } catch (err) {
+    console.warn("[huddle:recovery:shadow_socket_failed]", {
+      source,
+      workspaceId,
+      channelId,
+      huddleId,
+      userId,
+      error: err.message,
+    });
+    return null;
+  }
+}
+
+function withRecoveryMetadata(payload, recoveryResult) {
+  const metadata = recoveryResult?.exposure?.metadata;
+  if (!metadata?.recoverySnapshot) return payload;
+  return {
+    ...payload,
+    recovery: metadata,
+  };
+}
+
+async function getScopeRecipientIds(scope, exceptUserId = null) {
+  let ids = [];
+  if (scope.type === "dm") {
+    ids = scope.participantIds || [];
+  } else if (scope.channel?.id) {
+    const members = await getChannelMembers(scope.channel.id);
+    ids = members.map((member) => String(member.user_id));
+  } else if (scope.parentScope) {
+    ids = await getScopeRecipientIds(scope.parentScope);
+  }
+  return ids.filter((uid) => !exceptUserId || uid !== String(exceptUserId));
+}
+
+async function emitHuddleInviteEvent(scope, event, payload, options = {}) {
+  const { exceptUserId = null, includeWorkspaceRoom = false } = options;
+  const recipientIds =
+    scope.type === "dm" || scope.isPrivate
+      ? await getScopeRecipientIds(scope, exceptUserId)
+      : [];
+  await huddleRealtimeService.broadcastInvite({
+    scope,
+    event,
+    payload,
+    recipientIds,
+    exceptUserId,
+    includeWorkspaceRoom,
+  });
+}
+
+async function emitHuddleLiveEvent(scope, room, event, payload, options = {}) {
+  await huddleRealtimeService.broadcastLive({
+    scope,
+    huddleId: room?.huddleId || payload?.huddleId,
+    event,
+    payload,
+    exceptUserId: options.exceptUserId || null,
+  });
+}
+
+async function getHuddlePushTargetIds(scope, actorUserId) {
+  if (scope.type === "dm" || scope.isPrivate) {
+    return getScopeRecipientIds(scope, actorUserId);
+  }
+  return getActiveWorkspaceUserIds(scope.workspaceId, actorUserId);
+}
+
+async function canManageHuddle({ scope, room, active, membership, userId }) {
+  if (scope.type === "dm") {
+    return scope.participantIds?.includes(String(userId));
+  }
+
+  const startedBy = String(room?.startedBy?.userId || active?.started_by || "");
+  if (startedBy && startedBy === String(userId)) return true;
+
+  const role = String(membership?.role || "").toLowerCase();
+  if (HUDDLE_ADMIN_ROLES.has(role)) return true;
+
+  if (scope.channel?.id) {
+    try {
+      if (await isChannelAdmin(scope.channel.id, userId)) return true;
+    } catch {}
+  }
+
+  return false;
+}
+
 /* -------------------------------------------------------
    INIT SOCKET WITH FRONTEND URL
 ------------------------------------------------------- */
@@ -130,6 +638,7 @@ export function initSocket(server, frontendUrl) {
       credentials: true,
     },
   });
+  huddleRealtimeService.configure({ io, workspaceRoomName });
 
 // Register AI socket listeners
   registerAiSocket(io);  // THIS is where AI gets integrated
@@ -212,6 +721,17 @@ socket._recentMessageHashes = new Set();
     return;
   }
 
+  if (isSocketReconnect(socket)) {
+    evaluateHuddleRecoveryShadow({
+      source: "socket:reconnect",
+      socket,
+      workspaceId: socket.workspaceId,
+      userId,
+      username,
+      access: { ok: true },
+    }).catch(() => {});
+  }
+
   // 🔁 Personal room (for direct emits)
 socket.join(userId);
 
@@ -279,7 +799,8 @@ if (channelKey.startsWith("dm:")) {
   `
   SELECT
     m.*,
-    u.username
+    u.username,
+    u.avatar_url
   FROM chat_messages m
   LEFT JOIN users u ON u.id = m.user_id
   WHERE m.channel_key = $1
@@ -310,6 +831,8 @@ socket.emit("chat:history", {
       channelId: channelKey,
       userId: m.user_id,
       username: m.username,
+      avatarUrl: m.avatar_url || null,
+      avatar_url: m.avatar_url || null,
       textHtml: resolveRenderableText(m),
       createdAt: m.created_at,
       updatedAt: m.updated_at,
@@ -363,17 +886,25 @@ socket.emit("chat:history", {
         socket.join(wsRoom);
 
         const resolvedWorkspaceId = socket.workspaceId;
-        const active = await getActiveHuddle(channelKey);
+        const canSeeHuddle =
+          !(channel.isPrivate || channel.is_private) ||
+          (await isChannelMember(channel.id, userId));
+        const activeScopeContext = canSeeHuddle
+          ? await resolveHuddleScope(channelKey, resolvedWorkspaceId, String(userId))
+          : null;
+        const activeResult = canSeeHuddle
+          ? await huddleCompatibilityAdapter.getActiveLegacyHuddle({
+              workspaceId: resolvedWorkspaceId,
+              channelId: channelKey,
+              actorUserId: String(userId),
+              scope: activeScopeContext?.scope || {},
+              source: "chat:join",
+            })
+          : null;
+        const active = activeResult?.active || null;
         if (active && !socket.disconnected && !socket._isCleanedUp) {
-          // Resolve the actual username of the huddle starter from the DB
-          let starterUsername = "User";
-          try {
-            const { rows: urows } = await pool.query(
-              "SELECT username FROM users WHERE id = $1 LIMIT 1",
-              [active.started_by]
-            );
-            if (urows[0]?.username) starterUsername = urows[0].username;
-          } catch (_) {}
+          const starterUsername = active.starter_username || "User";
+          const sessionId = activeResult?.sessionId || active.session_id || null;
           socket.emit("huddle:started", {
             channelId: channelKey,
             workspaceId: channel.workspaceId || resolvedWorkspaceId,
@@ -384,6 +915,7 @@ socket.emit("chat:history", {
             },
             at: active.started_at,
             persisted: true,
+            ...(sessionId ? { sessionId } : {}),
           });
         }
 
@@ -425,10 +957,10 @@ socket.emit("chat:history", {
   if (!channelId || (!text?.trim() && !hasAttachments)) return;
 
   const workspaceId = socket.workspaceId;
-  const cleanText = text.trim();
+  const cleanText = typeof text === "string" ? text.trim() : "";
 
   // 🔐 HARD DEDUPLICATION (same socket, same message)
-  const dedupeKey = `${channelId}::${cleanText}::${parentId || "root"}`;
+  const dedupeKey = `${channelId}::${tempId || cleanText}::${parentId || "root"}::${JSON.stringify(attachments || [])}`;
 
   if (socket._recentMessageHashes.has(dedupeKey)) {
     console.warn("⚠️ Duplicate chat:message ignored", dedupeKey);
@@ -722,27 +1254,127 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   /* -----------------------------------------------------
      HUDDLES
   ----------------------------------------------------- */
+  async function endHuddleAndNotify(
+    scope,
+    huddleId,
+    endedBy,
+    reason = "legacy_huddle_ended"
+  ) {
+    const sessionResult = await huddleCompatibilityAdapter.endLegacyHuddle({
+      workspaceId: scope.workspaceId,
+      channelId: scope.channelId,
+      huddleId,
+      userId: endedBy?.userId ? String(endedBy.userId) : null,
+      username: endedBy?.username || null,
+      scope,
+      reason,
+    });
+    if (!sessionResult?.ok) {
+      return {
+        ok: false,
+        reason: sessionResult?.reason || "huddle_end_failed",
+      };
+    }
+
+    huddleRealtimeService.deleteRoom({ workspaceId: scope.workspaceId, huddleId });
+    const sessionId = sessionResult?.sessionId || null;
+
+    const out = {
+      channelId: scope.channelId,
+      workspaceId: scope.workspaceId,
+      huddleId,
+      endedBy,
+      at: new Date().toISOString(),
+      ...(sessionId ? { sessionId } : {}),
+    };
+    await emitHuddleInviteEvent(scope, "huddle:ended", out);
+    return { ok: true, payload: out, sessionResult };
+  }
+
   socket.on("huddle:start", async ({ channelId, huddleId }) => {
+    channelId = normalizeSocketId(channelId);
+    huddleId = normalizeSocketId(huddleId);
     if (!channelId || !huddleId) return;
 
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    const ctx = await authorizeHuddleScope(socket, channelId, "huddle:start");
+    if (!ctx.ok) return;
+    const { scope } = ctx;
+    const workspaceId = scope.workspaceId;
+
+    const duplicateRoom = huddleRealtimeService.getPresence({ workspaceId, huddleId });
+    if (duplicateRoom) {
+      if (
+        duplicateRoom.channelId === channelId &&
+        duplicateRoom.workspaceId === workspaceId &&
+        String(duplicateRoom.startedBy?.userId) === String(userId)
+      ) {
+        return;
+      }
+      emitHuddleDenied(socket, "huddle:start", "huddle_id_already_active", { channelId, huddleId });
+      return;
+    }
 
     // Clear any stale/zombie huddle so a new one can always start.
     // A huddle becomes stale when everyone left without pressing "End for all".
-    const existing = await getActiveHuddle(channelId);
+    const existingResult = await huddleCompatibilityAdapter.getActiveLegacyHuddle({
+      workspaceId,
+      channelId,
+      actorUserId: String(userId),
+      scope,
+      source: "huddle:start:existing",
+    });
+    if (existingResult && !existingResult.ok) {
+      emitHuddleDenied(socket, "huddle:start", existingResult.reason || "active_huddle_lookup_failed", { channelId, huddleId });
+      return;
+    }
+    const existing = existingResult?.active || null;
     if (existing) {
-      try { await endHuddle({ channelKey: channelId, huddleId: existing.huddle_id }); } catch (_) {}
-      huddleRooms.delete(existing.huddle_id);
-      const staleEnded = { channelId, workspaceId, huddleId: existing.huddle_id, endedBy: { userId, username }, at: new Date().toISOString() };
-      io.to(legacyRoomName(channelId)).emit("huddle:ended", staleEnded);
-      io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:ended", staleEnded);
+      const staleRoom = huddleRealtimeService.getPresence({
+        workspaceId,
+        huddleId: existing.huddle_id,
+      });
+      if (staleRoom && staleRoom.workspaceId !== workspaceId) {
+        emitHuddleDenied(socket, "huddle:start", "active_huddle_scope_mismatch", { channelId });
+        return;
+      }
+      const ended = await endHuddleAndNotify(scope, existing.huddle_id, { userId, username });
+      if (!ended.ok) {
+        emitHuddleDenied(socket, "huddle:start", ended.reason, { channelId, huddleId });
+        return;
+      }
     }
 
-    await createHuddle({
-      channelKey: channelId,
+    const startResult = await huddleCompatibilityAdapter.startLegacyHuddle({
+      workspaceId,
+      channelId,
       huddleId,
-      startedBy: userId,
+      userId: String(userId),
+      username,
+      scope,
     });
+    if (!startResult?.ok || !startResult?.legacy) {
+      emitHuddleDenied(socket, "huddle:start", startResult?.reason || "huddle_start_failed", { channelId, huddleId });
+      return;
+    }
+    const sessionId = startResult?.sessionId || null;
+    if (!sessionId || !startResult?.providerLock?.locked) {
+      emitHuddleDenied(socket, "huddle:start", "provider_lock_required", {
+        channelId,
+        huddleId,
+        providerLock: startResult?.providerLockDiagnostics || null,
+      });
+      return;
+    }
+    const providerLockDiagnostics =
+      startResult.providerLockDiagnostics ||
+      await getProviderLockDiagnostics({
+        workspaceId,
+        sessionId,
+        action: "huddle:start",
+        requestedProvider: "mesh",
+        userId: String(userId),
+        deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+      });
 
     const out = {
       channelId,
@@ -751,59 +1383,58 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       startedBy: { userId, username },
       at: new Date().toISOString(),
       persisted: true,
+      providerLock: providerLockDiagnostics,
+      ...(sessionId ? { sessionId } : {}),
     };
 
-    // Track in huddleRooms with startedBy so huddle:sync can replay it
-    huddleRooms.set(huddleId, {
+    const starterDeviceContext = getHuddleSocketDeviceContext(socket);
+    huddleRealtimeService.createRoom({
+      huddleId,
       channelId,
       workspaceId,
-      participants: new Set([String(userId)]),
-      participantNames: new Map([[String(userId), username]]),
-      startedBy: { userId, username },
+      participants: [{ userId: String(userId), username, ...starterDeviceContext }],
+      startedBy: { userId: String(userId), username },
       startedAt: out.at,
+      scope,
+      sessionId,
+    });
+    huddleRealtimeService.recordHeartbeat({
+      workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId),
+      username,
+      sessionId,
+      ...starterDeviceContext,
+      source: "huddle:start",
     });
 
-    const isDM = channelId.startsWith("dm:");
-
-    if (isDM) {
-      // DM huddle: only notify the other participant, not the whole workspace
-      const dmParts = channelId.split(":");
-      for (let i = 1; i < dmParts.length; i++) {
-        const uid = dmParts[i];
-        if (uid !== String(userId)) {
-          io.to(uid).emit("huddle:started", out);
-        }
-      }
-    } else {
-      // Channel huddle: broadcast to channel rooms and entire workspace
-      io.to(legacyRoomName(channelId)).emit("huddle:started", out);
-      io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:started", out);
-      io.to(`workspace:${workspaceId}`).emit("huddle:started", out);
-    }
+    await emitHuddleInviteEvent(scope, "huddle:started", out, {
+      exceptUserId: scope.type === "dm" || scope.isPrivate ? userId : null,
+      includeWorkspaceRoom: scope.type !== "dm" && !scope.isPrivate,
+    });
 
     // Send FCM push notification only to relevant participants (not entire workspace for DMs)
     try {
-      let pushTargetIds;
-      if (isDM) {
-        // Only push to the other DM participant
-        const dmParts = channelId.split(":");
-        pushTargetIds = dmParts.slice(1).filter(uid => uid !== String(userId));
-      } else {
-        const { rows: members } = await pool.query(
-          "SELECT user_id FROM workspace_users WHERE workspace_id = $1 AND user_id != $2",
-          [workspaceId, userId]
-        );
-        pushTargetIds = members.map(m => String(m.user_id));
-      }
-      const channelLabel = isDM ? "Direct Message" : `#${channelId}`;
+      const pushTargetIds = await getHuddlePushTargetIds(scope, userId);
+      const channelLabel =
+        scope.type === "dm" ? "Direct Message" :
+        scope.type === "thread" ? "Thread" :
+        `#${channelId}`;
       for (const uid of pushTargetIds) {
         sendPushToUser({
           userId: uid,
           title: `📞 ${username} is calling`,
           body: `Incoming huddle in ${channelLabel}`,
-          url: "/chat",
+          url: `/chat?channel=${encodeURIComponent(channelId)}`,
           type: "huddle",
-          extraData: { huddleId, channelId, startedByName: username, startedBy: String(userId) },
+          extraData: {
+            huddleId,
+            channelId,
+            startedByName: username,
+            startedBy: String(userId),
+            ...(sessionId ? { sessionId } : {}),
+          },
         }).catch(() => {});
       }
     } catch (e) {
@@ -812,49 +1443,148 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   });
 
   socket.on("huddle:end", async ({ channelId, huddleId }) => {
+    channelId = normalizeSocketId(channelId);
+    huddleId = normalizeSocketId(huddleId);
     if (!channelId || !huddleId) return;
-    huddleRooms.delete(huddleId);
-    await endHuddle({ channelKey: channelId, huddleId });
 
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = {
+    const ctx = await authorizeHuddleScope(socket, channelId, "huddle:end");
+    if (!ctx.ok) return;
+
+    const resolved = await getRoomOrActiveHuddle({
       channelId,
-      workspaceId,
       huddleId,
-      endedBy: { userId, username },
-      at: new Date().toISOString(),
-    };
+      workspaceId: ctx.scope.workspaceId,
+      scope: ctx.scope,
+    });
+    if (!resolved.ok) {
+      emitHuddleDenied(socket, "huddle:end", resolved.reason, { channelId, huddleId });
+      return;
+    }
 
-    io.to(legacyRoomName(channelId)).emit("huddle:ended", out);
-    io.to(workspaceRoomName(channelId, workspaceId)).emit(
-      "huddle:ended",
-      out
-    );
+    const allowed = await canManageHuddle({
+      scope: ctx.scope,
+      room: resolved.room,
+      active: resolved.active,
+      membership: ctx.membership,
+      userId,
+    });
+    if (!allowed) {
+      emitHuddleDenied(socket, "huddle:end", "huddle_owner_required", { channelId, huddleId });
+      return;
+    }
+
+    const ended = await endHuddleAndNotify(ctx.scope, huddleId, { userId, username });
+    if (!ended.ok) {
+      emitHuddleDenied(socket, "huddle:end", ended.reason, { channelId, huddleId });
+    }
   });
 
-  socket.on("huddle:join", ({ channelId, huddleId }) => {
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    // Join channel rooms so this socket receives huddle signaling and
-    // media-state events (mute, screen-share) for the duration of the call.
-    socket.join(legacyRoomName(channelId));
-    socket.join(workspaceRoomName(channelId, workspaceId));
+  socket.on("huddle:join", async ({ channelId, huddleId }) => {
+    channelId = normalizeSocketId(channelId);
+    huddleId = normalizeSocketId(huddleId);
+    if (!channelId || !huddleId) return;
 
-    // Track participant for auto-end-on-empty logic
-    if (!huddleRooms.has(huddleId)) {
-      huddleRooms.set(huddleId, { channelId, workspaceId, participants: new Set(), participantNames: new Map() });
+    const ctx = await authorizeHuddleScope(socket, channelId, "huddle:join");
+    if (!ctx.ok) return;
+
+    const resolved = await getRoomOrActiveHuddle({
+      channelId,
+      huddleId,
+      workspaceId: ctx.scope.workspaceId,
+      scope: ctx.scope,
+    });
+    if (!resolved.ok) {
+      emitHuddleDenied(socket, "huddle:join", resolved.reason, { channelId, huddleId });
+      return;
     }
-    const room = huddleRooms.get(huddleId);
-    if (!room.participantNames) room.participantNames = new Map();
 
-    // Collect existing participants BEFORE adding the new joiner
-    // so we can send them to the joiner (fixes race condition where
-    // huddle:user-joined is missed if the caller hasn't joined the room yet)
-    const existingParticipants = Array.from(room.participants)
-      .filter(uid => uid !== String(userId))
-      .map(uid => ({ userId: uid, username: room.participantNames.get(uid) || "" }));
+    const workspaceId = ctx.scope.workspaceId;
+    const room =
+      resolved.room ||
+      huddleRealtimeService.ensureRoomFromActive({
+        scope: ctx.scope,
+        huddleId,
+        active: resolved.active,
+      });
+    const deviceContext = getHuddleSocketDeviceContext(socket);
+    const resolvedSession = getResolvedHuddleSession({
+      room,
+      active: resolved.active,
+      session: resolved.session,
+    });
+    const providerLockGuard = await enforceSocketHuddleProviderLock({
+      workspaceId,
+      session: resolvedSession,
+      channelId,
+      huddleId,
+      action: "huddle:join",
+      requestedProvider: "mesh",
+      userId: String(userId),
+      deviceId: deviceContext.deviceId || null,
+      allowLiveKitLifecycleJoin: true,
+      createIfMissing: true,
+    });
+    if (!providerLockGuard.ok) {
+      emitHuddleDenied(socket, "huddle:join", providerLockGuard.reason || "provider_lock_mismatch", {
+        channelId,
+        huddleId,
+        providerLock: providerLockGuard.diagnostics,
+      });
+      return;
+    }
 
-    room.participants.add(String(userId));
-    room.participantNames.set(String(userId), username);
+    huddleRealtimeService.joinRealtimeRooms({
+      socket,
+      workspaceId,
+      channelId,
+      scope: ctx.scope,
+    });
+
+    const sessionResult = await huddleCompatibilityAdapter.recordLegacyHuddleJoin({
+      workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId),
+      username,
+      scope: ctx.scope,
+      socket,
+    });
+    const sessionId = sessionResult?.sessionId || room.sessionId || null;
+
+    const joinResult = huddleRealtimeService.joinDevice({
+      workspaceId,
+      huddleId,
+      channelId,
+      userId: String(userId),
+      username,
+      ...deviceContext,
+      scope: ctx.scope,
+      sessionId,
+    });
+    huddleRealtimeService.recordHeartbeat({
+      workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId),
+      username,
+      sessionId,
+      ...deviceContext,
+      source: "huddle:join",
+    });
+    const joinRecovery = await evaluateHuddleRecoveryShadow({
+      source: "huddle:join:shadow_recovery",
+      socket,
+      workspaceId,
+      channelId,
+      huddleId,
+      userId,
+      username,
+      scope: ctx.scope,
+      localRoom: joinResult.room,
+      active: resolved.active,
+      session: sessionResult?.session || resolved.session || null,
+    });
+    const existingParticipants = joinResult.existingParticipants || [];
 
     const out = {
       channelId,
@@ -863,44 +1593,198 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       userId,
       username,
       at: new Date().toISOString(),
+      providerLock: providerLockGuard.diagnostics,
+      ...(sessionId ? { sessionId } : {}),
     };
 
     // Tell existing participants that someone new joined (they create offers)
-    socket.to(legacyRoomName(channelId)).emit("huddle:user-joined", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:user-joined", out);
+    await emitHuddleLiveEvent(ctx.scope, joinResult.room, "huddle:user-joined", out, { exceptUserId: userId });
 
     // Tell the joiner who's already in the call — the joiner creates offers to them.
     // This eliminates the race where huddle:user-joined is missed by the caller.
     if (existingParticipants.length > 0) {
-      socket.emit("huddle:participants", {
+      socket.emit("huddle:participants", withRecoveryMetadata({
         channelId,
         huddleId,
+        providerLock: providerLockGuard.diagnostics,
+        ...(sessionId ? { sessionId } : {}),
         participants: existingParticipants,
-      });
+      }, joinRecovery));
     }
+
+    const participantsOut = {
+      channelId,
+      workspaceId,
+      huddleId,
+      providerLock: providerLockGuard.diagnostics,
+      ...(sessionId ? { sessionId } : {}),
+      participants: joinResult.participants || [],
+    };
+    await emitHuddleLiveEvent(ctx.scope, joinResult.room, "huddle:participants", participantsOut);
   });
 
-  async function handleHuddleLeave(channelId, huddleId, workspaceId) {
-    const room = huddleRooms.get(huddleId);
-    if (room) {
-      room.participants.delete(String(userId));
-      if (room.participants.size === 0) {
-        huddleRooms.delete(huddleId);
-        try { await endHuddle({ channelKey: channelId, huddleId }); } catch (_) {}
-        const ended = { channelId, workspaceId, huddleId, endedBy: { userId, username }, at: new Date().toISOString() };
-        io.to(legacyRoomName(channelId)).emit("huddle:ended", ended);
-        io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:ended", ended);
-        return; // already emitted huddle:ended, skip huddle:user-left
-      }
+  async function handleHuddleLeave(channelId, huddleId) {
+    const ctx = await authorizeHuddleScope(socket, channelId, "huddle:leave");
+    if (!ctx.ok) return;
+
+    const resolved = await getRoomOrActiveHuddle({
+      channelId,
+      huddleId,
+      workspaceId: ctx.scope.workspaceId,
+      scope: ctx.scope,
+    });
+    if (!resolved.ok || !resolved.room) return;
+
+    const room = resolved.room;
+    if (
+      !huddleRealtimeService.hasParticipant({
+        workspaceId: ctx.scope.workspaceId,
+        huddleId,
+        userId: String(userId),
+      })
+    ) {
+      emitHuddleDenied(socket, "huddle:leave", "participant_required", { channelId, huddleId });
+      return;
     }
-    const out = { channelId, workspaceId, huddleId, userId, username, at: new Date().toISOString() };
-    socket.to(legacyRoomName(channelId)).emit("huddle:user-left", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:user-left", out);
+
+    const sessionResult = await huddleCompatibilityAdapter.recordLegacyHuddleLeave({
+      workspaceId: ctx.scope.workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId),
+      username,
+      scope: ctx.scope,
+      socket,
+    });
+    const sessionId = sessionResult?.sessionId || room.sessionId || null;
+
+    const leaveResult = huddleRealtimeService.leaveDevice({
+      workspaceId: ctx.scope.workspaceId,
+      huddleId,
+      userId: String(userId),
+      ...getHuddleSocketDeviceContext(socket),
+    });
+
+    if (leaveResult.participantStillPresent) {
+      return;
+    }
+
+    if (leaveResult.participantCount === 0 || ctx.scope.type === "dm") {
+      const ended = await endHuddleAndNotify(ctx.scope, huddleId, { userId, username });
+      if (!ended.ok) {
+        console.error("[huddle:leave:end]", ended.reason);
+      }
+      return;
+    }
+
+    const out = {
+      channelId,
+      workspaceId: ctx.scope.workspaceId,
+      huddleId,
+      userId,
+      username,
+      at: new Date().toISOString(),
+      ...(sessionId ? { sessionId } : {}),
+    };
+    await emitHuddleLiveEvent(ctx.scope, leaveResult.room, "huddle:user-left", out, { exceptUserId: userId });
   }
 
   socket.on("huddle:leave", ({ channelId, huddleId }) => {
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    handleHuddleLeave(channelId, huddleId, workspaceId).catch((e) => console.error("[huddle:leave]", e.message));
+    channelId = normalizeSocketId(channelId);
+    huddleId = normalizeSocketId(huddleId);
+    if (!channelId || !huddleId) return;
+    handleHuddleLeave(channelId, huddleId).catch((e) => console.error("[huddle:leave]", e.message));
+  });
+
+  socket.on("huddle:heartbeat", async (payload = {}) => {
+    let { channelId, huddleId, clientSentAt, sequence } = payload || {};
+    channelId = normalizeSocketId(channelId);
+    huddleId = normalizeSocketId(huddleId);
+    if (!channelId || !huddleId) return;
+
+    const ctx = await authorizeHuddleScope(socket, channelId, "huddle:heartbeat");
+    if (!ctx.ok) return;
+
+    const room = huddleRealtimeService.getPresence({
+      workspaceId: ctx.scope.workspaceId,
+      huddleId,
+    });
+    if (!room || room.channelId !== channelId) {
+      emitHuddleDenied(socket, "huddle:heartbeat", "huddle_room_required", { channelId, huddleId });
+      return;
+    }
+    if (
+      !huddleRealtimeService.hasParticipant({
+        workspaceId: ctx.scope.workspaceId,
+        huddleId,
+        userId: String(userId),
+      })
+    ) {
+      emitHuddleDenied(socket, "huddle:heartbeat", "participant_required", { channelId, huddleId });
+      return;
+    }
+
+    const deviceContext = getHuddleSocketDeviceContext(socket, payload);
+    const providerLockGuard = await enforceSocketHuddleProviderLock({
+      workspaceId: ctx.scope.workspaceId,
+      session: getResolvedHuddleSession({ room }),
+      channelId,
+      huddleId,
+      action: "huddle:heartbeat",
+      requestedProvider: "mesh",
+      userId: String(userId),
+      deviceId: deviceContext.deviceId || null,
+      allowLiveKitLifecycleJoin: true,
+      createIfMissing: false,
+    });
+    if (!providerLockGuard.ok) {
+      emitHuddleDenied(socket, "huddle:heartbeat", providerLockGuard.reason || "provider_lock_mismatch", {
+        channelId,
+        huddleId,
+        providerLock: providerLockGuard.diagnostics,
+      });
+      return;
+    }
+
+    const heartbeat = huddleRealtimeService.recordHeartbeat({
+      workspaceId: ctx.scope.workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId),
+      username,
+      sessionId: room.sessionId || null,
+      clientSentAt,
+      sequence,
+      ...deviceContext,
+      source: "huddle:heartbeat",
+    });
+    const heartbeatRecovery = await evaluateHuddleRecoveryShadow({
+      source: "huddle:heartbeat:shadow_recovery",
+      socket,
+      workspaceId: ctx.scope.workspaceId,
+      channelId,
+      huddleId,
+      userId,
+      username,
+      scope: ctx.scope,
+      localRoom: room,
+      session: { id: room.sessionId || null, state: "live" },
+      payload,
+    });
+
+    socket.emit("huddle:heartbeat:ack", withRecoveryMetadata({
+      channelId,
+      workspaceId: ctx.scope.workspaceId,
+      huddleId,
+      at: new Date().toISOString(),
+      ok: heartbeat?.ok !== false,
+      supported: Boolean(heartbeat?.supported),
+      shadow: Boolean(heartbeat?.shadow),
+      providerLock: providerLockGuard.diagnostics,
+      ...(heartbeat?.deviceId ? { deviceId: heartbeat.deviceId } : {}),
+      ...(typeof heartbeat?.latencyMs === "number" ? { latencyMs: heartbeat.latencyMs } : {}),
+      ...(room.sessionId ? { sessionId: room.sessionId } : {}),
+    }, heartbeatRecovery));
   });
 
   // Frontend emits this on socket connect/reconnect to re-receive any active invitation
@@ -908,46 +1792,130 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   socket.on("huddle:sync", async () => {
     const ws = socket.workspaceId || WORKSPACE_GLOBAL;
     try {
+      const workspaceContext = await getWorkspaceHuddleContext(socket);
+      if (!workspaceContext.ok) return;
       // 1️⃣ Check in-memory map first (most accurate while server is running)
-      for (const [huddleId, room] of huddleRooms.entries()) {
-        if (room.workspaceId !== ws) continue;
-        if (room.participants.has(String(userId))) continue; // already in this call
-        socket.emit("huddle:started", {
+      for (const room of huddleRealtimeService.getRecoverySnapshots({
+        workspaceId: ws,
+        userId: String(userId),
+      })) {
+        const huddleId = room.huddleId;
+        const scopeContext = await resolveHuddleScope(room.channelId, ws, String(userId));
+        if (!scopeContext.ok) continue;
+        const sessionResult = room.sessionId
+          ? { sessionId: room.sessionId }
+          : await huddleCompatibilityAdapter.shadowReadLegacyHuddle({
+              workspaceId: ws,
+              channelId: room.channelId,
+              huddleId,
+              actorUserId: String(userId),
+              scope: scopeContext.scope,
+              source: "huddle:sync:memory",
+            });
+        const sessionId = sessionResult?.sessionId || null;
+        const providerLockDiagnostics = await getProviderLockDiagnostics({
+          workspaceId: ws,
+          sessionId,
+          action: "huddle:sync",
+          requestedProvider: "mesh",
+          userId: String(userId),
+          deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+          allowLiveKitLifecycleJoin: true,
+        });
+        huddleRealtimeService.updateRoomContext({
+          workspaceId: ws,
+          huddleId,
+          scope: scopeContext.scope,
+          sessionId,
+        });
+        huddleCompatibilityAdapter.verifyParticipantSnapshot({
+          workspaceId: ws,
+          channelId: room.channelId,
+          huddleId,
+          expectedParticipantIds: room.participantIds || [],
+          actorUserId: String(userId),
+          source: "huddle:sync:memory",
+        }).catch(() => {});
+        const syncRecovery = await evaluateHuddleRecoveryShadow({
+          source: "huddle:sync:memory:shadow_recovery",
+          socket,
+          workspaceId: ws,
+          channelId: room.channelId,
+          huddleId,
+          userId,
+          username,
+          scope: scopeContext.scope,
+          localRoom: room,
+          session: sessionResult?.session || (sessionId ? { id: sessionId, state: "live" } : null),
+        });
+        socket.emit("huddle:started", withRecoveryMetadata({
           channelId: room.channelId,
           workspaceId: ws,
           huddleId,
           startedBy: room.startedBy || { userId: "unknown", username: "Someone" },
           at: room.startedAt || new Date().toISOString(),
           persisted: true,
-        });
+          providerLock: providerLockDiagnostics,
+          ...(sessionId ? { sessionId } : {}),
+        }, syncRecovery));
         return; // only send one invitation at a time
       }
 
       // 2️⃣ Fallback: query DB for any recently-started active huddle in workspace channels
-      // (handles the case where the server restarted and huddleRooms is empty)
-      const { rows } = await pool.query(
-        `SELECT h.huddle_id, h.channel_key, h.started_by, h.started_at, u.username AS starter_username
-         FROM chat_huddles h
-         JOIN users u ON u.id = h.started_by
-         JOIN chat_channels c ON c.key = h.channel_key
-         WHERE c.workspace_id = $1
-           AND h.ended_at IS NULL
-           AND h.started_by != $2
-           AND h.started_at > NOW() - INTERVAL '5 minutes'
-         ORDER BY h.started_at DESC
-         LIMIT 1`,
-        [ws, userId]
-      );
-      if (rows.length > 0) {
-        const h = rows[0];
-        socket.emit("huddle:started", {
+      // (handles the case where the server restarted and local realtime state is empty)
+      const recentResult = await huddleCompatibilityAdapter.listRecentActiveLegacyHuddles({
+        workspaceId: ws,
+        excludeStartedBy: String(userId),
+        withinMinutes: 5,
+        limit: 20,
+        source: "huddle:sync:db",
+      });
+      const rows = recentResult?.huddles || [];
+      for (const h of rows) {
+        const scopeContext = await resolveHuddleScope(h.channel_key, ws, String(userId));
+        if (!scopeContext.ok) continue;
+        const sessionResult = await huddleCompatibilityAdapter.getActiveLegacyHuddle({
+          workspaceId: ws,
+          channelId: h.channel_key,
+          huddleId: h.huddle_id,
+          actorUserId: String(userId),
+          scope: scopeContext.scope,
+          source: "huddle:sync:db",
+        });
+        const sessionId = sessionResult?.sessionId || null;
+        const providerLockDiagnostics = await getProviderLockDiagnostics({
+          workspaceId: ws,
+          sessionId,
+          action: "huddle:sync",
+          requestedProvider: "mesh",
+          userId: String(userId),
+          deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+          allowLiveKitLifecycleJoin: true,
+        });
+        const syncRecovery = await evaluateHuddleRecoveryShadow({
+          source: "huddle:sync:db:shadow_recovery",
+          socket,
+          workspaceId: ws,
+          channelId: h.channel_key,
+          huddleId: h.huddle_id,
+          userId,
+          username,
+          scope: scopeContext.scope,
+          localRoom: null,
+          active: sessionResult?.active || h,
+          session: sessionResult?.session || null,
+        });
+        socket.emit("huddle:started", withRecoveryMetadata({
           channelId: h.channel_key,
           workspaceId: ws,
           huddleId: h.huddle_id,
           startedBy: { userId: h.started_by, username: h.starter_username },
           at: h.started_at,
           persisted: true,
-        });
+          providerLock: providerLockDiagnostics,
+          ...(sessionId ? { sessionId } : {}),
+        }, syncRecovery));
+        return;
       }
     } catch (e) {
       console.error("[huddle:sync]", e.message);
@@ -957,24 +1925,64 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   // When a recipient declines a huddle invite: notify the initiator and end
   // the huddle so the caller's GlobalHuddleWindow closes via huddle:ended.
   socket.on("huddle:decline", async ({ channelId, huddleId, initiatorUserId }) => {
-    if (!initiatorUserId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
+    channelId = normalizeSocketId(channelId);
+    huddleId = normalizeSocketId(huddleId);
+    initiatorUserId = normalizeSocketId(initiatorUserId);
+    if (!channelId || !huddleId || !initiatorUserId) return;
+
+    const ctx = await authorizeHuddleScope(socket, channelId, "huddle:decline");
+    if (!ctx.ok) return;
+
+    const resolved = await getRoomOrActiveHuddle({
+      channelId,
+      huddleId,
+      workspaceId: ctx.scope.workspaceId,
+      scope: ctx.scope,
+    });
+    if (!resolved.ok) {
+      emitHuddleDenied(socket, "huddle:decline", resolved.reason, { channelId, huddleId });
+      return;
+    }
+
+    const startedBy = String(resolved.room?.startedBy?.userId || resolved.active?.started_by || "");
+    if (String(initiatorUserId) !== startedBy || String(initiatorUserId) === String(userId)) {
+      emitHuddleDenied(socket, "huddle:decline", "huddle_initiator_mismatch", { channelId, huddleId });
+      return;
+    }
+
+    const workspaceId = ctx.scope.workspaceId;
     const at = new Date().toISOString();
+    const sessionResult = await huddleCompatibilityAdapter.recordLegacyHuddleDecline({
+      workspaceId,
+      channelId,
+      huddleId,
+      userId: String(userId),
+      username,
+      scope: ctx.scope,
+    });
+    const sessionId = sessionResult?.sessionId || resolved.room?.sessionId || null;
 
     // Tell the initiator who declined (for the toast)
-    io.to(String(initiatorUserId)).emit("huddle:declined", {
+    huddleRealtimeService.sendToUser({
+      userId: initiatorUserId,
+      event: "huddle:declined",
+      payload: {
       channelId,
       workspaceId,
       huddleId,
       declinedBy: { userId, username },
       at,
+      ...(sessionId ? { sessionId } : {}),
+      },
     });
 
-    // End the huddle in DB so the caller's onEnded handler closes the window
-    try { await endHuddle({ channelKey: channelId, huddleId }); } catch (_) {}
-    const ended = { channelId, workspaceId, huddleId, endedBy: { userId, username }, at };
-    io.to(legacyRoomName(channelId)).emit("huddle:ended", ended);
-    io.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:ended", ended);
+    const room = resolved.room;
+    if (ctx.scope.type === "dm" || !room || room.participantCount <= 1) {
+      const ended = await endHuddleAndNotify(ctx.scope, huddleId, { userId, username });
+      if (!ended.ok) {
+        console.error("[huddle:decline:end]", ended.reason);
+      }
+    }
   });
 
   /* -----------------------------------------------------
@@ -982,16 +1990,79 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   ----------------------------------------------------- */
   socket.on(
     "huddle:signal",
-    ({ channelId, targetUserId, huddleId, data }) => {
+    async ({ channelId, targetUserId, huddleId, data }) => {
+      channelId = normalizeSocketId(channelId);
+      targetUserId = normalizeSocketId(targetUserId);
+      huddleId = normalizeSocketId(huddleId);
       if (!channelId || !targetUserId || !huddleId || !data) return;
 
-      io.to(targetUserId).emit("huddle:signal", {
+      const ctx = await authorizeHuddleScope(socket, channelId, "huddle:signal");
+      if (!ctx.ok) return;
+
+      const resolved = await getRoomOrActiveHuddle({
         channelId,
         huddleId,
-        fromUserId: userId,
-        toUserId: targetUserId,
-        data,
-        workspaceId: socket.workspaceId || WORKSPACE_GLOBAL,
+        workspaceId: ctx.scope.workspaceId,
+        scope: ctx.scope,
+      });
+      if (!resolved.ok || !resolved.room) {
+        emitHuddleDenied(socket, "huddle:signal", resolved.reason || "huddle_room_required", { channelId, huddleId });
+        return;
+      }
+
+      const providerLockGuard = await enforceSocketHuddleProviderLock({
+        workspaceId: ctx.scope.workspaceId,
+        session: getResolvedHuddleSession({
+          room: resolved.room,
+          active: resolved.active,
+          session: resolved.session,
+        }),
+        channelId,
+        huddleId,
+        action: "huddle:signal",
+        requestedProvider: "mesh",
+        userId: String(userId),
+        deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+        allowLiveKitLifecycleJoin: false,
+        createIfMissing: true,
+      });
+      if (!providerLockGuard.ok) {
+        emitHuddleDenied(socket, "huddle:signal", providerLockGuard.reason || "provider_lock_mismatch", {
+          channelId,
+          huddleId,
+          providerLock: providerLockGuard.diagnostics,
+        });
+        return;
+      }
+
+      if (
+        !huddleRealtimeService.hasParticipant({
+          workspaceId: ctx.scope.workspaceId,
+          huddleId,
+          userId: String(userId),
+        }) ||
+        !huddleRealtimeService.hasParticipant({
+          workspaceId: ctx.scope.workspaceId,
+          huddleId,
+          userId: String(targetUserId),
+        })
+      ) {
+        emitHuddleDenied(socket, "huddle:signal", "participant_target_required", { channelId, huddleId, targetUserId });
+        return;
+      }
+
+      huddleRealtimeService.sendToUser({
+        userId: targetUserId,
+        event: "huddle:signal",
+        payload: {
+          channelId,
+          huddleId,
+          fromUserId: userId,
+          toUserId: targetUserId,
+          data,
+          workspaceId: ctx.scope.workspaceId,
+          ...(resolved.room.sessionId ? { sessionId: resolved.room.sessionId } : {}),
+        },
       });
     }
   );
@@ -999,68 +2070,106 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   /* -----------------------------------------------------
      HUDDLE MEDIA STATE BROADCASTS
   ----------------------------------------------------- */
-  socket.on("huddle:mute", ({ channelId }) => {
+  async function broadcastHuddleMediaState({ channelId, event, payload, hostOnly = false, action = event }) {
+    channelId = normalizeSocketId(channelId);
     if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, userId, username };
-    socket.to(legacyRoomName(channelId)).emit("huddle:mute", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:mute", out);
+
+    const ctx = await authorizeHuddleScope(socket, channelId, action);
+    if (!ctx.ok) return;
+
+    const activeRoom = huddleRealtimeService.findRoomByChannel({
+      channelId,
+      workspaceId: ctx.scope.workspaceId,
+      userId,
+    });
+    if (!activeRoom?.room) {
+      emitHuddleDenied(socket, action, "participant_required", { channelId });
+      return;
+    }
+
+    if (hostOnly) {
+      const allowed = await canManageHuddle({
+        scope: ctx.scope,
+        room: activeRoom.room,
+        active: null,
+        membership: ctx.membership,
+        userId,
+      });
+      if (!allowed) {
+        emitHuddleDenied(socket, action, "huddle_owner_required", { channelId, huddleId: activeRoom.huddleId });
+        return;
+      }
+    }
+
+    const out = payload();
+    if (activeRoom.room.sessionId) out.sessionId = activeRoom.room.sessionId;
+    await emitHuddleLiveEvent(ctx.scope, activeRoom.room, event, out, { exceptUserId: userId });
+  }
+
+  socket.on("huddle:mute", ({ channelId }) => {
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:mute",
+      payload: () => ({ channelId, userId, username }),
+    }).catch((e) => console.error("[huddle:mute]", e.message));
   });
 
   socket.on("huddle:unmute", ({ channelId }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, userId, username };
-    socket.to(legacyRoomName(channelId)).emit("huddle:unmute", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:unmute", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:unmute",
+      payload: () => ({ channelId, userId, username }),
+    }).catch((e) => console.error("[huddle:unmute]", e.message));
   });
 
   socket.on("huddle:camera-off", ({ channelId }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, userId, username };
-    socket.to(legacyRoomName(channelId)).emit("huddle:camera-off", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:camera-off", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:camera-off",
+      payload: () => ({ channelId, userId, username }),
+    }).catch((e) => console.error("[huddle:camera-off]", e.message));
   });
 
   socket.on("huddle:camera-on", ({ channelId }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, userId, username };
-    socket.to(legacyRoomName(channelId)).emit("huddle:camera-on", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:camera-on", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:camera-on",
+      payload: () => ({ channelId, userId, username }),
+    }).catch((e) => console.error("[huddle:camera-on]", e.message));
   });
 
   socket.on("huddle:subtitle", ({ channelId, text, isFinal }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, fromUserId: userId, username, text, isFinal };
-    socket.to(legacyRoomName(channelId)).emit("huddle:subtitle", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:subtitle", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:subtitle",
+      payload: () => ({ channelId, fromUserId: userId, username, text, isFinal }),
+    }).catch((e) => console.error("[huddle:subtitle]", e.message));
   });
 
   socket.on("huddle:screen-start", ({ channelId }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, userId, username };
-    socket.to(legacyRoomName(channelId)).emit("huddle:screen-start", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:screen-start", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:screen-start",
+      payload: () => ({ channelId, userId, username }),
+    }).catch((e) => console.error("[huddle:screen-start]", e.message));
   });
 
   socket.on("huddle:screen-stop", ({ channelId }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, userId, username };
-    socket.to(legacyRoomName(channelId)).emit("huddle:screen-stop", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:screen-stop", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:screen-stop",
+      payload: () => ({ channelId, userId, username }),
+    }).catch((e) => console.error("[huddle:screen-stop]", e.message));
   });
 
   socket.on("huddle:mute-all", ({ channelId }) => {
-    if (!channelId) return;
-    const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const out = { channelId, byUserId: userId };
-    socket.to(legacyRoomName(channelId)).emit("huddle:muted", out);
-    socket.to(workspaceRoomName(channelId, workspaceId)).emit("huddle:muted", out);
+    broadcastHuddleMediaState({
+      channelId,
+      event: "huddle:muted",
+      action: "huddle:mute-all",
+      hostOnly: true,
+      payload: () => ({ channelId, byUserId: userId }),
+    }).catch((e) => console.error("[huddle:mute-all]", e.message));
   });
 
   /* -----------------------------------------------------
@@ -1092,18 +2201,42 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       workspaceId: socket.workspaceId,
     });
 
-    // Clean up any huddles this user was in
-    for (const [huddleId, room] of huddleRooms.entries()) {
-      if (room.participants.has(String(userId))) {
-        room.participants.delete(String(userId));
-        if (room.participants.size === 0) {
-          huddleRooms.delete(huddleId);
-          const ws = room.workspaceId || WORKSPACE_GLOBAL;
-          endHuddle({ channelKey: room.channelId, huddleId }).catch(() => {});
-          const ended = { channelId: room.channelId, workspaceId: ws, huddleId, endedBy: { userId, username }, at: new Date().toISOString() };
-          io.to(legacyRoomName(room.channelId)).emit("huddle:ended", ended);
-          io.to(workspaceRoomName(room.channelId, ws)).emit("huddle:ended", ended);
-        }
+    // Clean up any huddles this user was in.
+    const disconnectDeviceContext = getHuddleSocketDeviceContext(socket);
+    for (const change of huddleRealtimeService.leaveDeviceFromAllRooms({
+      userId: String(userId),
+      ...disconnectDeviceContext,
+    })) {
+      const huddleId = change.huddleId;
+      huddleCompatibilityAdapter.recordLegacyHuddleLeave({
+        workspaceId: change.workspaceId || WORKSPACE_GLOBAL,
+        channelId: change.channelId,
+        huddleId,
+        userId: String(userId),
+        username,
+        socket,
+      }).catch(() => {});
+      if (change.shouldEnd) {
+        const ws = change.workspaceId || WORKSPACE_GLOBAL;
+        const scope = change.scope || {
+          type: isDmChannelKey(change.channelId) ? "dm" : "channel",
+          channelId: change.channelId,
+          workspaceId: ws,
+          isPrivate: isDmChannelKey(change.channelId),
+          participantIds: dmParticipantIds(change.channelId),
+        };
+        endHuddleAndNotify(
+          scope,
+          huddleId,
+          { userId, username },
+          "legacy_huddle_disconnect_empty"
+        )
+          .then((ended) => {
+            if (!ended.ok) {
+              console.error("[huddle:disconnect:end]", ended.reason);
+            }
+          })
+          .catch((err) => console.error("[huddle:disconnect:end]", err.message));
       }
     }
   });
@@ -1252,6 +2385,8 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     workspaceId: resolvedWorkspaceId,
     userId: message.userId || message.user_id,
     username: message.username,
+    avatarUrl: message.avatarUrl || message.avatar_url || null,
+    avatar_url: message.avatarUrl || message.avatar_url || null,
     textHtml: resolvedText,
     createdAt:
       message.createdAt || message.created_at || new Date().toISOString(),
@@ -1267,7 +2402,10 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     isAiMessage: message.isAiMessage === true,
   };
 
-io.to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)).emit("chat:message", payload);
+io
+  .to(legacyRoomName(resolvedChannelKey))
+  .to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId))
+  .emit("chat:message", payload);
 
   // For DM channels: also emit to each participant's personal room so they
   // receive the notification even when they're not on the chat page (and
@@ -1276,7 +2414,9 @@ io.to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId)).emit("chat:mes
     const parts = resolvedChannelKey.split(":");
     for (let i = 1; i < parts.length; i++) {
       const uid = parts[i];
-      if (uid) io.to(uid).emit("chat:message", payload);
+      if (uid && uid !== String(payload.userId || "")) {
+        io.to(uid).emit("chat:message", payload);
+      }
     }
   }
 }

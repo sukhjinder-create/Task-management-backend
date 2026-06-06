@@ -1,7 +1,9 @@
 // db.js
+import { assertDatabaseScriptSafetyIfNeeded } from "./utils/databaseSafety.js";
 import pkg from "pg";
 import dotenv from "dotenv";
 
+assertDatabaseScriptSafetyIfNeeded();
 dotenv.config();
 
 const { Pool, types } = pkg;

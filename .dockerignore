@@ -1,4 +1,5 @@
 node_modules
+mobile/
 .env
 .env.*
 npm-debug.log*

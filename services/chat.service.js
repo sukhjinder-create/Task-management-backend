@@ -49,6 +49,7 @@ function mapMessageRow(row) {
     reactions: row.reactions || {},
     attachments: row.attachments || [],
     username: row.username,
+    avatar_url: row.avatar_url || null,
     workspace_id: row.workspace_id || null,
     encrypted_json: row.encrypted_json,
     fallback_text: row.fallback_text,
@@ -364,6 +365,32 @@ export async function createChannel({
   }
 }
 
+export async function updateChannel({
+  channelId,
+  name,
+  isPrivate = false,
+  workspaceId,
+}) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `
+      UPDATE chat_channels
+      SET name = $1,
+          is_private = $2
+      WHERE id = $3
+        AND workspace_id = $4
+      RETURNING *
+      `,
+      [name, isPrivate, channelId, workspaceId]
+    );
+    if (!res.rows.length) return null;
+    return mapChannelRow(res.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
 // Helper to send events to AI service
 async function emitToAI(event) {
   const aiServiceUrl = process.env.AI_SERVICE_URL;
@@ -467,6 +494,9 @@ const baseText =
   normalizedFallback?.trim() ||
   fallbackText?.trim() ||
   (typeof textHtml === "string" ? textHtml.trim() : "");
+const safeTextHtml = typeof textHtml === "string" && textHtml.trim()
+  ? textHtml.trim()
+  : baseText;
 
 const safeAttachments = Array.isArray(attachments) ? attachments : [];
 
@@ -506,12 +536,14 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
   )
   ON CONFLICT (workspace_id, temp_id) WHERE temp_id IS NOT NULL
   DO UPDATE SET temp_id = EXCLUDED.temp_id
-  RETURNING *, (SELECT u.username FROM users u WHERE u.id = user_id) AS username
+  RETURNING *,
+    (SELECT u.username FROM users u WHERE u.id = user_id) AS username,
+    (SELECT u.avatar_url FROM users u WHERE u.id = user_id) AS avatar_url
   `,
   [
     channelKey,
     userId,
-    textHtml || baseText,
+    safeTextHtml,
     baseText,
     encryptedJson
     ? JSON.stringify(encryptedJson)
@@ -537,6 +569,8 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
       channelId: channelKey,
       userId: savedMessage.user_id,
       username: savedMessage.username,
+      avatarUrl: savedMessage.avatar_url || null,
+      avatar_url: savedMessage.avatar_url || null,
       textHtml: savedMessage.text_html || savedMessage.fallback_text || "",
       createdAt: savedMessage.created_at,
       updatedAt: savedMessage.updated_at,
@@ -1057,6 +1091,7 @@ const exported = {
   getChannelByKey,
   getChannelById,
   createChannel,
+  updateChannel,
   ensureChannelMember,
   createChatMessage,
   getRecentMessagesByChannelKey,

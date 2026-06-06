@@ -75,6 +75,7 @@ import { observeService } from "./events/observers/serviceObserver.js";
 // 🔥 NEW: Import services ONLY to wrap them (no logic change)
 import projectService from "./services/project.service.js";
 import * as taskService from "./services/task.service.js";
+import huddleIceService from "./services/huddleIce.service.js";
 import universalIntegrationRoutes from "./integrations/core/integration.routes.js";
 import integrationRoutes from "./routes/integration.routes.js";
 import integrationDebugRoutes from "./routes/integrationDebug.routes.js";
@@ -121,6 +122,7 @@ import paymentsRoutes, {
 } from "./routes/payments.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
+import huddleMediaRoutes from "./routes/huddleMedia.routes.js";
 
 
 
@@ -182,6 +184,7 @@ app.use(
   "/integrations/webhooks",
   authMiddleware,
   requireWorkspaceForUser,
+  allowRoles("admin"),
   integrationWebhookSetupRoutes
 );
 
@@ -193,6 +196,7 @@ app.use(
   "/integrations/youtrack",
   authMiddleware,
   requireWorkspaceForUser,
+  allowRoles("admin"),
   youtrackRoutes
 );
 
@@ -201,6 +205,7 @@ app.use(
   "/integrations/youtrack",
   authMiddleware,
   requireWorkspaceForUser,
+  allowRoles("admin"),
   youtrackViewerRoutes
 );
 
@@ -209,6 +214,7 @@ app.use(
   "/integrations/slack",
   authMiddleware,
   requireWorkspaceForUser,
+  allowRoles("admin"),
   slackMigrationRoutes
 );
 
@@ -217,11 +223,18 @@ app.use(
   "/migration-history",
   authMiddleware,
   requireWorkspaceForUser,
+  allowRoles("admin"),
   migrationHistoryRoutes
 );
 
 // NEW universal adapter routes (SAFE ADDITION)
-app.use("/integrations", universalIntegrationRoutes);
+app.use(
+  "/integrations",
+  authMiddleware,
+  requireWorkspaceForUser,
+  allowRoles("admin"),
+  universalIntegrationRoutes
+);
 app.use("/uploads", express.static("uploads"), (req, res) => {
   res.status(404).json({ error: "File not found" });
 });
@@ -245,36 +258,11 @@ app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin/plans", superadminPlansRoutes);
 app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin", superadminRoutes);
+app.use("/app-version", appVersionRoutes);
 
 // Public endpoint — no auth required (must be before any catch-all authMiddleware)
 app.get("/ice-servers", (req, res) => {
-  const iceServers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun.relay.metered.ca:80" },
-    {
-      urls: [
-        "turn:openrelay.metered.ca:80",
-        "turn:openrelay.metered.ca:443",
-        "turn:openrelay.metered.ca:443?transport=tcp",
-        "turn:openrelay.metered.ca:80?transport=tcp",
-      ],
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-  ];
-  const turnUser = process.env.TURN_USERNAME;
-  const turnCred = process.env.TURN_CREDENTIAL;
-  const turnUrl  = process.env.TURN_URL || "global.relay.metered.ca";
-  if (turnUser && turnCred) {
-    iceServers.push(
-      { urls: `turn:${turnUrl}:80`,                  username: turnUser, credential: turnCred },
-      { urls: `turn:${turnUrl}:80?transport=tcp`,     username: turnUser, credential: turnCred },
-      { urls: `turn:${turnUrl}:443`,                  username: turnUser, credential: turnCred },
-      { urls: `turns:${turnUrl}:443?transport=tcp`,   username: turnUser, credential: turnCred },
-    );
-  }
-  res.json({ iceServers });
+  res.json(huddleIceService.getIceServersPayload());
 });
 
 app.use(authMiddleware, requireWorkspaceForUser, reportsRouter);
@@ -331,6 +319,7 @@ app.post("/chat/mark-read", authMiddleware, requireWorkspaceForUser, async (req,
 
 app.use("/chat/messages", authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatMessagesRoutes);
 app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatChannelRoutes);
+app.use("/huddle/media",  authMiddleware, requireWorkspaceForUser, huddleMediaRoutes);
 
 // Admin attendance — fully protected (auth + workspace + attendance plan feature)
 app.use("/admin/attendance", authMiddleware, requireWorkspaceForUser, requirePlanFeature("attendance"), adminAttendanceRoutes);
@@ -365,7 +354,6 @@ app.use("/reviews",   authMiddleware, requireWorkspaceForUser, requirePlanFeatur
 app.use("/ai-features", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_hub"),            aiFeaturesRoutes);
 app.use("/payments",  authMiddleware, requireWorkspaceForUser, paymentsRoutes);
 app.use("/push",       pushRoutes);
-app.use("/app-version", appVersionRoutes); // VAPID public key is public; subscribe/prefs use authMiddleware inside
 
 
 app.use("/integration-debug", integrationDebugRoutes);

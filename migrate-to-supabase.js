@@ -11,6 +11,7 @@
  *   Then run:  node migrate-to-supabase.js
  */
 
+import "./scripts/database-safety-guard.js";
 import "dotenv/config";
 import pg from "pg";
 import fs from "fs";
