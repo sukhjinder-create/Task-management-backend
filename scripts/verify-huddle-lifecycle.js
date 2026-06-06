@@ -457,6 +457,21 @@ pool.query = store.query.bind(store);
 pool.connect = async () => store.connect();
 
 const adapter = await import("../services/huddleCompatibilityAdapter.service.js");
+const { normalizeLegacyHuddleScope } = await import(
+  "../services/huddleSession.service.js"
+);
+
+const normalizedDmScope = normalizeLegacyHuddleScope({
+  workspaceId: "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+  legacyChannelKey:
+    "dm:d0d9307e-1286-4a02-b1a5-80a9039ac9e2:f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+});
+assert.equal(normalizedDmScope.scopeType, "dm");
+assert.equal(
+  normalizedDmScope.threadMessageId,
+  null,
+  "DM participant UUIDs must never be persisted as thread message IDs"
+);
 
 const scope = (workspaceId, channelId) => ({
   type: "channel",

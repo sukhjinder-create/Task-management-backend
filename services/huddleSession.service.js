@@ -67,9 +67,11 @@ export function normalizeLegacyHuddleScope({
       : "channel"
   );
   const threadMessageId =
-    scope.threadMessageId ||
-    scope.thread_message_id ||
-    threadMessageIdFromChannelKey(channelKey);
+    scopeType === "thread"
+      ? scope.threadMessageId ||
+        scope.thread_message_id ||
+        threadMessageIdFromChannelKey(channelKey)
+      : null;
   const channelId =
     scopeType === "channel"
       ? scope.channel?.id || null
