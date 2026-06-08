@@ -44,6 +44,13 @@ function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function safeDisplayName(value, fallback = "Teammate") {
+  const displayName = safeString(value);
+  if (!displayName) return fallback;
+  if (displayName.toLowerCase().startsWith("livekit:")) return fallback;
+  return displayName.slice(0, 80);
+}
+
 function isEnabled(value) {
   return safeString(value).toLowerCase() === "true";
 }
@@ -367,13 +374,22 @@ export class HuddleMediaTokenService {
       identity: normalizedRequest.providerIdentity,
       ttl: `${ttlSeconds}s`,
     });
-    token.name = normalizedRequest.providerIdentity;
+    const displayName = safeDisplayName(
+      normalizedRequest.metadata?.displayName ||
+      normalizedRequest.metadata?.username ||
+      normalizedRequest.metadata?.name
+    );
+    token.name = displayName;
     token.metadata = JSON.stringify({
       workspaceId: normalizedRequest.workspaceId,
       sessionId: normalizedRequest.sessionId,
       participantId: normalizedRequest.participantId,
       deviceId: normalizedRequest.deviceId,
+      userId: normalizedRequest.userId,
+      guestId: normalizedRequest.guestId,
       identityKind: normalizedRequest.identityKind,
+      displayName,
+      username: displayName,
     });
     token.addGrant(tokenGrantFromRequest(normalizedRequest));
     const jwt = await token.toJwt();

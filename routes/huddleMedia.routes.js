@@ -35,6 +35,13 @@ function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function safeDisplayName(value, fallback = "Teammate") {
+  const displayName = safeString(value);
+  if (!displayName) return fallback;
+  if (displayName.toLowerCase().startsWith("livekit:")) return fallback;
+  return displayName.slice(0, 80);
+}
+
 function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     String(value || "")
@@ -519,6 +526,12 @@ router.post("/livekit/token", async (req, res) => {
       userId: authz.userId,
       deviceId: authz.deviceId,
     });
+    const displayName = safeDisplayName(
+      req.user?.username ||
+      req.user?.name ||
+      req.user?.displayName ||
+      req.user?.email
+    );
     const tokenResult = await huddleMediaTokenService.requestToken({
       request: createMediaTokenRequest({
         workspaceId: authz.workspaceId,
@@ -530,6 +543,10 @@ router.post("/livekit/token", async (req, res) => {
         userId: authz.userId,
         identityKind: "workspace_user",
         providerIdentity,
+        metadata: {
+          displayName,
+          username: displayName,
+        },
       }),
       authorization: createMediaTokenAuthorizationContract({
         workspaceAccess: true,
@@ -567,6 +584,7 @@ router.post("/livekit/token", async (req, res) => {
       userId: authz.userId,
       metadata: {
         providerLock: authz.providerLock,
+        displayName,
       },
       diagnostics: {
         tokenIssued: true,
