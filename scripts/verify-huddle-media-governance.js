@@ -235,6 +235,11 @@ assert.match(sessionService, /pg_advisory_xact_lock/, "Provider lock creation mu
 assert.match(sessionService, /findLockedMediaSession/, "Provider lock lookup must exist");
 assert.match(sessionService, /findActiveMediaProviderIdentity/, "LiveKit lifecycle joins must be provable without socket contract changes");
 assert.match(sessionService, /createOrGetLockedMediaSession/, "Provider lock creation must exist");
+assert.match(
+  sessionService,
+  /tokenIssued:\s*false[\s\S]*roomProvisioned:\s*false[\s\S]*\.\.\.diagnostics/,
+  "Provider identity diagnostics defaults must not overwrite successful token issuance diagnostics"
+);
 assert.match(providerSelector, /capabilities_absent_default_mesh/, "Missing capabilities must default to mesh");
 assert.match(providerSelector, /selectedProvider/, "Selector must expose selected provider");
 assert.match(providerSelector, /fallbackReason/, "Selector must expose fallback reason");
@@ -252,6 +257,7 @@ console.log("- LiveKit fallback reasons are explicit for disabled, not entitled,
 console.log("- Existing provider locks are inherited and late joiners cannot change the selected provider.");
 console.log("- LiveKit route persists provider locks and rejects split-brain lock mismatches.");
 console.log("- Canary-allowlisted workspaces satisfy LiveKit canary entitlement for room/token and start-lock authorization.");
+console.log("- Provider identity diagnostics preserve successful room/token evidence.");
 console.log("- Legacy socket join/signal paths enforce provider locks and reject split-brain mesh participation.");
 console.log("- Rollback flags and canary shutdown flags are documented.");
 console.log("- Mobile LiveKit is canary-gated with mesh as the default fallback.");

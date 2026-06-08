@@ -647,9 +647,9 @@ export async function upsertMediaProviderIdentity({
       guestId,
       json(metadata),
       json({
-        ...diagnostics,
         tokenIssued: false,
         roomProvisioned: false,
+        ...diagnostics,
       }),
     ]
   );
