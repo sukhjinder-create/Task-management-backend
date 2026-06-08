@@ -30,6 +30,10 @@ import {
   enforceSocketHuddleProviderLock,
   getProviderLockDiagnostics,
 } from "../services/huddleProviderLockGuard.service.js";
+import {
+  HUDDLE_MEDIA_PROVIDERS,
+  normalizeMediaProviderType,
+} from "../services/huddleMediaSession.service.js";
 
 import workspaceService from "../services/workspace.service.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
@@ -247,6 +251,31 @@ function emitHuddleDenied(socket, action, reason, extra = {}) {
   });
 }
 
+function resolveSocketRequestedProvider(payload = {}) {
+  return normalizeMediaProviderType(
+    payload?.provider ||
+    payload?.providerType ||
+    payload?.mediaProvider ||
+    HUDDLE_MEDIA_PROVIDERS.MESH
+  );
+}
+
+function resolveSocketClientCapabilities(payload = {}) {
+  const supplied =
+    payload?.clientCapabilities ||
+    payload?.capabilities ||
+    payload?.client ||
+    null;
+  if (supplied && typeof supplied === "object" && !Array.isArray(supplied)) {
+    return supplied;
+  }
+  return null;
+}
+
+function hasLiveKitEntitlement(ctx = {}) {
+  return Boolean(ctx.huddleEntitlement?.liveKit);
+}
+
 async function getWorkspaceHuddleContext(socket) {
   const workspaceId = socket.workspaceId;
   const userId = String(socket.user?.id || "");
@@ -268,19 +297,49 @@ async function getWorkspaceHuddleContext(socket) {
 
   const trialEndsAt = workspace.trial_ends_at ? new Date(workspace.trial_ends_at) : null;
   const onTrial = trialEndsAt && trialEndsAt > new Date();
-  if (onTrial) return { ok: true, workspace, membership };
+  if (onTrial) {
+    return {
+      ok: true,
+      workspace,
+      membership,
+      huddleEntitlement: {
+        onTrial: true,
+        features: [],
+        liveKit: true,
+      },
+    };
+  }
 
   const planSlug = workspace.billing_plan || workspace.plan || null;
   const plan = planSlug ? await getPlanBySlug(planSlug).catch(() => null) : null;
   const features = normalizeFeatures(plan?.features);
+  const liveKitEntitled = hasFeature(features, "video_huddle");
 
   if (hasFeature(features, "video_huddle") || hasFeature(features, "huddle")) {
-    return { ok: true, workspace, membership };
+    return {
+      ok: true,
+      workspace,
+      membership,
+      huddleEntitlement: {
+        onTrial: false,
+        features,
+        liveKit: liveKitEntitled,
+      },
+    };
   }
 
   const normalizedPlan = String(planSlug || "").toLowerCase();
   if (HUDDLE_ALLOWED_FALLBACK_PLANS.has(normalizedPlan)) {
-    return { ok: true, workspace, membership };
+    return {
+      ok: true,
+      workspace,
+      membership,
+      huddleEntitlement: {
+        onTrial: false,
+        features,
+        liveKit: false,
+      },
+    };
   }
   if (HUDDLE_BLOCKED_FALLBACK_PLANS.has(normalizedPlan)) {
     return { ok: false, reason: "plan_entitlement_required" };
@@ -288,7 +347,16 @@ async function getWorkspaceHuddleContext(socket) {
 
   // Preserve legacy workspaces whose plan rows predate machine-readable features.
   if (!planSlug && features.length === 0) {
-    return { ok: true, workspace, membership };
+    return {
+      ok: true,
+      workspace,
+      membership,
+      huddleEntitlement: {
+        onTrial: false,
+        features,
+        liveKit: false,
+      },
+    };
   }
 
   return { ok: false, reason: "plan_entitlement_required" };
@@ -1376,7 +1444,8 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     return { ok: true, payload: out, sessionResult };
   }
 
-  socket.on("huddle:start", async ({ channelId, huddleId }) => {
+  socket.on("huddle:start", async (payload = {}) => {
+    let { channelId, huddleId } = payload;
     channelId = normalizeSocketId(channelId);
     huddleId = normalizeSocketId(huddleId);
     if (!channelId || !huddleId) return;
@@ -1436,6 +1505,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       userId: String(userId),
       username,
       scope,
+      requestedProvider: resolveSocketRequestedProvider(payload),
+      clientCapabilities: resolveSocketClientCapabilities(payload),
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      entitlement: hasLiveKitEntitlement(ctx),
     });
     if (!startResult?.ok || !startResult?.legacy) {
       emitHuddleDenied(socket, "huddle:start", startResult?.reason || "huddle_start_failed", { channelId, huddleId });
@@ -1456,7 +1529,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
         workspaceId,
         sessionId,
         action: "huddle:start",
-        requestedProvider: "mesh",
+        requestedProvider: resolveSocketRequestedProvider(payload),
         userId: String(userId),
         deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
       });
@@ -1566,7 +1639,8 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     }
   });
 
-  socket.on("huddle:join", async ({ channelId, huddleId }) => {
+  socket.on("huddle:join", async (payload = {}) => {
+    let { channelId, huddleId } = payload;
     channelId = normalizeSocketId(channelId);
     huddleId = normalizeSocketId(huddleId);
     if (!channelId || !huddleId) return;
@@ -1605,7 +1679,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       channelId,
       huddleId,
       action: "huddle:join",
-      requestedProvider: "mesh",
+      requestedProvider: resolveSocketRequestedProvider(payload),
       userId: String(userId),
       deviceId: deviceContext.deviceId || null,
       allowLiveKitLifecycleJoin: true,

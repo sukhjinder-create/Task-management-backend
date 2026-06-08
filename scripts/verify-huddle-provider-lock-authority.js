@@ -196,8 +196,18 @@ const adapter = read("services/huddleCompatibilityAdapter.service.js");
 assert.match(socket, /enforceSocketHuddleProviderLock/, "Socket must import provider-lock guard");
 assert.match(
   adapter,
-  /recordLegacyHuddleStart[\s\S]*ensureSessionFromLegacy[\s\S]*createStartMeshProviderLock[\s\S]*upsertHuddleParticipant/,
-  "huddle:start must create or inherit the mesh provider lock before host participant persistence"
+  /recordLegacyHuddleStart[\s\S]*ensureSessionFromLegacy[\s\S]*createStartMediaProviderLock[\s\S]*upsertHuddleParticipant/,
+  "huddle:start must create or inherit a provider lock before host participant persistence"
+);
+assert.match(
+  adapter,
+  /requestedProvider[\s\S]*clientCapabilities[\s\S]*entitlement[\s\S]*selectHuddleMediaProvider/,
+  "huddle:start provider lock must consume requested provider, client capabilities, and entitlement"
+);
+assert.match(
+  socket,
+  /socket\.on\("huddle:start"[\s\S]*resolveSocketRequestedProvider[\s\S]*resolveSocketClientCapabilities[\s\S]*hasLiveKitEntitlement/,
+  "huddle:start must pass additive provider intent into provider-lock creation"
 );
 assert.match(
   socket,
@@ -281,7 +291,8 @@ console.log("- Mesh lock + LiveKit request is rejected.");
 console.log("- LiveKit lock + LiveKit request is allowed.");
 console.log("- LiveKit lock + mesh join/signal is rejected.");
 console.log("- LiveKit lifecycle socket join requires an active LiveKit provider identity.");
-console.log("- huddle:start creates a mesh provider lock before host participation or realtime publication.");
+console.log("- huddle:start creates an immutable provider lock before host participation or realtime publication.");
+console.log("- LiveKit-capable huddle:start requests can create a LiveKit lock without changing old mesh clients.");
 console.log("- Unlocked mesh participation creates a mesh provider lock.");
 console.log("- Unlocked LiveKit selection remains selector-governed.");
 console.log("- LiveKit cannot acquire a lock after mesh startup has locked the session.");

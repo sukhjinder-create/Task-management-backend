@@ -199,60 +199,80 @@ function providerLockStartError(message, details = {}) {
   return err;
 }
 
-async function createStartMeshProviderLock({
+function normalizeStartMediaProvider(provider = null) {
+  return safeString(provider).toLowerCase() === HUDDLE_MEDIA_PROVIDERS.LIVEKIT
+    ? HUDDLE_MEDIA_PROVIDERS.LIVEKIT
+    : HUDDLE_MEDIA_PROVIDERS.MESH;
+}
+
+async function createStartMediaProviderLock({
   workspaceId,
   channelId,
   huddleId,
   session,
+  requestedProvider = HUDDLE_MEDIA_PROVIDERS.MESH,
+  clientCapabilities = null,
+  platform = null,
+  entitlement = false,
   client,
 }) {
+  const normalizedRequest = normalizeStartMediaProvider(requestedProvider);
   const providerSelection = selectHuddleMediaProvider({
-    requestedProvider: HUDDLE_MEDIA_PROVIDERS.MESH,
+    requestedProvider: normalizedRequest,
     workspaceId,
     session,
-    clientCapabilities: null,
-    entitlement: false,
+    platform,
+    clientCapabilities,
+    entitlement,
   });
+  const selectedProvider = normalizeStartMediaProvider(providerSelection.selectedProvider);
   const lockResult = await createOrGetLockedMediaSession({
     session,
     workspaceId,
     providerSelection,
-    providerType: HUDDLE_MEDIA_PROVIDERS.MESH,
+    providerType: selectedProvider,
     providerRoomId: buildProviderRoomIdentity({
-      providerType: HUDDLE_MEDIA_PROVIDERS.MESH,
+      providerType: selectedProvider,
       workspaceId,
       sessionId: session.id,
       legacyHuddleId: huddleId,
       legacyChannelKey: channelId,
     }),
     providerMetadata: {
-      transport: "mesh",
-      signaling: "socket.io",
-      roomMode: "legacy_mesh",
+      transport: selectedProvider,
+      signaling: selectedProvider === HUDDLE_MEDIA_PROVIDERS.LIVEKIT ? "livekit" : "socket.io",
+      roomMode: selectedProvider === HUDDLE_MEDIA_PROVIDERS.LIVEKIT ? "livekit_canary" : "legacy_mesh",
       compatibilitySource: "huddle:start",
     },
     diagnostics: {
       providerLockEvaluated: true,
       providerLockMatched: true,
       providerLockRejected: false,
-      requestedProvider: HUDDLE_MEDIA_PROVIDERS.MESH,
-      selectedProvider: HUDDLE_MEDIA_PROVIDERS.MESH,
+      requestedProvider: normalizedRequest,
+      selectedProvider,
       fallbackReason: providerSelection.fallbackReason || null,
       selectionReason: providerSelection.selectionReason,
+      clientCapabilities: providerSelection.clientCapabilities || null,
       socketAction: "huddle:start",
     },
     selectedBy: "huddle_start_provider_lock",
     client,
   });
 
-  if (lockResult.mismatch || lockResult.providerType !== HUDDLE_MEDIA_PROVIDERS.MESH) {
+  if (lockResult.mismatch || lockResult.providerType !== selectedProvider) {
     throw providerLockStartError("provider_lock_mismatch", {
       lockedProvider: lockResult.providerType,
-      requestedProvider: HUDDLE_MEDIA_PROVIDERS.MESH,
+      requestedProvider: normalizedRequest,
+      selectedProvider,
     });
   }
 
-  return lockResult;
+  return {
+    ...lockResult,
+    requestedProvider: normalizedRequest,
+    selectedProvider,
+    providerSelection,
+  };
 }
 
 async function getSessionParticipantIds({ sessionId, client = null }) {
@@ -534,6 +554,10 @@ export async function startLegacyHuddle({
   userId,
   username = null,
   scope = {},
+  requestedProvider = HUDDLE_MEDIA_PROVIDERS.MESH,
+  clientCapabilities = null,
+  platform = null,
+  entitlement = false,
 }) {
   let legacy = null;
   try {
@@ -563,6 +587,10 @@ export async function startLegacyHuddle({
     username,
     scope,
     startedAt: legacy?.started_at || null,
+    requestedProvider,
+    clientCapabilities,
+    platform,
+    entitlement,
   });
   if (sessionResult?.reason === "provider_lock_start_failed") {
     await endLegacyChatHuddle({
@@ -863,6 +891,10 @@ export async function recordLegacyHuddleStart({
   username = null,
   scope = {},
   startedAt = null,
+  requestedProvider = HUDDLE_MEDIA_PROVIDERS.MESH,
+  clientCapabilities = null,
+  platform = null,
+  entitlement = false,
 }) {
   try {
     return success(
@@ -880,11 +912,15 @@ export async function recordLegacyHuddleStart({
           client,
         });
 
-        const providerLockResult = await createStartMeshProviderLock({
+        const providerLockResult = await createStartMediaProviderLock({
           workspaceId,
           channelId,
           huddleId,
           session,
+          requestedProvider,
+          clientCapabilities,
+          platform,
+          entitlement,
           client,
         });
 
@@ -910,6 +946,8 @@ export async function recordLegacyHuddleStart({
             huddleId,
             username,
             compatibilitySource: "legacy_socket",
+            requestedProvider: providerLockResult.requestedProvider,
+            selectedProvider: providerLockResult.selectedProvider,
           },
           client,
         });
@@ -921,7 +959,7 @@ export async function recordLegacyHuddleStart({
           providerLock: providerLockResult.providerLock || null,
           providerLockDiagnostics: {
             action: "huddle:start",
-            requestedProvider: HUDDLE_MEDIA_PROVIDERS.MESH,
+            requestedProvider: providerLockResult.requestedProvider,
             effectiveProvider: providerLockResult.providerType,
             providerLockEvaluated: true,
             providerLockMatched: true,
@@ -931,7 +969,8 @@ export async function recordLegacyHuddleStart({
             providerLock: providerLockResult.providerLock || null,
             selectionReason: providerLockResult.inherited
               ? "provider_lock_matched"
-              : "provider_lock_created",
+              : providerLockResult.providerSelection?.selectionReason || "provider_lock_created",
+            fallbackReason: providerLockResult.providerSelection?.fallbackReason || null,
             rejectionReason: null,
           },
         };
