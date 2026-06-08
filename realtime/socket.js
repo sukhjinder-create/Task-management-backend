@@ -39,6 +39,11 @@ import { recomputeWorkspaceHealth } from "../services/workspaceHealth.service.js
 let io;
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const WORKSPACE_GLOBAL = "GLOBAL";
+const parsedHuddleDisconnectGraceMs = Number(process.env.HUDDLE_DISCONNECT_GRACE_MS || 15000);
+const HUDDLE_DISCONNECT_GRACE_MS = Number.isFinite(parsedHuddleDisconnectGraceMs)
+  ? Math.max(0, parsedHuddleDisconnectGraceMs)
+  : 15000;
+const pendingHuddleDisconnectTimers = new Map();
 
 /**
  * For DM channels we use key pattern:
@@ -599,6 +604,86 @@ async function emitHuddleLiveEvent(scope, room, event, payload, options = {}) {
     payload,
     exceptUserId: options.exceptUserId || null,
   });
+}
+
+function huddleDisconnectTimerKey({ userId, socketId }) {
+  return `${String(userId || "")}:${String(socketId || "")}`;
+}
+
+function scheduleHuddleDisconnectCleanup({ socket, userId, username, deviceContext }) {
+  const timerKey = huddleDisconnectTimerKey({ userId, socketId: deviceContext.socketId });
+  clearTimeout(pendingHuddleDisconnectTimers.get(timerKey));
+
+  const runCleanup = async () => {
+    pendingHuddleDisconnectTimers.delete(timerKey);
+
+    for (const change of huddleRealtimeService.leaveDeviceFromAllRooms({
+      userId: String(userId),
+      ...deviceContext,
+    })) {
+      const huddleId = change.huddleId;
+
+      if (!change.participantStillPresent) {
+        huddleCompatibilityAdapter.recordLegacyHuddleLeave({
+          workspaceId: change.workspaceId || WORKSPACE_GLOBAL,
+          channelId: change.channelId,
+          huddleId,
+          userId: String(userId),
+          username,
+          socket,
+        }).catch(() => {});
+      }
+
+      if (change.shouldEnd) {
+        const ws = change.workspaceId || WORKSPACE_GLOBAL;
+        const scope = change.scope || {
+          type: isDmChannelKey(change.channelId) ? "dm" : "channel",
+          channelId: change.channelId,
+          workspaceId: ws,
+          isPrivate: isDmChannelKey(change.channelId),
+          participantIds: dmParticipantIds(change.channelId),
+        };
+        endHuddleAndNotify(
+          scope,
+          huddleId,
+          { userId, username },
+          "legacy_huddle_disconnect_empty"
+        )
+          .then((ended) => {
+            if (!ended.ok) {
+              console.error("[huddle:disconnect:end]", ended.reason);
+            }
+          })
+          .catch((err) => console.error("[huddle:disconnect:end]", err.message));
+        continue;
+      }
+
+      if (!change.participantStillPresent) {
+        const scope = change.scope || {
+          type: isDmChannelKey(change.channelId) ? "dm" : "channel",
+          channelId: change.channelId,
+          workspaceId: change.workspaceId || WORKSPACE_GLOBAL,
+          isPrivate: isDmChannelKey(change.channelId),
+          participantIds: dmParticipantIds(change.channelId),
+        };
+        const out = {
+          channelId: change.channelId,
+          workspaceId: change.workspaceId || WORKSPACE_GLOBAL,
+          huddleId,
+          userId,
+          username,
+          at: new Date().toISOString(),
+          ...(change.sessionId ? { sessionId: change.sessionId } : {}),
+        };
+        emitHuddleLiveEvent(scope, change.room, "huddle:user-left", out, { exceptUserId: userId })
+          .catch((err) => console.error("[huddle:disconnect:user-left]", err.message));
+      }
+    }
+  };
+
+  const timer = setTimeout(runCleanup, HUDDLE_DISCONNECT_GRACE_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  pendingHuddleDisconnectTimers.set(timerKey, timer);
 }
 
 async function getHuddlePushTargetIds(scope, actorUserId) {
@@ -1409,6 +1494,8 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       source: "huddle:start",
     });
 
+    socket.emit("huddle:started", out);
+
     await emitHuddleInviteEvent(scope, "huddle:started", out, {
       exceptUserId: scope.type === "dm" || scope.isPrivate ? userId : null,
       includeWorkspaceRoom: scope.type !== "dm" && !scope.isPrivate,
@@ -2201,44 +2288,15 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       workspaceId: socket.workspaceId,
     });
 
-    // Clean up any huddles this user was in.
+    // Treat disconnect as a recoverable refresh/network gap first. If the
+    // device does not come back before the grace window, clean it up and notify.
     const disconnectDeviceContext = getHuddleSocketDeviceContext(socket);
-    for (const change of huddleRealtimeService.leaveDeviceFromAllRooms({
-      userId: String(userId),
-      ...disconnectDeviceContext,
-    })) {
-      const huddleId = change.huddleId;
-      huddleCompatibilityAdapter.recordLegacyHuddleLeave({
-        workspaceId: change.workspaceId || WORKSPACE_GLOBAL,
-        channelId: change.channelId,
-        huddleId,
-        userId: String(userId),
-        username,
-        socket,
-      }).catch(() => {});
-      if (change.shouldEnd) {
-        const ws = change.workspaceId || WORKSPACE_GLOBAL;
-        const scope = change.scope || {
-          type: isDmChannelKey(change.channelId) ? "dm" : "channel",
-          channelId: change.channelId,
-          workspaceId: ws,
-          isPrivate: isDmChannelKey(change.channelId),
-          participantIds: dmParticipantIds(change.channelId),
-        };
-        endHuddleAndNotify(
-          scope,
-          huddleId,
-          { userId, username },
-          "legacy_huddle_disconnect_empty"
-        )
-          .then((ended) => {
-            if (!ended.ok) {
-              console.error("[huddle:disconnect:end]", ended.reason);
-            }
-          })
-          .catch((err) => console.error("[huddle:disconnect:end]", err.message));
-      }
-    }
+    scheduleHuddleDisconnectCleanup({
+      socket,
+      userId,
+      username,
+      deviceContext: disconnectDeviceContext,
+    });
   });
 });
 

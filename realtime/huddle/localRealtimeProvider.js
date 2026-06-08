@@ -330,8 +330,6 @@ export class LocalRealtimeProvider {
     for (const room of this.rooms.values()) {
       if (room.workspaceId !== workspaceId) continue;
       this.refreshParticipants(room);
-      if (room.participants?.has(String(userId))) continue;
-      if (String(room.startedBy?.userId || "") === String(userId)) continue;
       snapshots.push(this.snapshot(room));
     }
     return snapshots;
