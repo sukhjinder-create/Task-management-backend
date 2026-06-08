@@ -224,8 +224,10 @@ assert.match(route, /durable_session_required|durable_session_not_found/, "LiveK
 assert.match(route, /provider_lock_mismatch/, "LiveKit route must reject lock mismatches");
 assert.match(route, /providerLockEvaluated/, "LiveKit route must expose provider-lock diagnostics");
 assert.match(route, /resolveClientCapabilities/, "LiveKit route must consume client capabilities");
+assert.match(route, /canaryEntitled/, "LiveKit route must allow canary-entitled workspaces through room/token authorization");
 assert.match(route, /upsertMediaProviderIdentity/, "LiveKit route must persist provider identity diagnostics");
 assert.match(socket, /enforceSocketHuddleProviderLock/, "Legacy socket participation must enforce provider locks");
+assert.match(socket, /canaryLiveKitEntitled/, "Socket huddle start must allow canary-entitled workspaces to create LiveKit locks");
 assert.match(socket, /socket\.on\("huddle:join"[\s\S]*enforceSocketHuddleProviderLock/, "huddle:join must enforce provider locks");
 assert.match(socket, /"huddle:signal"[\s\S]*enforceSocketHuddleProviderLock/, "huddle:signal must enforce provider locks");
 assert.match(providerLockGuard, /evaluateProviderLockCompatibility/, "Provider-lock guard must expose a certifiable decision function");
@@ -249,6 +251,7 @@ console.log("- LiveKit selection requires canary, allowlist, entitlement, capabi
 console.log("- LiveKit fallback reasons are explicit for disabled, not entitled, not canary, missing capability, force mesh, and lock mismatch.");
 console.log("- Existing provider locks are inherited and late joiners cannot change the selected provider.");
 console.log("- LiveKit route persists provider locks and rejects split-brain lock mismatches.");
+console.log("- Canary-allowlisted workspaces satisfy LiveKit canary entitlement for room/token and start-lock authorization.");
 console.log("- Legacy socket join/signal paths enforce provider locks and reject split-brain mesh participation.");
 console.log("- Rollback flags and canary shutdown flags are documented.");
 console.log("- Mobile LiveKit is canary-gated with mesh as the default fallback.");

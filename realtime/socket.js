@@ -235,6 +235,27 @@ function hasFeature(features, key) {
   return normalizeFeatures(features).includes(key);
 }
 
+function isHuddleEnvEnabled(value) {
+  return normalizeSocketId(value).toLowerCase() === "true";
+}
+
+function splitHuddleCsv(value) {
+  return normalizeSocketId(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isLiveKitCanaryWorkspaceAllowed(workspaceId, env = process.env) {
+  const resolvedWorkspaceId = normalizeSocketId(workspaceId);
+  const allowlist = splitHuddleCsv(env.HUDDLE_LIVEKIT_CANARY_WORKSPACES);
+  return (
+    isHuddleEnvEnabled(env.HUDDLE_LIVEKIT_CANARY_ENABLED) &&
+    (allowlist.includes("*") ||
+      (Boolean(resolvedWorkspaceId) && allowlist.includes(resolvedWorkspaceId)))
+  );
+}
+
 function emitHuddleDenied(socket, action, reason, extra = {}) {
   socket.emit("huddle:error", {
     action,
@@ -306,6 +327,7 @@ async function getWorkspaceHuddleContext(socket) {
         onTrial: true,
         features: [],
         liveKit: true,
+        canaryLiveKit: isLiveKitCanaryWorkspaceAllowed(workspaceId),
       },
     };
   }
@@ -313,7 +335,9 @@ async function getWorkspaceHuddleContext(socket) {
   const planSlug = workspace.billing_plan || workspace.plan || null;
   const plan = planSlug ? await getPlanBySlug(planSlug).catch(() => null) : null;
   const features = normalizeFeatures(plan?.features);
-  const liveKitEntitled = hasFeature(features, "video_huddle");
+  const canaryLiveKitEntitled = isLiveKitCanaryWorkspaceAllowed(workspaceId);
+  const liveKitEntitled =
+    hasFeature(features, "video_huddle") || canaryLiveKitEntitled;
 
   if (hasFeature(features, "video_huddle") || hasFeature(features, "huddle")) {
     return {
@@ -324,6 +348,7 @@ async function getWorkspaceHuddleContext(socket) {
         onTrial: false,
         features,
         liveKit: liveKitEntitled,
+        canaryLiveKit: canaryLiveKitEntitled,
       },
     };
   }
@@ -337,7 +362,8 @@ async function getWorkspaceHuddleContext(socket) {
       huddleEntitlement: {
         onTrial: false,
         features,
-        liveKit: false,
+        liveKit: canaryLiveKitEntitled,
+        canaryLiveKit: canaryLiveKitEntitled,
       },
     };
   }
@@ -354,7 +380,8 @@ async function getWorkspaceHuddleContext(socket) {
       huddleEntitlement: {
         onTrial: false,
         features,
-        liveKit: false,
+        liveKit: canaryLiveKitEntitled,
+        canaryLiveKit: canaryLiveKitEntitled,
       },
     };
   }

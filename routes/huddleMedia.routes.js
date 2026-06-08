@@ -48,6 +48,39 @@ function hasVideoHuddleEntitlement(req) {
   return Boolean(req.workspace?.onTrial) || features.includes("video_huddle");
 }
 
+function isEnabled(value) {
+  return safeString(value).toLowerCase() === "true";
+}
+
+function splitCsv(value) {
+  return safeString(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isLiveKitCanaryWorkspaceAllowed(workspaceId, env = process.env) {
+  const resolvedWorkspaceId = safeString(workspaceId);
+  const allowlist = splitCsv(env.HUDDLE_LIVEKIT_CANARY_WORKSPACES);
+  return (
+    isEnabled(env.HUDDLE_LIVEKIT_CANARY_ENABLED) &&
+    (allowlist.includes("*") ||
+      (Boolean(resolvedWorkspaceId) && allowlist.includes(resolvedWorkspaceId)))
+  );
+}
+
+function getVideoHuddleEntitlement(req) {
+  const planEntitled = hasVideoHuddleEntitlement(req);
+  const canaryEntitled = isLiveKitCanaryWorkspaceAllowed(
+    req.workspaceId || req.workspace?.id
+  );
+  return {
+    entitled: planEntitled || canaryEntitled,
+    planEntitled,
+    canaryEntitled,
+  };
+}
+
 function liveKitProviderRequested(body = {}) {
   return safeString(body.provider || body.providerType).toLowerCase() ===
     HUDDLE_MEDIA_PROVIDERS.LIVEKIT;
@@ -138,7 +171,8 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
   const sessionId = resolveSessionId(body);
   const providerRequested = liveKitProviderRequested(body);
   const requestedWorkspaceId = safeString(body.workspaceId);
-  const planEntitled = hasVideoHuddleEntitlement(req);
+  const entitlement = getVideoHuddleEntitlement(req);
+  const planEntitled = entitlement.entitled;
   const roomConfig = getLiveKitRoomEndpointConfig({ workspaceId });
   const tokenConfig = getLiveKitTokenEndpointConfig({ workspaceId });
   let selector = null;
@@ -152,6 +186,8 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
     channelProvided: Boolean(channelId),
     sessionProvided: Boolean(sessionId),
     planEntitled,
+    planFeatureEntitled: entitlement.planEntitled,
+    canaryEntitled: entitlement.canaryEntitled,
     canaryEnabled: false,
     workspaceAllowed: false,
     canaryEligible: false,
