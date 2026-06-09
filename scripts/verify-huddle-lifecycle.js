@@ -24,6 +24,7 @@ class MemoryHuddleStore {
       legacy: [],
       sessions: [],
       mediaSessions: [],
+      mediaProviderIdentities: [],
       participants: [],
       devices: [],
       events: [],
@@ -162,6 +163,38 @@ class MemoryHuddleStore {
         this.state.mediaSessions.push(row);
       }
       return { rows: [clone(row)] };
+    }
+
+    if (/^UPDATE huddle_media_provider_identities /i.test(sql)) {
+      const rows = this.state.mediaProviderIdentities.filter(
+        (item) =>
+          item.workspace_id === params[0] &&
+          item.session_id === params[1] &&
+          item.state === "active"
+      );
+      for (const row of rows) {
+        row.state = "inactive";
+        row.disconnected_at = row.disconnected_at || params[2] || now();
+        row.diagnostics = { ...parseJson(row.diagnostics), ...parseJson(params[3]) };
+        row.updated_at = now();
+      }
+      return { rows: clone(rows.map((row) => ({ id: row.id }))), rowCount: rows.length };
+    }
+
+    if (/^UPDATE huddle_media_sessions /i.test(sql)) {
+      const rows = this.state.mediaSessions.filter(
+        (item) =>
+          item.workspace_id === params[0] &&
+          item.session_id === params[1] &&
+          ["pending", "active", "degraded", "failed"].includes(item.state)
+      );
+      for (const row of rows) {
+        row.state = "ended";
+        row.ended_at = row.ended_at || params[2] || now();
+        row.diagnostics = { ...parseJson(row.diagnostics), ...parseJson(params[3]) };
+        row.updated_at = now();
+      }
+      return { rows: clone(rows), rowCount: rows.length };
     }
 
     if (/^UPDATE huddle_sessions /i.test(sql) && /scope_type = \$2/i.test(sql)) {
@@ -594,6 +627,7 @@ async function verifyDualWriteLifecycle() {
   assert.equal(ended.legacyEndOk, true);
   assert.equal(store.state.legacy[0].ended_at !== null, true);
   assert.equal(store.state.sessions[0].state, "ended");
+  assert.equal(store.state.mediaSessions[0].state, "ended");
 }
 
 async function verifyWorkspaceIsolation() {

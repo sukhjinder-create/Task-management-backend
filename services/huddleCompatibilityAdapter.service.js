@@ -24,6 +24,7 @@ import {
   HUDDLE_MEDIA_PROVIDERS,
   buildProviderRoomIdentity,
   createOrGetLockedMediaSession,
+  endMediaSessionsForHuddleSession,
 } from "./huddleMediaSession.service.js";
 import { selectHuddleMediaProvider } from "./huddleMediaProviderSelector.service.js";
 
@@ -1266,7 +1267,14 @@ export async function recordLegacyHuddleEnd({
         client,
       });
 
-      return { session: endedSession || session };
+      const mediaCleanup = await endMediaSessionsForHuddleSession({
+        workspaceId,
+        sessionId: session.id,
+        reason,
+        client,
+      });
+
+      return { session: endedSession || session, mediaCleanup };
     });
   } catch (err) {
     return fail("legacy_end_dual_write_failed", {

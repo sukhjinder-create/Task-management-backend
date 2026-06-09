@@ -700,6 +700,66 @@ export async function findActiveMediaProviderIdentity({
   return rows[0] || null;
 }
 
+export async function endMediaSessionsForHuddleSession({
+  workspaceId,
+  sessionId,
+  reason = "huddle_ended",
+  endedAt = new Date(),
+  client = null,
+}) {
+  if (!workspaceId) throw new Error("workspaceId is required");
+  if (!sessionId) throw new Error("sessionId is required");
+
+  const endedAtIso = endedAt instanceof Date
+    ? endedAt.toISOString()
+    : new Date(endedAt).toISOString();
+  const diagnosticsPatch = {
+    providerCleanup: {
+      reason,
+      endedAt: endedAtIso,
+      source: "huddle:end",
+    },
+  };
+
+  const identities = await runner(client).query(
+    `
+    UPDATE huddle_media_provider_identities
+    SET
+      state = 'inactive',
+      disconnected_at = COALESCE(disconnected_at, $3::timestamptz),
+      diagnostics = diagnostics || $4::jsonb,
+      updated_at = now()
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND state = 'active'
+    RETURNING id
+    `,
+    [workspaceId, sessionId, endedAtIso, json(diagnosticsPatch)]
+  );
+
+  const sessions = await runner(client).query(
+    `
+    UPDATE huddle_media_sessions
+    SET
+      state = 'ended',
+      ended_at = COALESCE(ended_at, $3::timestamptz),
+      diagnostics = diagnostics || $4::jsonb,
+      updated_at = now()
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND state IN ('pending', 'active', 'degraded', 'failed')
+    RETURNING *
+    `,
+    [workspaceId, sessionId, endedAtIso, json(diagnosticsPatch)]
+  );
+
+  return {
+    mediaSessions: sessions.rows.map((row) => mediaSessionModelFromRow(row)),
+    mediaSessionCount: sessions.rowCount || 0,
+    providerIdentityCount: identities.rowCount || 0,
+  };
+}
+
 export function getMediaReadinessDiagnostics({
   providerSelection = null,
   mediaSession = null,
@@ -783,5 +843,6 @@ export default {
   createOrGetPersistentMediaSession,
   upsertMediaProviderIdentity,
   findActiveMediaProviderIdentity,
+  endMediaSessionsForHuddleSession,
   getMediaReadinessDiagnostics,
 };
