@@ -25,6 +25,8 @@
     "migrate:huddle-sessions": "node --import ./scripts/database-safety-guard.js run-huddle-sessions-migration.js",
     "migrate:huddle-transcript-segments": "node --import ./scripts/database-safety-guard.js run-huddle-transcript-segments-migration.js",
     "verify:huddle-transcript-segments": "node scripts/verify-huddle-transcript-segments.js",
+    "migrate:huddle-artifact-service": "node --import ./scripts/database-safety-guard.js run-huddle-artifact-service-migration.js",
+    "verify:huddle-artifact-service": "node scripts/verify-huddle-artifact-service.js",
     "verify:huddle-compatibility": "node --import ./scripts/database-safety-guard.js scripts/verify-huddle-compatibility-adapter.js",
     "verify:huddle-lifecycle": "node --import ./scripts/database-safety-guard.js scripts/verify-huddle-lifecycle.js",
     "verify:huddle-shadow-presence": "node scripts/verify-huddle-shadow-presence.js",

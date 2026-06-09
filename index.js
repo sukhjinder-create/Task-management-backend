@@ -122,6 +122,7 @@ import paymentsRoutes, {
 } from "./routes/payments.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
+import huddleArtifactRoutes from "./routes/huddleArtifact.routes.js";
 import huddleMediaRoutes from "./routes/huddleMedia.routes.js";
 import huddleTranscriptRoutes from "./routes/huddleTranscript.routes.js";
 
@@ -320,6 +321,7 @@ app.post("/chat/mark-read", authMiddleware, requireWorkspaceForUser, async (req,
 
 app.use("/chat/messages", authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatMessagesRoutes);
 app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatChannelRoutes);
+app.use("/huddle/artifacts", authMiddleware, requireWorkspaceForUser, huddleArtifactRoutes);
 app.use("/huddle/media",  authMiddleware, requireWorkspaceForUser, huddleMediaRoutes);
 app.use("/huddle/transcripts", authMiddleware, requireWorkspaceForUser, huddleTranscriptRoutes);
 
