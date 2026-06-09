@@ -72,6 +72,23 @@ function json(value) {
   return JSON.stringify(value || {});
 }
 
+function safeNumber(value, fallback = null) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function safeBoolean(value, fallback = false) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function boundedString(value, maxLength = 160) {
+  return safeString(value).slice(0, maxLength) || null;
+}
+
+function boundedArray(value, maxItems = 20) {
+  return Array.isArray(value) ? value.slice(0, maxItems) : [];
+}
+
 function persistentStateFromModelState(state) {
   if (state === HUDDLE_MEDIA_SESSION_STATES.ACTIVE) return "active";
   if (state === HUDDLE_MEDIA_SESSION_STATES.ENDED) return "ended";
@@ -760,6 +777,191 @@ export async function endMediaSessionsForHuddleSession({
   };
 }
 
+function sanitizeQualityBrowser(raw = {}) {
+  const browser = objectOrEmpty(raw);
+  return {
+    userAgent: boundedString(browser.userAgent, 240),
+    platform: boundedString(browser.platform, 80),
+    language: boundedString(browser.language, 40),
+    viewportWidth: safeNumber(browser.viewportWidth),
+    viewportHeight: safeNumber(browser.viewportHeight),
+    screenWidth: safeNumber(browser.screenWidth),
+    screenHeight: safeNumber(browser.screenHeight),
+    devicePixelRatio: safeNumber(browser.devicePixelRatio),
+  };
+}
+
+function sanitizeQualityAggregate(raw = {}) {
+  const aggregate = objectOrEmpty(raw);
+  return {
+    participantCount: safeNumber(aggregate.participantCount, 0),
+    trackCount: safeNumber(aggregate.trackCount, 0),
+    videoTrackCount: safeNumber(aggregate.videoTrackCount, 0),
+    audioTrackCount: safeNumber(aggregate.audioTrackCount, 0),
+    screenShareTrackCount: safeNumber(aggregate.screenShareTrackCount, 0),
+    averageRttMs: safeNumber(aggregate.averageRttMs),
+    averagePacketLoss: safeNumber(aggregate.averagePacketLoss),
+    totalBitrateKbps: safeNumber(aggregate.totalBitrateKbps),
+    maxSendWidth: safeNumber(aggregate.maxSendWidth),
+    maxSendHeight: safeNumber(aggregate.maxSendHeight),
+    maxReceiveWidth: safeNumber(aggregate.maxReceiveWidth),
+    maxReceiveHeight: safeNumber(aggregate.maxReceiveHeight),
+  };
+}
+
+function sanitizeQualityParticipant(raw = {}) {
+  const participant = objectOrEmpty(raw);
+  return {
+    participantId: boundedString(participant.participantId, 180),
+    isLocal: safeBoolean(participant.isLocal),
+    displayName: boundedString(participant.displayName, 80),
+    connectionQuality: boundedString(participant.connectionQuality, 40),
+    trackCount: safeNumber(participant.trackCount, 0),
+    videoTrackCount: safeNumber(participant.videoTrackCount, 0),
+    audioTrackCount: safeNumber(participant.audioTrackCount, 0),
+    screenShareTrackCount: safeNumber(participant.screenShareTrackCount, 0),
+    rttMs: safeNumber(participant.rttMs),
+    packetLoss: safeNumber(participant.packetLoss),
+    bitrateKbps: safeNumber(participant.bitrateKbps),
+  };
+}
+
+function sanitizeQualityTrack(raw = {}) {
+  const track = objectOrEmpty(raw);
+  return {
+    trackId: boundedString(track.trackId, 180),
+    participantId: boundedString(track.participantId, 180),
+    isLocal: safeBoolean(track.isLocal),
+    kind: boundedString(track.kind, 32),
+    source: boundedString(track.source, 40),
+    direction: boundedString(track.direction, 24),
+    publicationState: boundedString(track.publicationState, 40),
+    subscriptionState: boundedString(track.subscriptionState, 40),
+    isMuted: safeBoolean(track.isMuted),
+    isSubscribed: safeBoolean(track.isSubscribed),
+    width: safeNumber(track.width),
+    height: safeNumber(track.height),
+    framesPerSecond: safeNumber(track.framesPerSecond),
+    bitrateKbps: safeNumber(track.bitrateKbps),
+    availableOutgoingBitrateKbps: safeNumber(track.availableOutgoingBitrateKbps),
+    availableIncomingBitrateKbps: safeNumber(track.availableIncomingBitrateKbps),
+    rttMs: safeNumber(track.rttMs),
+    packetLoss: safeNumber(track.packetLoss),
+    packetsLost: safeNumber(track.packetsLost),
+    packetsSent: safeNumber(track.packetsSent),
+    packetsReceived: safeNumber(track.packetsReceived),
+    bytesSent: safeNumber(track.bytesSent),
+    bytesReceived: safeNumber(track.bytesReceived),
+    framesDropped: safeNumber(track.framesDropped),
+    codec: boundedString(track.codec, 80),
+    mimeType: boundedString(track.mimeType, 80),
+    rid: boundedString(track.rid, 32),
+    scalabilityMode: boundedString(track.scalabilityMode, 60),
+    simulcastLayer: boundedString(track.simulcastLayer, 40),
+    streamState: boundedString(track.streamState, 40),
+    videoQuality: boundedString(track.videoQuality, 40),
+    qualityLimitationReason: boundedString(track.qualityLimitationReason, 60),
+  };
+}
+
+export function sanitizeLiveKitQualityDiagnostics(raw = {}) {
+  const diagnostics = objectOrEmpty(raw);
+  const tracks = boundedArray(diagnostics.tracks, 48).map(sanitizeQualityTrack);
+  const participants = boundedArray(diagnostics.participants, 24).map(sanitizeQualityParticipant);
+  return {
+    observedAt: boundedString(diagnostics.observedAt, 40) || new Date().toISOString(),
+    provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+    providerRoomId: boundedString(diagnostics.providerRoomId, 220),
+    adaptiveStream: safeBoolean(diagnostics.adaptiveStream),
+    dynacast: safeBoolean(diagnostics.dynacast),
+    browser: sanitizeQualityBrowser(diagnostics.browser),
+    aggregate: sanitizeQualityAggregate({
+      ...diagnostics.aggregate,
+      participantCount: diagnostics.aggregate?.participantCount ?? participants.length,
+      trackCount: diagnostics.aggregate?.trackCount ?? tracks.length,
+    }),
+    participants,
+    tracks,
+  };
+}
+
+export async function recordLiveKitQualityDiagnostics({
+  workspaceId,
+  sessionId,
+  providerRoomId = null,
+  userId = null,
+  deviceId = null,
+  diagnostics = {},
+  client = null,
+}) {
+  if (!workspaceId) throw new Error("workspaceId is required");
+  if (!sessionId) throw new Error("sessionId is required");
+
+  const sanitized = sanitizeLiveKitQualityDiagnostics({
+    ...diagnostics,
+    providerRoomId: providerRoomId || diagnostics.providerRoomId,
+  });
+  const observedAt = new Date().toISOString();
+  const diagnosticsPatch = {
+    liveKitQuality: sanitized,
+    liveKitQualityUpdatedAt: observedAt,
+  };
+
+  const sessions = await runner(client).query(
+    `
+    UPDATE huddle_media_sessions
+    SET
+      diagnostics = COALESCE(diagnostics, '{}'::jsonb) || $3::jsonb,
+      updated_at = now()
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND provider_type = 'livekit'
+    RETURNING id
+    `,
+    [workspaceId, sessionId, json(diagnosticsPatch)]
+  );
+
+  let providerIdentityCount = 0;
+  if (userId || deviceId) {
+    const values = [workspaceId, sessionId, HUDDLE_MEDIA_PROVIDERS.LIVEKIT, json(diagnosticsPatch)];
+    const predicates = [
+      "workspace_id = $1",
+      "session_id = $2",
+      "provider_type = $3",
+      "state = 'active'",
+    ];
+    if (userId) {
+      values.push(userId);
+      predicates.push(`user_id = $${values.length}`);
+    }
+    if (deviceId) {
+      values.push(deviceId);
+      predicates.push(`device_id = $${values.length}`);
+    }
+
+    const identities = await runner(client).query(
+      `
+      UPDATE huddle_media_provider_identities
+      SET
+        diagnostics = COALESCE(diagnostics, '{}'::jsonb) || $4::jsonb,
+        updated_at = now()
+      WHERE ${predicates.join("\n        AND ")}
+      RETURNING id
+      `,
+      values
+    );
+    providerIdentityCount = identities.rowCount || 0;
+  }
+
+  return {
+    mediaSessionUpdated: (sessions.rowCount || 0) > 0,
+    mediaSessionCount: sessions.rowCount || 0,
+    providerIdentityCount,
+    observedAt,
+    summary: sanitized.aggregate,
+  };
+}
+
 export function getMediaReadinessDiagnostics({
   providerSelection = null,
   mediaSession = null,
@@ -844,5 +1046,7 @@ export default {
   upsertMediaProviderIdentity,
   findActiveMediaProviderIdentity,
   endMediaSessionsForHuddleSession,
+  sanitizeLiveKitQualityDiagnostics,
+  recordLiveKitQualityDiagnostics,
   getMediaReadinessDiagnostics,
 };

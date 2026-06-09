@@ -9,6 +9,7 @@ import {
   buildProviderRoomIdentity,
   createOrGetLockedMediaSession,
   findLockedMediaSession,
+  recordLiveKitQualityDiagnostics,
   upsertMediaProviderIdentity,
 } from "../services/huddleMediaSession.service.js";
 import {
@@ -319,6 +320,51 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
   if (endpointKind === "token" && (!checks.apiKeyConfigured || !checks.apiSecretConfigured)) {
     return { ok: false, status: 503, reason: "livekit_token_configuration_missing", checks, scope: scopeResult.scope, selector };
   }
+  if (endpointKind === "diagnostics") {
+    if (!providerLock || providerLock.providerType !== HUDDLE_MEDIA_PROVIDERS.LIVEKIT) {
+      return {
+        ok: false,
+        status: 409,
+        reason: "livekit_provider_lock_required",
+        checks: {
+          ...checks,
+          providerLocked: Boolean(providerLock),
+          lockedProvider: providerLock?.providerType || null,
+          providerLockEvaluated: true,
+          providerLockMatched: false,
+          providerLockRejected: true,
+          rejectionReason: "livekit_provider_lock_required",
+        },
+        scope: scopeResult.scope,
+        selector,
+        providerLock,
+        durableSession: durableSession.session,
+      };
+    }
+    return {
+      ok: true,
+      workspaceId,
+      userId,
+      channelId,
+      sessionId: durableSession.session.id,
+      huddleId: safeString(body.huddleId) || sessionId,
+      deviceId: safeString(body.deviceId) || null,
+      scope: scopeResult.scope,
+      selector,
+      mediaSession: providerLock,
+      providerLock: providerLock.providerLock,
+      roomConfig,
+      tokenConfig,
+      checks: {
+        ...checks,
+        providerLocked: true,
+        providerLockEvaluated: true,
+        providerLockMatched: true,
+        providerLockRejected: false,
+        rejectionReason: null,
+      },
+    };
+  }
 
   const providerRoomId = safeString(body.providerRoomId) ||
     buildProviderRoomIdentity({
@@ -443,6 +489,48 @@ router.get("/livekit/diagnostics", (req, res) => {
       metrics: readinessDashboard.metrics,
     }),
   });
+});
+
+router.post("/livekit/diagnostics", async (req, res) => {
+  try {
+    const authz = await authorizeLiveKitRequest(req, req.body, "diagnostics");
+    if (!authz.ok) {
+      return res.status(authz.status).json(safeErrorPayload({
+        reason: authz.reason,
+        authorization: authz.checks,
+        diagnostics: {
+          selector: getProviderSelectionDiagnostics(authz.selector),
+        },
+      }));
+    }
+
+    const result = await recordLiveKitQualityDiagnostics({
+      workspaceId: authz.workspaceId,
+      sessionId: authz.sessionId,
+      providerRoomId:
+        safeString(req.body.providerRoomId) ||
+        authz.mediaSession?.providerRoomId ||
+        null,
+      userId: authz.userId,
+      deviceId: authz.deviceId,
+      diagnostics: req.body.diagnostics,
+    });
+
+    return res.json({
+      ok: true,
+      provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+      diagnostics: {
+        persisted: result.mediaSessionUpdated,
+        providerIdentityCount: result.providerIdentityCount,
+        summary: result.summary,
+        authorization: authz.checks,
+        providerLock: authz.providerLock,
+      },
+    });
+  } catch (error) {
+    console.error("[huddle:media:livekit:diagnostics]", error.message);
+    return res.status(500).json({ ok: false, reason: "livekit_diagnostics_endpoint_failed" });
+  }
 });
 
 router.post("/livekit/room", async (req, res) => {
