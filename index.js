@@ -125,6 +125,7 @@ import appVersionRoutes from "./routes/appVersion.routes.js";
 import huddleArtifactRoutes from "./routes/huddleArtifact.routes.js";
 import huddleIntelligenceRoutes from "./routes/huddleIntelligence.routes.js";
 import huddleMediaRoutes from "./routes/huddleMedia.routes.js";
+import huddleTranscriptionRoutes from "./routes/huddleTranscription.routes.js";
 import huddleTranscriptRoutes from "./routes/huddleTranscript.routes.js";
 
 
@@ -325,6 +326,7 @@ app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFe
 app.use("/huddle/artifacts", authMiddleware, requireWorkspaceForUser, huddleArtifactRoutes);
 app.use("/huddle/intelligence", authMiddleware, requireWorkspaceForUser, huddleIntelligenceRoutes);
 app.use("/huddle/media",  authMiddleware, requireWorkspaceForUser, huddleMediaRoutes);
+app.use("/huddle/transcription", authMiddleware, requireWorkspaceForUser, huddleTranscriptionRoutes);
 app.use("/huddle/transcripts", authMiddleware, requireWorkspaceForUser, huddleTranscriptRoutes);
 
 // Admin attendance — fully protected (auth + workspace + attendance plan feature)

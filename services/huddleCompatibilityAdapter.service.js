@@ -27,6 +27,7 @@ import {
   endMediaSessionsForHuddleSession,
 } from "./huddleMediaSession.service.js";
 import { selectHuddleMediaProvider } from "./huddleMediaProviderSelector.service.js";
+import { finalizeHuddleTranscript } from "./huddleTranscriptionPipeline.service.js";
 
 export const HUDDLE_MISMATCH_TYPES = Object.freeze({
   MISSING_SESSION: "missing_session",
@@ -1288,6 +1289,7 @@ export async function recordLegacyHuddleEnd({
     });
   }
 
+  let transcriptFinalization = null;
   try {
     await createHuddleSessionEvent({
       sessionId: stateResult.session.id,
@@ -1302,7 +1304,22 @@ export async function recordLegacyHuddleEnd({
         compatibilitySource: "legacy_socket",
       },
     });
-    return success({ ...stateResult, eventWriteOk: true });
+    try {
+      transcriptFinalization = await finalizeHuddleTranscript({
+        workspaceId,
+        sessionId: stateResult.session.id,
+        actorUserId: userId || stateResult.session.ended_by || stateResult.session.host_user_id || null,
+        role: "admin",
+        reason,
+      });
+    } catch (transcriptErr) {
+      transcriptFinalization = {
+        ok: false,
+        reason: transcriptErr?.reason || transcriptErr?.message || "transcript_finalization_failed",
+      };
+      console.warn("[huddle:transcription] finalization skipped:", transcriptFinalization.reason);
+    }
+    return success({ ...stateResult, eventWriteOk: true, transcriptFinalization });
   } catch (err) {
     await reportSessionFailure("legacy_end_event_write_failed", {
       mismatchType: HUDDLE_MISMATCH_TYPES.EVENT_MISMATCH,
