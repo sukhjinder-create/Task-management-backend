@@ -60,6 +60,12 @@ function safeUuid(value) {
     : null;
 }
 
+function transcriptionSessionIdFromSource(input = {}) {
+  const sourceSegmentId = safeString(input.sourceSegmentId || input.source_segment_id, 240);
+  const match = sourceSegmentId.match(/^deepgram:([0-9a-f-]{36}):/i);
+  return safeUuid(match?.[1]);
+}
+
 function safeInteger(value, fallback = null) {
   const number = Number(value);
   return Number.isInteger(number) ? number : fallback;
@@ -517,6 +523,8 @@ async function insertProviderEvent({
     ON CONFLICT (workspace_id, session_id, provider_name, provider_event_id)
       WHERE provider_event_id IS NOT NULL
     DO UPDATE SET
+      transcription_session_id = COALESCE(EXCLUDED.transcription_session_id, huddle_transcription_provider_events.transcription_session_id),
+      participant_id = COALESCE(EXCLUDED.participant_id, huddle_transcription_provider_events.participant_id),
       status = EXCLUDED.status,
       transcript_segment_id = COALESCE(EXCLUDED.transcript_segment_id, huddle_transcription_provider_events.transcript_segment_id),
       caption_event_id = COALESCE(EXCLUDED.caption_event_id, huddle_transcription_provider_events.caption_event_id),
@@ -796,10 +804,12 @@ export async function ingestTranscriptionProviderEvent({
     if (session.ended_at || session.state === "ended") {
       throw createServiceError("Huddle session has ended", 409, "huddle_session_ended");
     }
+    const normalized = normalizeTranscriptionProviderEvent(input);
     const requestedTranscriptionSessionId =
       transcriptionSessionId ||
       input.transcriptionSessionId ||
       input.transcription_session_id ||
+      transcriptionSessionIdFromSource(input) ||
       null;
     const transcriptionSession = await getTranscriptionSessionRow({
       workspaceId,
@@ -844,7 +854,6 @@ export async function ingestTranscriptionProviderEvent({
       throw createServiceError("Huddle participation required", 403, "huddle_participation_required");
     }
 
-    const normalized = normalizeTranscriptionProviderEvent(input);
     const participantDeviceId =
       input.participantDeviceId ||
       input.participant_device_id ||
@@ -854,7 +863,7 @@ export async function ingestTranscriptionProviderEvent({
       const ignored = await insertProviderEvent({
         workspaceId,
         sessionId,
-        transcriptionSessionId,
+        transcriptionSessionId: effectiveTranscriptionSessionId,
         participantId: participant?.id || null,
         providerName: normalized.providerName,
         normalized,
@@ -989,7 +998,7 @@ export async function ingestTranscriptionProviderEvent({
       segmentStatus: normalized.status,
       lastSegmentId: segment?.id || null,
       provenance: {
-        transcriptionSessionId,
+        transcriptionSessionId: effectiveTranscriptionSessionId,
         providerEventId: normalized.providerEventId,
       },
       diagnostics: {
