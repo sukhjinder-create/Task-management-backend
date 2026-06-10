@@ -92,7 +92,6 @@ export function getProviderCapabilities(provider = HUDDLE_STT_PROVIDERS.DEEPGRAM
 }
 
 export function buildDeepgramListenUrl({
-  accessToken,
   model,
   language,
   endpoint = "wss://api.deepgram.com/v1/listen",
@@ -110,7 +109,6 @@ export function buildDeepgramListenUrl({
   url.searchParams.set("tag", "asystence_huddle");
   if (metadata.workspaceId) url.searchParams.set("workspace_id", safeString(metadata.workspaceId, 80));
   if (metadata.sessionId) url.searchParams.set("session_id", safeString(metadata.sessionId, 80));
-  if (accessToken) url.searchParams.set("token", accessToken);
   return url.toString();
 }
 
@@ -172,7 +170,6 @@ export async function createSttProviderGrant({
   });
   const resolvedLanguage = safeString(language, 32) || config.language;
   const listenUrl = buildDeepgramListenUrl({
-    accessToken: token.accessToken,
     model: config.model,
     language: resolvedLanguage,
     endpoint: config.deepgram.endpoint,
