@@ -211,6 +211,7 @@ async function getParticipantForActor({
   sessionId,
   actorUserId,
   participantId = null,
+  includeInactive = false,
   client = null,
 }) {
   const params = [workspaceId, sessionId];
@@ -222,13 +223,15 @@ async function getParticipantForActor({
     params.push(actorUserId);
     clauses.push(`user_id = $${params.length}`);
   }
+  const stateClause = includeInactive
+    ? ""
+    : "AND left_at IS NULL\n      AND join_state IN ('joining', 'joined', 'reconnecting', 'invited')";
   const { rows } = await runner(client).query(
     `
     SELECT *
     FROM huddle_session_participants
     WHERE ${clauses.join(" AND ")}
-      AND left_at IS NULL
-      AND join_state IN ('joining', 'joined', 'reconnecting', 'invited')
+      ${stateClause}
     ORDER BY joined_at DESC NULLS LAST, created_at DESC
     LIMIT 1
     `,
@@ -793,24 +796,50 @@ export async function ingestTranscriptionProviderEvent({
     if (session.ended_at || session.state === "ended") {
       throw createServiceError("Huddle session has ended", 409, "huddle_session_ended");
     }
+    const requestedTranscriptionSessionId =
+      transcriptionSessionId ||
+      input.transcriptionSessionId ||
+      input.transcription_session_id ||
+      null;
     const transcriptionSession = await getTranscriptionSessionRow({
       workspaceId,
       sessionId,
-      transcriptionSessionId,
+      transcriptionSessionId: requestedTranscriptionSessionId,
       client: tx,
     });
+    const effectiveTranscriptionSessionId =
+      transcriptionSession?.id || safeUuid(requestedTranscriptionSessionId);
     const requestedParticipantId =
       input.participantId ||
       input.participant_id ||
       transcriptionSession?.participant_id ||
       null;
-    const participant = await getParticipantForActor({
+    let participant = await getParticipantForActor({
       workspaceId,
       sessionId,
       actorUserId,
       participantId: requestedParticipantId,
       client: tx,
     });
+    if (!participant && transcriptionSession?.participant_id) {
+      participant = await getParticipantForActor({
+        workspaceId,
+        sessionId,
+        actorUserId,
+        participantId: transcriptionSession.participant_id,
+        includeInactive: true,
+        client: tx,
+      });
+    }
+    if (!participant && transcriptionSession?.user_id) {
+      participant = await getParticipantForActor({
+        workspaceId,
+        sessionId,
+        actorUserId: transcriptionSession.user_id,
+        includeInactive: true,
+        client: tx,
+      });
+    }
     if (!participant && !["admin", "owner", "manager"].includes(String(role).toLowerCase())) {
       throw createServiceError("Huddle participation required", 403, "huddle_participation_required");
     }
@@ -887,7 +916,7 @@ export async function ingestTranscriptionProviderEvent({
           metadata: {
             providerEventId: normalized.providerEventId,
             providerRequestId: normalized.providerRequestId,
-            transcriptionSessionId,
+            transcriptionSessionId: effectiveTranscriptionSessionId,
             providerMetadata: normalized.metadata,
           },
         },
@@ -916,7 +945,7 @@ export async function ingestTranscriptionProviderEvent({
           providerName: normalized.providerName,
           providerSpeakerId: input.providerSpeakerId || input.provider_speaker_id || participant.id,
           provenance: {
-            transcriptionSessionId,
+            transcriptionSessionId: effectiveTranscriptionSessionId,
             sourceSegmentId: normalized.sourceSegmentId,
           },
         },
@@ -942,7 +971,7 @@ export async function ingestTranscriptionProviderEvent({
           confidence: normalized.confidence,
           replayable: true,
           metadata: {
-            transcriptionSessionId,
+            transcriptionSessionId: effectiveTranscriptionSessionId,
             providerEventId: normalized.providerEventId,
           },
         },
@@ -975,7 +1004,7 @@ export async function ingestTranscriptionProviderEvent({
     const providerEvent = await insertProviderEvent({
       workspaceId,
       sessionId,
-      transcriptionSessionId,
+      transcriptionSessionId: effectiveTranscriptionSessionId,
       participantId: participant?.id || null,
       providerName: normalized.providerName,
       normalized,
@@ -987,7 +1016,7 @@ export async function ingestTranscriptionProviderEvent({
       client: tx,
     });
 
-    if (transcriptionSessionId) {
+    if (effectiveTranscriptionSessionId) {
       await tx.query(
         `
         UPDATE huddle_transcription_sessions
@@ -1004,7 +1033,7 @@ export async function ingestTranscriptionProviderEvent({
           AND session_id = $3
         `,
         [
-          transcriptionSessionId,
+          effectiveTranscriptionSessionId,
           workspaceId,
           sessionId,
           normalized.status === "partial" ? 1 : 0,
@@ -1023,7 +1052,7 @@ export async function ingestTranscriptionProviderEvent({
       actorUserId,
       eventType: HUDDLE_TRANSCRIPTION_EVENTS.PROVIDER_EVENT_PROCESSED,
       eventPayload: {
-        transcriptionSessionId,
+        transcriptionSessionId: effectiveTranscriptionSessionId,
         providerEventId: normalized.providerEventId,
         transcriptSegmentId: segment?.id || null,
         captionEventId: captionResult?.caption?.id || null,
