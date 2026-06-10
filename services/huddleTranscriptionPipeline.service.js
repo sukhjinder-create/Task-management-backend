@@ -61,8 +61,14 @@ function safeUuid(value) {
 }
 
 function transcriptionSessionIdFromSource(input = {}) {
-  const sourceSegmentId = safeString(input.sourceSegmentId || input.source_segment_id, 240);
-  const match = sourceSegmentId.match(/^deepgram:([0-9a-f-]{36}):/i);
+  const sourceSegmentId = safeString(
+    input.sourceSegmentId ||
+      input.source_segment_id ||
+      input.providerEventId ||
+      input.provider_event_id,
+    240
+  );
+  const match = sourceSegmentId.match(/deepgram:([0-9a-f-]{36}):/i);
   return safeUuid(match?.[1]);
 }
 
@@ -805,11 +811,17 @@ export async function ingestTranscriptionProviderEvent({
       throw createServiceError("Huddle session has ended", 409, "huddle_session_ended");
     }
     const normalized = normalizeTranscriptionProviderEvent(input);
+    const sourceDerivedTranscriptionSessionId =
+      transcriptionSessionIdFromSource(input) ||
+      transcriptionSessionIdFromSource({
+        sourceSegmentId: normalized.sourceSegmentId,
+        providerEventId: normalized.providerEventId,
+      });
     const requestedTranscriptionSessionId =
       transcriptionSessionId ||
       input.transcriptionSessionId ||
       input.transcription_session_id ||
-      transcriptionSessionIdFromSource(input) ||
+      sourceDerivedTranscriptionSessionId ||
       null;
     const transcriptionSession = await getTranscriptionSessionRow({
       workspaceId,
