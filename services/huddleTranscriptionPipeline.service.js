@@ -1037,6 +1037,13 @@ export async function ingestTranscriptionProviderEvent({
       client: tx,
     });
 
+    await repairTranscriptionIdentityLinks({
+      workspaceId,
+      sessionId,
+      sourceSegmentId: normalized.sourceSegmentId,
+      client: tx,
+    });
+
     if (effectiveTranscriptionSessionId) {
       await tx.query(
         `
@@ -1109,6 +1116,249 @@ function retentionExpiresAt(policy = {}) {
   return new Date(Date.now() + policy.retentionDays * 24 * 60 * 60 * 1000).toISOString();
 }
 
+async function repairTranscriptionIdentityLinks({
+  workspaceId,
+  sessionId,
+  sourceSegmentId = null,
+  client,
+}) {
+  const params = [workspaceId, sessionId, sourceSegmentId || null];
+  await client.query(
+    `
+    WITH resolved AS (
+      SELECT DISTINCT
+        e.source_segment_id,
+        e.provider_name,
+        substring(e.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid AS transcription_session_id,
+        ts.participant_id,
+        ts.participant_device_id,
+        ts.user_id,
+        ts.guest_id
+      FROM huddle_transcription_provider_events e
+      JOIN huddle_transcription_sessions ts
+        ON ts.id = substring(e.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid
+       AND ts.workspace_id = e.workspace_id
+       AND ts.session_id = e.session_id
+      WHERE e.workspace_id = $1
+        AND e.session_id = $2
+        AND e.source_segment_id ~ 'deepgram:[0-9a-f-]{36}:'
+        AND ($3::text IS NULL OR e.source_segment_id = $3)
+    )
+    UPDATE huddle_transcript_segments s
+    SET participant_id = COALESCE(s.participant_id, r.participant_id),
+        participant_device_id = COALESCE(s.participant_device_id, r.participant_device_id),
+        speaker_kind = CASE
+          WHEN s.speaker_kind IS NULL OR s.speaker_kind = 'unknown' THEN
+            CASE WHEN r.user_id IS NOT NULL THEN 'workspace_user'
+                 WHEN r.guest_id IS NOT NULL THEN 'guest'
+                 ELSE s.speaker_kind END
+          ELSE s.speaker_kind
+        END,
+        speaker_user_id = COALESCE(s.speaker_user_id, r.user_id),
+        speaker_guest_id = COALESCE(s.speaker_guest_id, r.guest_id),
+        metadata = s.metadata || jsonb_build_object('transcriptionSessionId', r.transcription_session_id),
+        updated_at = now()
+    FROM resolved r
+    WHERE s.workspace_id = $1
+      AND s.session_id = $2
+      AND s.source_provider = r.provider_name
+      AND s.source_segment_id = r.source_segment_id
+    `,
+    params
+  );
+
+  await client.query(
+    `
+    WITH segment_links AS (
+      SELECT
+        s.id AS transcript_segment_id,
+        s.source_segment_id,
+        s.participant_id,
+        s.participant_device_id,
+        s.speaker_user_id,
+        s.speaker_guest_id,
+        substring(s.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid AS transcription_session_id
+      FROM huddle_transcript_segments s
+      WHERE s.workspace_id = $1
+        AND s.session_id = $2
+        AND s.source_segment_id ~ 'deepgram:[0-9a-f-]{36}:'
+        AND ($3::text IS NULL OR s.source_segment_id = $3)
+    )
+    UPDATE huddle_speaker_attributions a
+    SET transcript_segment_id = COALESCE(a.transcript_segment_id, sl.transcript_segment_id),
+        participant_id = COALESCE(a.participant_id, sl.participant_id),
+        participant_device_id = COALESCE(a.participant_device_id, sl.participant_device_id),
+        speaker_user_id = COALESCE(a.speaker_user_id, sl.speaker_user_id),
+        speaker_guest_id = COALESCE(a.speaker_guest_id, sl.speaker_guest_id),
+        provenance_json = a.provenance_json || jsonb_build_object('transcriptionSessionId', sl.transcription_session_id),
+        updated_at = now()
+    FROM segment_links sl
+    WHERE a.workspace_id = $1
+      AND a.session_id = $2
+      AND a.provenance_json->>'sourceSegmentId' = sl.source_segment_id
+    `,
+    params
+  );
+
+  await client.query(
+    `
+    WITH event_links AS (
+      SELECT
+        e.provider_event_id,
+        e.source_segment_id,
+        e.provider_name,
+        substring(e.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid AS transcription_session_id,
+        ts.participant_id,
+        s.id AS transcript_segment_id,
+        (
+          SELECT a.id
+          FROM huddle_speaker_attributions a
+          WHERE a.workspace_id = e.workspace_id
+            AND a.session_id = e.session_id
+            AND a.provenance_json->>'sourceSegmentId' = e.source_segment_id
+          ORDER BY a.created_at DESC
+          LIMIT 1
+        ) AS speaker_attribution_id
+      FROM huddle_transcription_provider_events e
+      JOIN huddle_transcription_sessions ts
+        ON ts.id = substring(e.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid
+       AND ts.workspace_id = e.workspace_id
+       AND ts.session_id = e.session_id
+      LEFT JOIN huddle_transcript_segments s
+        ON s.workspace_id = e.workspace_id
+       AND s.session_id = e.session_id
+       AND s.source_provider = e.provider_name
+       AND s.source_segment_id = e.source_segment_id
+      WHERE e.workspace_id = $1
+        AND e.session_id = $2
+        AND e.source_segment_id ~ 'deepgram:[0-9a-f-]{36}:'
+        AND ($3::text IS NULL OR e.source_segment_id = $3)
+    )
+    UPDATE huddle_caption_events c
+    SET transcript_segment_id = COALESCE(c.transcript_segment_id, el.transcript_segment_id),
+        speaker_attribution_id = COALESCE(c.speaker_attribution_id, el.speaker_attribution_id),
+        metadata = c.metadata || jsonb_build_object('transcriptionSessionId', el.transcription_session_id)
+    FROM event_links el
+    WHERE c.workspace_id = $1
+      AND c.session_id = $2
+      AND c.metadata->>'providerEventId' = el.provider_event_id
+    `,
+    params
+  );
+
+  await client.query(
+    `
+    WITH event_links AS (
+      SELECT
+        e.id,
+        substring(e.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid AS transcription_session_id,
+        ts.participant_id,
+        s.id AS transcript_segment_id,
+        (
+          SELECT c.id
+          FROM huddle_caption_events c
+          WHERE c.workspace_id = e.workspace_id
+            AND c.session_id = e.session_id
+            AND c.metadata->>'providerEventId' = e.provider_event_id
+          ORDER BY c.emitted_at DESC
+          LIMIT 1
+        ) AS caption_event_id,
+        (
+          SELECT a.id
+          FROM huddle_speaker_attributions a
+          WHERE a.workspace_id = e.workspace_id
+            AND a.session_id = e.session_id
+            AND a.provenance_json->>'sourceSegmentId' = e.source_segment_id
+          ORDER BY a.created_at DESC
+          LIMIT 1
+        ) AS speaker_attribution_id
+      FROM huddle_transcription_provider_events e
+      JOIN huddle_transcription_sessions ts
+        ON ts.id = substring(e.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid
+       AND ts.workspace_id = e.workspace_id
+       AND ts.session_id = e.session_id
+      LEFT JOIN huddle_transcript_segments s
+        ON s.workspace_id = e.workspace_id
+       AND s.session_id = e.session_id
+       AND s.source_provider = e.provider_name
+       AND s.source_segment_id = e.source_segment_id
+      WHERE e.workspace_id = $1
+        AND e.session_id = $2
+        AND e.source_segment_id ~ 'deepgram:[0-9a-f-]{36}:'
+        AND ($3::text IS NULL OR e.source_segment_id = $3)
+    )
+    UPDATE huddle_transcription_provider_events e
+    SET transcription_session_id = COALESCE(e.transcription_session_id, el.transcription_session_id),
+        participant_id = COALESCE(e.participant_id, el.participant_id),
+        transcript_segment_id = COALESCE(e.transcript_segment_id, el.transcript_segment_id),
+        caption_event_id = COALESCE(e.caption_event_id, el.caption_event_id),
+        speaker_attribution_id = COALESCE(e.speaker_attribution_id, el.speaker_attribution_id)
+    FROM event_links el
+    WHERE e.id = el.id
+    `,
+    params
+  );
+
+  await client.query(
+    `
+    WITH stats AS (
+      SELECT
+        transcription_session_id,
+        count(*) FILTER (WHERE event_type = 'partial')::int AS partial_count,
+        count(*) FILTER (WHERE event_type = 'final')::int AS final_count
+      FROM huddle_transcription_provider_events
+      WHERE workspace_id = $1
+        AND session_id = $2
+        AND transcription_session_id IS NOT NULL
+      GROUP BY transcription_session_id
+    ),
+    caption_stats AS (
+      SELECT
+        substring(s.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid AS transcription_session_id,
+        count(c.*)::int AS caption_count
+      FROM huddle_caption_events c
+      JOIN huddle_transcript_segments s
+        ON s.id = c.transcript_segment_id
+       AND s.workspace_id = c.workspace_id
+       AND s.session_id = c.session_id
+      WHERE c.workspace_id = $1
+        AND c.session_id = $2
+        AND s.source_segment_id ~ 'deepgram:[0-9a-f-]{36}:'
+      GROUP BY transcription_session_id
+    ),
+    attribution_stats AS (
+      SELECT
+        substring(s.source_segment_id from 'deepgram:([0-9a-f-]{36}):')::uuid AS transcription_session_id,
+        count(a.*)::int AS attribution_count
+      FROM huddle_speaker_attributions a
+      JOIN huddle_transcript_segments s
+        ON s.id = a.transcript_segment_id
+       AND s.workspace_id = a.workspace_id
+       AND s.session_id = a.session_id
+      WHERE a.workspace_id = $1
+        AND a.session_id = $2
+        AND s.source_segment_id ~ 'deepgram:[0-9a-f-]{36}:'
+      GROUP BY transcription_session_id
+    )
+    UPDATE huddle_transcription_sessions ts
+    SET partial_segment_count = COALESCE(stats.partial_count, 0),
+        final_segment_count = COALESCE(stats.final_count, 0),
+        caption_event_count = COALESCE(caption_stats.caption_count, 0),
+        attribution_count = COALESCE(attribution_stats.attribution_count, 0),
+        updated_at = now()
+    FROM stats
+    LEFT JOIN caption_stats
+      ON caption_stats.transcription_session_id = stats.transcription_session_id
+    LEFT JOIN attribution_stats
+      ON attribution_stats.transcription_session_id = stats.transcription_session_id
+    WHERE ts.id = stats.transcription_session_id
+      AND ts.workspace_id = $1
+      AND ts.session_id = $2
+    `,
+    params.slice(0, 2)
+  );
+}
+
 export async function finalizeHuddleTranscript({
   workspaceId,
   sessionId,
@@ -1124,6 +1374,7 @@ export async function finalizeHuddleTranscript({
       [`huddle_transcript_finalization:${workspaceId}:${sessionId}`]
     );
     const policy = await getEffectiveTranscriptionPolicy({ workspaceId, sessionId, client: tx });
+    await repairTranscriptionIdentityLinks({ workspaceId, sessionId, client: tx });
     const existing = await listHuddleArtifacts({
       workspaceId,
       sessionId,
