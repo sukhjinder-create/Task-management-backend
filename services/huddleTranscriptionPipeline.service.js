@@ -260,6 +260,28 @@ async function getLatestDeviceForParticipant({
   return rows[0] || null;
 }
 
+async function getTranscriptionSessionRow({
+  workspaceId,
+  sessionId,
+  transcriptionSessionId,
+  client = null,
+}) {
+  const id = safeUuid(transcriptionSessionId);
+  if (!id) return null;
+  const { rows } = await runner(client).query(
+    `
+    SELECT *
+    FROM huddle_transcription_sessions
+    WHERE id = $1
+      AND workspace_id = $2
+      AND session_id = $3
+    LIMIT 1
+    `,
+    [id, workspaceId, sessionId]
+  );
+  return rows[0] || null;
+}
+
 export async function getEffectiveTranscriptionPolicy({
   workspaceId,
   sessionId,
@@ -771,11 +793,22 @@ export async function ingestTranscriptionProviderEvent({
     if (session.ended_at || session.state === "ended") {
       throw createServiceError("Huddle session has ended", 409, "huddle_session_ended");
     }
+    const transcriptionSession = await getTranscriptionSessionRow({
+      workspaceId,
+      sessionId,
+      transcriptionSessionId,
+      client: tx,
+    });
+    const requestedParticipantId =
+      input.participantId ||
+      input.participant_id ||
+      transcriptionSession?.participant_id ||
+      null;
     const participant = await getParticipantForActor({
       workspaceId,
       sessionId,
       actorUserId,
-      participantId: input.participantId || input.participant_id,
+      participantId: requestedParticipantId,
       client: tx,
     });
     if (!participant && !["admin", "owner", "manager"].includes(String(role).toLowerCase())) {
@@ -783,6 +816,11 @@ export async function ingestTranscriptionProviderEvent({
     }
 
     const normalized = normalizeTranscriptionProviderEvent(input);
+    const participantDeviceId =
+      input.participantDeviceId ||
+      input.participant_device_id ||
+      transcriptionSession?.participant_device_id ||
+      null;
     if (!normalized.text && normalized.status !== HUDDLE_TRANSCRIPT_SEGMENT_STATUSES.RETRACTED) {
       const ignored = await insertProviderEvent({
         workspaceId,
@@ -832,6 +870,7 @@ export async function ingestTranscriptionProviderEvent({
         role,
         input: {
           participantId: participant?.id || null,
+          participantDeviceId,
           speakerKind: participant?.participant_kind || "workspace_user",
           speakerUserId: participant?.user_id || actorUserId || null,
           speakerGuestId: participant?.guest_id || null,
@@ -867,7 +906,7 @@ export async function ingestTranscriptionProviderEvent({
         input: {
           transcriptSegmentId: segment.id,
           participantId: participant.id,
-          participantDeviceId: input.participantDeviceId || input.participant_device_id,
+          participantDeviceId,
           speakerKind: participant.participant_kind || "workspace_user",
           speakerUserId: participant.user_id || actorUserId || null,
           speakerGuestId: participant.guest_id || null,
@@ -1030,6 +1069,10 @@ export async function finalizeHuddleTranscript({
 } = {}) {
   return withTransaction(client, async (tx) => {
     await getSessionRow({ workspaceId, sessionId, client: tx });
+    await tx.query(
+      "SELECT pg_advisory_xact_lock(hashtext($1))",
+      [`huddle_transcript_finalization:${workspaceId}:${sessionId}`]
+    );
     const policy = await getEffectiveTranscriptionPolicy({ workspaceId, sessionId, client: tx });
     const existing = await listHuddleArtifacts({
       workspaceId,

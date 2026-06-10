@@ -567,6 +567,29 @@ export async function createTranscriptSegment({
         $9, $10, $11, $12, $13, $14, $15,
         $16, $17, $18, $19, $20, $21, $22::jsonb
       )
+      ON CONFLICT (workspace_id, session_id, source_provider, source_segment_id)
+        WHERE source_segment_id IS NOT NULL AND deleted_at IS NULL
+      DO UPDATE SET
+        participant_id = COALESCE(EXCLUDED.participant_id, huddle_transcript_segments.participant_id),
+        participant_device_id = COALESCE(EXCLUDED.participant_device_id, huddle_transcript_segments.participant_device_id),
+        speaker_kind = COALESCE(EXCLUDED.speaker_kind, huddle_transcript_segments.speaker_kind),
+        speaker_user_id = COALESCE(EXCLUDED.speaker_user_id, huddle_transcript_segments.speaker_user_id),
+        speaker_guest_id = COALESCE(EXCLUDED.speaker_guest_id, huddle_transcript_segments.speaker_guest_id),
+        speaker_label = COALESCE(EXCLUDED.speaker_label, huddle_transcript_segments.speaker_label),
+        source_event_id = COALESCE(EXCLUDED.source_event_id, huddle_transcript_segments.source_event_id),
+        language = COALESCE(EXCLUDED.language, huddle_transcript_segments.language),
+        transcript_text = EXCLUDED.transcript_text,
+        status = EXCLUDED.status,
+        confidence = COALESCE(EXCLUDED.confidence, huddle_transcript_segments.confidence),
+        started_at = COALESCE(huddle_transcript_segments.started_at, EXCLUDED.started_at),
+        ended_at = COALESCE(EXCLUDED.ended_at, huddle_transcript_segments.ended_at),
+        finalized_at = CASE
+          WHEN EXCLUDED.status = 'final' THEN COALESCE(huddle_transcript_segments.finalized_at, now())
+          ELSE huddle_transcript_segments.finalized_at
+        END,
+        sequence_number = COALESCE(EXCLUDED.sequence_number, huddle_transcript_segments.sequence_number),
+        updated_by = EXCLUDED.updated_by,
+        metadata = huddle_transcript_segments.metadata || EXCLUDED.metadata
       RETURNING *
       `,
       [
