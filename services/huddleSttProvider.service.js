@@ -19,7 +19,7 @@ export const HUDDLE_STT_PROVIDER_FEATURES = Object.freeze({
 });
 
 const DEFAULT_DEEPGRAM_MODEL = "nova-3";
-const DEFAULT_DEEPGRAM_LANGUAGE = "en-US";
+const DEFAULT_DEEPGRAM_LANGUAGE = "multi";
 const DEFAULT_DEEPGRAM_TOKEN_TTL_SECONDS = 300;
 
 function safeString(value, maxLength = null) {
@@ -104,6 +104,9 @@ export function buildDeepgramListenUrl({
   url.searchParams.set("smart_format", "true");
   url.searchParams.set("punctuate", "true");
   url.searchParams.set("utterance_end_ms", "1000");
+  if (safeString(language).toLowerCase() === "multi") {
+    url.searchParams.set("endpointing", "100");
+  }
   url.searchParams.set("vad_events", "true");
   url.searchParams.set("diarize", "false");
   url.searchParams.set("tag", "asystence_huddle");

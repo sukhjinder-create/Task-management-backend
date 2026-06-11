@@ -16,6 +16,8 @@ import {
   listCaptionEvents,
   listConsentRecords,
   listIntelligenceJobs,
+  listIntelligenceJobAttempts,
+  listIntelligenceJobDependencies,
   listMemoryCandidates,
   listMeetingDigests,
   listOwnershipResolutions,
@@ -135,8 +137,38 @@ router.post("/sessions/:sessionId/jobs", async (req, res) => {
       input: req.body?.input,
       provenance: req.body?.provenance,
       metadata: req.body?.metadata,
+      dependsOnJobIds: req.body?.dependsOnJobIds || req.body?.depends_on_job_ids,
+      dependencyType: req.body?.dependencyType || req.body?.dependency_type,
     });
     res.status(201).json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.get("/sessions/:sessionId/jobs/:jobId/attempts", async (req, res) => {
+  try {
+    const attempts = await listIntelligenceJobAttempts({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      jobId: req.params.jobId,
+      ...actor(req),
+    });
+    res.json({ ok: true, attempts });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.get("/sessions/:sessionId/jobs/:jobId/dependencies", async (req, res) => {
+  try {
+    const dependencies = await listIntelligenceJobDependencies({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      jobId: req.params.jobId,
+      ...actor(req),
+    });
+    res.json({ ok: true, dependencies });
   } catch (error) {
     errorResponse(res, error);
   }

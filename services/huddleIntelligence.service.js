@@ -36,6 +36,8 @@ export const HUDDLE_INTELLIGENCE_EVENTS = Object.freeze({
   JOB_PROCESSING: "huddle.intelligence.job_processing",
   JOB_COMPLETED: "huddle.intelligence.job_completed",
   JOB_FAILED: "huddle.intelligence.job_failed",
+  JOB_RETRY_SCHEDULED: "huddle.intelligence.job_retry_scheduled",
+  JOB_RECOVERED: "huddle.intelligence.job_recovered",
   JOB_CANCELLED: "huddle.intelligence.job_cancelled",
   TRANSCRIPT_STATE_UPDATED: "huddle.intelligence.transcript_state_updated",
   SPEAKER_ATTRIBUTION_RECORDED: "huddle.intelligence.speaker_attribution_recorded",
@@ -65,7 +67,7 @@ function safeString(value, maxLength = null) {
 
 function safeUuid(value) {
   const normalized = safeString(String(value || ""));
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(normalized)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
     ? normalized
     : null;
 }
@@ -175,6 +177,9 @@ function serializeJob(row = {}) {
     scheduledAt: row.scheduled_at,
     lockedAt: row.locked_at,
     lockedBy: row.locked_by,
+    leaseExpiresAt: row.lease_expires_at,
+    heartbeatAt: row.heartbeat_at,
+    lastRecoveredAt: row.last_recovered_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
     failedAt: row.failed_at,
@@ -190,6 +195,44 @@ function serializeJob(row = {}) {
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function serializeJobAttempt(row = {}) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    workspaceId: row.workspace_id,
+    sessionId: row.session_id,
+    attemptNumber: row.attempt_number,
+    workerId: row.worker_id,
+    status: row.status,
+    startedAt: row.started_at,
+    heartbeatAt: row.heartbeat_at,
+    completedAt: row.completed_at,
+    failedAt: row.failed_at,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
+    input: row.input_json || {},
+    output: row.output_json || {},
+    provenance: row.provenance_json || {},
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializeJobDependency(row = {}) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    dependsOnJobId: row.depends_on_job_id,
+    dependencyType: row.dependency_type,
+    dependencyStatus: row.dependency_status || null,
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
   };
 }
 
@@ -265,6 +308,28 @@ function serializeCaption(row = {}) {
     eventVersion: row.event_version,
     emittedAt: row.emitted_at,
     finalizedAt: row.finalized_at,
+    speaker: {
+      participantId:
+        row.speaker_participant_id ||
+        row.attribution_participant_id ||
+        row.segment_participant_id ||
+        null,
+      userId:
+        row.speaker_user_id ||
+        row.attribution_speaker_user_id ||
+        row.segment_speaker_user_id ||
+        null,
+      guestId:
+        row.speaker_guest_id ||
+        row.attribution_speaker_guest_id ||
+        row.segment_speaker_guest_id ||
+        null,
+      label:
+        row.speaker_display_name ||
+        row.attribution_speaker_label ||
+        row.segment_speaker_label ||
+        null,
+    },
     metadata: row.metadata || {},
     createdAt: row.created_at,
   };
@@ -503,6 +568,8 @@ export async function enqueueIntelligenceJob({
   input = {},
   provenance = {},
   metadata = {},
+  dependsOnJobIds = [],
+  dependencyType = "hard",
   client = null,
 }) {
   return withTransaction(client, async (tx) => {
@@ -560,6 +627,39 @@ export async function enqueueIntelligenceJob({
       values
     );
     const job = rows[0];
+    const dependencyRows = [];
+    for (const dependencyJobId of [...new Set(arrayOrEmpty(dependsOnJobIds).map(safeUuid).filter(Boolean))]) {
+      if (dependencyJobId === job.id) continue;
+      const dependencyResult = await tx.query(
+        `
+        INSERT INTO huddle_intelligence_job_dependencies (
+          job_id,
+          depends_on_job_id,
+          dependency_type,
+          metadata
+        )
+        SELECT $1, upstream.id, $3, $4::jsonb
+        FROM huddle_intelligence_jobs upstream
+        WHERE upstream.id = $2
+          AND upstream.workspace_id = $5
+          AND upstream.session_id = $6
+        ON CONFLICT (job_id, depends_on_job_id)
+        DO UPDATE SET
+          dependency_type = EXCLUDED.dependency_type,
+          metadata = huddle_intelligence_job_dependencies.metadata || EXCLUDED.metadata
+        RETURNING *
+        `,
+        [
+          job.id,
+          dependencyJobId,
+          dependencyType === "soft" ? "soft" : "hard",
+          json({ source: "enqueue" }),
+          workspaceId,
+          sessionId,
+        ]
+      );
+      if (dependencyResult.rows[0]) dependencyRows.push(dependencyResult.rows[0]);
+    }
     const event = await recordIntelligenceEvent({
       eventType: HUDDLE_INTELLIGENCE_EVENTS.JOB_QUEUED,
       workspaceId,
@@ -568,7 +668,11 @@ export async function enqueueIntelligenceJob({
       payload: { jobId: job.id, jobType: job.job_type, status: job.status },
       client: tx,
     });
-    return { job: serializeJob(job), event: serializeEvent(event) };
+    return {
+      job: serializeJob(job),
+      dependencies: dependencyRows.map(serializeJobDependency),
+      event: serializeEvent(event),
+    };
   });
 }
 
@@ -633,6 +737,7 @@ export async function claimNextIntelligenceJob({
   workerId,
   jobTypes = JOB_TYPES,
   now = new Date(),
+  leaseSeconds = 90,
   client = null,
 }) {
   if (!safeString(workerId)) throw createServiceError("workerId is required", 400, "worker_required");
@@ -640,13 +745,22 @@ export async function claimNextIntelligenceJob({
     const { rows } = await tx.query(
       `
       WITH next_job AS (
-        SELECT id
-        FROM huddle_intelligence_jobs
-        WHERE status IN ('queued', 'failed')
-          AND attempt_count < max_attempts
-          AND scheduled_at <= $1
-          AND job_type = ANY($2::text[])
-        ORDER BY priority ASC, scheduled_at ASC, created_at ASC
+        SELECT j.id
+        FROM huddle_intelligence_jobs j
+        WHERE j.status = 'queued'
+          AND j.attempt_count < j.max_attempts
+          AND j.scheduled_at <= $1
+          AND j.job_type = ANY($2::text[])
+          AND NOT EXISTS (
+            SELECT 1
+            FROM huddle_intelligence_job_dependencies dependency
+            JOIN huddle_intelligence_jobs upstream
+              ON upstream.id = dependency.depends_on_job_id
+            WHERE dependency.job_id = j.id
+              AND dependency.dependency_type = 'hard'
+              AND upstream.status <> 'completed'
+          )
+        ORDER BY j.priority ASC, j.scheduled_at ASC, j.created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
@@ -655,6 +769,8 @@ export async function claimNextIntelligenceJob({
           attempt_count = attempt_count + 1,
           locked_at = $1,
           locked_by = $3,
+          lease_expires_at = $1::timestamptz + make_interval(secs => $4),
+          heartbeat_at = $1,
           started_at = COALESCE(started_at, $1),
           error_code = NULL,
           error_message = NULL,
@@ -663,10 +779,51 @@ export async function claimNextIntelligenceJob({
       WHERE j.id = next_job.id
       RETURNING j.*
       `,
-      [safeTimestamp(now, new Date().toISOString()), arrayOrEmpty(jobTypes).map(normalizeJobType), safeString(workerId, 120)]
+      [
+        safeTimestamp(now, new Date().toISOString()),
+        arrayOrEmpty(jobTypes).map(normalizeJobType),
+        safeString(workerId, 120),
+        Math.min(Math.max(Number(leaseSeconds) || 90, 30), 900),
+      ]
     );
     const job = rows[0] || null;
     if (job) {
+      await tx.query(
+        `
+        INSERT INTO huddle_intelligence_job_attempts (
+          job_id,
+          workspace_id,
+          session_id,
+          attempt_number,
+          worker_id,
+          status,
+          started_at,
+          heartbeat_at,
+          input_json,
+          provenance_json,
+          metadata
+        )
+        VALUES ($1,$2,$3,$4,$5,'processing',$6,$6,$7::jsonb,$8::jsonb,$9::jsonb)
+        ON CONFLICT (job_id, attempt_number)
+        DO UPDATE SET
+          worker_id = EXCLUDED.worker_id,
+          status = 'processing',
+          heartbeat_at = EXCLUDED.heartbeat_at,
+          metadata = huddle_intelligence_job_attempts.metadata || EXCLUDED.metadata,
+          updated_at = now()
+        `,
+        [
+          job.id,
+          job.workspace_id,
+          job.session_id,
+          job.attempt_count,
+          safeString(workerId, 120),
+          safeTimestamp(now, new Date().toISOString()),
+          json(job.input_json),
+          json(job.provenance_json),
+          json({ leaseSeconds: Math.min(Math.max(Number(leaseSeconds) || 90, 30), 900) }),
+        ]
+      );
       await recordIntelligenceEvent({
         eventType: HUDDLE_INTELLIGENCE_EVENTS.JOB_PROCESSING,
         workspaceId: job.workspace_id,
@@ -699,6 +856,8 @@ export async function completeIntelligenceJob({
           completed_at = now(),
           locked_at = NULL,
           locked_by = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = now(),
           updated_at = now()
       WHERE id = $1
         AND workspace_id = $2
@@ -708,6 +867,19 @@ export async function completeIntelligenceJob({
     );
     const job = rows[0];
     if (!job) throw createServiceError("job_not_found", 404, "job_not_found");
+    await tx.query(
+      `
+      UPDATE huddle_intelligence_job_attempts
+      SET status = 'completed',
+          output_json = $3::jsonb,
+          metadata = metadata || $4::jsonb,
+          completed_at = now(),
+          heartbeat_at = now()
+      WHERE job_id = $1
+        AND attempt_number = $2
+      `,
+      [job.id, job.attempt_count, json(output), json(metadata)]
+    );
     const event = await recordIntelligenceEvent({
       eventType: HUDDLE_INTELLIGENCE_EVENTS.JOB_COMPLETED,
       workspaceId,
@@ -726,6 +898,7 @@ export async function failIntelligenceJob({
   errorCode = "intelligence_job_failed",
   errorMessage = null,
   retry = true,
+  retryDelaySeconds = null,
   metadata = {},
   client = null,
 }) {
@@ -742,18 +915,60 @@ export async function failIntelligenceJob({
           failed_at = now(),
           locked_at = NULL,
           locked_by = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = now(),
+          scheduled_at = CASE
+            WHEN $5 = TRUE AND attempt_count < max_attempts
+              THEN now() + make_interval(secs => $7)
+            ELSE scheduled_at
+          END,
           metadata = metadata || $6::jsonb,
           updated_at = now()
       WHERE id = $1
         AND workspace_id = $2
       RETURNING *
       `,
-      [jobId, workspaceId, safeString(errorCode, 120), safeString(errorMessage, 2000) || null, Boolean(retry), json(metadata)]
+      [
+        jobId,
+        workspaceId,
+        safeString(errorCode, 120),
+        safeString(errorMessage, 2000) || null,
+        Boolean(retry),
+        json(metadata),
+        Math.min(
+          Math.max(Number(retryDelaySeconds) || 15, 1),
+          3600
+        ),
+      ]
     );
     const job = rows[0];
     if (!job) throw createServiceError("job_not_found", 404, "job_not_found");
+    const retryScheduled = job.status === HUDDLE_INTELLIGENCE_JOB_STATUSES.QUEUED;
+    await tx.query(
+      `
+      UPDATE huddle_intelligence_job_attempts
+      SET status = $3,
+          error_code = $4,
+          error_message = $5,
+          metadata = metadata || $6::jsonb,
+          failed_at = now(),
+          heartbeat_at = now()
+      WHERE job_id = $1
+        AND attempt_number = $2
+      `,
+      [
+        job.id,
+        job.attempt_count,
+        retryScheduled ? "retry_scheduled" : "failed",
+        job.error_code,
+        job.error_message,
+        json(metadata),
+      ]
+    );
     const event = await recordIntelligenceEvent({
-      eventType: HUDDLE_INTELLIGENCE_EVENTS.JOB_FAILED,
+      eventType: retryScheduled
+        ? HUDDLE_INTELLIGENCE_EVENTS.JOB_RETRY_SCHEDULED
+        : HUDDLE_INTELLIGENCE_EVENTS.JOB_FAILED,
       workspaceId,
       sessionId: job.session_id,
       actorUserId: job.created_by,
@@ -777,6 +992,8 @@ export async function cancelIntelligenceJob({ workspaceId, jobId, actorUserId, r
           cancelled_by = $3,
           locked_at = NULL,
           locked_by = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = now(),
           metadata = metadata || $4::jsonb,
           updated_at = now()
       WHERE id = $1
@@ -786,6 +1003,19 @@ export async function cancelIntelligenceJob({ workspaceId, jobId, actorUserId, r
       [jobId, workspaceId, actorUserId, json({ reason: safeString(reason, 500) || null })]
     );
     const job = rows[0];
+    await tx.query(
+      `
+      UPDATE huddle_intelligence_job_attempts
+      SET status = 'cancelled',
+          metadata = metadata || $3::jsonb,
+          failed_at = now(),
+          heartbeat_at = now()
+      WHERE job_id = $1
+        AND attempt_number = $2
+        AND status = 'processing'
+      `,
+      [job.id, job.attempt_count, json({ reason: safeString(reason, 500) || null })]
+    );
     const event = await recordIntelligenceEvent({
       eventType: HUDDLE_INTELLIGENCE_EVENTS.JOB_CANCELLED,
       workspaceId,
@@ -796,6 +1026,189 @@ export async function cancelIntelligenceJob({ workspaceId, jobId, actorUserId, r
     });
     return { job: serializeJob(job), event: serializeEvent(event) };
   });
+}
+
+export async function heartbeatIntelligenceJob({
+  workspaceId,
+  jobId,
+  workerId,
+  leaseSeconds = 90,
+  client = null,
+}) {
+  const { rows } = await runner(client).query(
+    `
+    UPDATE huddle_intelligence_jobs
+    SET heartbeat_at = now(),
+        lease_expires_at = now() + make_interval(secs => $4),
+        updated_at = now()
+    WHERE id = $1
+      AND workspace_id = $2
+      AND status = 'processing'
+      AND locked_by = $3
+    RETURNING *
+    `,
+    [
+      jobId,
+      workspaceId,
+      safeString(workerId, 120),
+      Math.min(Math.max(Number(leaseSeconds) || 90, 30), 900),
+    ]
+  );
+  const job = rows[0];
+  if (!job) throw createServiceError("job_lease_not_owned", 409, "job_lease_not_owned");
+  await runner(client).query(
+    `
+    UPDATE huddle_intelligence_job_attempts
+    SET heartbeat_at = now()
+    WHERE job_id = $1
+      AND attempt_number = $2
+      AND worker_id = $3
+      AND status = 'processing'
+    `,
+    [job.id, job.attempt_count, safeString(workerId, 120)]
+  );
+  return serializeJob(job);
+}
+
+export async function recoverStaleIntelligenceJobs({
+  now = new Date(),
+  retryDelaySeconds = 15,
+  limit = 100,
+  client = null,
+} = {}) {
+  return withTransaction(client, async (tx) => {
+    const { rows } = await tx.query(
+      `
+      WITH stale AS (
+        SELECT id
+        FROM huddle_intelligence_jobs
+        WHERE status = 'processing'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < $1
+        ORDER BY lease_expires_at ASC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE huddle_intelligence_jobs job
+      SET status = CASE
+            WHEN attempt_count < max_attempts THEN 'queued'
+            ELSE 'failed'
+          END,
+          error_code = 'worker_lease_expired',
+          error_message = 'The worker lease expired before the job completed.',
+          failed_at = now(),
+          scheduled_at = CASE
+            WHEN attempt_count < max_attempts
+              THEN now() + make_interval(secs => $3)
+            ELSE scheduled_at
+          END,
+          locked_at = NULL,
+          locked_by = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = now(),
+          last_recovered_at = now(),
+          metadata = metadata || '{"recoveredFromExpiredLease":true}'::jsonb,
+          updated_at = now()
+      FROM stale
+      WHERE job.id = stale.id
+      RETURNING job.*
+      `,
+      [
+        safeTimestamp(now, new Date().toISOString()),
+        Math.min(Math.max(Number(limit) || 100, 1), 500),
+        Math.min(Math.max(Number(retryDelaySeconds) || 15, 1), 3600),
+      ]
+    );
+
+    for (const job of rows) {
+      await tx.query(
+        `
+        UPDATE huddle_intelligence_job_attempts
+        SET status = 'recovered',
+            error_code = 'worker_lease_expired',
+            error_message = 'The worker lease expired before the job completed.',
+            failed_at = now(),
+            heartbeat_at = now(),
+            metadata = metadata || '{"recoveredFromExpiredLease":true}'::jsonb
+        WHERE job_id = $1
+          AND attempt_number = $2
+        `,
+        [job.id, job.attempt_count]
+      );
+      await recordIntelligenceEvent({
+        eventType: HUDDLE_INTELLIGENCE_EVENTS.JOB_RECOVERED,
+        workspaceId: job.workspace_id,
+        sessionId: job.session_id,
+        actorUserId: job.created_by,
+        payload: {
+          jobId: job.id,
+          jobType: job.job_type,
+          status: job.status,
+          attemptCount: job.attempt_count,
+        },
+        client: tx,
+      });
+    }
+
+    return {
+      recoveredCount: rows.length,
+      jobs: rows.map(serializeJob),
+    };
+  });
+}
+
+export async function listIntelligenceJobAttempts({
+  workspaceId,
+  sessionId,
+  jobId,
+  actorUserId,
+  role = "user",
+  client = null,
+}) {
+  const job = await getIntelligenceJob({ workspaceId, jobId, actorUserId, role, client });
+  if (String(job.sessionId) !== String(sessionId)) {
+    throw createServiceError("job_session_mismatch", 409, "job_session_mismatch");
+  }
+  const { rows } = await runner(client).query(
+    `
+    SELECT *
+    FROM huddle_intelligence_job_attempts
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND job_id = $3
+    ORDER BY attempt_number DESC
+    `,
+    [workspaceId, sessionId, jobId]
+  );
+  return rows.map(serializeJobAttempt);
+}
+
+export async function listIntelligenceJobDependencies({
+  workspaceId,
+  sessionId,
+  jobId,
+  actorUserId,
+  role = "user",
+  client = null,
+}) {
+  const job = await getIntelligenceJob({ workspaceId, jobId, actorUserId, role, client });
+  if (String(job.sessionId) !== String(sessionId)) {
+    throw createServiceError("job_session_mismatch", 409, "job_session_mismatch");
+  }
+  const { rows } = await runner(client).query(
+    `
+    SELECT dependency.*, upstream.status AS dependency_status
+    FROM huddle_intelligence_job_dependencies dependency
+    JOIN huddle_intelligence_jobs upstream
+      ON upstream.id = dependency.depends_on_job_id
+    WHERE dependency.job_id = $1
+      AND upstream.workspace_id = $2
+      AND upstream.session_id = $3
+    ORDER BY dependency.created_at ASC
+    `,
+    [jobId, workspaceId, sessionId]
+  );
+  return rows.map(serializeJobDependency);
 }
 
 export async function updateTranscriptProcessingState({
@@ -1047,22 +1460,49 @@ export async function listCaptionEvents({ workspaceId, sessionId, actorUserId, r
   const context = await getSessionAccessContext({ workspaceId, sessionId, userId: actorUserId, role, client });
   assertSessionPermission(context, "read");
   const params = [workspaceId, sessionId];
-  const conditions = ["workspace_id = $1", "session_id = $2"];
+  const conditions = ["c.workspace_id = $1", "c.session_id = $2"];
   let idx = 3;
-  if (replayableOnly) conditions.push("replayable = TRUE");
+  if (replayableOnly) conditions.push("c.replayable = TRUE");
   const afterTimestamp = safeTimestamp(after);
   if (afterTimestamp) {
-    conditions.push(`emitted_at > $${idx}`);
+    conditions.push(`c.emitted_at > $${idx}`);
     params.push(afterTimestamp);
     idx += 1;
   }
   params.push(Math.min(Math.max(Number(limit) || 200, 1), 1000));
   const { rows } = await runner(client).query(
     `
-    SELECT *
-    FROM huddle_caption_events
+    SELECT
+      c.*,
+      a.participant_id AS attribution_participant_id,
+      a.speaker_user_id AS attribution_speaker_user_id,
+      a.speaker_guest_id AS attribution_speaker_guest_id,
+      a.speaker_label AS attribution_speaker_label,
+      s.participant_id AS segment_participant_id,
+      s.speaker_user_id AS segment_speaker_user_id,
+      s.speaker_guest_id AS segment_speaker_guest_id,
+      s.speaker_label AS segment_speaker_label,
+      COALESCE(
+        NULLIF(a.speaker_label, ''),
+        NULLIF(s.speaker_label, ''),
+        NULLIF(u.username, ''),
+        NULLIF(g.display_name, '')
+      ) AS speaker_display_name
+    FROM huddle_caption_events c
+    LEFT JOIN huddle_speaker_attributions a
+      ON a.id = c.speaker_attribution_id
+     AND a.workspace_id = c.workspace_id
+     AND a.session_id = c.session_id
+    LEFT JOIN huddle_transcript_segments s
+      ON s.id = c.transcript_segment_id
+     AND s.workspace_id = c.workspace_id
+     AND s.session_id = c.session_id
+    LEFT JOIN users u
+      ON u.id = COALESCE(a.speaker_user_id, s.speaker_user_id)
+    LEFT JOIN huddle_guests g
+      ON g.id = COALESCE(a.speaker_guest_id, s.speaker_guest_id)
     WHERE ${conditions.join(" AND ")}
-    ORDER BY emitted_at ASC, sequence_number ASC NULLS LAST, created_at ASC
+    ORDER BY c.emitted_at ASC, c.sequence_number ASC NULLS LAST, c.created_at ASC
     LIMIT $${idx}
     `,
     params
@@ -1483,8 +1923,8 @@ export function getHuddleIntelligenceDiagnostics() {
     domain: "huddle_intelligence",
     separatedFromMedia: true,
     generationEnabled: false,
-    sttProviderEnabled: false,
-    captionsUiEnabled: false,
+    sttProviderEnabled: true,
+    captionsUiEnabled: true,
     memoryPromotionEnabled: false,
     taskCreationEnabled: false,
     jobTypes: JOB_TYPES,
@@ -1492,6 +1932,8 @@ export function getHuddleIntelligenceDiagnostics() {
     transcriptProcessingStatuses: Object.values(HUDDLE_TRANSCRIPT_PROCESSING_STATUSES),
     tables: {
       jobs: "huddle_intelligence_jobs",
+      jobAttempts: "huddle_intelligence_job_attempts",
+      jobDependencies: "huddle_intelligence_job_dependencies",
       transcriptProcessing: "huddle_transcript_processing_state",
       speakerAttribution: "huddle_speaker_attributions",
       captions: "huddle_caption_events",
@@ -1516,6 +1958,10 @@ export default {
   completeIntelligenceJob,
   failIntelligenceJob,
   cancelIntelligenceJob,
+  heartbeatIntelligenceJob,
+  recoverStaleIntelligenceJobs,
+  listIntelligenceJobAttempts,
+  listIntelligenceJobDependencies,
   updateTranscriptProcessingState,
   getTranscriptProcessingState,
   recordSpeakerAttribution,

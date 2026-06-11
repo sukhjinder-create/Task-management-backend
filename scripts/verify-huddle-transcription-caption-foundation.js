@@ -31,6 +31,7 @@ const deployWorkflow = read(".github/workflows/deploy.yml");
 
 const {
   HUDDLE_STT_PROVIDERS,
+  buildDeepgramListenUrl,
   getHuddleSttProviderDiagnostics,
 } = await import("../services/huddleSttProvider.service.js");
 const {
@@ -78,6 +79,12 @@ function verifyProviderAbstraction() {
   assert.match(sttProvider, /DEEPGRAM_API_KEY/, "Deepgram API key must be env-driven");
   assert.match(sttProvider, /HUDDLE_TRANSCRIPTION_PROVIDER/, "selected provider must be env-driven");
   assert.match(sttProvider, /stt_provider_not_implemented/, "future providers must fail explicitly");
+  const multilingualUrl = new URL(buildDeepgramListenUrl({
+    model: "nova-3",
+    language: "multi",
+  }));
+  assert.equal(multilingualUrl.searchParams.get("language"), "multi");
+  assert.equal(multilingualUrl.searchParams.get("endpointing"), "100");
 }
 
 function verifyIngestionPipeline() {

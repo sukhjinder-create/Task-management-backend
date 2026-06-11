@@ -103,7 +103,8 @@ function verifyJobs() {
   assert.match(migration, /idempotency_key/, "jobs must support idempotency");
   assert.match(migration, /provenance_json/, "jobs must support provenance");
   assert.match(worker, /generationEnabled: false/, "worker must not enable generation");
-  assert.match(worker, /generation_not_implemented/, "worker must fail unsupported generation explicitly");
+  assert.match(worker, /orchestrationEnabled: true/, "worker must enable durable orchestration");
+  assert.match(worker, /generationState: "awaiting_generator"/, "generation jobs must remain explicitly pending");
 }
 
 function verifyTranscriptProcessing() {
@@ -221,8 +222,8 @@ function verifyDiagnostics() {
   assert.equal(diagnostics.ready, true);
   assert.equal(diagnostics.separatedFromMedia, true);
   assert.equal(diagnostics.generationEnabled, false);
-  assert.equal(diagnostics.sttProviderEnabled, false);
-  assert.equal(diagnostics.captionsUiEnabled, false);
+  assert.equal(diagnostics.sttProviderEnabled, true);
+  assert.equal(diagnostics.captionsUiEnabled, true);
   assert.equal(diagnostics.memoryPromotionEnabled, false);
   assert.equal(diagnostics.taskCreationEnabled, false);
   assert.deepEqual(diagnostics.jobTypes, Object.values(HUDDLE_INTELLIGENCE_JOB_TYPES));
@@ -230,9 +231,12 @@ function verifyDiagnostics() {
 
   const workerDiagnostics = getHuddleIntelligenceWorkerDiagnostics();
   assert.equal(workerDiagnostics.ready, true);
-  assert.equal(workerDiagnostics.architectureOnly, true);
+  assert.equal(workerDiagnostics.architectureOnly, false);
+  assert.equal(workerDiagnostics.orchestrationEnabled, true);
   assert.equal(workerDiagnostics.generationEnabled, false);
-  assert.equal(workerDiagnostics.sttProviderEnabled, false);
+  assert.equal(workerDiagnostics.sttProviderEnabled, true);
+  assert.equal(workerDiagnostics.retryRecoveryEnabled, true);
+  assert.equal(workerDiagnostics.dependencySchedulingEnabled, true);
 }
 
 verifySchemaCore();

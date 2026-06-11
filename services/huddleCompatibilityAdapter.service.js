@@ -28,6 +28,10 @@ import {
 } from "./huddleMediaSession.service.js";
 import { selectHuddleMediaProvider } from "./huddleMediaProviderSelector.service.js";
 import { finalizeHuddleTranscript } from "./huddleTranscriptionPipeline.service.js";
+import {
+  HUDDLE_INTELLIGENCE_JOB_TYPES,
+  enqueueIntelligenceJob,
+} from "./huddleIntelligence.service.js";
 
 export const HUDDLE_MISMATCH_TYPES = Object.freeze({
   MISSING_SESSION: "missing_session",
@@ -1304,6 +1308,7 @@ export async function recordLegacyHuddleEnd({
         compatibilitySource: "legacy_socket",
       },
     });
+    let intelligenceJob = null;
     try {
       transcriptFinalization = await finalizeHuddleTranscript({
         workspaceId,
@@ -1312,6 +1317,37 @@ export async function recordLegacyHuddleEnd({
         role: "admin",
         reason,
       });
+      if (transcriptFinalization?.artifact?.id) {
+        try {
+          intelligenceJob = await enqueueIntelligenceJob({
+            workspaceId,
+            sessionId: stateResult.session.id,
+            actorUserId: userId || stateResult.session.ended_by || stateResult.session.host_user_id || null,
+            role: "admin",
+            jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.TRANSCRIPT_FINALIZATION,
+            artifactId: transcriptFinalization.artifact.id,
+            idempotencyKey: `transcript-workflow:${transcriptFinalization.artifact.id}:v1`,
+            input: {
+              transcriptArtifactId: transcriptFinalization.artifact.id,
+              trigger: "huddle_ended",
+            },
+            provenance: {
+              source: "huddle:end",
+              transcriptArtifactId: transcriptFinalization.artifact.id,
+            },
+            metadata: {
+              orchestrationOnly: true,
+              generationImplemented: false,
+            },
+          });
+        } catch (jobError) {
+          intelligenceJob = {
+            ok: false,
+            reason: jobError?.reason || jobError?.message || "intelligence_job_enqueue_failed",
+          };
+          console.warn("[huddle:intelligence] workflow enqueue skipped:", intelligenceJob.reason);
+        }
+      }
     } catch (transcriptErr) {
       transcriptFinalization = {
         ok: false,
@@ -1319,7 +1355,12 @@ export async function recordLegacyHuddleEnd({
       };
       console.warn("[huddle:transcription] finalization skipped:", transcriptFinalization.reason);
     }
-    return success({ ...stateResult, eventWriteOk: true, transcriptFinalization });
+    return success({
+      ...stateResult,
+      eventWriteOk: true,
+      transcriptFinalization,
+      intelligenceJob,
+    });
   } catch (err) {
     await reportSessionFailure("legacy_end_event_write_failed", {
       mismatchType: HUDDLE_MISMATCH_TYPES.EVENT_MISMATCH,
