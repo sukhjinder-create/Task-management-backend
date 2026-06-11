@@ -1918,11 +1918,14 @@ export async function getArtifactProcessingState({ workspaceId, sessionId, artif
 }
 
 export function getHuddleIntelligenceDiagnostics() {
+  const generationEnabled = ["1", "true", "yes", "on"].includes(
+    String(process.env.HUDDLE_INTELLIGENCE_GENERATION_ENABLED || "").trim().toLowerCase()
+  );
   return {
     ready: true,
     domain: "huddle_intelligence",
     separatedFromMedia: true,
-    generationEnabled: false,
+    generationEnabled,
     sttProviderEnabled: true,
     captionsUiEnabled: true,
     memoryPromotionEnabled: false,

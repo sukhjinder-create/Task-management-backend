@@ -23,6 +23,7 @@ function shouldRun(name) {
 const migration = read("migrations/20260609_huddle_zz_intelligence_core.sql");
 const service = read("services/huddleIntelligence.service.js");
 const worker = read("services/huddleIntelligenceWorker.service.js");
+const generation = read("services/huddleIntelligenceGeneration.service.js");
 const route = read("routes/huddleIntelligence.routes.js");
 const index = read("index.js");
 const packageJson = JSON.parse(read("package.json"));
@@ -102,9 +103,11 @@ function verifyJobs() {
   assert.match(migration, /max_attempts/, "jobs must support retry limits");
   assert.match(migration, /idempotency_key/, "jobs must support idempotency");
   assert.match(migration, /provenance_json/, "jobs must support provenance");
-  assert.match(worker, /generationEnabled: false/, "worker must not enable generation");
+  assert.match(worker, /getHuddleIntelligenceGenerationDiagnostics/, "worker must report generation readiness");
+  assert.match(generation, /generateHuddleArtifact/, "generation must use the existing worker boundary");
+  assert.match(generation, /approvalStatus: "pending"/, "generated artifacts must require approval");
   assert.match(worker, /orchestrationEnabled: true/, "worker must enable durable orchestration");
-  assert.match(worker, /generationState: "awaiting_generator"/, "generation jobs must remain explicitly pending");
+  assert.match(worker, /generationState: "awaiting_generator"/, "disabled generation must remain explicitly pending");
 }
 
 function verifyTranscriptProcessing() {

@@ -32,6 +32,9 @@ import {
 import {
   getHuddleIntelligenceWorkerDiagnostics,
 } from "../services/huddleIntelligenceWorker.service.js";
+import {
+  getHuddleIntelligenceGenerationDiagnostics,
+} from "../services/huddleIntelligenceGeneration.service.js";
 import { allowRoles } from "../middleware/role.middleware.js";
 
 const router = express.Router();
@@ -58,6 +61,14 @@ router.get("/diagnostics", (_req, res) => {
     ok: true,
     intelligence: getHuddleIntelligenceDiagnostics(),
     worker: getHuddleIntelligenceWorkerDiagnostics(),
+    generation: getHuddleIntelligenceGenerationDiagnostics(),
+  });
+});
+
+router.get("/generation/diagnostics", (_req, res) => {
+  res.json({
+    ok: true,
+    generation: getHuddleIntelligenceGenerationDiagnostics(),
   });
 });
 

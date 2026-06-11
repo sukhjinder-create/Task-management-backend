@@ -24,22 +24,49 @@ const OLLAMA_NUM_GPU = parseInt(process.env.OLLAMA_NUM_GPU ?? "0");
  * @param {AbortSignal} [opts.signal]       — optional abort signal (Ollama only)
  * @returns {Promise<string>}
  */
-export async function generateText({ prompt, messages, maxTokens = 900, json = false, signal } = {}) {
+export async function generateText({
+  prompt,
+  messages,
+  maxTokens = 900,
+  json = false,
+  temperature = 0.4,
+  signal,
+} = {}) {
   switch (PROVIDER) {
     case "ollama":
-    case "local":       return _ollama(prompt, maxTokens, signal);
-    case "openai":      return _openai(prompt, maxTokens, json);
-    case "grok":        return _grok(prompt, maxTokens);
-    case "groq":        return _groq(prompt, maxTokens, messages);
-    case "huggingface": return _huggingface(prompt, maxTokens);
+    case "local":       return _ollama(prompt, maxTokens, json, temperature, signal);
+    case "openai":      return _openai(prompt, maxTokens, json, temperature, messages);
+    case "grok":        return _grok(prompt, maxTokens, json, temperature, messages);
+    case "groq":        return _groq(prompt, maxTokens, json, temperature, messages);
+    case "huggingface": return _huggingface(prompt, maxTokens, temperature);
     default:
       throw new Error(`Unsupported LLM_PROVIDER: "${PROVIDER}". Valid values: ollama, openai, grok, groq, huggingface`);
   }
 }
 
+export function getLlmRuntimeDiagnostics() {
+  const model = {
+    ollama: OLLAMA_MODEL,
+    local: OLLAMA_MODEL,
+    openai: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    grok: process.env.GROK_MODEL || "grok-beta",
+    groq: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+    huggingface: process.env.HF_MODEL || "mistralai/Mixtral-8x7B-Instruct-v0.1",
+  }[PROVIDER] || null;
+  const configured = {
+    ollama: Boolean(OLLAMA_URL),
+    local: Boolean(OLLAMA_URL),
+    openai: Boolean(process.env.OPENAI_API_KEY),
+    grok: Boolean(process.env.GROK_API_KEY),
+    groq: Boolean(process.env.GROQ_API_KEY),
+    huggingface: Boolean(process.env.HUGGINGFACE_API_KEY),
+  }[PROVIDER] || false;
+  return { provider: PROVIDER, model, configured };
+}
+
 // ─── Ollama ───────────────────────────────────────────────────────────────────
 
-async function _ollama(prompt, maxTokens, signal) {
+async function _ollama(prompt, maxTokens, json, temperature, signal) {
   try {
     const res = await axios.post(
       `${OLLAMA_URL}/api/generate`,
@@ -47,9 +74,10 @@ async function _ollama(prompt, maxTokens, signal) {
         model: OLLAMA_MODEL,
         prompt,
         stream: false,
+        ...(json ? { format: "json" } : {}),
         options: {
           num_predict: maxTokens,
-          temperature: 0.4,
+          temperature,
           top_k: 20,
           top_p: 0.9,
           num_gpu: OLLAMA_NUM_GPU,
@@ -71,14 +99,14 @@ async function _ollama(prompt, maxTokens, signal) {
 
 // ─── OpenAI ───────────────────────────────────────────────────────────────────
 
-async function _openai(prompt, maxTokens, json) {
+async function _openai(prompt, maxTokens, json, temperature, messages) {
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
     {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: messages || [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
-      temperature: 0.4,
+      temperature,
       ...(json ? { response_format: { type: "json_object" } } : {}),
     },
     {
@@ -94,14 +122,15 @@ async function _openai(prompt, maxTokens, json) {
 
 // ─── Grok ─────────────────────────────────────────────────────────────────────
 
-async function _grok(prompt, maxTokens) {
+async function _grok(prompt, maxTokens, json, temperature, messages) {
   const res = await axios.post(
     "https://api.x.ai/v1/chat/completions",
     {
-      model: "grok-beta",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.4,
+      model: process.env.GROK_MODEL || "grok-beta",
+      messages: messages || [{ role: "user", content: prompt }],
+      temperature,
       max_tokens: maxTokens,
+      ...(json ? { response_format: { type: "json_object" } } : {}),
     },
     {
       headers: {
@@ -117,15 +146,16 @@ async function _grok(prompt, maxTokens) {
 
 // ─── Groq ─────────────────────────────────────────────────────────────────────
 
-async function _groq(prompt, maxTokens, messages) {
+async function _groq(prompt, maxTokens, json, temperature, messages) {
   const msgs = messages || [{ role: "user", content: prompt }];
   const res = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
       model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
       messages: msgs,
-      temperature: 0.4,
+      temperature,
       max_tokens: maxTokens,
+      ...(json ? { response_format: { type: "json_object" } } : {}),
     },
     {
       headers: {
@@ -141,13 +171,13 @@ async function _groq(prompt, maxTokens, messages) {
 
 // ─── HuggingFace ──────────────────────────────────────────────────────────────
 
-async function _huggingface(prompt, maxTokens) {
+async function _huggingface(prompt, maxTokens, temperature) {
   const model = process.env.HF_MODEL || "mistralai/Mixtral-8x7B-Instruct-v0.1";
   const res = await axios.post(
     `https://api-inference.huggingface.co/models/${model}`,
     {
       inputs: prompt,
-      parameters: { max_new_tokens: maxTokens, temperature: 0.4, top_p: 0.9 },
+      parameters: { max_new_tokens: maxTokens, temperature, top_p: 0.9 },
     },
     {
       headers: {

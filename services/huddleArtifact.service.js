@@ -1245,6 +1245,9 @@ export async function listArtifactPermissions({
 }
 
 export function getHuddleArtifactDiagnostics() {
+  const aiGenerationEnabled = ["1", "true", "yes", "on"].includes(
+    String(process.env.HUDDLE_INTELLIGENCE_GENERATION_ENABLED || "").trim().toLowerCase()
+  );
   return {
     ready: true,
     model: "huddle_artifacts",
@@ -1255,7 +1258,7 @@ export function getHuddleArtifactDiagnostics() {
     revisionTable: "huddle_artifact_revisions",
     sourceTable: "huddle_artifact_sources",
     permissionTable: "huddle_artifact_permissions",
-    aiGenerationEnabled: false,
+    aiGenerationEnabled,
     captionsEnabled: false,
     memoryPromotionEnabled: false,
   };

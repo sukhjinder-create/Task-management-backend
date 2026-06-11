@@ -14,6 +14,11 @@ import {
   listHuddleArtifacts,
 } from "./huddleArtifact.service.js";
 import { finalizeHuddleTranscript } from "./huddleTranscriptionPipeline.service.js";
+import {
+  createOwnershipSuggestions,
+  generateHuddleArtifact,
+  getHuddleIntelligenceGenerationDiagnostics,
+} from "./huddleIntelligenceGeneration.service.js";
 
 const ORCHESTRATION_VERSION = 1;
 const DEFAULT_LEASE_SECONDS = 90;
@@ -25,6 +30,8 @@ const ARTIFACT_JOB_TYPES = Object.freeze({
   [HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION]: "action_item",
   [HUDDLE_INTELLIGENCE_JOB_TYPES.TIMELINE_GENERATION]: "timeline",
 });
+
+const GENERATED_ARTIFACT_TYPES = new Set(["summary", "decision", "action_item"]);
 
 function safeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -52,16 +59,19 @@ async function ensurePendingArtifact(job, artifactType, client = null) {
     limit: 100,
     client,
   });
-  const existing = artifacts.find((artifact) =>
-    !["failed", "archived", "superseded", "deleted"].includes(artifact.status)
-  );
+  const existing = artifacts.find((artifact) => {
+    if (!["draft", "pending", "processing"].includes(artifact.status)) return false;
+    return ["awaiting_generator", "processing", "failed"].includes(
+      artifact.contentJson?.generationState
+    );
+  });
   if (existing) return { artifact: existing, created: false };
 
   const transcriptArtifactId =
     job.artifactId ||
     job.input?.transcriptArtifactId ||
     null;
-  const approvalRequired = ["decision", "action_item"].includes(artifactType);
+  const approvalRequired = GENERATED_ARTIFACT_TYPES.has(artifactType);
   const result = await createHuddleArtifact({
     workspaceId: job.workspaceId,
     sessionId: job.sessionId,
@@ -205,6 +215,23 @@ async function processTranscriptFinalization(job, client = null) {
 async function processArtifactPreparation(job, client = null) {
   const artifactType = ARTIFACT_JOB_TYPES[job.jobType];
   const prepared = await ensurePendingArtifact(job, artifactType, client);
+  if (GENERATED_ARTIFACT_TYPES.has(artifactType)) {
+    const generated = await generateHuddleArtifact({
+      job,
+      artifact: prepared.artifact,
+      client,
+    });
+    return {
+      orchestrationOnly: false,
+      generationImplemented: true,
+      generationState: "generated_pending_approval",
+      artifactType,
+      artifactId: generated.artifact.id,
+      artifactCreated: prepared.created,
+      evidenceSegmentIds: generated.evidenceSegmentIds,
+      diagnostics: generated.diagnostics,
+    };
+  }
   return {
     orchestrationOnly: true,
     generationImplemented: false,
@@ -215,13 +242,13 @@ async function processArtifactPreparation(job, client = null) {
   };
 }
 
-async function processOwnershipResolution(job) {
+async function processOwnershipResolution(job, client = null) {
+  const result = await createOwnershipSuggestions({ job, client });
   return {
-    orchestrationOnly: true,
-    generationImplemented: false,
-    ownershipState: "awaiting_generated_action_items",
-    approvalRequired: true,
-    taskCreationEnabled: false,
+    orchestrationOnly: false,
+    generationImplemented: true,
+    ownershipState: "pending_approval",
+    ...result,
   };
 }
 
@@ -287,7 +314,7 @@ async function processClaimedJob(job, client = null) {
     return processArtifactPreparation(job, client);
   }
   if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.OWNERSHIP_RESOLUTION) {
-    return processOwnershipResolution(job);
+    return processOwnershipResolution(job, client);
   }
   if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.MEETING_DIGEST_GENERATION) {
     return processMeetingDigest(job, client);
@@ -296,24 +323,38 @@ async function processClaimedJob(job, client = null) {
 }
 
 export function getHuddleIntelligenceWorkerDiagnostics() {
+  const generation = getHuddleIntelligenceGenerationDiagnostics();
   return {
     ready: true,
     architectureOnly: false,
     orchestrationEnabled: true,
-    generationEnabled: false,
+    generationEnabled: generation.generationEnabled,
     sttProviderEnabled: true,
     retryRecoveryEnabled: true,
     dependencySchedulingEnabled: true,
     attemptAuditEnabled: true,
     orchestrationVersion: ORCHESTRATION_VERSION,
+    generation,
     supportedJobTypes: Object.values(HUDDLE_INTELLIGENCE_JOB_TYPES),
     handlers: Object.fromEntries(
       Object.values(HUDDLE_INTELLIGENCE_JOB_TYPES).map((jobType) => [
         jobType,
         {
           registered: true,
-          generationImplemented: false,
-          orchestrationOnly: true,
+          generationImplemented:
+            [
+              HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.OWNERSHIP_RESOLUTION,
+            ].includes(jobType),
+          orchestrationOnly:
+            ![
+              HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.OWNERSHIP_RESOLUTION,
+            ].includes(jobType),
           preparesArtifact: Boolean(ARTIFACT_JOB_TYPES[jobType]),
         },
       ])
@@ -354,8 +395,8 @@ export async function runHuddleIntelligenceJobOnce({
       output,
       outputArtifactId: output.artifactId || null,
       metadata: {
-        orchestrationOnly: true,
-        generationImplemented: false,
+        orchestrationOnly: output.orchestrationOnly !== false,
+        generationImplemented: Boolean(output.generationImplemented),
         workerId,
       },
       client,
