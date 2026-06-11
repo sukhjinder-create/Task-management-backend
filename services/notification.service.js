@@ -67,6 +67,7 @@ async function buildSlackText({
   user_id,
   type,
   message,
+  action_url,
   task_id,
   project_id,
   comment_id,
@@ -92,7 +93,9 @@ async function buildSlackText({
 
   let linkUrl = null;
 
-  if (project_id) {
+  if (action_url) {
+    linkUrl = `${FRONTEND_BASE_URL}${action_url}`;
+  } else if (project_id) {
     if (task_id) {
       const params = new URLSearchParams();
       params.set("task", task_id);
@@ -117,7 +120,7 @@ async function buildSlackText({
 
 async function sendEmailNotification(
   userId,
-  { type, message, task_id, project_id, comment_id }
+  { type, message, title, action_url, task_id, project_id, comment_id }
 ) {
   if (!EMAIL_NOTIFICATIONS_ENABLED || !mailTransporter) return;
 
@@ -125,10 +128,11 @@ async function sendEmailNotification(
     const user = await getUserById(userId);
     if (!user?.email) return;
 
-    const subject = `[TaskManager] ${type}`;
+    const subject = title || `[TaskManager] ${type}`;
     const bodyLines = [
       message,
       "",
+      action_url && `${FRONTEND_BASE_URL}${action_url}`,
       task_id && `Task ID: ${task_id}`,
       project_id && `Project ID: ${project_id}`,
       comment_id && `Comment ID: ${comment_id}`,
@@ -153,6 +157,10 @@ export async function notifyUser({
   user_id,
   type,
   message,
+  title = null,
+  action_url = null,
+  source_key = null,
+  metadata = {},
   task_id = null,
   project_id = null,
   comment_id = null,
@@ -172,6 +180,10 @@ export async function notifyUser({
     user_id,
     type,
     message,
+    title,
+    action_url,
+    source_key,
+    metadata,
     task_id,
     project_id,
     comment_id,
@@ -195,6 +207,7 @@ export async function notifyUser({
       user_id,
       type,
       message,
+      action_url,
       task_id,
       project_id,
       comment_id,
@@ -219,21 +232,27 @@ export async function notifyUser({
   sendEmailNotification(user_id, {
     type,
     message,
+    title,
+    action_url,
     task_id,
     project_id,
     comment_id,
   });
 
   // 5️⃣ Push notification (web + mobile)
-  const pushType = type.startsWith("chat") ? "chat" : "task";
-  let pushUrl = "/notifications";
-  if (project_id && task_id) pushUrl = `/projects/${project_id}?task=${task_id}`;
-  else if (project_id) pushUrl = `/projects/${project_id}`;
-  else if (task_id) pushUrl = `/my-tasks`;
+  const pushType = type.startsWith("chat")
+    ? "chat"
+    : type.startsWith("huddle_")
+      ? "huddle_intelligence"
+      : "task";
+  let pushUrl = action_url || "/notifications";
+  if (!action_url && project_id && task_id) pushUrl = `/projects/${project_id}?task=${task_id}`;
+  else if (!action_url && project_id) pushUrl = `/projects/${project_id}`;
+  else if (!action_url && task_id) pushUrl = `/my-tasks`;
 
   sendPushToUser({
     userId: user_id,
-    title: pushType === "chat" ? "New message" : "Task update",
+    title: title || (pushType === "chat" ? "New message" : "Task update"),
     body: message,
     url: pushUrl,
     type: pushType,

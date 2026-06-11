@@ -706,12 +706,28 @@ export async function grantTranscriptionProviderToken({
       throw createServiceError("Transcription consent required", 403, "transcription_consent_required");
     }
 
+    const { rows: keytermRows } = await tx.query(
+      `
+      SELECT DISTINCT
+        COALESCE(u.username, g.display_name, p.metadata->>'displayName') AS display_name
+      FROM huddle_session_participants p
+      LEFT JOIN users u ON u.id = p.user_id
+      LEFT JOIN huddle_guests g ON g.id = p.guest_id
+      WHERE p.workspace_id = $1
+        AND p.session_id = $2
+      `,
+      [workspaceId, sessionId]
+    );
+    const keyterms = keytermRows
+      .map((row) => safeString(row.display_name, 100))
+      .filter(Boolean);
     const grant = await createSttProviderGrant({
       workspaceId,
       sessionId,
       participantId: participant?.id,
       provider: policy.providerName,
       language: language || policy.defaultLanguage,
+      keyterms,
     });
     const transcriptionSession = await upsertTranscriptionSession({
       workspaceId,
@@ -758,6 +774,7 @@ export async function grantTranscriptionProviderToken({
         provider: grant.provider,
         model: grant.model,
         language: grant.language,
+        keytermCount: grant.keytermCount,
       },
       client: tx,
     });
@@ -770,6 +787,7 @@ export async function grantTranscriptionProviderToken({
       accessToken: grant.accessToken,
       expiresIn: grant.expiresIn,
       expiresAt: grant.expiresAt,
+      keytermCount: grant.keytermCount,
       transcriptionSession: serializeTranscriptionSession(transcriptionSession),
       policy,
       consent,

@@ -9,6 +9,7 @@ import {
   buildProviderRoomIdentity,
   createOrGetLockedMediaSession,
   findLockedMediaSession,
+  listLiveKitQualitySamples,
   recordLiveKitQualityDiagnostics,
   upsertMediaProviderIdentity,
 } from "../services/huddleMediaSession.service.js";
@@ -491,6 +492,29 @@ router.get("/livekit/diagnostics", (req, res) => {
   });
 });
 
+router.get("/livekit/quality/sessions/:sessionId", async (req, res) => {
+  try {
+    const samples = await listLiveKitQualitySamples({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      actorUserId: req.user?.id,
+      role: req.user?.role || "user",
+      limit: req.query.limit,
+    });
+    res.json({
+      ok: true,
+      provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+      sampleCount: samples.length,
+      samples,
+    });
+  } catch (error) {
+    res.status(error?.statusCode || 500).json({
+      ok: false,
+      reason: error?.reason || "livekit_quality_samples_failed",
+    });
+  }
+});
+
 router.post("/livekit/diagnostics", async (req, res) => {
   try {
     const authz = await authorizeLiveKitRequest(req, req.body, "diagnostics");
@@ -522,6 +546,7 @@ router.post("/livekit/diagnostics", async (req, res) => {
       diagnostics: {
         persisted: result.mediaSessionUpdated,
         providerIdentityCount: result.providerIdentityCount,
+        qualitySampleId: result.qualitySampleId,
         summary: result.summary,
         authorization: authz.checks,
         providerLock: authz.providerLock,

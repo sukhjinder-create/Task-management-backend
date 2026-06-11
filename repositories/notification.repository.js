@@ -1,22 +1,20 @@
 import pool from "../db.js";
 
-/**
- * NOTE:
- * - workspace_id in DB is UUID or NULL
- * - "GLOBAL" must NEVER be sent to Postgres
- * - Global notifications = workspace_id IS NULL
- */
-
 export async function createNotification({
   user_id,
   type,
   message,
+  title = null,
+  action_url = null,
+  source_key = null,
+  metadata = {},
   task_id = null,
   project_id = null,
   comment_id = null,
-  workspaceId = null, // ✅ CHANGED: default NULL, not "GLOBAL"
+  workspaceId = null,
 }) {
-  const query = `
+  const { rows } = await pool.query(
+    `
     INSERT INTO notifications (
       user_id,
       type,
@@ -24,48 +22,57 @@ export async function createNotification({
       task_id,
       project_id,
       comment_id,
-      workspace_id
+      workspace_id,
+      title,
+      action_url,
+      source_key,
+      metadata
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-    RETURNING *;
-  `;
-
-  const values = [
-    user_id,
-    type,
-    message,
-    task_id,
-    project_id,
-    comment_id,
-    workspaceId || null, // ✅ ENSURE UUID or NULL ONLY
-  ];
-
-  const { rows } = await pool.query(query, values);
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+    ON CONFLICT (user_id, source_key)
+    WHERE source_key IS NOT NULL
+    DO UPDATE SET
+      type = EXCLUDED.type,
+      message = EXCLUDED.message,
+      title = EXCLUDED.title,
+      action_url = EXCLUDED.action_url,
+      metadata = notifications.metadata || EXCLUDED.metadata,
+      workspace_id = EXCLUDED.workspace_id
+    RETURNING *
+    `,
+    [
+      user_id,
+      type,
+      message,
+      task_id,
+      project_id,
+      comment_id,
+      workspaceId || null,
+      title,
+      action_url,
+      source_key,
+      JSON.stringify(metadata && typeof metadata === "object" ? metadata : {}),
+    ]
+  );
   return rows[0];
 }
 
 export async function getNotificationsByUser(
   userId,
-  { unreadOnly = false, workspaceId = null } = {} // ✅ default NULL
+  { unreadOnly = false, workspaceId = null } = {}
 ) {
   let query = `
     SELECT *
     FROM notifications
     WHERE user_id = $1
   `;
-
   const values = [userId];
 
-  // Filter by workspace when provided; otherwise return all for this user
   if (workspaceId) {
     query += ` AND workspace_id = $2`;
     values.push(workspaceId);
   }
-
-  if (unreadOnly) {
-    query += " AND is_read = FALSE";
-  }
-
+  if (unreadOnly) query += " AND is_read = FALSE";
   query += " ORDER BY created_at DESC LIMIT 100";
 
   const { rows } = await pool.query(query, values);

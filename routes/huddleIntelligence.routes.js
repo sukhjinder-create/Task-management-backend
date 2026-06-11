@@ -35,6 +35,9 @@ import {
 import {
   getHuddleIntelligenceGenerationDiagnostics,
 } from "../services/huddleIntelligenceGeneration.service.js";
+import {
+  getMeetingIntelligenceReview,
+} from "../services/huddleMeetingIntelligence.service.js";
 import { allowRoles } from "../middleware/role.middleware.js";
 
 const router = express.Router();
@@ -77,6 +80,19 @@ router.get("/worker/diagnostics", (_req, res) => {
     ok: true,
     worker: getHuddleIntelligenceWorkerDiagnostics(),
   });
+});
+
+router.get("/sessions/:sessionId/review", async (req, res) => {
+  try {
+    const review = await getMeetingIntelligenceReview({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ...actor(req),
+    });
+    res.json({ ok: true, review });
+  } catch (error) {
+    errorResponse(res, error);
+  }
 });
 
 router.use((req, res, next) => {

@@ -7,6 +7,7 @@ import {
   failIntelligenceJob,
   getHuddleIntelligenceDiagnostics,
   heartbeatIntelligenceJob,
+  listMeetingDigests,
   recoverStaleIntelligenceJobs,
 } from "./huddleIntelligence.service.js";
 import {
@@ -19,6 +20,10 @@ import {
   generateHuddleArtifact,
   getHuddleIntelligenceGenerationDiagnostics,
 } from "./huddleIntelligenceGeneration.service.js";
+import {
+  getMeetingIntelligenceDeliveryContext,
+} from "./huddleMeetingIntelligence.service.js";
+import { notifyUser } from "./notification.service.js";
 
 const ORCHESTRATION_VERSION = 1;
 const DEFAULT_LEASE_SECONDS = 90;
@@ -167,6 +172,7 @@ async function enqueueTranscriptWorkflow(job, transcriptArtifactId, client = nul
       decisions.job.id,
       actions.job.id,
       timeline.job.id,
+      ownership.job.id,
     ],
   });
 
@@ -254,34 +260,118 @@ async function processOwnershipResolution(job, client = null) {
 
 async function processMeetingDigest(job, client = null) {
   const actor = jobActor(job);
-  const result = await createMeetingDigest({
-    workspaceId: job.workspaceId,
-    sessionId: job.sessionId,
-    ...actor,
-    input: {
-      digestType: "post_meeting",
-      status: "draft",
-      generatedByJobId: job.id,
-      digest: {
-        generationState: "awaiting_generated_artifacts",
-      },
-      provenance: {
-        source: "huddle_intelligence_worker",
-        sourceJobId: job.id,
-        transcriptArtifactId: job.artifactId || null,
-      },
-      metadata: {
-        orchestrationOnly: true,
-        generationImplemented: false,
-      },
-    },
-    client,
-  });
+  const [artifacts, existingDigests, delivery] = await Promise.all([
+    listHuddleArtifacts({
+      workspaceId: job.workspaceId,
+      sessionId: job.sessionId,
+      ...actor,
+      includeDeleted: false,
+      limit: 100,
+      client,
+    }),
+    listMeetingDigests({
+      workspaceId: job.workspaceId,
+      sessionId: job.sessionId,
+      ...actor,
+      limit: 50,
+      client,
+    }),
+    getMeetingIntelligenceDeliveryContext({
+      workspaceId: job.workspaceId,
+      sessionId: job.sessionId,
+      client,
+    }),
+  ]);
+  const latestReady = (type) =>
+    artifacts.find(
+      (artifact) => artifact.artifactType === type && artifact.status === "ready"
+    ) || null;
+  const summary = latestReady("summary");
+  const decisions = latestReady("decision");
+  const actions = latestReady("action_item");
+  const timeline = latestReady("timeline");
+  const decisionCount = Array.isArray(decisions?.contentJson?.decisions)
+    ? decisions.contentJson.decisions.length
+    : 0;
+  const actionItemCount = Array.isArray(actions?.contentJson?.actionItems)
+    ? actions.contentJson.actionItems.length
+    : 0;
+  const reviewPath = `/huddles/${job.sessionId}/intelligence`;
+  const existing = existingDigests.find(
+    (digest) => digest.generatedByJobId === job.id
+  );
+  const result = existing
+    ? { meetingDigest: existing }
+    : await createMeetingDigest({
+        workspaceId: job.workspaceId,
+        sessionId: job.sessionId,
+        ...actor,
+        input: {
+          digestType: "post_meeting",
+          status: "ready",
+          summaryArtifactId: summary?.id,
+          decisionsArtifactId: decisions?.id,
+          actionsArtifactId: actions?.id,
+          timelineArtifactId: timeline?.id,
+          generatedByJobId: job.id,
+          digest: {
+            schemaVersion: 1,
+            generationState: "ready_for_review",
+            summaryAvailable: Boolean(summary),
+            decisionCount,
+            actionItemCount,
+            reviewPath,
+          },
+          provenance: {
+            source: "huddle_intelligence_worker",
+            sourceJobId: job.id,
+            transcriptArtifactId: job.artifactId || null,
+            summaryArtifactId: summary?.id || null,
+            decisionsArtifactId: decisions?.id || null,
+            actionsArtifactId: actions?.id || null,
+          },
+          metadata: {
+            orchestrationOnly: false,
+            deliveryImplemented: true,
+            taskCreationEnabled: false,
+          },
+        },
+        client,
+      });
+
+  await Promise.all(
+    delivery.participantUserIds.map((userId) =>
+      notifyUser({
+        user_id: userId,
+        workspaceId: job.workspaceId,
+        type: "huddle_intelligence_ready",
+        title: "Meeting intelligence is ready",
+        message: `${delivery.title}: summary available, ${decisionCount} decision${decisionCount === 1 ? "" : "s"}, ${actionItemCount} action item${actionItemCount === 1 ? "" : "s"}.`,
+        action_url: reviewPath,
+        source_key: `huddle-intelligence:${job.sessionId}:${userId}`,
+        metadata: {
+          sessionId: job.sessionId,
+          meetingTitle: delivery.title,
+          summaryAvailable: Boolean(summary),
+          decisionCount,
+          actionItemCount,
+          meetingDigestId: result.meetingDigest.id,
+        },
+      })
+    )
+  );
+
   return {
-    orchestrationOnly: true,
+    orchestrationOnly: false,
     generationImplemented: false,
-    generationState: "awaiting_generated_artifacts",
+    deliveryImplemented: true,
+    generationState: "ready_for_review",
     meetingDigestId: result.meetingDigest.id,
+    notificationCount: delivery.participantUserIds.length,
+    reviewPath,
+    summaryAvailable: Boolean(summary),
+    decisionCount,
+    actionItemCount,
   };
 }
 

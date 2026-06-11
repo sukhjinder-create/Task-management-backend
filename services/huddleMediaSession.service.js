@@ -806,6 +806,14 @@ function sanitizeQualityAggregate(raw = {}) {
     maxSendHeight: safeNumber(aggregate.maxSendHeight),
     maxReceiveWidth: safeNumber(aggregate.maxReceiveWidth),
     maxReceiveHeight: safeNumber(aggregate.maxReceiveHeight),
+    maxScreenShareSendWidth: safeNumber(aggregate.maxScreenShareSendWidth),
+    maxScreenShareSendHeight: safeNumber(aggregate.maxScreenShareSendHeight),
+    maxScreenShareReceiveWidth: safeNumber(aggregate.maxScreenShareReceiveWidth),
+    maxScreenShareReceiveHeight: safeNumber(aggregate.maxScreenShareReceiveHeight),
+    adaptiveStreamAttachedTrackCount: safeNumber(aggregate.adaptiveStreamAttachedTrackCount, 0),
+    selectedLowLayerCount: safeNumber(aggregate.selectedLowLayerCount, 0),
+    selectedMediumLayerCount: safeNumber(aggregate.selectedMediumLayerCount, 0),
+    selectedHighLayerCount: safeNumber(aggregate.selectedHighLayerCount, 0),
   };
 }
 
@@ -861,6 +869,13 @@ function sanitizeQualityTrack(raw = {}) {
     streamState: boundedString(track.streamState, 40),
     videoQuality: boundedString(track.videoQuality, 40),
     qualityLimitationReason: boundedString(track.qualityLimitationReason, 60),
+    publicationWidth: safeNumber(track.publicationWidth),
+    publicationHeight: safeNumber(track.publicationHeight),
+    renderedWidth: safeNumber(track.renderedWidth),
+    renderedHeight: safeNumber(track.renderedHeight),
+    attachedElementCount: safeNumber(track.attachedElementCount, 0),
+    adaptiveStreamAttached: safeBoolean(track.adaptiveStreamAttached),
+    currentBitrateKbps: safeNumber(track.currentBitrateKbps),
   };
 }
 
@@ -922,6 +937,7 @@ export async function recordLiveKitQualityDiagnostics({
   );
 
   let providerIdentityCount = 0;
+  let providerIdentityId = null;
   if (userId || deviceId) {
     const values = [workspaceId, sessionId, HUDDLE_MEDIA_PROVIDERS.LIVEKIT, json(diagnosticsPatch)];
     const predicates = [
@@ -951,15 +967,156 @@ export async function recordLiveKitQualityDiagnostics({
       values
     );
     providerIdentityCount = identities.rowCount || 0;
+    providerIdentityId = identities.rows[0]?.id || null;
   }
+
+  const qualityObservedAt = Number.isNaN(new Date(sanitized.observedAt).getTime())
+    ? observedAt
+    : sanitized.observedAt;
+  const sample = await runner(client).query(
+    `
+    INSERT INTO huddle_media_quality_samples (
+      workspace_id,
+      session_id,
+      media_session_id,
+      provider_identity_id,
+      provider_type,
+      provider_room_id,
+      user_id,
+      device_id,
+      observed_at,
+      aggregate,
+      participants,
+      tracks,
+      browser,
+      metadata
+    )
+    VALUES (
+      $1,$2,$3,$4,'livekit',$5,$6,$7,$8,
+      $9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb
+    )
+    RETURNING id
+    `,
+    [
+      workspaceId,
+      sessionId,
+      sessions.rows[0]?.id || null,
+      providerIdentityId,
+      sanitized.providerRoomId,
+      userId,
+      deviceId,
+      qualityObservedAt,
+      json(sanitized.aggregate),
+      JSON.stringify(sanitized.participants),
+      JSON.stringify(sanitized.tracks),
+      json(sanitized.browser),
+      json({
+        adaptiveStream: sanitized.adaptiveStream,
+        dynacast: sanitized.dynacast,
+      }),
+    ]
+  );
 
   return {
     mediaSessionUpdated: (sessions.rowCount || 0) > 0,
     mediaSessionCount: sessions.rowCount || 0,
     providerIdentityCount,
+    qualitySampleId: sample.rows[0]?.id || null,
     observedAt,
     summary: sanitized.aggregate,
   };
+}
+
+export async function listLiveKitQualitySamples({
+  workspaceId,
+  sessionId,
+  actorUserId,
+  role = "user",
+  limit = 200,
+  client = null,
+}) {
+  const access = await runner(client).query(
+    `
+    SELECT
+      s.started_by,
+      s.host_user_id,
+      EXISTS (
+        SELECT 1
+        FROM huddle_session_participants p
+        WHERE p.workspace_id = s.workspace_id
+          AND p.session_id = s.id
+          AND p.user_id = $3
+      ) AS participated
+    FROM huddle_sessions s
+    WHERE s.workspace_id = $1
+      AND s.id = $2
+    LIMIT 1
+    `,
+    [workspaceId, sessionId, actorUserId]
+  );
+  const session = access.rows[0];
+  if (!session) {
+    const error = new Error("huddle_session_not_found");
+    error.statusCode = 404;
+    error.reason = "huddle_session_not_found";
+    throw error;
+  }
+  const privileged = ["admin", "manager", "owner"].includes(String(role || "").toLowerCase());
+  const host =
+    String(session.started_by || "") === String(actorUserId || "") ||
+    String(session.host_user_id || "") === String(actorUserId || "");
+  if (!privileged && !host && !session.participated) {
+    const error = new Error("huddle_quality_access_denied");
+    error.statusCode = 403;
+    error.reason = "huddle_quality_access_denied";
+    throw error;
+  }
+  const { rows } = await runner(client).query(
+    `
+    SELECT
+      id,
+      workspace_id,
+      session_id,
+      media_session_id,
+      provider_identity_id,
+      provider_type,
+      provider_room_id,
+      user_id,
+      device_id,
+      observed_at,
+      aggregate,
+      participants,
+      tracks,
+      browser,
+      metadata,
+      created_at
+    FROM huddle_media_quality_samples
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND provider_type = 'livekit'
+    ORDER BY observed_at DESC, created_at DESC
+    LIMIT $3
+    `,
+    [workspaceId, sessionId, Math.min(Math.max(Number(limit) || 200, 1), 1000)]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    sessionId: row.session_id,
+    mediaSessionId: row.media_session_id,
+    providerIdentityId: row.provider_identity_id,
+    provider: row.provider_type,
+    providerRoomId: row.provider_room_id,
+    userId: row.user_id,
+    deviceId: row.device_id,
+    observedAt: row.observed_at,
+    aggregate: row.aggregate || {},
+    participants: row.participants || [],
+    tracks: row.tracks || [],
+    browser: row.browser || {},
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+  }));
 }
 
 export function getMediaReadinessDiagnostics({
@@ -1048,5 +1205,6 @@ export default {
   endMediaSessionsForHuddleSession,
   sanitizeLiveKitQualityDiagnostics,
   recordLiveKitQualityDiagnostics,
+  listLiveKitQualitySamples,
   getMediaReadinessDiagnostics,
 };

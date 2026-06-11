@@ -96,6 +96,7 @@ export function buildDeepgramListenUrl({
   language,
   endpoint = "wss://api.deepgram.com/v1/listen",
   metadata = {},
+  keyterms = [],
 } = {}) {
   const url = new URL(endpoint);
   url.searchParams.set("model", safeString(model, 80) || DEFAULT_DEEPGRAM_MODEL);
@@ -110,6 +111,13 @@ export function buildDeepgramListenUrl({
   url.searchParams.set("vad_events", "true");
   url.searchParams.set("diarize", "false");
   url.searchParams.set("tag", "asystence_huddle");
+  [...new Set(
+    (Array.isArray(keyterms) ? keyterms : [])
+      .map((keyterm) => safeString(keyterm, 100))
+      .filter(Boolean)
+  )].slice(0, 100).forEach((keyterm) => {
+    url.searchParams.append("keyterm", keyterm);
+  });
   if (metadata.workspaceId) url.searchParams.set("workspace_id", safeString(metadata.workspaceId, 80));
   if (metadata.sessionId) url.searchParams.set("session_id", safeString(metadata.sessionId, 80));
   return url.toString();
@@ -149,6 +157,7 @@ export async function createSttProviderGrant({
   participantId = null,
   provider = null,
   language = null,
+  keyterms = [],
   env = process.env,
 } = {}) {
   const config = getHuddleSttConfig(env);
@@ -177,6 +186,7 @@ export async function createSttProviderGrant({
     language: resolvedLanguage,
     endpoint: config.deepgram.endpoint,
     metadata: { workspaceId, sessionId, participantId },
+    keyterms,
   });
 
   return {
@@ -189,6 +199,9 @@ export async function createSttProviderGrant({
     expiresIn: token.expiresIn,
     expiresAt: new Date(Date.now() + token.expiresIn * 1000).toISOString(),
     listenUrl,
+    keytermCount: [...new Set(
+      (Array.isArray(keyterms) ? keyterms : []).map((item) => safeString(item, 100)).filter(Boolean)
+    )].slice(0, 100).length,
   };
 }
 
@@ -212,6 +225,17 @@ export function getHuddleSttProviderDiagnostics(env = process.env) {
     captionsEnabled: config.captionsEnabled,
     transcriptArtifactsEnabled: config.transcriptArtifactsEnabled,
     capabilities: getProviderCapabilities(selected),
+    languageQuality: {
+      canonicalTranscriptTranslated: false,
+      canonicalTranscriptTransliterated: false,
+      hindi: selected === HUDDLE_STT_PROVIDERS.DEEPGRAM ? "supported" : "provider_dependent",
+      hinglish: selected === HUDDLE_STT_PROVIDERS.DEEPGRAM ? "multilingual_code_switching" : "provider_dependent",
+      punjabi: selected === HUDDLE_STT_PROVIDERS.DEEPGRAM
+        ? "unsupported_by_current_provider"
+        : "provider_dependent",
+      transliterationDisplay: "derived_layer_only",
+      participantNameKeyterms: selected === HUDDLE_STT_PROVIDERS.DEEPGRAM,
+    },
     blockers: [
       !config.enabled ? "huddle_transcription_disabled" : null,
       selected !== HUDDLE_STT_PROVIDERS.DEEPGRAM ? "selected_provider_not_implemented" : null,
