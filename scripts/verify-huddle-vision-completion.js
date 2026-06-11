@@ -41,6 +41,7 @@ for (const token of [
   "ownership_participant_required",
   "expectedStatus",
   "suggested_owner_user_id",
+  "\\$9::uuid",
 ]) {
   assert.match(intelligenceService, new RegExp(token), `ownership review guard missing ${token}`);
 }
