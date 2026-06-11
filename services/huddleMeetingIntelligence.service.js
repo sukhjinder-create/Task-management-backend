@@ -403,7 +403,11 @@ export async function getWhatDidIMiss({
   const explicitSince = requestedSince && !Number.isNaN(requestedSince.getTime());
   const sessionStartedTimestamp = new Date(context.session.started_at || 0).getTime();
   const actorJoinedTimestamp = new Date(actorParticipant?.joinedAt || 0).getTime();
+  const actorIsHost =
+    String(context.session.started_by || "") === String(actorUserId || "") ||
+    String(context.session.host_user_id || "") === String(actorUserId || "");
   const lateJoin =
+    !actorIsHost &&
     Number.isFinite(actorJoinedTimestamp) &&
     actorJoinedTimestamp > sessionStartedTimestamp + 5000;
   const coverageMode = explicitSince

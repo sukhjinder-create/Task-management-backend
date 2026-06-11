@@ -72,6 +72,7 @@ for (const token of [
 assert.match(meetingService, /getWhatDidIMiss/);
 assert.match(meetingService, /canonicalTranscript: true/);
 assert.match(meetingService, /before_participant_join/);
+assert.match(meetingService, /actorIsHost/);
 assert.match(meetingService, /segmentTimestamp\(segment\) < actorJoinedTimestamp/);
 assert.match(intelligenceRoutes, /what-did-i-miss/);
 assert.match(intelligenceRoutes, /memory-candidates\/from-artifact/);
