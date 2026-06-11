@@ -12,8 +12,8 @@ import {
   listOwnershipResolutions,
 } from "./huddleIntelligence.service.js";
 
-const GENERATION_VERSION = 1;
-const PROMPT_VERSION = "huddle-intelligence-v1";
+const GENERATION_VERSION = 2;
+const PROMPT_VERSION = "huddle-intelligence-report-v2";
 const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 120000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 3200;
 
@@ -292,23 +292,80 @@ function normalizeSummary(raw, context) {
       };
     })
     .filter(Boolean);
+  const discussionHighlights = arrayOrEmpty(
+    root.discussionHighlights || root.discussion_highlights || root.keyPoints || root.key_points
+  )
+    .slice(0, 16)
+    .map((item, index) => {
+      const normalized = objectOrEmpty(item);
+      const text = normalizeTextItem(
+        normalized.text || normalized.point || normalized.highlight,
+        1800
+      );
+      const evidenceSegmentIds = normalizeEvidenceIds(
+        normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
+        context.knownSegmentIds
+      );
+      if (!text || evidenceSegmentIds.length === 0) return null;
+      return {
+        id: `discussion-highlight-${index + 1}`,
+        speaker: normalizeTextItem(
+          normalized.speaker || normalized.speakerName || normalized.speaker_name,
+          160
+        ) || "Multiple participants",
+        text,
+        evidenceSegmentIds,
+      };
+    })
+    .filter(Boolean);
+  const openQuestions = arrayOrEmpty(root.openQuestions || root.open_questions)
+    .slice(0, 12)
+    .map((item, index) => {
+      const normalized = typeof item === "string" ? { question: item } : objectOrEmpty(item);
+      const question = normalizeTextItem(
+        normalized.question || normalized.text,
+        1200
+      );
+      const evidenceSegmentIds = normalizeEvidenceIds(
+        normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
+        context.knownSegmentIds
+      );
+      if (!question || evidenceSegmentIds.length === 0) return null;
+      return {
+        id: `open-question-${index + 1}`,
+        question,
+        raisedBy: normalizeTextItem(
+          normalized.raisedBy || normalized.raised_by || normalized.speaker,
+          160
+        ) || null,
+        evidenceSegmentIds,
+      };
+    })
+    .filter(Boolean);
   const overview = normalizeTextItem(root.overview || root.summary, 5000);
   const overviewEvidenceSegmentIds = normalizeEvidenceIds(
     root.overviewEvidenceSegmentIds || root.overview_evidence_segment_ids,
     context.knownSegmentIds
   );
-  if (!overview || overviewEvidenceSegmentIds.length === 0 || keyPoints.length === 0) {
+  if (
+    !overview ||
+    overviewEvidenceSegmentIds.length === 0 ||
+    keyPoints.length === 0 ||
+    discussionHighlights.length === 0
+  ) {
     throw generationError("summary_evidence_validation_failed", {
       retryable: true,
       statusCode: 502,
     });
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     title: normalizeTextItem(root.title, 300) || "Meeting summary",
     overview,
     overviewEvidenceSegmentIds,
     keyPoints,
+    discussionHighlights,
+    openQuestions,
     confidence: safeConfidence(root.confidence, 0.5),
   };
 }
@@ -449,6 +506,12 @@ function evidenceIdsFromContent(artifactType, content) {
     return [...new Set([
       ...arrayOrEmpty(content.overviewEvidenceSegmentIds),
       ...arrayOrEmpty(content.keyPoints).flatMap((item) => arrayOrEmpty(item.evidenceSegmentIds)),
+      ...arrayOrEmpty(content.discussionHighlights).flatMap((item) =>
+        arrayOrEmpty(item.evidenceSegmentIds)
+      ),
+      ...arrayOrEmpty(content.openQuestions).flatMap((item) =>
+        arrayOrEmpty(item.evidenceSegmentIds)
+      ),
     ])];
   }
   if (artifactType === HUDDLE_GENERATION_TYPES.DECISION) {
@@ -465,8 +528,16 @@ function contentText(artifactType, content) {
   if (artifactType === HUDDLE_GENERATION_TYPES.SUMMARY) {
     return [
       content.title,
+      "Executive Summary",
       content.overview,
+      "Discussion Highlights",
+      ...content.discussionHighlights.map((item) => `- ${item.speaker}: ${item.text}`),
+      "Important Points",
       ...content.keyPoints.map((item) => `- ${item.text}`),
+      "Open Questions",
+      ...(content.openQuestions.length
+        ? content.openQuestions.map((item) => `- ${item.question}`)
+        : ["- None identified"]),
     ].filter(Boolean).join("\n\n");
   }
   if (artifactType === HUDDLE_GENERATION_TYPES.DECISION) {
@@ -500,8 +571,14 @@ function promptFor({ artifactType, packet, participants }) {
   const task = {
     summary: `
 Return:
-{"title":"...","overview":"...","overviewEvidenceSegmentIds":["uuid"],"keyPoints":[{"text":"...","evidenceSegmentIds":["uuid"]}],"confidence":0.0}
-Every overview and key point must have evidence. Keep the summary concise and factual.`,
+{"title":"...","overview":"...","overviewEvidenceSegmentIds":["uuid"],"discussionHighlights":[{"speaker":"participant display name","text":"what this person contributed and why it mattered","evidenceSegmentIds":["uuid"]}],"keyPoints":[{"text":"important discussion point","evidenceSegmentIds":["uuid"]}],"openQuestions":[{"question":"unresolved question or issue","raisedBy":"participant display name or null","evidenceSegmentIds":["uuid"]}],"confidence":0.0}
+Write a complete, useful meeting report rather than a generic short summary.
+The overview should normally be 2-5 substantive paragraphs, depending on meeting length.
+Explain the meeting purpose, discussion progression, outcomes, unresolved work, and ownership.
+Discussion highlights must attribute contributions to the actual speaker shown in the transcript.
+Use several distinct transcript segments when the meeting contains enough evidence.
+Do not duplicate decisions or action items verbatim; provide the context that makes them understandable.
+Every claim, highlight, point, and open question must cite evidence. Return an empty openQuestions array only when the transcript contains no unresolved issue.`,
     decision: `
 Return:
 {"decisions":[{"title":"...","decision":"...","rationale":"...","confidence":0.0,"evidenceSegmentIds":["uuid"]}]}

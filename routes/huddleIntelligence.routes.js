@@ -37,7 +37,12 @@ import {
 } from "../services/huddleIntelligenceGeneration.service.js";
 import {
   getMeetingIntelligenceReview,
+  getWhatDidIMiss,
 } from "../services/huddleMeetingIntelligence.service.js";
+import {
+  createMemoryCandidateFromArtifact,
+  promoteApprovedMemoryCandidate,
+} from "../services/huddleMemoryPromotion.service.js";
 import { allowRoles } from "../middleware/role.middleware.js";
 
 const router = express.Router();
@@ -90,6 +95,78 @@ router.get("/sessions/:sessionId/review", async (req, res) => {
       ...actor(req),
     });
     res.json({ ok: true, review });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.get("/sessions/:sessionId/what-did-i-miss", async (req, res) => {
+  try {
+    const result = await getWhatDidIMiss({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ...actor(req),
+      since: req.query.since || null,
+    });
+    res.json({ ok: true, result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.post("/sessions/:sessionId/memory-candidates/from-artifact/:artifactId", async (req, res) => {
+  try {
+    const result = await createMemoryCandidateFromArtifact({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      artifactId: req.params.artifactId,
+      ...actor(req),
+    });
+    res.status(result.created ? 201 : 200).json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.post("/sessions/:sessionId/memory-candidates/:memoryCandidateId/promote", async (req, res) => {
+  try {
+    const result = await promoteApprovedMemoryCandidate({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      memoryCandidateId: req.params.memoryCandidateId,
+      ...actor(req),
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.patch("/sessions/:sessionId/ownership/:ownershipResolutionId", async (req, res) => {
+  try {
+    const result = await updateOwnershipResolution({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ownershipResolutionId: req.params.ownershipResolutionId,
+      ...actor(req),
+      patch: req.body || {},
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.patch("/sessions/:sessionId/memory-candidates/:memoryCandidateId", async (req, res) => {
+  try {
+    const result = await updateMemoryCandidate({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      memoryCandidateId: req.params.memoryCandidateId,
+      ...actor(req),
+      patch: req.body || {},
+    });
+    res.json({ ok: true, ...result });
   } catch (error) {
     errorResponse(res, error);
   }
@@ -364,21 +441,6 @@ router.post("/sessions/:sessionId/ownership", async (req, res) => {
   }
 });
 
-router.patch("/sessions/:sessionId/ownership/:ownershipResolutionId", async (req, res) => {
-  try {
-    const result = await updateOwnershipResolution({
-      workspaceId: req.workspaceId,
-      sessionId: req.params.sessionId,
-      ownershipResolutionId: req.params.ownershipResolutionId,
-      ...actor(req),
-      patch: req.body || {},
-    });
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    errorResponse(res, error);
-  }
-});
-
 router.get("/sessions/:sessionId/memory-candidates", async (req, res) => {
   try {
     const memoryCandidates = await listMemoryCandidates({
@@ -402,21 +464,6 @@ router.post("/sessions/:sessionId/memory-candidates", async (req, res) => {
       input: req.body || {},
     });
     res.status(201).json({ ok: true, ...result });
-  } catch (error) {
-    errorResponse(res, error);
-  }
-});
-
-router.patch("/sessions/:sessionId/memory-candidates/:memoryCandidateId", async (req, res) => {
-  try {
-    const result = await updateMemoryCandidate({
-      workspaceId: req.workspaceId,
-      sessionId: req.params.sessionId,
-      memoryCandidateId: req.params.memoryCandidateId,
-      ...actor(req),
-      patch: req.body || {},
-    });
-    res.json({ ok: true, ...result });
   } catch (error) {
     errorResponse(res, error);
   }

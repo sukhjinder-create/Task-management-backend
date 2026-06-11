@@ -1722,18 +1722,108 @@ export function createOwnershipResolution(args) {
 export async function updateOwnershipResolution({ workspaceId, sessionId, ownershipResolutionId, actorUserId, role = "user", patch = {}, client = null }) {
   return withTransaction(client, async (tx) => {
     const context = await getSessionAccessContext({ workspaceId, sessionId, userId: actorUserId, role, client: tx });
-    assertSessionPermission(context, "write");
-    const status = safeString(patch.status, 80) || "pending_approval";
-    const resolved = ["approved", "reassigned", "rejected", "cancelled"].includes(status);
+    const canReview = isPrivilegedRole(role) || isHuddleHost(context.session, actorUserId);
+    if (!canReview) {
+      throw createServiceError(
+        "Ownership review requires the Huddle host or a workspace reviewer",
+        403,
+        "ownership_review_forbidden"
+      );
+    }
+    const allowedStatuses = new Set(["approved", "reassigned", "rejected", "cancelled"]);
+    const status = safeString(patch.status, 80);
+    if (!allowedStatuses.has(status)) {
+      throw createServiceError(
+        "Invalid ownership review transition",
+        400,
+        "ownership_status_invalid"
+      );
+    }
+    const existingResult = await tx.query(
+      `
+      SELECT *
+      FROM huddle_ownership_resolutions
+      WHERE id = $1
+        AND workspace_id = $2
+        AND session_id = $3
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [ownershipResolutionId, workspaceId, sessionId]
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) {
+      throw createServiceError(
+        "ownership_resolution_not_found",
+        404,
+        "ownership_resolution_not_found"
+      );
+    }
+    const expectedStatus = safeString(patch.expectedStatus || patch.expected_status, 80);
+    if (expectedStatus && expectedStatus !== existing.status) {
+      throw createServiceError(
+        "Ownership suggestion changed before the review was saved",
+        409,
+        "ownership_revision_conflict"
+      );
+    }
+
+    const requestedOwnerUserId = safeUuid(
+      patch.resolvedOwnerUserId || patch.resolved_owner_user_id
+    );
+    const resolvedOwnerUserId =
+      status === "approved"
+        ? requestedOwnerUserId || existing.resolved_owner_user_id || existing.suggested_owner_user_id
+        : status === "reassigned"
+          ? requestedOwnerUserId
+          : null;
+    if (["approved", "reassigned"].includes(status) && !resolvedOwnerUserId) {
+      throw createServiceError(
+        "An owner must be selected before approval",
+        422,
+        "ownership_owner_required"
+      );
+    }
+    if (resolvedOwnerUserId) {
+      const target = await tx.query(
+        `
+        SELECT id
+        FROM huddle_session_participants
+        WHERE workspace_id = $1
+          AND session_id = $2
+          AND user_id = $3
+        LIMIT 1
+        `,
+        [workspaceId, sessionId, resolvedOwnerUserId]
+      );
+      if (!target.rows[0]) {
+        throw createServiceError(
+          "Selected owner did not participate in this Huddle",
+          422,
+          "ownership_participant_required"
+        );
+      }
+    }
+
+    if (
+      existing.status === status &&
+      String(existing.resolved_owner_user_id || "") === String(resolvedOwnerUserId || "")
+    ) {
+      return {
+        ownershipResolution: serializeOwnership(existing),
+        event: null,
+        idempotent: true,
+      };
+    }
     const { rows } = await tx.query(
       `
       UPDATE huddle_ownership_resolutions
       SET status = $4,
-          resolved_owner_user_id = COALESCE($5, resolved_owner_user_id),
+          resolved_owner_user_id = $5,
           resolution_note = COALESCE($6, resolution_note),
-          resolved_by = CASE WHEN $7 = TRUE THEN $8 ELSE resolved_by END,
-          resolved_at = CASE WHEN $7 = TRUE THEN now() ELSE resolved_at END,
-          metadata = metadata || $9::jsonb,
+          resolved_by = $7,
+          resolved_at = now(),
+          metadata = metadata || $8::jsonb,
           updated_at = now()
       WHERE id = $1
         AND workspace_id = $2
@@ -1745,21 +1835,30 @@ export async function updateOwnershipResolution({ workspaceId, sessionId, owners
         workspaceId,
         sessionId,
         status,
-        safeUuid(patch.resolvedOwnerUserId || patch.resolved_owner_user_id),
+        resolvedOwnerUserId,
         safeString(patch.resolutionNote || patch.resolution_note, 1000) || null,
-        resolved,
         actorUserId,
-        json(patch.metadata),
+        json({
+          ...objectOrEmpty(patch.metadata),
+          previousStatus: existing.status,
+          reviewedAt: new Date().toISOString(),
+        }),
       ]
     );
     const ownership = rows[0];
-    if (!ownership) throw createServiceError("ownership_resolution_not_found", 404, "ownership_resolution_not_found");
     const event = await recordIntelligenceEvent({
       eventType: HUDDLE_INTELLIGENCE_EVENTS.OWNERSHIP_RESOLUTION_UPDATED,
       workspaceId,
       sessionId,
       actorUserId,
-      payload: { ownershipResolutionId: ownership.id, status: ownership.status },
+      payload: {
+        ownershipResolutionId: ownership.id,
+        previousStatus: existing.status,
+        status: ownership.status,
+        previousOwnerUserId: existing.resolved_owner_user_id,
+        resolvedOwnerUserId: ownership.resolved_owner_user_id,
+        resolutionNote: ownership.resolution_note,
+      },
       client: tx,
     });
     return { ownershipResolution: serializeOwnership(ownership), event: serializeEvent(event) };
@@ -1779,24 +1878,72 @@ export function createMemoryCandidate(args) {
 export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCandidateId, actorUserId, role = "user", patch = {}, client = null }) {
   return withTransaction(client, async (tx) => {
     const context = await getSessionAccessContext({ workspaceId, sessionId, userId: actorUserId, role, client: tx });
-    assertSessionPermission(context, "write");
+    const canReview = isPrivilegedRole(role) || isHuddleHost(context.session, actorUserId);
+    if (!canReview) {
+      throw createServiceError(
+        "Memory review requires the Huddle host or a workspace reviewer",
+        403,
+        "memory_review_forbidden"
+      );
+    }
     const status = safeString(patch.status, 80) || "pending_approval";
+    if (!["candidate", "pending_approval", "approved", "rejected", "cancelled"].includes(status)) {
+      throw createServiceError(
+        "Memory promotion uses the dedicated promotion endpoint",
+        400,
+        "memory_status_invalid"
+      );
+    }
     const approved = status === "approved";
     const rejected = status === "rejected";
-    const promoted = status === "promoted";
+    const existingResult = await tx.query(
+      `
+      SELECT *
+      FROM huddle_memory_candidates
+      WHERE id = $1
+        AND workspace_id = $2
+        AND session_id = $3
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [memoryCandidateId, workspaceId, sessionId]
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) {
+      throw createServiceError(
+        "memory_candidate_not_found",
+        404,
+        "memory_candidate_not_found"
+      );
+    }
+    const expectedStatus = safeString(patch.expectedStatus || patch.expected_status, 80);
+    if (expectedStatus && expectedStatus !== existing.status) {
+      throw createServiceError(
+        "Memory candidate changed before the review was saved",
+        409,
+        "memory_revision_conflict"
+      );
+    }
+    if (existing.status === status) {
+      return {
+        memoryCandidate: serializeMemoryCandidate(existing),
+        event: null,
+        idempotent: true,
+      };
+    }
     const { rows } = await tx.query(
       `
       UPDATE huddle_memory_candidates
       SET status = $4,
           title = COALESCE($5, title),
           candidate_text = COALESCE($6, candidate_text),
-          approved_by = CASE WHEN $7 = TRUE THEN $10 ELSE approved_by END,
-          approved_at = CASE WHEN $7 = TRUE THEN now() ELSE approved_at END,
-          rejected_by = CASE WHEN $8 = TRUE THEN $10 ELSE rejected_by END,
-          rejected_at = CASE WHEN $8 = TRUE THEN now() ELSE rejected_at END,
-          promoted_memory_id = CASE WHEN $9 = TRUE THEN COALESCE($11, promoted_memory_id) ELSE promoted_memory_id END,
-          promoted_at = CASE WHEN $9 = TRUE THEN now() ELSE promoted_at END,
-          metadata = metadata || $12::jsonb,
+          approved_by = CASE WHEN $7 = TRUE THEN $9 ELSE NULL END,
+          approved_at = CASE WHEN $7 = TRUE THEN now() ELSE NULL END,
+          rejected_by = CASE WHEN $8 = TRUE THEN $9 ELSE NULL END,
+          rejected_at = CASE WHEN $8 = TRUE THEN now() ELSE NULL END,
+          promoted_memory_id = promoted_memory_id,
+          promoted_at = promoted_at,
+          metadata = metadata || $10::jsonb,
           updated_at = now()
       WHERE id = $1
         AND workspace_id = $2
@@ -1812,10 +1959,12 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
         safeString(patch.candidateText || patch.candidate_text, 200000) || null,
         approved,
         rejected,
-        promoted,
         actorUserId,
-        safeUuid(patch.promotedMemoryId || patch.promoted_memory_id),
-        json(patch.metadata),
+        json({
+          ...objectOrEmpty(patch.metadata),
+          previousStatus: existing.status,
+          reviewedAt: new Date().toISOString(),
+        }),
       ]
     );
     const memoryCandidate = rows[0];
@@ -1825,7 +1974,11 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
       workspaceId,
       sessionId,
       actorUserId,
-      payload: { memoryCandidateId: memoryCandidate.id, status: memoryCandidate.status },
+      payload: {
+        memoryCandidateId: memoryCandidate.id,
+        previousStatus: existing.status,
+        status: memoryCandidate.status,
+      },
       client: tx,
     });
     return { memoryCandidate: serializeMemoryCandidate(memoryCandidate), event: serializeEvent(event) };

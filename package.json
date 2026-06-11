@@ -34,6 +34,7 @@
     "verify:huddle-intelligence-generation": "node scripts/verify-huddle-intelligence-generation.js",
     "migrate:huddle-product-quality": "node --import ./scripts/database-safety-guard.js run-huddle-product-quality-migration.js",
     "verify:huddle-product-quality": "node scripts/verify-huddle-product-quality.js",
+    "verify:huddle-vision-completion": "node scripts/verify-huddle-vision-completion.js",
     "verify:huddle-intelligence-jobs": "node scripts/verify-huddle-intelligence-core.js --suite=jobs",
     "verify:huddle-transcript-processing": "node scripts/verify-huddle-intelligence-core.js --suite=transcript-processing",
     "verify:huddle-speaker-attribution": "node scripts/verify-huddle-intelligence-core.js --suite=speaker-attribution",

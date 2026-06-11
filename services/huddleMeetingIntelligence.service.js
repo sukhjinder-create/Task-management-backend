@@ -6,6 +6,7 @@ import {
 import {
   listIntelligenceJobs,
   listMeetingDigests,
+  listMemoryCandidates,
   listOwnershipResolutions,
   listTimelineEntries,
 } from "./huddleIntelligence.service.js";
@@ -188,6 +189,7 @@ export async function getMeetingIntelligenceReview({
     transcript,
     timeline,
     ownership,
+    memoryCandidates,
     digests,
     jobs,
   ] = await Promise.all([
@@ -225,6 +227,14 @@ export async function getMeetingIntelligenceReview({
       actorUserId,
       role,
       limit: 500,
+      client,
+    }),
+    listMemoryCandidates({
+      workspaceId,
+      sessionId,
+      actorUserId,
+      role,
+      limit: 200,
       client,
     }),
     listMeetingDigests({
@@ -303,7 +313,8 @@ export async function getMeetingIntelligenceReview({
       canRead: true,
       canReviewArtifacts: privileged || host,
       canEditApprovedArtifacts: privileged,
-      canReviewOwnership: privileged,
+      canReviewOwnership: privileged || host,
+      canReviewMemory: privileged || host,
       canCreateTasks: false,
     },
     status: {
@@ -311,10 +322,13 @@ export async function getMeetingIntelligenceReview({
       decisionCount,
       actionItemCount,
       ownershipSuggestionCount: ownership.length,
+      memoryCandidateCount: memoryCandidates.length,
       transcriptSegmentCount: transcript.length,
       pendingReviewCount: selectedArtifacts.filter(
         (artifact) => artifact.approvalStatus === "pending"
-      ).length + ownership.filter((item) => item.status === "pending_approval").length,
+      ).length +
+        ownership.filter((item) => item.status === "pending_approval").length +
+        memoryCandidates.filter((item) => item.status === "pending_approval").length,
       processingJobCount: jobs.filter((job) =>
         ["queued", "processing"].includes(job.status)
       ).length,
@@ -327,6 +341,7 @@ export async function getMeetingIntelligenceReview({
     transcript,
     timeline: combinedTimeline,
     ownership,
+    memoryCandidates,
     digest: latestDigest,
     jobs,
     export: {
@@ -343,7 +358,139 @@ export async function getMeetingIntelligenceReview({
   };
 }
 
+function segmentTimestamp(segment) {
+  return new Date(segment.startedAt || segment.createdAt || 0).getTime();
+}
+
+function evidenceIntersects(item, segmentIds) {
+  return (item?.evidenceSegmentIds || []).some((id) => segmentIds.has(id));
+}
+
+export async function getWhatDidIMiss({
+  workspaceId,
+  sessionId,
+  actorUserId,
+  role = "user",
+  since = null,
+  client = null,
+}) {
+  const [context, transcript, artifacts] = await Promise.all([
+    loadMeetingContext({ workspaceId, sessionId, client }),
+    listTranscriptSegments({
+      workspaceId,
+      sessionId,
+      actorUserId,
+      role,
+      status: "final",
+      includeRetracted: false,
+      limit: 1000,
+      client,
+    }),
+    listHuddleArtifacts({
+      workspaceId,
+      sessionId,
+      actorUserId,
+      role,
+      includeDeleted: false,
+      limit: 100,
+      client,
+    }),
+  ]);
+  const actorParticipant = context.participants.find(
+    (participant) => String(participant.userId || "") === String(actorUserId || "")
+  );
+  const requestedSince = since ? new Date(since) : null;
+  const explicitSince = requestedSince && !Number.isNaN(requestedSince.getTime());
+  const sessionStartedTimestamp = new Date(context.session.started_at || 0).getTime();
+  const actorJoinedTimestamp = new Date(actorParticipant?.joinedAt || 0).getTime();
+  const lateJoin =
+    Number.isFinite(actorJoinedTimestamp) &&
+    actorJoinedTimestamp > sessionStartedTimestamp + 5000;
+  const coverageMode = explicitSince
+    ? "since_requested_time"
+    : lateJoin
+      ? "before_participant_join"
+      : "meeting_so_far";
+  const missedSegments = explicitSince
+    ? transcript.filter(
+        (segment) => segmentTimestamp(segment) >= requestedSince.getTime()
+      )
+    : lateJoin
+      ? transcript.filter(
+          (segment) => segmentTimestamp(segment) < actorJoinedTimestamp
+        )
+      : transcript;
+  const relevantSegments = missedSegments.slice(-80);
+  const sinceAt = explicitSince
+    ? requestedSince.toISOString()
+    : relevantSegments[0]?.startedAt || context.session.started_at;
+  const throughAt = lateJoin
+    ? actorParticipant.joinedAt
+    : relevantSegments.at(-1)?.endedAt ||
+      relevantSegments.at(-1)?.startedAt ||
+      null;
+  const relevantIds = new Set(relevantSegments.map((segment) => segment.id));
+  const summary = latestArtifact(artifacts, "summary");
+  const decisionArtifact = latestArtifact(artifacts, "decision");
+  const actionArtifact = latestArtifact(artifacts, "action_item");
+  const discussionHighlights = relevantSegments.slice(-12).map((segment) => ({
+    speaker: segment.speaker?.label || "Participant",
+    text: segment.text,
+    occurredAt: segment.startedAt,
+    evidenceSegmentIds: [segment.id],
+  }));
+  const generatedHighlights = (summary?.contentJson?.discussionHighlights || [])
+    .filter((item) => evidenceIntersects(item, relevantIds));
+  const openQuestions = (summary?.contentJson?.openQuestions || [])
+    .filter((item) => evidenceIntersects(item, relevantIds));
+  const decisions = (decisionArtifact?.contentJson?.decisions || [])
+    .filter((item) => evidenceIntersects(item, relevantIds));
+  const actionItems = (actionArtifact?.contentJson?.actionItems || [])
+    .filter((item) => evidenceIntersects(item, relevantIds));
+  const rollingSummary = generatedHighlights.length
+    ? generatedHighlights
+        .slice(-8)
+        .map((item) => `${item.speaker}: ${item.text}`)
+        .join("\n")
+    : discussionHighlights
+        .slice(-8)
+        .map((item) => `${item.speaker}: ${item.text}`)
+        .join("\n");
+
+  return {
+    session: {
+      id: context.session.id,
+      title: context.title,
+      state: context.session.state,
+      startedAt: context.session.started_at,
+      endedAt: context.session.ended_at,
+    },
+    sinceAt,
+    throughAt,
+    coverageMode,
+    generatedAt: new Date().toISOString(),
+    live: context.session.state !== "ended",
+    rollingSummary,
+    discussionHighlights:
+      generatedHighlights.length > 0 ? generatedHighlights : discussionHighlights,
+    decisions,
+    actionItems,
+    openQuestions,
+    transcript: relevantSegments,
+    evidence: {
+      canonicalTranscript: true,
+      segmentCount: relevantSegments.length,
+      generatedArtifactIds: {
+        summary: summary?.id || null,
+        decisions: decisionArtifact?.id || null,
+        actions: actionArtifact?.id || null,
+      },
+    },
+  };
+}
+
 export default {
   getMeetingIntelligenceDeliveryContext,
   getMeetingIntelligenceReview,
+  getWhatDidIMiss,
 };

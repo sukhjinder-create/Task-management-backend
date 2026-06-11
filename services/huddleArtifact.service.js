@@ -63,6 +63,8 @@ export const HUDDLE_ARTIFACT_PERMISSION_REASONS = Object.freeze({
   APPROVAL_FORBIDDEN: "huddle_artifact_approval_forbidden",
   PRIVATE_ARTIFACT: "huddle_artifact_private",
   ADMIN_REQUIRED: "huddle_artifact_admin_required",
+  REVISION_CONFLICT: "huddle_artifact_revision_conflict",
+  NOT_REVIEWABLE: "huddle_artifact_not_reviewable",
 });
 
 const CANONICAL_TYPES = Object.freeze(Object.values(HUDDLE_ARTIFACT_TYPES));
@@ -478,7 +480,7 @@ function assertPermission(permission) {
   throw createServiceError(permission.reason, statusCode, permission.reason);
 }
 
-async function getArtifactRow({ workspaceId, artifactId, client = null }) {
+async function getArtifactRow({ workspaceId, artifactId, client = null, forUpdate = false }) {
   const { rows } = await runner(client).query(
     `
     SELECT *
@@ -486,6 +488,7 @@ async function getArtifactRow({ workspaceId, artifactId, client = null }) {
     WHERE id = $1
       AND workspace_id = $2
     LIMIT 1
+    ${forUpdate ? "FOR UPDATE" : ""}
     `,
     [artifactId, workspaceId]
   );
@@ -498,6 +501,27 @@ async function getArtifactRow({ workspaceId, artifactId, client = null }) {
     );
   }
   return artifact;
+}
+
+function assertReviewableArtifact(artifact, expectedRevision = null) {
+  if (artifact.status !== HUDDLE_ARTIFACT_STATUSES.READY) {
+    throw createServiceError(
+      "Only ready artifacts can be reviewed",
+      409,
+      HUDDLE_ARTIFACT_PERMISSION_REASONS.NOT_REVIEWABLE
+    );
+  }
+  if (
+    expectedRevision !== null &&
+    expectedRevision !== undefined &&
+    Number(expectedRevision) !== Number(artifact.current_revision)
+  ) {
+    throw createServiceError(
+      "Artifact revision changed before the review was saved",
+      409,
+      HUDDLE_ARTIFACT_PERMISSION_REASONS.REVISION_CONFLICT
+    );
+  }
 }
 
 async function recordArtifactEvent({ eventType, artifact, actorUserId, eventPayload = {}, client }) {
@@ -963,10 +987,16 @@ export async function approveHuddleArtifact({
   actorUserId,
   role = "user",
   approvalNote = null,
+  expectedRevision = null,
   client = null,
 }) {
   return withTransaction(client, async (tx) => {
-    const existing = await getArtifactRow({ workspaceId, artifactId, client: tx });
+    const existing = await getArtifactRow({
+      workspaceId,
+      artifactId,
+      client: tx,
+      forUpdate: true,
+    });
     const context = await getSessionAccessContext({ workspaceId, sessionId: existing.session_id, userId: actorUserId, role, client: tx });
     const grants = await getArtifactGrants({ artifactId, workspaceId, client: tx });
     const permission = evaluateArtifactPermission({
@@ -979,6 +1009,17 @@ export async function approveHuddleArtifact({
       action: "approve",
     });
     assertPermission(permission);
+    assertReviewableArtifact(existing, expectedRevision);
+
+    if (existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.APPROVED) {
+      return {
+        artifact: serializeArtifact(existing),
+        revision: null,
+        event: null,
+        permission,
+        idempotent: true,
+      };
+    }
 
     const { rows } = await tx.query(
       `
@@ -989,7 +1030,8 @@ export async function approveHuddleArtifact({
           rejected_by = NULL,
           rejected_at = NULL,
           approval_note = COALESCE($4, approval_note),
-          current_revision = current_revision + 1
+          current_revision = current_revision + 1,
+          updated_at = now()
       WHERE id = $1
         AND workspace_id = $2
       RETURNING *
@@ -1007,7 +1049,12 @@ export async function approveHuddleArtifact({
       eventType: HUDDLE_ARTIFACT_EVENTS.APPROVED,
       artifact,
       actorUserId,
-      eventPayload: { revisionId: revision.id },
+      eventPayload: {
+        revisionId: revision.id,
+        previousApprovalStatus: existing.approval_status,
+        nextApprovalStatus: artifact.approval_status,
+        approvalNote: safeString(approvalNote, 2000) || null,
+      },
       client: tx,
     });
     return { artifact: serializeArtifact(artifact), revision: serializeRevision(revision), event: serializeEvent(event), permission };
@@ -1020,10 +1067,16 @@ export async function rejectHuddleArtifact({
   actorUserId,
   role = "user",
   approvalNote = null,
+  expectedRevision = null,
   client = null,
 }) {
   return withTransaction(client, async (tx) => {
-    const existing = await getArtifactRow({ workspaceId, artifactId, client: tx });
+    const existing = await getArtifactRow({
+      workspaceId,
+      artifactId,
+      client: tx,
+      forUpdate: true,
+    });
     const context = await getSessionAccessContext({ workspaceId, sessionId: existing.session_id, userId: actorUserId, role, client: tx });
     const grants = await getArtifactGrants({ artifactId, workspaceId, client: tx });
     const permission = evaluateArtifactPermission({
@@ -1036,6 +1089,17 @@ export async function rejectHuddleArtifact({
       action: "approve",
     });
     assertPermission(permission);
+    assertReviewableArtifact(existing, expectedRevision);
+
+    if (existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.REJECTED) {
+      return {
+        artifact: serializeArtifact(existing),
+        revision: null,
+        event: null,
+        permission,
+        idempotent: true,
+      };
+    }
 
     const { rows } = await tx.query(
       `
@@ -1046,7 +1110,8 @@ export async function rejectHuddleArtifact({
           approved_by = NULL,
           approved_at = NULL,
           approval_note = COALESCE($4, approval_note),
-          current_revision = current_revision + 1
+          current_revision = current_revision + 1,
+          updated_at = now()
       WHERE id = $1
         AND workspace_id = $2
       RETURNING *
@@ -1064,7 +1129,12 @@ export async function rejectHuddleArtifact({
       eventType: HUDDLE_ARTIFACT_EVENTS.REJECTED,
       artifact,
       actorUserId,
-      eventPayload: { revisionId: revision.id },
+      eventPayload: {
+        revisionId: revision.id,
+        previousApprovalStatus: existing.approval_status,
+        nextApprovalStatus: artifact.approval_status,
+        approvalNote: safeString(approvalNote, 2000) || null,
+      },
       client: tx,
     });
     return { artifact: serializeArtifact(artifact), revision: serializeRevision(revision), event: serializeEvent(event), permission };

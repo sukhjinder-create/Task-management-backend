@@ -145,6 +145,7 @@ router.post("/:artifactId/approve", async (req, res) => {
       artifactId: req.params.artifactId,
       ...actor(req),
       approvalNote: req.body?.approvalNote || req.body?.note,
+      expectedRevision: req.body?.expectedRevision,
     });
     res.json({ ok: true, ...result });
   } catch (error) {
@@ -159,6 +160,7 @@ router.post("/:artifactId/reject", async (req, res) => {
       artifactId: req.params.artifactId,
       ...actor(req),
       approvalNote: req.body?.approvalNote || req.body?.note,
+      expectedRevision: req.body?.expectedRevision,
     });
     res.json({ ok: true, ...result });
   } catch (error) {
