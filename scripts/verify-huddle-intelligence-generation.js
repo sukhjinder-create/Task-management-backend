@@ -131,6 +131,8 @@ for (const token of [
   "transcriptHash",
   "promptHash",
   "approvalStatus: \"pending\"",
+  "orchestrationOnly: false",
+  "generationImplemented: true",
   "taskCreationEnabled: false",
   "ai_processing_consent_denied",
   "workspace_not_allowlisted",
