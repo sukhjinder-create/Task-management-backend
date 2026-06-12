@@ -50,6 +50,7 @@ export const HUDDLE_ARTIFACT_EVENTS = Object.freeze({
   UPDATED: "huddle.artifact.updated",
   APPROVED: "huddle.artifact.approved",
   REJECTED: "huddle.artifact.rejected",
+  REVOKED: "huddle.artifact.revoked",
   PERMISSION_GRANTED: "huddle.artifact.permission_granted",
   SOURCE_LINKED: "huddle.artifact.source_linked",
 });
@@ -1141,6 +1142,99 @@ export async function rejectHuddleArtifact({
   });
 }
 
+export async function revokeHuddleArtifact({
+  workspaceId,
+  artifactId,
+  actorUserId,
+  role = "user",
+  approvalNote = null,
+  expectedRevision = null,
+  client = null,
+}) {
+  return withTransaction(client, async (tx) => {
+    const existing = await getArtifactRow({
+      workspaceId,
+      artifactId,
+      client: tx,
+      forUpdate: true,
+    });
+    const context = await getSessionAccessContext({
+      workspaceId,
+      sessionId: existing.session_id,
+      userId: actorUserId,
+      role,
+      client: tx,
+    });
+    const grants = await getArtifactGrants({ artifactId, workspaceId, client: tx });
+    const permission = evaluateArtifactPermission({
+      session: context.session,
+      participant: context.participant,
+      artifact: existing,
+      grants,
+      userId: actorUserId,
+      role,
+      action: "approve",
+    });
+    assertPermission(permission);
+    assertReviewableArtifact(existing, expectedRevision);
+    if (existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.REVOKED) {
+      return {
+        artifact: serializeArtifact(existing),
+        revision: null,
+        event: null,
+        permission,
+        idempotent: true,
+      };
+    }
+    if (existing.approval_status !== HUDDLE_ARTIFACT_APPROVAL_STATUSES.APPROVED) {
+      throw createServiceError(
+        "Only an approved artifact can be revoked",
+        409,
+        "huddle_artifact_approval_required_for_revocation"
+      );
+    }
+    const { rows } = await tx.query(
+      `
+      UPDATE huddle_artifacts
+      SET approval_status = 'revoked',
+          approved_by = NULL,
+          approved_at = NULL,
+          approval_note = COALESCE($3, approval_note),
+          current_revision = current_revision + 1,
+          updated_at = now()
+      WHERE id = $1 AND workspace_id = $2
+      RETURNING *
+      `,
+      [artifactId, workspaceId, safeString(approvalNote, 2000) || null]
+    );
+    const artifact = rows[0];
+    const revision = await insertRevision({
+      artifact,
+      createdBy: actorUserId,
+      metadata: { reason: "artifact_revoked" },
+      client: tx,
+    });
+    const event = await recordArtifactEvent({
+      eventType: HUDDLE_ARTIFACT_EVENTS.REVOKED,
+      artifact,
+      actorUserId,
+      eventPayload: {
+        revisionId: revision.id,
+        previousApprovalStatus: existing.approval_status,
+        nextApprovalStatus: artifact.approval_status,
+        approvalNote: safeString(approvalNote, 2000) || null,
+      },
+      client: tx,
+    });
+    return {
+      artifact: serializeArtifact(artifact),
+      revision: serializeRevision(revision),
+      event: serializeEvent(event),
+      permission,
+    };
+  });
+}
+
 export async function listArtifactRevisions({
   workspaceId,
   artifactId,
@@ -1344,6 +1438,7 @@ export default {
   updateHuddleArtifact,
   approveHuddleArtifact,
   rejectHuddleArtifact,
+  revokeHuddleArtifact,
   getHuddleArtifact,
   listHuddleArtifacts,
   listArtifactRevisions,

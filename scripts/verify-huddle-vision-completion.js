@@ -32,6 +32,8 @@ for (const token of [
   "huddle_artifact_revision_conflict",
   "previousApprovalStatus",
   "nextApprovalStatus",
+  "revokeHuddleArtifact",
+  "huddle.artifact.revoked",
   "updated_at = now()",
   "FOR UPDATE",
 ]) {

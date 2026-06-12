@@ -135,6 +135,44 @@ function buildMeetingReport({
       participants: evidenceSpeakers(item.evidenceSegmentIds, segmentById),
     };
   });
+  const speakerNames = uniqueStrings([
+    ...transcript.map((segment) => segment.speaker?.label),
+    ...discussionHighlights.map((item) => item.speaker),
+  ]);
+  const speakerHighlights = speakerNames.map((speaker) => {
+    const keyPointsRaised = discussionHighlights.filter(
+      (item) => item.speaker === speaker
+    );
+    const commitments = reportActions.filter(
+      (item) =>
+        item.owner?.label === speaker || item.participants?.includes(speaker)
+    );
+    const decisionsInfluenced = reportDecisions.filter((item) =>
+      item.participants?.includes(speaker)
+    );
+    const concernsRaised = [...keyPoints, ...openQuestions]
+      .filter((item) =>
+        evidenceSpeakers(item.evidenceSegmentIds, segmentById).includes(speaker)
+      )
+      .filter((item) =>
+        /\b(risk|block|concern|delay|dependency|uncertain|issue|question)\b/i.test(
+          item.text || item.question || ""
+        )
+      );
+    return {
+      speaker,
+      keyPointsRaised,
+      commitments,
+      concernsRaised,
+      decisionsInfluenced,
+    };
+  }).filter(
+    (item) =>
+      item.keyPointsRaised.length ||
+      item.commitments.length ||
+      item.concernsRaised.length ||
+      item.decisionsInfluenced.length
+  );
   const chronologicalConversation = array(summary.chronologicalSummary).length
     ? array(summary.chronologicalSummary)
     : [
@@ -192,6 +230,7 @@ function buildMeetingReport({
       evidenceSegmentIds: array(summary.overviewEvidenceSegmentIds),
     },
     discussionHighlights,
+    speakerHighlights,
     keyPoints,
     chronologicalConversation,
     decisions: reportDecisions,

@@ -11,6 +11,7 @@ import {
   listArtifactSources,
   listHuddleArtifacts,
   rejectHuddleArtifact,
+  revokeHuddleArtifact,
   updateHuddleArtifact,
 } from "../services/huddleArtifact.service.js";
 
@@ -156,6 +157,21 @@ router.post("/:artifactId/approve", async (req, res) => {
 router.post("/:artifactId/reject", async (req, res) => {
   try {
     const result = await rejectHuddleArtifact({
+      workspaceId: req.workspaceId,
+      artifactId: req.params.artifactId,
+      ...actor(req),
+      approvalNote: req.body?.approvalNote || req.body?.note,
+      expectedRevision: req.body?.expectedRevision,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.post("/:artifactId/revoke", async (req, res) => {
+  try {
+    const result = await revokeHuddleArtifact({
       workspaceId: req.workspaceId,
       artifactId: req.params.artifactId,
       ...actor(req),
