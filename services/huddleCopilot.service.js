@@ -43,18 +43,58 @@ function artifactEvidence(artifact) {
   return [...found];
 }
 
-function buildEvidenceCatalog(review, memories) {
-  const catalog = [];
-  for (const segment of review.transcript.slice(-240)) {
-    catalog.push({
+const SEARCH_STOP_WORDS = new Set([
+  "about", "after", "again", "also", "and", "are", "did", "for", "from",
+  "have", "how", "meeting", "that", "the", "their", "this", "was", "what",
+  "when", "where", "which", "who", "why", "with",
+]);
+
+function searchTerms(question) {
+  return [...new Set(
+    safeString(question, 1000)
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((term) => term.length > 2 && !SEARCH_STOP_WORDS.has(term))
+  )].slice(0, 20);
+}
+
+function relevanceScore(item, terms) {
+  if (!terms.length) return 0;
+  const haystack = `${item.label || ""} ${item.text || ""}`.toLowerCase();
+  return terms.reduce(
+    (score, term) => score + (haystack.includes(term) ? 1 : 0),
+    0
+  );
+}
+
+function relevantItems(items, question, limit) {
+  const terms = searchTerms(question);
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      score: relevanceScore(item, terms),
+    }))
+    .sort((left, right) => right.score - left.score || right.index - left.index)
+    .slice(0, limit)
+    .map(({ item }) => item);
+}
+
+function buildEvidenceCatalog(review, memories, question) {
+  const transcriptItems = review.transcript.slice(-400).map((segment) => ({
       ref: `T:${segment.id}`,
       type: "transcript",
       id: segment.id,
       label: segment.speaker?.label || "Participant",
       text: safeString(segment.text, 1600),
       occurredAt: segment.startedAt || segment.createdAt || null,
-    });
-  }
+    }));
+  const latestTranscript = transcriptItems.slice(-40);
+  const relevantTranscript = relevantItems(transcriptItems, question, 80);
+  const transcript = [...new Map(
+    [...relevantTranscript, ...latestTranscript].map((item) => [item.ref, item])
+  ).values()].slice(0, 100);
+  const artifacts = [];
   for (const [name, artifact] of Object.entries(review.artifacts || {})) {
     if (
       !artifact?.id ||
@@ -63,7 +103,7 @@ function buildEvidenceCatalog(review, memories) {
     ) {
       continue;
     }
-    catalog.push({
+    artifacts.push({
       ref: `A:${artifact.id}`,
       type: "artifact",
       id: artifact.id,
@@ -73,16 +113,16 @@ function buildEvidenceCatalog(review, memories) {
       occurredAt: artifact.updatedAt,
     });
   }
-  for (const memory of memories.slice(0, 40)) {
-    catalog.push({
+  const memoryItems = memories.map((memory) => ({
       ref: `M:${memory.id}`,
       type: "memory",
       id: memory.id,
       label: memory.title || "Workspace memory",
       text: safeString(memory.content, 3000),
       occurredAt: memory.updated_at,
-    });
-  }
+    }));
+  const memory = relevantItems(memoryItems, question, 20);
+  const catalog = [...transcript, ...artifacts, ...memory];
   return catalog.filter((item) => item.text);
 }
 
@@ -113,7 +153,7 @@ export async function askHuddleCopilot({
       limit: 50,
     }),
   ]);
-  const catalog = buildEvidenceCatalog(review, memories);
+  const catalog = buildEvidenceCatalog(review, memories, normalizedQuestion);
   if (!catalog.length) throw serviceError("copilot_evidence_unavailable", 409);
 
   const prompt = [
@@ -162,6 +202,8 @@ export async function askHuddleCopilot({
     meetingSessionId: sessionId,
     transcriptRevision: review.artifacts?.transcript?.currentRevision || null,
     evidenceCount: evidence.length,
+    catalogCount: catalog.length,
+    memoryCatalogCount: catalog.filter((item) => item.type === "memory").length,
   };
   const { rows } = await pool.query(
     `

@@ -817,6 +817,38 @@ function sanitizeQualityAggregate(raw = {}) {
   };
 }
 
+function sanitizeQualityStartup(raw = {}) {
+  const startup = objectOrEmpty(raw);
+  return {
+    joinMs: safeNumber(startup.joinMs),
+    publishMs: safeNumber(startup.publishMs),
+    subscribeMs: safeNumber(startup.subscribeMs),
+    intentToJoinMs: safeNumber(startup.intentToJoinMs),
+    firstAudioMs: safeNumber(startup.firstAudioMs),
+    firstVideoMs: safeNumber(startup.firstVideoMs),
+    captionsActiveMs: safeNumber(startup.captionsActiveMs),
+  };
+}
+
+function sanitizeBackgroundEffectDiagnostics(raw = {}) {
+  const effect = objectOrEmpty(raw);
+  const diagnostics = objectOrEmpty(effect.diagnostics);
+  const timings = objectOrEmpty(diagnostics.timings);
+  return {
+    mode: boundedString(effect.mode, 40) || "off",
+    active: safeBoolean(effect.active),
+    reason: boundedString(diagnostics.reason, 100),
+    trigger: boundedString(diagnostics.trigger, 80),
+    framesPerSecond: safeNumber(diagnostics.framesPerSecond),
+    timings: {
+      moduleLoadMs: safeNumber(timings.moduleLoadMs),
+      processorAttachMs: safeNumber(timings.processorAttachMs),
+      switchMs: safeNumber(timings.switchMs),
+      totalMs: safeNumber(timings.totalMs),
+    },
+  };
+}
+
 function sanitizeQualityParticipant(raw = {}) {
   const participant = objectOrEmpty(raw);
   return {
@@ -890,6 +922,10 @@ export function sanitizeLiveKitQualityDiagnostics(raw = {}) {
     adaptiveStream: safeBoolean(diagnostics.adaptiveStream),
     dynacast: safeBoolean(diagnostics.dynacast),
     browser: sanitizeQualityBrowser(diagnostics.browser),
+    startup: sanitizeQualityStartup(diagnostics.startup),
+    backgroundEffect: sanitizeBackgroundEffectDiagnostics(
+      diagnostics.backgroundEffect
+    ),
     aggregate: sanitizeQualityAggregate({
       ...diagnostics.aggregate,
       participantCount: diagnostics.aggregate?.participantCount ?? participants.length,
@@ -1013,6 +1049,8 @@ export async function recordLiveKitQualityDiagnostics({
       json({
         adaptiveStream: sanitized.adaptiveStream,
         dynacast: sanitized.dynacast,
+        startup: sanitized.startup,
+        backgroundEffect: sanitized.backgroundEffect,
       }),
     ]
   );
@@ -1146,6 +1184,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   );
   const source = realDeviceSamples.length ? realDeviceSamples : ordered;
   const aggregates = source.map((sample) => sample.aggregate || {});
+  const startupSamples = source.map((sample) => sample.metadata?.startup || {});
+  const backgroundEffectSamples = source
+    .map((sample) => sample.metadata?.backgroundEffect || {})
+    .filter((effect) => effect.mode || effect.reason);
   const tracks = source.flatMap((sample) => sample.tracks || []);
   const receiveVideo = tracks.filter(
     (track) => track.kind === "video" && track.direction === "receive"
@@ -1310,6 +1352,28 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       videoCodecs,
       qualityLimitationReasons,
       estimatedMegabytesPerHour,
+      averageIntentToJoinMs: average(
+        startupSamples.map((item) => item.intentToJoinMs)
+      ),
+      averageJoinMs: average(startupSamples.map((item) => item.joinMs)),
+      averagePublishMs: average(startupSamples.map((item) => item.publishMs)),
+      averageFirstAudioMs: average(
+        startupSamples.map((item) => item.firstAudioMs)
+      ),
+      averageFirstVideoMs: average(
+        startupSamples.map((item) => item.firstVideoMs)
+      ),
+      averageCaptionsActiveMs: average(
+        startupSamples.map((item) => item.captionsActiveMs)
+      ),
+      backgroundEffectModes: uniqueStrings(
+        backgroundEffectSamples.map((item) => item.mode)
+      ),
+      backgroundEffectDegradationCount: backgroundEffectSamples.filter(
+        (item) =>
+          item.reason === "background_replacement_degraded_to_blur" ||
+          item.reason === "background_effect_automatically_disabled"
+      ).length,
       maxSendResolution:
         maxSendWidth && maxSendHeight ? `${maxSendWidth}x${maxSendHeight}` : null,
       maxReceiveResolution:

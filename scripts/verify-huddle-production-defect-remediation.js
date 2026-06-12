@@ -60,7 +60,11 @@ assert.match(liveKitConnection, /maxBitrate: mobile \? 600_000 : 1_000_000/);
 assert.match(liveKitProvider, /estimatedMegabytesPerHour/);
 assert.match(media, /Estimated media data usage is unusually high/);
 assert.match(backgroundEffects, /constrainedDevice/);
+assert.match(backgroundEffects, /preloadBackgroundEffects/);
+assert.match(backgroundEffects, /totalPreloadMs/);
 assert.match(liveKitProvider, /background_effect_automatically_disabled/);
+assert.match(liveKitProvider, /background_replacement_degraded_to_blur/);
+assert.match(liveKitProvider, /intentToJoinLatencyMs/);
 
 assert.doesNotMatch(meetingIntelligence, /downloadJsonExport/);
 assert.doesNotMatch(meetingIntelligence, /> JSON</);

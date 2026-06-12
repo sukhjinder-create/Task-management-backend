@@ -21,6 +21,7 @@ const notificationRepository = read("repositories/notification.repository.js");
 const notificationService = read("services/notification.service.js");
 const sttProvider = read("services/huddleSttProvider.service.js");
 const transcriptionPipeline = read("services/huddleTranscriptionPipeline.service.js");
+const copilotService = read("services/huddleCopilot.service.js");
 
 assert.match(migration, /CREATE TABLE IF NOT EXISTS huddle_media_quality_samples/);
 assert.match(migration, /ADD COLUMN IF NOT EXISTS action_url TEXT/);
@@ -48,9 +49,12 @@ assert.match(sttProvider, /canonicalTranscriptTranslated: false/);
 assert.match(sttProvider, /unsupported_by_current_provider/);
 assert.match(transcriptionPipeline, /SELECT DISTINCT/);
 assert.match(transcriptionPipeline, /keytermCount/);
+assert.match(copilotService, /relevantItems\(memoryItems, question, 20\)/);
+assert.match(copilotService, /memoryCatalogCount/);
 
 const {
   sanitizeLiveKitQualityDiagnostics,
+  summarizeLiveKitQualitySamples,
 } = await import("../services/huddleMediaSession.service.js");
 const {
   buildDeepgramListenUrl,
@@ -67,6 +71,27 @@ const sanitized = sanitizeLiveKitQualityDiagnostics({
     maxScreenShareReceiveWidth: 1920,
     maxScreenShareReceiveHeight: 1080,
   },
+  startup: {
+    intentToJoinMs: 920,
+    joinMs: 610,
+    publishMs: 180,
+    firstAudioMs: 1180,
+    firstVideoMs: 1430,
+    captionsActiveMs: 1750,
+  },
+  backgroundEffect: {
+    mode: "blur",
+    active: true,
+    diagnostics: {
+      reason: "background_replacement_degraded_to_blur",
+      timings: {
+        moduleLoadMs: 45,
+        processorAttachMs: 70,
+        switchMs: 25,
+        totalMs: 140,
+      },
+    },
+  },
   tracks: [{
     direction: "receive",
     kind: "video",
@@ -82,6 +107,23 @@ assert.equal(sanitized.aggregate.selectedHighLayerCount, 3);
 assert.equal(sanitized.aggregate.adaptiveStreamAttachedTrackCount, 4);
 assert.equal(sanitized.tracks[0].adaptiveStreamAttached, true);
 assert.equal(sanitized.tracks[0].renderedWidth, 1280);
+assert.equal(sanitized.startup.intentToJoinMs, 920);
+assert.equal(sanitized.startup.firstVideoMs, 1430);
+assert.equal(sanitized.backgroundEffect.mode, "blur");
+assert.equal(sanitized.backgroundEffect.timings.totalMs, 140);
+const qualitySummary = summarizeLiveKitQualitySamples([{
+  observedAt: sanitized.observedAt,
+  aggregate: sanitized.aggregate,
+  tracks: sanitized.tracks,
+  browser: { userAgent: "Chrome real device" },
+  metadata: {
+    startup: sanitized.startup,
+    backgroundEffect: sanitized.backgroundEffect,
+  },
+}]);
+assert.equal(qualitySummary.metrics.averageIntentToJoinMs, 920);
+assert.equal(qualitySummary.metrics.averageFirstAudioMs, 1180);
+assert.deepEqual(qualitySummary.metrics.backgroundEffectModes, ["blur"]);
 
 const listenUrl = new URL(buildDeepgramListenUrl({
   model: "nova-3",
