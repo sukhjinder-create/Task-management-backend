@@ -80,7 +80,81 @@ function relevantItems(items, question, limit) {
     .map(({ item }) => item);
 }
 
-function buildEvidenceCatalog(review, memories, question) {
+function normalizeScope(scope) {
+  return safeString(scope, 40).toLowerCase() === "workspace"
+    ? "workspace"
+    : "meeting";
+}
+
+async function listAccessibleWorkspaceArtifacts({
+  workspaceId,
+  sessionId,
+  actorUserId,
+  role,
+}) {
+  const privileged = ["admin", "manager", "owner"].includes(
+    safeString(role, 40).toLowerCase()
+  );
+  const { rows } = await pool.query(
+    `
+    SELECT
+      a.id,
+      a.session_id,
+      a.artifact_type,
+      a.content_text,
+      a.content_json,
+      a.updated_at,
+      s.started_at,
+      COALESCE(
+        s.metadata->>'title',
+        s.metadata->>'meetingTitle',
+        c.name,
+        CASE WHEN host.username IS NOT NULL THEN host.username || '''s Huddle' END,
+        'Huddle'
+      ) AS meeting_title
+    FROM huddle_artifacts a
+    JOIN huddle_sessions s
+      ON s.id = a.session_id
+     AND s.workspace_id = a.workspace_id
+    LEFT JOIN chat_channels c ON c.id = s.channel_id
+    LEFT JOIN users host ON host.id = s.host_user_id
+    WHERE a.workspace_id = $1
+      AND a.session_id <> $2
+      AND a.artifact_type IN ('summary', 'decision', 'action_item', 'timeline')
+      AND a.status = 'ready'
+      AND a.approval_status = 'approved'
+      AND a.deleted_at IS NULL
+      AND (
+        $4::boolean = TRUE
+        OR s.started_by = $3
+        OR s.host_user_id = $3
+        OR EXISTS (
+          SELECT 1
+          FROM huddle_session_participants participant
+          WHERE participant.workspace_id = s.workspace_id
+            AND participant.session_id = s.id
+            AND participant.user_id = $3
+        )
+      )
+      AND (
+        a.visibility <> 'private'
+        OR a.created_by = $3
+        OR $4::boolean = TRUE
+      )
+    ORDER BY a.updated_at DESC
+    LIMIT 300
+    `,
+    [workspaceId, sessionId, actorUserId, privileged]
+  );
+  return rows;
+}
+
+function buildEvidenceCatalog(
+  review,
+  memories,
+  question,
+  workspaceArtifacts = []
+) {
   const transcriptItems = review.transcript.slice(-400).map((segment) => ({
       ref: `T:${segment.id}`,
       type: "transcript",
@@ -107,6 +181,8 @@ function buildEvidenceCatalog(review, memories, question) {
       ref: `A:${artifact.id}`,
       type: "artifact",
       id: artifact.id,
+      sessionId: review.session?.id,
+      meetingTitle: review.session?.title,
       label: `${artifact.artifactType} artifact`,
       text: safeString(artifact.contentText, 5000),
       evidenceSegmentIds: artifactEvidence(artifact),
@@ -117,12 +193,28 @@ function buildEvidenceCatalog(review, memories, question) {
       ref: `M:${memory.id}`,
       type: "memory",
       id: memory.id,
+      sessionId: memory.metadata?.sourceSessionId || null,
+      meetingTitle: memory.metadata?.meetingTitle || memory.title || "Workspace memory",
       label: memory.title || "Workspace memory",
       text: safeString(memory.content, 3000),
       occurredAt: memory.updated_at,
     }));
   const memory = relevantItems(memoryItems, question, 20);
-  const catalog = [...transcript, ...artifacts, ...memory];
+  const workspaceArtifactItems = workspaceArtifacts.map((artifact) => ({
+    ref: `W:${artifact.id}`,
+    type: "workspace_artifact",
+    id: artifact.id,
+    sessionId: artifact.session_id,
+    meetingTitle: artifact.meeting_title || "Huddle",
+    label: `${artifact.meeting_title || "Huddle"} - ${safeString(artifact.artifact_type).replaceAll("_", " ")}`,
+    text: safeString(artifact.content_text, 5000),
+    evidenceSegmentIds: artifactEvidence({
+      contentJson: artifact.content_json || {},
+    }),
+    occurredAt: artifact.started_at || artifact.updated_at,
+  }));
+  const crossMeeting = relevantItems(workspaceArtifactItems, question, 40);
+  const catalog = [...transcript, ...artifacts, ...memory, ...crossMeeting];
   return catalog.filter((item) => item.text);
 }
 
@@ -132,13 +224,15 @@ export async function askHuddleCopilot({
   actorUserId,
   role = "user",
   question,
+  scope = "meeting",
 }) {
   const normalizedQuestion = safeString(question, 1000);
+  const normalizedScope = normalizeScope(scope);
   if (!normalizedQuestion) throw serviceError("copilot_question_required", 422);
   const diagnostics = getLlmRuntimeDiagnostics();
   if (!diagnostics.configured) throw serviceError("copilot_provider_not_configured", 503);
 
-  const [review, memories] = await Promise.all([
+  const [review, memories, workspaceArtifacts] = await Promise.all([
     getMeetingIntelligenceReview({
       workspaceId,
       sessionId,
@@ -152,14 +246,32 @@ export async function askHuddleCopilot({
       q: "",
       limit: 50,
     }),
+    normalizedScope === "workspace"
+      ? listAccessibleWorkspaceArtifacts({
+          workspaceId,
+          sessionId,
+          actorUserId,
+          role,
+        })
+      : Promise.resolve([]),
   ]);
-  const catalog = buildEvidenceCatalog(review, memories, normalizedQuestion);
+  const catalog = buildEvidenceCatalog(
+    review,
+    memories,
+    normalizedQuestion,
+    workspaceArtifacts
+  );
   if (!catalog.length) throw serviceError("copilot_evidence_unavailable", 409);
 
   const prompt = [
-    "You are an evidence-bound meeting copilot.",
+    normalizedScope === "workspace"
+      ? "You are an evidence-bound workspace meeting copilot."
+      : "You are an evidence-bound meeting copilot.",
     "Answer only from the supplied evidence. If evidence is insufficient, say so.",
     "Never invent people, commitments, decisions, dates, or facts.",
+    normalizedScope === "workspace"
+      ? "Synthesize across meetings only when multiple cited sources support the comparison."
+      : "Keep the answer scoped to this meeting.",
     "Return JSON: {\"answer\":\"...\",\"references\":[\"T:uuid\"],\"confidence\":0.0}.",
     `Question: ${normalizedQuestion}`,
     `Evidence:\n${catalog
@@ -195,6 +307,12 @@ export async function askHuddleCopilot({
       excerpt: item.text.slice(0, 500),
       occurredAt: item.occurredAt || null,
       evidenceSegmentIds: item.evidenceSegmentIds || [],
+      sessionId: item.sessionId || sessionId,
+      meetingTitle:
+        item.meetingTitle ||
+        (item.sessionId ? review.session?.title : null) ||
+        review.session?.title ||
+        null,
     };
   });
   const provenance = {
@@ -204,6 +322,10 @@ export async function askHuddleCopilot({
     evidenceCount: evidence.length,
     catalogCount: catalog.length,
     memoryCatalogCount: catalog.filter((item) => item.type === "memory").length,
+    workspaceArtifactCatalogCount: catalog.filter(
+      (item) => item.type === "workspace_artifact"
+    ).length,
+    scope: normalizedScope,
   };
   const { rows } = await pool.query(
     `

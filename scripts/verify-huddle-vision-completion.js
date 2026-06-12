@@ -24,6 +24,7 @@ const frontendRoot = join(root, "..", "Task-management");
 const frontend = (path) => readFileSync(join(frontendRoot, path), "utf8");
 const backgroundEffects = frontend("src/huddle/media/BackgroundEffects.js");
 const liveKitProvider = frontend("src/huddle/media/LiveKitMediaProvider.js");
+const liveKitRenderTarget = frontend("src/huddle/media/LiveKitRenderTarget.js");
 const meetingView = frontend("src/pages/HuddleMeetingIntelligence.jsx");
 const callWindow = frontend("src/huddle/GlobalHuddleWindow.jsx");
 
@@ -99,6 +100,11 @@ assert.doesNotMatch(backgroundEffects, /^import .*@livekit\/track-processors/m);
 assert.match(backgroundEffects, /background-blur/);
 assert.match(backgroundEffects, /virtual-background/);
 assert.match(liveKitProvider, /setBackgroundEffect/);
+assert.match(liveKitProvider, /setScreenShareEnabled\(\s*true,\s*captureOptions,\s*publishOptions/);
+assert.match(liveKitRenderTarget, /setVideoDimensions/);
+assert.match(liveKitRenderTarget, /setVideoFPS/);
+assert.match(callWindow, /presentingParticipant/);
+assert.match(callWindow, /object-contain bg-black/);
 assert.match(meetingView, /expectedRevision/);
 assert.match(meetingView, /Discussion highlights/);
 assert.match(meetingView, /Open questions/);
@@ -126,10 +132,14 @@ for (const token of [
 
 for (const token of [
   "evidence-bound meeting copilot",
+  "workspace meeting copilot",
   "copilot_answer_missing_evidence",
   "huddle_copilot_queries",
   "approved",
   "listWorkspaceMemoryEntries",
+  "listAccessibleWorkspaceArtifacts",
+  "workspaceArtifactCatalogCount",
+  "scope: normalizedScope",
 ]) {
   assert.match(copilotService, new RegExp(token), `copilot evidence guard missing ${token}`);
 }
@@ -138,6 +148,11 @@ assert.match(mediaService, /summarizeLiveKitQualitySamples/);
 assert.match(mediaService, /videoScore/);
 assert.match(mediaService, /audioScore/);
 assert.match(mediaService, /connectionScore/);
+assert.match(mediaService, /renderTargetMatchRate/);
+assert.match(memoryService, /meetingTitle/);
+assert.match(memoryService, /participantNames/);
+assert.match(meetingView, /Across meetings/);
+assert.match(meetingView, /Tile target match/);
 
 console.log("Huddle vision-completion verification passed");
 console.log("- Artifact and ownership reviews are serialized, idempotent, and audit-linked.");
@@ -147,4 +162,7 @@ console.log("- What Did I Miss is canonical-transcript backed.");
 console.log("- Background processors remain lazy-loaded with unsupported-browser fallback.");
 console.log("- Approved actions create idempotent source-linked tasks only after ownership review.");
 console.log("- Meeting Copilot rejects uncited answers and persists evidence-bound audit records.");
+console.log("- Copilot can retrieve permission-filtered, approved evidence across meetings.");
+console.log("- Memory retains meeting titles, participants, artifact type, and transcript provenance.");
+console.log("- Remote video subscriptions request the visible tile dimensions and screen share uses a content-first stage.");
 console.log("- Quality scoring separates video, audio, and connection signals.");

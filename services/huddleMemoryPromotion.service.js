@@ -53,10 +53,39 @@ async function assertReviewer({
 }) {
   const { rows } = await client.query(
     `
-    SELECT id, started_by, host_user_id
-    FROM huddle_sessions
-    WHERE workspace_id = $1
-      AND id = $2
+    SELECT
+      s.id,
+      s.started_by,
+      s.host_user_id,
+      s.started_at,
+      COALESCE(
+        s.metadata->>'title',
+        s.metadata->>'meetingTitle',
+        c.name,
+        CASE WHEN u.username IS NOT NULL THEN u.username || '''s Huddle' END,
+        'Huddle'
+      ) AS meeting_title,
+      COALESCE((
+        SELECT jsonb_agg(DISTINCT participant_name)
+        FROM (
+          SELECT COALESCE(
+            pu.username,
+            g.display_name,
+            p.metadata->>'displayName'
+          ) AS participant_name
+          FROM huddle_session_participants p
+          LEFT JOIN users pu ON pu.id = p.user_id
+          LEFT JOIN huddle_guests g ON g.id = p.guest_id
+          WHERE p.workspace_id = s.workspace_id
+            AND p.session_id = s.id
+        ) participants
+        WHERE participant_name IS NOT NULL
+      ), '[]'::jsonb) AS participant_names
+    FROM huddle_sessions s
+    LEFT JOIN users u ON u.id = s.host_user_id
+    LEFT JOIN chat_channels c ON c.id = s.channel_id
+    WHERE s.workspace_id = $1
+      AND s.id = $2
     LIMIT 1
     `,
     [workspaceId, sessionId]
@@ -69,11 +98,31 @@ async function assertReviewer({
   return session;
 }
 
-function artifactMemoryTitle(artifact) {
-  return (
-    safeString(artifact.contentJson?.title, 300) ||
-    `${safeString(artifact.artifactType, 80).replaceAll("_", " ")} from Huddle`
-  );
+function artifactMemoryTitle(artifact, session) {
+  const meetingTitle = safeString(session?.meeting_title, 220) || "Huddle";
+  const typeLabel = {
+    summary: "Summary",
+    decision: "Decisions",
+    action_item: "Action items",
+    timeline: "Timeline",
+    transcript: "Transcript",
+  }[artifact.artifactType] || safeString(artifact.artifactType, 80).replaceAll("_", " ");
+  return `${meetingTitle}: ${typeLabel}`;
+}
+
+function memoryTags(candidate) {
+  const metadata = candidate?.metadata || {};
+  const participantNames = Array.isArray(metadata.participantNames)
+    ? metadata.participantNames
+    : [];
+  return [...new Set([
+    "huddle",
+    "meeting-intelligence",
+    safeString(metadata.sourceArtifactType, 80),
+    ...participantNames.map((name) =>
+      safeString(name, 80).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-")
+    ),
+  ].filter(Boolean))].slice(0, 20);
 }
 
 function collectTranscriptEvidence(value, evidence = new Set()) {
@@ -137,7 +186,7 @@ export async function createMemoryCandidateFromArtifact({
   client = null,
 }) {
   return withTransaction(client, async (tx) => {
-    await assertReviewer({
+    const session = await assertReviewer({
       workspaceId,
       sessionId,
       actorUserId,
@@ -192,7 +241,7 @@ export async function createMemoryCandidateFromArtifact({
       role,
       input: {
         sourceArtifactId: artifact.id,
-        title: artifactMemoryTitle(artifact),
+        title: artifactMemoryTitle(artifact, session),
         candidateText: artifact.contentText,
         memoryVisibility: "workspace",
         status: "pending_approval",
@@ -204,10 +253,18 @@ export async function createMemoryCandidateFromArtifact({
           sourceArtifactType: artifact.artifactType,
           sourceArtifactRevision: artifact.currentRevision,
           sourceTranscriptReferences,
+          meetingSessionId: sessionId,
+          meetingTitle: session.meeting_title,
+          meetingStartedAt: session.started_at,
+          participantNames: session.participant_names || [],
         },
         metadata: {
           promotionAutomatic: false,
           sourceApprovalStatus: artifact.approvalStatus,
+          sourceArtifactType: artifact.artifactType,
+          meetingTitle: session.meeting_title,
+          meetingStartedAt: session.started_at,
+          participantNames: session.participant_names || [],
         },
       },
       client: tx,
@@ -328,7 +385,7 @@ export async function promoteApprovedMemoryCandidate({
         workspaceId,
         candidate.title || "Huddle memory",
         candidate.candidate_text,
-        JSON.stringify(["huddle", "meeting-intelligence"]),
+        JSON.stringify(memoryTags(candidate)),
         candidate.memory_visibility === "private" ? "private" : "workspace",
         actorUserId,
         memoryArtifact.artifact.id,
@@ -337,6 +394,18 @@ export async function promoteApprovedMemoryCandidate({
           sourceArtifactId: candidate.source_artifact_id,
           memoryArtifactId: memoryArtifact.artifact.id,
           memoryCandidateId: candidate.id,
+          meetingTitle:
+            candidate.metadata?.meetingTitle ||
+            candidate.provenance_json?.meetingTitle ||
+            null,
+          meetingStartedAt:
+            candidate.metadata?.meetingStartedAt ||
+            candidate.provenance_json?.meetingStartedAt ||
+            null,
+          participantNames:
+            candidate.metadata?.participantNames ||
+            candidate.provenance_json?.participantNames ||
+            [],
           approvedBy: candidate.approved_by,
           approvedAt: candidate.approved_at,
           provenance: candidate.provenance_json || {},

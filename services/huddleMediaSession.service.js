@@ -810,6 +810,12 @@ function sanitizeQualityAggregate(raw = {}) {
     maxScreenShareSendHeight: safeNumber(aggregate.maxScreenShareSendHeight),
     maxScreenShareReceiveWidth: safeNumber(aggregate.maxScreenShareReceiveWidth),
     maxScreenShareReceiveHeight: safeNumber(aggregate.maxScreenShareReceiveHeight),
+    maxRequestedReceiveWidth: safeNumber(aggregate.maxRequestedReceiveWidth),
+    maxRequestedReceiveHeight: safeNumber(aggregate.maxRequestedReceiveHeight),
+    renderTargetTrackCount: safeNumber(aggregate.renderTargetTrackCount, 0),
+    renderTargetMismatchCount: safeNumber(aggregate.renderTargetMismatchCount, 0),
+    screenShareSendBitrateKbps: safeNumber(aggregate.screenShareSendBitrateKbps),
+    screenShareReceiveBitrateKbps: safeNumber(aggregate.screenShareReceiveBitrateKbps),
     adaptiveStreamAttachedTrackCount: safeNumber(aggregate.adaptiveStreamAttachedTrackCount, 0),
     selectedLowLayerCount: safeNumber(aggregate.selectedLowLayerCount, 0),
     selectedMediumLayerCount: safeNumber(aggregate.selectedMediumLayerCount, 0),
@@ -905,6 +911,14 @@ function sanitizeQualityTrack(raw = {}) {
     publicationHeight: safeNumber(track.publicationHeight),
     renderedWidth: safeNumber(track.renderedWidth),
     renderedHeight: safeNumber(track.renderedHeight),
+    requestedWidth: safeNumber(track.requestedWidth),
+    requestedHeight: safeNumber(track.requestedHeight),
+    requestedFramesPerSecond: safeNumber(track.requestedFramesPerSecond),
+    requestedPixelRatio: safeNumber(track.requestedPixelRatio),
+    renderTargetVisible:
+      track.renderTargetVisible === null || track.renderTargetVisible === undefined
+        ? null
+        : safeBoolean(track.renderTargetVisible),
     attachedElementCount: safeNumber(track.attachedElementCount, 0),
     adaptiveStreamAttached: safeBoolean(track.adaptiveStreamAttached),
     currentBitrateKbps: safeNumber(track.currentBitrateKbps),
@@ -1196,6 +1210,9 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     (track) => track.kind === "video" && track.direction === "send"
   );
   const screenShare = tracks.filter((track) => track.source === "screen");
+  const targetedReceiveVideo = receiveVideo.filter(
+    (track) => Number(track.requestedWidth) > 0 && Number(track.requestedHeight) > 0
+  );
   const averageSendFps = average(sendVideo.map((track) => track.framesPerSecond));
   const averageReceiveFps = average(
     receiveVideo.map((track) => track.framesPerSecond)
@@ -1246,6 +1263,22 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     0,
     ...finiteValues(aggregates.map((item) => item.maxSendHeight))
   ) || null;
+  const renderTargetTrackCount = aggregates.reduce(
+    (total, item) => total + (Number(item.renderTargetTrackCount) || 0),
+    0
+  );
+  const renderTargetMismatchCount = aggregates.reduce(
+    (total, item) => total + (Number(item.renderTargetMismatchCount) || 0),
+    0
+  );
+  const renderTargetMatchRate = renderTargetTrackCount
+    ? Number(
+        (
+          (renderTargetTrackCount - renderTargetMismatchCount) /
+          renderTargetTrackCount
+        ).toFixed(4)
+      )
+    : null;
   let score = source.length ? 100 : 0;
   const observations = [];
   if (!realDeviceSamples.length && ordered.length) {
@@ -1291,6 +1324,12 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     score -= 15;
     observations.push("Remote video was not attached through LiveKit adaptive streaming");
   }
+  if (renderTargetMatchRate !== null && renderTargetMatchRate < 0.8) {
+    score -= 15;
+    observations.push(
+      "Received video frequently remained below the dimensions requested by visible tiles"
+    );
+  }
   if (qualityLimitationReasons.bandwidth) {
     score -= 10;
     observations.push(
@@ -1314,6 +1353,7 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       !receiveVideo.some((track) => track.adaptiveStreamAttached)
         ? 20
         : 0) -
+      (renderTargetMatchRate !== null && renderTargetMatchRate < 0.8 ? 20 : 0) -
       (qualityLimitationReasons.bandwidth ? 10 : 0) -
       (averagePacketLoss > 0.05 ? 25 : averagePacketLoss > 0.02 ? 10 : 0)
   );
@@ -1374,6 +1414,21 @@ export function summarizeLiveKitQualitySamples(samples = []) {
           item.reason === "background_replacement_degraded_to_blur" ||
           item.reason === "background_effect_automatically_disabled"
       ).length,
+      renderTargetTrackCount,
+      renderTargetMismatchCount,
+      renderTargetMatchRate,
+      averageRequestedReceiveWidth: average(
+        targetedReceiveVideo.map((track) => track.requestedWidth)
+      ),
+      averageRequestedReceiveHeight: average(
+        targetedReceiveVideo.map((track) => track.requestedHeight)
+      ),
+      averageScreenShareSendBitrateKbps: average(
+        aggregates.map((item) => item.screenShareSendBitrateKbps)
+      ),
+      averageScreenShareReceiveBitrateKbps: average(
+        aggregates.map((item) => item.screenShareReceiveBitrateKbps)
+      ),
       maxSendResolution:
         maxSendWidth && maxSendHeight ? `${maxSendWidth}x${maxSendHeight}` : null,
       maxReceiveResolution:

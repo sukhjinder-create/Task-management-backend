@@ -70,6 +70,10 @@ const sanitized = sanitizeLiveKitQualityDiagnostics({
     adaptiveStreamAttachedTrackCount: 4,
     maxScreenShareReceiveWidth: 1920,
     maxScreenShareReceiveHeight: 1080,
+    renderTargetTrackCount: 2,
+    renderTargetMismatchCount: 1,
+    screenShareSendBitrateKbps: 1800,
+    screenShareReceiveBitrateKbps: 1400,
   },
   startup: {
     intentToJoinMs: 920,
@@ -101,12 +105,19 @@ const sanitized = sanitizeLiveKitQualityDiagnostics({
     adaptiveStreamAttached: true,
     renderedWidth: 1280,
     renderedHeight: 720,
+    requestedWidth: 1280,
+    requestedHeight: 720,
+    requestedFramesPerSecond: 30,
+    requestedPixelRatio: 2,
+    renderTargetVisible: true,
   }],
 });
 assert.equal(sanitized.aggregate.selectedHighLayerCount, 3);
 assert.equal(sanitized.aggregate.adaptiveStreamAttachedTrackCount, 4);
 assert.equal(sanitized.tracks[0].adaptiveStreamAttached, true);
 assert.equal(sanitized.tracks[0].renderedWidth, 1280);
+assert.equal(sanitized.tracks[0].requestedWidth, 1280);
+assert.equal(sanitized.tracks[0].renderTargetVisible, true);
 assert.equal(sanitized.startup.intentToJoinMs, 920);
 assert.equal(sanitized.startup.firstVideoMs, 1430);
 assert.equal(sanitized.backgroundEffect.mode, "blur");
@@ -124,6 +135,8 @@ const qualitySummary = summarizeLiveKitQualitySamples([{
 assert.equal(qualitySummary.metrics.averageIntentToJoinMs, 920);
 assert.equal(qualitySummary.metrics.averageFirstAudioMs, 1180);
 assert.deepEqual(qualitySummary.metrics.backgroundEffectModes, ["blur"]);
+assert.equal(qualitySummary.metrics.renderTargetMatchRate, 0.5);
+assert.equal(qualitySummary.metrics.averageScreenShareSendBitrateKbps, 1800);
 
 const listenUrl = new URL(buildDeepgramListenUrl({
   model: "nova-3",
@@ -148,5 +161,6 @@ assert.equal(diagnostics.languageQuality.punjabi, "unsupported_by_current_provid
 
 console.log("Huddle product-quality verification passed.");
 console.log("- LiveKit quality samples persist selected layers, rendered dimensions, attachment state, bitrate, and screen-share metrics.");
+console.log("- Quality summaries compare actual receive layers against explicit visible-tile targets.");
 console.log("- Meeting Intelligence delivery is compact, idempotent, participant-scoped, evidence-linked, and human-reviewed.");
 console.log("- Hindi/Hinglish remain canonical, participant names use Deepgram keyterms, and Punjabi is explicitly reported as a provider gap.");

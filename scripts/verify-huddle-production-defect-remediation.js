@@ -14,6 +14,7 @@ const review = readBackend("services/huddleMeetingIntelligence.service.js");
 const media = readBackend("services/huddleMediaSession.service.js");
 const transcriptionClient = readFrontend("src/huddle/media/LiveTranscriptionClient.js");
 const liveKitProvider = readFrontend("src/huddle/media/LiveKitMediaProvider.js");
+const liveKitRenderTarget = readFrontend("src/huddle/media/LiveKitRenderTarget.js");
 const liveKitConnection = readFrontend("src/huddle/media/LiveKitConnection.js");
 const backgroundEffects = readFrontend("src/huddle/media/BackgroundEffects.js");
 const huddleWindow = readFrontend("src/huddle/GlobalHuddleWindow.jsx");
@@ -65,6 +66,10 @@ assert.match(backgroundEffects, /totalPreloadMs/);
 assert.match(liveKitProvider, /background_effect_automatically_disabled/);
 assert.match(liveKitProvider, /background_replacement_degraded_to_blur/);
 assert.match(liveKitProvider, /intentToJoinLatencyMs/);
+assert.match(liveKitProvider, /renderTargetMismatchCount/);
+assert.match(liveKitProvider, /screenShareSendBitrateKbps/);
+assert.match(liveKitRenderTarget, /setVideoDimensions/);
+assert.match(huddleWindow, /presentingParticipant/);
 
 assert.doesNotMatch(meetingIntelligence, /downloadJsonExport/);
 assert.doesNotMatch(meetingIntelligence, /> JSON</);
@@ -83,6 +88,7 @@ assert.match(huddleWindow, /\(!isMobileDevice \|\| isMaximized\)/);
 assert.match(media, /averageSendFps/);
 assert.match(media, /averageReceiveFps/);
 assert.match(media, /qualityLimitationReasons/);
+assert.match(media, /renderTargetMatchRate/);
 
 const hindiSample =
   "\u092e\u0941\u091d\u0947 \u0939\u093f\u0902\u0926\u0940 \u0914\u0930 Hinglish \u0920\u0940\u0915 \u091a\u093e\u0939\u093f\u090f";

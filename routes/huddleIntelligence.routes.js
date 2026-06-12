@@ -144,6 +144,7 @@ router.post("/sessions/:sessionId/copilot", async (req, res) => {
       sessionId: req.params.sessionId,
       ...actor(req),
       question: req.body?.question,
+      scope: req.body?.scope,
     });
     res.status(201).json({ ok: true, result });
   } catch (error) {
