@@ -1131,6 +1131,10 @@ function average(values) {
   );
 }
 
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => boundedString(value, 80)).filter(Boolean))];
+}
+
 export function summarizeLiveKitQualitySamples(samples = []) {
   const ordered = [...samples].sort(
     (left, right) =>
@@ -1150,6 +1154,22 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     (track) => track.kind === "video" && track.direction === "send"
   );
   const screenShare = tracks.filter((track) => track.source === "screen");
+  const averageSendFps = average(sendVideo.map((track) => track.framesPerSecond));
+  const averageReceiveFps = average(
+    receiveVideo.map((track) => track.framesPerSecond)
+  );
+  const videoCodecs = uniqueStrings(
+    tracks
+      .filter((track) => track.kind === "video")
+      .map((track) => track.codec)
+  );
+  const qualityLimitationReasons = tracks.reduce((counts, track) => {
+    const reason = boundedString(track.qualityLimitationReason, 60);
+    if (reason && reason !== "none") {
+      counts[reason] = (counts[reason] || 0) + 1;
+    }
+    return counts;
+  }, {});
   const averageRttMs = average(aggregates.map((item) => item.averageRttMs));
   const averagePacketLoss = average(
     aggregates.map((item) => item.averagePacketLoss)
@@ -1267,6 +1287,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageBitrateKbps,
       averageSendBitrateKbps,
       averageReceiveBitrateKbps,
+      averageSendFps,
+      averageReceiveFps,
+      videoCodecs,
+      qualityLimitationReasons,
       estimatedMegabytesPerHour,
       maxSendResolution:
         maxSendWidth && maxSendHeight ? `${maxSendWidth}x${maxSendHeight}` : null,

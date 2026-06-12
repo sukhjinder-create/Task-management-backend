@@ -1,4 +1,5 @@
 import pool from "../db.js";
+import { normalizeHuddleTranscriptText } from "../utils/huddleTranscriptText.js";
 import {
   createHuddleArtifact,
   listHuddleArtifacts,
@@ -597,7 +598,11 @@ export function normalizeTranscriptionProviderEvent(input = {}) {
   const providerName = safeString(input.provider || input.providerName || input.provider_name, 40) ||
     HUDDLE_STT_PROVIDERS.DEEPGRAM;
   const alt = deepgramAlternative(providerPayload);
-  const text = safeString(input.text || input.transcript || alt.transcript, 4000);
+  const normalizedText = normalizeHuddleTranscriptText(
+    input.text || input.transcript || alt.transcript,
+    { maxLength: 4000 }
+  );
+  const text = normalizedText.text;
   const explicitStatus = safeString(input.status, 32).toLowerCase();
   const isRetraction = explicitStatus === "retracted" || providerPayload.type === "Retraction";
   const isFinal =
@@ -664,6 +669,7 @@ export function normalizeTranscriptionProviderEvent(input = {}) {
       speechFinal: providerPayload.speech_final === true,
       wordCount: Array.isArray(alt.words) ? alt.words.length : null,
       providerType: safeString(providerPayload.type, 80) || null,
+      transcriptNormalization: normalizedText.diagnostics,
     },
   };
 }

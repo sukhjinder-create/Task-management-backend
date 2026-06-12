@@ -262,7 +262,7 @@ function buildMeetingReport({
           evidenceSegmentIds: item.evidenceSegmentIds || [],
         }));
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     title,
     executiveSummary: {
       purpose: safeString(summary.purpose) || safeString(summary.title) || title,
@@ -277,6 +277,7 @@ function buildMeetingReport({
       evidenceSegmentIds: array(summary.overviewEvidenceSegmentIds),
     },
     discussionHighlights,
+    discussionSummary: array(summary.discussionSummary),
     speakerHighlights,
     keyPoints,
     chronologicalConversation,
@@ -285,6 +286,7 @@ function buildMeetingReport({
     ownershipSuggestions: ownership,
     openQuestions,
     risks,
+    nextSteps: array(summary.nextSteps),
     outcomes: array(summary.meetingOutcomes).length
       ? array(summary.meetingOutcomes)
       : [

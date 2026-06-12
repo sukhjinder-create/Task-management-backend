@@ -18,6 +18,12 @@ const liveKitConnection = readFrontend("src/huddle/media/LiveKitConnection.js");
 const backgroundEffects = readFrontend("src/huddle/media/BackgroundEffects.js");
 const huddleWindow = readFrontend("src/huddle/GlobalHuddleWindow.jsx");
 const meetingIntelligence = readFrontend("src/pages/HuddleMeetingIntelligence.jsx");
+const artifact = readBackend("services/huddleArtifact.service.js");
+const generation = readBackend("services/huddleIntelligenceGeneration.service.js");
+const transcriptText = readBackend("utils/huddleTranscriptText.js");
+const { normalizeHuddleTranscriptText } = await import(
+  "../utils/huddleTranscriptText.js"
+);
 
 assert.match(intelligence, /Math\.min\(Math\.max\(Number\(limit\) \|\| 200, 1\), 5000\)/);
 assert.match(intelligence, /const direction = afterTimestamp \? "ASC" : "DESC"/);
@@ -28,13 +34,20 @@ assert.match(transcript, /NULLIF\(u\.username, ''\)/);
 assert.match(pipeline, /participant\?\.display_name/);
 assert.match(review, /resolveParticipantAliases/);
 assert.match(review, /Participant \$\{index \+ 1\}/);
+assert.match(transcriptText, /unicodeNormalization: "NFC"/);
+assert.match(transcriptText, /utf8MojibakeRepaired/);
+assert.match(generation, /Never emit Participant 1, Participant 2/);
+assert.match(generation, /huddle-intelligence-report-v3/);
 
 assert.match(transcriptionClient, /DEFAULT_TIMESLICE_MS = 250/);
 assert.match(transcriptionClient, /KEEP_ALIVE_INTERVAL_MS = 8000/);
 assert.match(transcriptionClient, /MAX_RECONNECT_DELAY_MS = 15000/);
-assert.match(transcriptionClient, /postQueue = postQueue/);
+assert.match(transcriptionClient, /pendingPartialEvent/);
+assert.match(transcriptionClient, /pendingFinalEvents/);
+assert.match(transcriptionClient, /coalescedPartialEvents/);
+assert.match(transcriptionClient, /enqueueProviderEvent/);
 assert.match(transcriptionClient, /status: "reconnecting"/);
-assert.match(liveKitProvider, /LIVE_CAPTION_POLL_INTERVAL_MS = 750/);
+assert.match(liveKitProvider, /LIVE_CAPTION_POLL_INTERVAL_MS = 500/);
 assert.match(liveKitProvider, /LIVE_CAPTION_CURSOR_OVERLAP_MS = 2000/);
 assert.match(liveKitProvider, /captionCursorRef/);
 
@@ -54,12 +67,42 @@ assert.doesNotMatch(meetingIntelligence, /> JSON</);
 assert.match(meetingIntelligence, /downloadMarkdownExport/);
 assert.match(meetingIntelligence, /downloadPdfExport/);
 assert.match(meetingIntelligence, /Asystence Huddle \| Page/);
+assert.match(meetingIntelligence, /\\uFEFF/);
+assert.match(meetingIntelligence, /NotoSansDevanagari/);
+assert.match(meetingIntelligence, /Discussion Summary/);
+assert.match(meetingIntelligence, /Ownership Suggestions/);
 assert.match(meetingIntelligence, /aria-label="Meeting participants"/);
 assert.match(huddleWindow, /Reconnecting captions/);
+assert.match(huddleWindow, /followLatestCaption/);
+assert.match(huddleWindow, /CURATED_HUDDLE_BACKGROUNDS/);
 assert.match(huddleWindow, /\(!isMobileDevice \|\| isMaximized\)/);
+assert.match(media, /averageSendFps/);
+assert.match(media, /averageReceiveFps/);
+assert.match(media, /qualityLimitationReasons/);
+
+const hindiSample =
+  "\u092e\u0941\u091d\u0947 \u0939\u093f\u0902\u0926\u0940 \u0914\u0930 Hinglish \u0920\u0940\u0915 \u091a\u093e\u0939\u093f\u090f";
+const corruptedHindi = Buffer.from(hindiSample, "utf8").toString("latin1");
+const repairedHindi = normalizeHuddleTranscriptText(corruptedHindi, {
+  maxLength: null,
+});
+assert.equal(repairedHindi.text, hindiSample);
+assert.equal(repairedHindi.diagnostics.utf8MojibakeRepaired, true);
+
+const approvalIdempotency = artifact.indexOf(
+  "existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.APPROVED"
+);
+const approvalRevisionGuard = artifact.indexOf(
+  "assertReviewableArtifact(existing, expectedRevision)",
+  approvalIdempotency
+);
+assert.ok(
+  approvalIdempotency > 0 && approvalRevisionGuard > approvalIdempotency,
+  "artifact retries must return the existing approval before revision conflict enforcement"
+);
 
 console.log("Huddle production-defect remediation verification passed.");
-console.log("- Caption history reads the newest page, incrementally catches up, reconnects, and emits low-latency local updates.");
-console.log("- Historical and new transcript evidence resolves canonical participant names.");
-console.log("- Video publishing uses bounded simulcast, accurate bandwidth accounting, and effect degradation safeguards.");
-console.log("- Meeting Intelligence exports readable Markdown/PDF reports and compact mobile controls remain reachable.");
+console.log("- Caption history catches up, reconnects, coalesces stale partials, and renders local speech immediately.");
+console.log("- Transcript evidence is Unicode-normalized and generation requires canonical participant names.");
+console.log("- Video diagnostics expose FPS, codec, selected layers, bandwidth, and quality limitations.");
+console.log("- Meeting Intelligence exports multilingual Markdown/PDF and review retries are idempotent.");

@@ -54,7 +54,7 @@ for (const token of [
 for (const token of [
   "discussionHighlights",
   "openQuestions",
-  "huddle-intelligence-report-v2",
+  "huddle-intelligence-report-v3",
   "speaker",
   "evidenceSegmentIds",
 ]) {

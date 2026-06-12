@@ -53,11 +53,18 @@ const summary = normalizeGenerationOutput({
       text: "Deployment follows database verification.",
       evidenceSegmentIds: [segmentB],
     }],
+    discussionHighlights: [{
+      speaker: "Participant 1",
+      text: "Asha confirmed the launch sequence.",
+      evidenceSegmentIds: [segmentA],
+    }],
     confidence: 0.94,
   },
 });
+assert.equal(summary.schemaVersion, 3);
 assert.deepEqual(summary.overviewEvidenceSegmentIds, [segmentA]);
 assert.deepEqual(summary.keyPoints[0].evidenceSegmentIds, [segmentB]);
+assert.equal(summary.discussionHighlights[0].speaker, "Asha");
 
 const decisions = normalizeGenerationOutput({
   artifactType: "decision",

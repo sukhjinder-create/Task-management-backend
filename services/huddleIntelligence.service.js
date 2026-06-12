@@ -1,4 +1,5 @@
 import pool from "../db.js";
+import { normalizeHuddleTranscriptText } from "../utils/huddleTranscriptText.js";
 import { createHuddleSessionEvent } from "./huddleEvent.service.js";
 
 export const HUDDLE_INTELLIGENCE_JOB_TYPES = Object.freeze({
@@ -292,13 +293,16 @@ function serializeAttribution(row = {}) {
 
 function serializeCaption(row = {}) {
   if (!row) return null;
+  const normalizedText = normalizeHuddleTranscriptText(row.caption_text, {
+    maxLength: null,
+  });
   return {
     id: row.id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
     transcriptSegmentId: row.transcript_segment_id,
     speakerAttributionId: row.speaker_attribution_id,
-    text: row.caption_text,
+    text: normalizedText.text,
     status: row.status,
     sourceProvider: row.source_provider,
     sequenceNumber: row.sequence_number,
@@ -1411,7 +1415,11 @@ export async function createCaptionEvent({ workspaceId, sessionId, actorUserId, 
   return withTransaction(client, async (tx) => {
     const context = await getSessionAccessContext({ workspaceId, sessionId, userId: actorUserId, role, client: tx });
     assertSessionPermission(context, "write");
-    const text = safeString(input.text || input.captionText || input.caption_text, 4000);
+    const normalizedText = normalizeHuddleTranscriptText(
+      input.text || input.captionText || input.caption_text,
+      { maxLength: 4000 }
+    );
+    const text = normalizedText.text;
     if (!text) throw createServiceError("caption_text_required", 400, "caption_text_required");
     const status = ["partial", "final", "retracted"].includes(safeString(input.status).toLowerCase())
       ? safeString(input.status).toLowerCase()
@@ -1440,7 +1448,10 @@ export async function createCaptionEvent({ workspaceId, sessionId, actorUserId, 
         input.replayable === undefined ? true : Boolean(input.replayable),
         Math.max(Number(input.eventVersion || input.event_version) || 1, 1),
         status === "final" ? safeTimestamp(input.finalizedAt || input.finalized_at, new Date().toISOString()) : null,
-        json(input.metadata),
+        json({
+          ...objectOrEmpty(input.metadata),
+          transcriptNormalization: normalizedText.diagnostics,
+        }),
       ]
     );
     const caption = rows[0];
@@ -1764,15 +1775,6 @@ export async function updateOwnershipResolution({ workspaceId, sessionId, owners
         "ownership_resolution_not_found"
       );
     }
-    const expectedStatus = safeString(patch.expectedStatus || patch.expected_status, 80);
-    if (expectedStatus && expectedStatus !== existing.status) {
-      throw createServiceError(
-        "Ownership suggestion changed before the review was saved",
-        409,
-        "ownership_revision_conflict"
-      );
-    }
-
     const requestedOwnerUserId = safeUuid(
       patch.resolvedOwnerUserId || patch.resolved_owner_user_id
     );
@@ -1819,6 +1821,14 @@ export async function updateOwnershipResolution({ workspaceId, sessionId, owners
         event: null,
         idempotent: true,
       };
+    }
+    const expectedStatus = safeString(patch.expectedStatus || patch.expected_status, 80);
+    if (expectedStatus && expectedStatus !== existing.status) {
+      throw createServiceError(
+        "Ownership suggestion changed before the review was saved",
+        409,
+        "ownership_revision_conflict"
+      );
     }
     const { rows } = await tx.query(
       `
@@ -1921,14 +1931,6 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
         "memory_candidate_not_found"
       );
     }
-    const expectedStatus = safeString(patch.expectedStatus || patch.expected_status, 80);
-    if (expectedStatus && expectedStatus !== existing.status) {
-      throw createServiceError(
-        "Memory candidate changed before the review was saved",
-        409,
-        "memory_revision_conflict"
-      );
-    }
     const nextTitle = safeString(patch.title, 300) || existing.title;
     const nextText =
       safeString(patch.candidateText || patch.candidate_text, 200000) ||
@@ -1941,6 +1943,14 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
         event: null,
         idempotent: true,
       };
+    }
+    const expectedStatus = safeString(patch.expectedStatus || patch.expected_status, 80);
+    if (expectedStatus && expectedStatus !== existing.status) {
+      throw createServiceError(
+        "Memory candidate changed before the review was saved",
+        409,
+        "memory_revision_conflict"
+      );
     }
     const revisionResult = await tx.query(
       `

@@ -1,4 +1,5 @@
 import pool from "../db.js";
+import { normalizeHuddleTranscriptText } from "../utils/huddleTranscriptText.js";
 import { createHuddleSessionEvent } from "./huddleEvent.service.js";
 
 export const HUDDLE_TRANSCRIPT_SEGMENT_STATUSES = Object.freeze({
@@ -124,6 +125,9 @@ function normalizeSpeakerKind(kind, { speakerUserId = null, speakerGuestId = nul
 
 function serializeTranscriptSegment(row = {}) {
   if (!row) return null;
+  const normalizedText = normalizeHuddleTranscriptText(row.transcript_text, {
+    maxLength: null,
+  });
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -140,7 +144,7 @@ function serializeTranscriptSegment(row = {}) {
     sourceSegmentId: row.source_segment_id,
     sourceEventId: row.source_event_id,
     language: row.language,
-    text: row.transcript_text,
+    text: normalizedText.text,
     status: row.status,
     confidence: row.confidence === null || row.confidence === undefined
       ? null
@@ -447,6 +451,10 @@ function normalizeSegmentInput(input = {}, context = {}, options = {}) {
       ? safeTimestamp(input.finalizedAt || input.finalized_at, new Date().toISOString())
       : null;
 
+  const normalizedText = normalizeHuddleTranscriptText(
+    input.text || input.transcriptText || input.transcript_text,
+    { maxLength: null }
+  );
   return {
     participantId,
     participantDeviceId: safeUuid(input.participantDeviceId || input.participant_device_id),
@@ -461,14 +469,17 @@ function normalizeSegmentInput(input = {}, context = {}, options = {}) {
     sourceSegmentId: safeString(input.sourceSegmentId || input.source_segment_id, 160) || null,
     sourceEventId: safeUuid(input.sourceEventId || input.source_event_id),
     language: safeString(input.language, 32) || null,
-    transcriptText: safeString(input.text || input.transcriptText || input.transcript_text),
+    transcriptText: normalizedText.text,
     status,
     confidence: safeConfidence(input.confidence),
     startedAt: safeTimestamp(input.startedAt || input.started_at, new Date().toISOString()),
     endedAt,
     finalizedAt,
     sequenceNumber: safeInteger(input.sequenceNumber || input.sequence_number),
-    metadata: objectOrEmpty(input.metadata),
+    metadata: {
+      ...objectOrEmpty(input.metadata),
+      transcriptNormalization: normalizedText.diagnostics,
+    },
   };
 }
 

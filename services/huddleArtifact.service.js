@@ -1010,7 +1010,7 @@ export async function approveHuddleArtifact({
       action: "approve",
     });
     assertPermission(permission);
-    assertReviewableArtifact(existing, expectedRevision);
+    assertReviewableArtifact(existing);
 
     if (existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.APPROVED) {
       return {
@@ -1021,6 +1021,7 @@ export async function approveHuddleArtifact({
         idempotent: true,
       };
     }
+    assertReviewableArtifact(existing, expectedRevision);
 
     const { rows } = await tx.query(
       `
@@ -1090,7 +1091,7 @@ export async function rejectHuddleArtifact({
       action: "approve",
     });
     assertPermission(permission);
-    assertReviewableArtifact(existing, expectedRevision);
+    assertReviewableArtifact(existing);
 
     if (existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.REJECTED) {
       return {
@@ -1101,6 +1102,7 @@ export async function rejectHuddleArtifact({
         idempotent: true,
       };
     }
+    assertReviewableArtifact(existing, expectedRevision);
 
     const { rows } = await tx.query(
       `
@@ -1176,7 +1178,7 @@ export async function revokeHuddleArtifact({
       action: "approve",
     });
     assertPermission(permission);
-    assertReviewableArtifact(existing, expectedRevision);
+    assertReviewableArtifact(existing);
     if (existing.approval_status === HUDDLE_ARTIFACT_APPROVAL_STATUSES.REVOKED) {
       return {
         artifact: serializeArtifact(existing),
@@ -1186,6 +1188,7 @@ export async function revokeHuddleArtifact({
         idempotent: true,
       };
     }
+    assertReviewableArtifact(existing, expectedRevision);
     if (existing.approval_status !== HUDDLE_ARTIFACT_APPROVAL_STATUSES.APPROVED) {
       throw createServiceError(
         "Only an approved artifact can be revoked",
