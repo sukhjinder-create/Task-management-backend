@@ -33,6 +33,7 @@
     "verify:huddle-intelligence-worker": "node scripts/verify-huddle-intelligence-worker.js",
     "verify:huddle-intelligence-generation": "node scripts/verify-huddle-intelligence-generation.js",
     "migrate:huddle-product-quality": "node --import ./scripts/database-safety-guard.js run-huddle-product-quality-migration.js",
+    "migrate:huddle-vision-completion": "node --import ./scripts/database-safety-guard.js run-huddle-vision-completion-migration.js",
     "verify:huddle-product-quality": "node scripts/verify-huddle-product-quality.js",
     "verify:huddle-vision-completion": "node scripts/verify-huddle-vision-completion.js",
     "verify:huddle-intelligence-jobs": "node scripts/verify-huddle-intelligence-core.js --suite=jobs",

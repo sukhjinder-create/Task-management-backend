@@ -41,8 +41,17 @@ import {
 } from "../services/huddleMeetingIntelligence.service.js";
 import {
   createMemoryCandidateFromArtifact,
+  listMemoryCandidateHistory,
   promoteApprovedMemoryCandidate,
+  revokePromotedMemoryCandidate,
 } from "../services/huddleMemoryPromotion.service.js";
+import {
+  createTaskFromHuddleAction,
+} from "../services/huddleActionTask.service.js";
+import {
+  askHuddleCopilot,
+  listHuddleCopilotQueries,
+} from "../services/huddleCopilot.service.js";
 import { allowRoles } from "../middleware/role.middleware.js";
 
 const router = express.Router();
@@ -114,6 +123,34 @@ router.get("/sessions/:sessionId/what-did-i-miss", async (req, res) => {
   }
 });
 
+router.get("/sessions/:sessionId/copilot", async (req, res) => {
+  try {
+    const queries = await listHuddleCopilotQueries({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ...actor(req),
+      limit: req.query.limit,
+    });
+    res.json({ ok: true, queries });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.post("/sessions/:sessionId/copilot", async (req, res) => {
+  try {
+    const result = await askHuddleCopilot({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ...actor(req),
+      question: req.body?.question,
+    });
+    res.status(201).json({ ok: true, result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
 router.post("/sessions/:sessionId/memory-candidates/from-artifact/:artifactId", async (req, res) => {
   try {
     const result = await createMemoryCandidateFromArtifact({
@@ -137,6 +174,51 @@ router.post("/sessions/:sessionId/memory-candidates/:memoryCandidateId/promote",
       ...actor(req),
     });
     res.json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.get("/sessions/:sessionId/memory-candidates/:memoryCandidateId/history", async (req, res) => {
+  try {
+    const history = await listMemoryCandidateHistory({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      memoryCandidateId: req.params.memoryCandidateId,
+      ...actor(req),
+    });
+    res.json({ ok: true, history });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.post("/sessions/:sessionId/memory-candidates/:memoryCandidateId/revoke", async (req, res) => {
+  try {
+    const result = await revokePromotedMemoryCandidate({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      memoryCandidateId: req.params.memoryCandidateId,
+      ...actor(req),
+      reason: req.body?.reason,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.post("/sessions/:sessionId/actions/:actionItemId/tasks", async (req, res) => {
+  try {
+    const result = await createTaskFromHuddleAction({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      actionItemId: req.params.actionItemId,
+      artifactId: req.body?.artifactId,
+      projectId: req.body?.projectId,
+      ...actor(req),
+    });
+    res.status(result.created ? 201 : 200).json({ ok: true, ...result });
   } catch (error) {
     errorResponse(res, error);
   }

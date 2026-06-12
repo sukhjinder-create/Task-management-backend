@@ -1924,13 +1924,57 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
         "memory_revision_conflict"
       );
     }
-    if (existing.status === status) {
+    const nextTitle = safeString(patch.title, 300) || existing.title;
+    const nextText =
+      safeString(patch.candidateText || patch.candidate_text, 200000) ||
+      existing.candidate_text;
+    const contentChanged =
+      nextTitle !== existing.title || nextText !== existing.candidate_text;
+    if (existing.status === status && !contentChanged) {
       return {
         memoryCandidate: serializeMemoryCandidate(existing),
         event: null,
         idempotent: true,
       };
     }
+    const revisionResult = await tx.query(
+      `
+      SELECT COALESCE(MAX(revision_number), 0) + 1 AS next_revision
+      FROM huddle_memory_candidate_revisions
+      WHERE memory_candidate_id = $1
+      `,
+      [memoryCandidateId]
+    );
+    const revisionNumber = Number(revisionResult.rows[0]?.next_revision || 1);
+    await tx.query(
+      `
+      INSERT INTO huddle_memory_candidate_revisions (
+        workspace_id,
+        session_id,
+        memory_candidate_id,
+        revision_number,
+        status,
+        title,
+        candidate_text,
+        changed_by,
+        change_reason,
+        metadata
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+      `,
+      [
+        workspaceId,
+        sessionId,
+        memoryCandidateId,
+        revisionNumber,
+        existing.status,
+        existing.title,
+        existing.candidate_text,
+        actorUserId,
+        contentChanged ? "content_edited" : "status_changed",
+        json({ nextStatus: status }),
+      ]
+    );
     const { rows } = await tx.query(
       `
       UPDATE huddle_memory_candidates
@@ -1955,8 +1999,8 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
         workspaceId,
         sessionId,
         status,
-        safeString(patch.title, 300) || null,
-        safeString(patch.candidateText || patch.candidate_text, 200000) || null,
+        nextTitle,
+        nextText,
         approved,
         rejected,
         actorUserId,
@@ -1978,6 +2022,8 @@ export async function updateMemoryCandidate({ workspaceId, sessionId, memoryCand
         memoryCandidateId: memoryCandidate.id,
         previousStatus: existing.status,
         status: memoryCandidate.status,
+        revisionNumber,
+        contentChanged,
       },
       client: tx,
     });

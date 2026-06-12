@@ -11,6 +11,7 @@ import {
   findLockedMediaSession,
   listLiveKitQualitySamples,
   recordLiveKitQualityDiagnostics,
+  summarizeLiveKitQualitySamples,
   upsertMediaProviderIdentity,
 } from "../services/huddleMediaSession.service.js";
 import {
@@ -511,6 +512,28 @@ router.get("/livekit/quality/sessions/:sessionId", async (req, res) => {
     res.status(error?.statusCode || 500).json({
       ok: false,
       reason: error?.reason || "livekit_quality_samples_failed",
+    });
+  }
+});
+
+router.get("/livekit/quality/sessions/:sessionId/summary", async (req, res) => {
+  try {
+    const samples = await listLiveKitQualitySamples({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      actorUserId: req.user?.id,
+      role: req.user?.role || "user",
+      limit: req.query.limit || 1000,
+    });
+    res.json({
+      ok: true,
+      provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+      quality: summarizeLiveKitQualitySamples(samples),
+    });
+  } catch (error) {
+    res.status(error?.statusCode || 500).json({
+      ok: false,
+      reason: error?.reason || "livekit_quality_summary_failed",
     });
   }
 });

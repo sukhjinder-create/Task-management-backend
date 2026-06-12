@@ -1119,6 +1119,162 @@ export async function listLiveKitQualitySamples({
   }));
 }
 
+function finiteValues(values) {
+  return values.map(Number).filter(Number.isFinite);
+}
+
+function average(values) {
+  const numbers = finiteValues(values);
+  if (!numbers.length) return null;
+  return Number(
+    (numbers.reduce((total, value) => total + value, 0) / numbers.length).toFixed(2)
+  );
+}
+
+export function summarizeLiveKitQualitySamples(samples = []) {
+  const ordered = [...samples].sort(
+    (left, right) =>
+      new Date(left.observedAt || 0).getTime() -
+      new Date(right.observedAt || 0).getTime()
+  );
+  const realDeviceSamples = ordered.filter(
+    (sample) => !/HeadlessChrome/i.test(sample.browser?.userAgent || "")
+  );
+  const source = realDeviceSamples.length ? realDeviceSamples : ordered;
+  const aggregates = source.map((sample) => sample.aggregate || {});
+  const tracks = source.flatMap((sample) => sample.tracks || []);
+  const receiveVideo = tracks.filter(
+    (track) => track.kind === "video" && track.direction === "receive"
+  );
+  const sendVideo = tracks.filter(
+    (track) => track.kind === "video" && track.direction === "send"
+  );
+  const screenShare = tracks.filter((track) => track.source === "screen");
+  const averageRttMs = average(aggregates.map((item) => item.averageRttMs));
+  const averagePacketLoss = average(
+    aggregates.map((item) => item.averagePacketLoss)
+  );
+  const averageBitrateKbps = average(
+    aggregates.map((item) => item.totalBitrateKbps)
+  );
+  const maxReceiveWidth = Math.max(
+    0,
+    ...finiteValues(aggregates.map((item) => item.maxReceiveWidth))
+  ) || null;
+  const maxReceiveHeight = Math.max(
+    0,
+    ...finiteValues(aggregates.map((item) => item.maxReceiveHeight))
+  ) || null;
+  const maxSendWidth = Math.max(
+    0,
+    ...finiteValues(aggregates.map((item) => item.maxSendWidth))
+  ) || null;
+  const maxSendHeight = Math.max(
+    0,
+    ...finiteValues(aggregates.map((item) => item.maxSendHeight))
+  ) || null;
+  let score = source.length ? 100 : 0;
+  const observations = [];
+  if (!realDeviceSamples.length && ordered.length) {
+    observations.push("Only synthetic browser telemetry is available");
+  }
+  if (averageRttMs !== null && averageRttMs > 300) {
+    score -= 25;
+    observations.push("Round-trip latency is above 300 ms");
+  } else if (averageRttMs !== null && averageRttMs > 180) {
+    score -= 12;
+    observations.push("Round-trip latency is elevated");
+  }
+  if (averagePacketLoss !== null && averagePacketLoss > 0.05) {
+    score -= 30;
+    observations.push("Packet loss is above 5%");
+  } else if (averagePacketLoss !== null && averagePacketLoss > 0.02) {
+    score -= 15;
+    observations.push("Packet loss is above 2%");
+  }
+  if (maxReceiveWidth !== null && maxReceiveWidth < 640) {
+    score -= 20;
+    observations.push("Received video never exceeded 640 px");
+  }
+  if (averageBitrateKbps !== null && averageBitrateKbps < 350) {
+    score -= 15;
+    observations.push("Observed aggregate bitrate is low");
+  }
+  if (receiveVideo.length && !receiveVideo.some((track) => track.adaptiveStreamAttached)) {
+    score -= 15;
+    observations.push("Remote video was not attached through LiveKit adaptive streaming");
+  }
+  const connectionScore = Math.max(
+    0,
+    100 -
+      (averageRttMs > 300 ? 35 : averageRttMs > 180 ? 15 : 0) -
+      (averagePacketLoss > 0.05 ? 40 : averagePacketLoss > 0.02 ? 20 : 0)
+  );
+  const videoScore = Math.max(
+    0,
+    100 -
+      (maxReceiveWidth !== null && maxReceiveWidth < 640 ? 30 : 0) -
+      (averageBitrateKbps !== null && averageBitrateKbps < 350 ? 25 : 0) -
+      (receiveVideo.length &&
+      !receiveVideo.some((track) => track.adaptiveStreamAttached)
+        ? 20
+        : 0) -
+      (averagePacketLoss > 0.05 ? 25 : averagePacketLoss > 0.02 ? 10 : 0)
+  );
+  const audioTracks = tracks.filter((track) => track.kind === "audio");
+  const audioPacketLoss = average(audioTracks.map((track) => track.packetLoss));
+  const audioScore = Math.max(
+    0,
+    100 -
+      (audioPacketLoss > 0.05 ? 45 : audioPacketLoss > 0.02 ? 20 : 0) -
+      (averageRttMs > 300 ? 25 : averageRttMs > 180 ? 10 : 0)
+  );
+  return {
+    ready: realDeviceSamples.length > 0,
+    score: Math.max(0, Math.min(100, score)),
+    rating:
+      score >= 85 ? "excellent" : score >= 70 ? "good" : score >= 50 ? "degraded" : "poor",
+    scores: {
+      overall: Math.max(0, Math.min(100, score)),
+      video: videoScore,
+      audio: audioScore,
+      connection: connectionScore,
+    },
+    sampleCount: ordered.length,
+    realDeviceSampleCount: realDeviceSamples.length,
+    syntheticSampleCount: ordered.length - realDeviceSamples.length,
+    observedFrom: source[0]?.observedAt || null,
+    observedTo: source.at(-1)?.observedAt || null,
+    metrics: {
+      averageRttMs,
+      averagePacketLoss,
+      averageBitrateKbps,
+      maxSendResolution:
+        maxSendWidth && maxSendHeight ? `${maxSendWidth}x${maxSendHeight}` : null,
+      maxReceiveResolution:
+        maxReceiveWidth && maxReceiveHeight
+          ? `${maxReceiveWidth}x${maxReceiveHeight}`
+          : null,
+      sendVideoTrackCount: sendVideo.length,
+      receiveVideoTrackCount: receiveVideo.length,
+      screenShareTrackCount: screenShare.length,
+      lowLayerSamples: aggregates.reduce(
+        (total, item) => total + (Number(item.selectedLowLayerCount) || 0),
+        0
+      ),
+      mediumLayerSamples: aggregates.reduce(
+        (total, item) => total + (Number(item.selectedMediumLayerCount) || 0),
+        0
+      ),
+      highLayerSamples: aggregates.reduce(
+        (total, item) => total + (Number(item.selectedHighLayerCount) || 0),
+        0
+      ),
+    },
+    observations,
+  };
+}
+
 export function getMediaReadinessDiagnostics({
   providerSelection = null,
   mediaSession = null,
@@ -1206,5 +1362,6 @@ export default {
   sanitizeLiveKitQualityDiagnostics,
   recordLiveKitQualityDiagnostics,
   listLiveKitQualitySamples,
+  summarizeLiveKitQualitySamples,
   getMediaReadinessDiagnostics,
 };

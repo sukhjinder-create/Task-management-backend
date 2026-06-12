@@ -394,7 +394,212 @@ export async function promoteApprovedMemoryCandidate({
   });
 }
 
+export async function listMemoryCandidateHistory({
+  workspaceId,
+  sessionId,
+  memoryCandidateId,
+  actorUserId,
+  role = "user",
+  client = null,
+}) {
+  const db = client || pool;
+  await assertReviewer({
+    workspaceId,
+    sessionId,
+    actorUserId,
+    role,
+    client: db,
+  });
+  const { rows } = await db.query(
+    `
+    SELECT
+      r.*,
+      u.username AS changed_by_name
+    FROM huddle_memory_candidate_revisions r
+    LEFT JOIN users u ON u.id = r.changed_by
+    WHERE r.workspace_id = $1
+      AND r.session_id = $2
+      AND r.memory_candidate_id = $3
+    ORDER BY r.revision_number DESC
+    `,
+    [workspaceId, sessionId, memoryCandidateId]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    revisionNumber: row.revision_number,
+    status: row.status,
+    title: row.title,
+    candidateText: row.candidate_text,
+    changedBy: row.changed_by,
+    changedByName: row.changed_by_name,
+    changeReason: row.change_reason,
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+  }));
+}
+
+export async function revokePromotedMemoryCandidate({
+  workspaceId,
+  sessionId,
+  memoryCandidateId,
+  actorUserId,
+  role = "user",
+  reason = null,
+  client = null,
+}) {
+  return withTransaction(client, async (tx) => {
+    await assertReviewer({
+      workspaceId,
+      sessionId,
+      actorUserId,
+      role,
+      client: tx,
+    });
+    const result = await tx.query(
+      `
+      SELECT *
+      FROM huddle_memory_candidates
+      WHERE id = $1
+        AND workspace_id = $2
+        AND session_id = $3
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [memoryCandidateId, workspaceId, sessionId]
+    );
+    const candidate = result.rows[0];
+    if (!candidate) throw serviceError("memory_candidate_not_found", 404);
+    if (candidate.status === "cancelled") {
+      return {
+        memoryCandidate: serializeCandidate(candidate),
+        revoked: false,
+        idempotent: true,
+      };
+    }
+    if (candidate.status !== "promoted" || !candidate.promoted_memory_id) {
+      throw serviceError("memory_candidate_not_promoted", 409);
+    }
+    const revisionResult = await tx.query(
+      `
+      SELECT COALESCE(MAX(revision_number), 0) + 1 AS next_revision
+      FROM huddle_memory_candidate_revisions
+      WHERE memory_candidate_id = $1
+      `,
+      [memoryCandidateId]
+    );
+    await tx.query(
+      `
+      INSERT INTO huddle_memory_candidate_revisions (
+        workspace_id,
+        session_id,
+        memory_candidate_id,
+        revision_number,
+        status,
+        title,
+        candidate_text,
+        changed_by,
+        change_reason,
+        metadata
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'promotion_revoked',$9::jsonb)
+      `,
+      [
+        workspaceId,
+        sessionId,
+        memoryCandidateId,
+        Number(revisionResult.rows[0]?.next_revision || 1),
+        candidate.status,
+        candidate.title,
+        candidate.candidate_text,
+        actorUserId,
+        JSON.stringify({ reason: safeString(reason, 1000) || null }),
+      ]
+    );
+    await tx.query(
+      `
+      UPDATE workspace_memory_entries
+      SET
+        is_archived = TRUE,
+        metadata = metadata || $3::jsonb,
+        updated_at = now()
+      WHERE id = $1 AND workspace_id = $2
+      `,
+      [
+        candidate.promoted_memory_id,
+        workspaceId,
+        JSON.stringify({
+          revokedAt: new Date().toISOString(),
+          revokedBy: actorUserId,
+          revokeReason: safeString(reason, 1000) || null,
+        }),
+      ]
+    );
+    if (candidate.artifact_id) {
+      await tx.query(
+        `
+        UPDATE huddle_artifacts
+        SET
+          status = 'archived',
+          metadata = metadata || $3::jsonb,
+          updated_at = now()
+        WHERE id = $1 AND workspace_id = $2
+        `,
+        [
+          candidate.artifact_id,
+          workspaceId,
+          JSON.stringify({
+            memoryPromotionRevokedAt: new Date().toISOString(),
+            memoryPromotionRevokedBy: actorUserId,
+          }),
+        ]
+      );
+    }
+    const updated = await tx.query(
+      `
+      UPDATE huddle_memory_candidates
+      SET
+        status = 'cancelled',
+        metadata = metadata || $4::jsonb,
+        updated_at = now()
+      WHERE id = $1
+        AND workspace_id = $2
+        AND session_id = $3
+      RETURNING *
+      `,
+      [
+        memoryCandidateId,
+        workspaceId,
+        sessionId,
+        JSON.stringify({
+          revokedAt: new Date().toISOString(),
+          revokedBy: actorUserId,
+          revokeReason: safeString(reason, 1000) || null,
+        }),
+      ]
+    );
+    await createHuddleSessionEvent({
+      workspaceId,
+      sessionId,
+      actorUserId,
+      eventType: "huddle.intelligence.memory_revoked",
+      eventPayload: {
+        memoryCandidateId,
+        workspaceMemoryId: candidate.promoted_memory_id,
+        reason: safeString(reason, 1000) || null,
+      },
+      client: tx,
+    });
+    return {
+      memoryCandidate: serializeCandidate(updated.rows[0]),
+      revoked: true,
+      idempotent: false,
+    };
+  });
+}
+
 export default {
   createMemoryCandidateFromArtifact,
+  listMemoryCandidateHistory,
   promoteApprovedMemoryCandidate,
+  revokePromotedMemoryCandidate,
 };

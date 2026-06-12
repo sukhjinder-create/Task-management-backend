@@ -34,7 +34,7 @@ assert.match(mediaRoute, /\/livekit\/quality\/sessions\/:sessionId/);
 assert.match(reviewService, /getMeetingIntelligenceReview/);
 assert.match(reviewService, /sourcesByArtifactId/);
 assert.match(reviewService, /canReviewArtifacts/);
-assert.match(reviewService, /canCreateTasks: false/);
+assert.match(reviewService, /canCreateTasks: privileged/);
 assert.match(intelligenceRoute, /\/sessions\/:sessionId\/review/);
 assert.match(worker, /huddle_intelligence_ready/);
 assert.match(worker, /huddle-intelligence:\$\{job\.sessionId\}:\$\{userId\}/);

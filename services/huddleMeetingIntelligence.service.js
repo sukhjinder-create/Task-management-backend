@@ -11,6 +11,7 @@ import {
   listTimelineEntries,
 } from "./huddleIntelligence.service.js";
 import { listTranscriptSegments } from "./huddleTranscript.service.js";
+import { listHuddleActionTasks } from "./huddleActionTask.service.js";
 
 function runner(client = null) {
   return client || pool;
@@ -48,6 +49,172 @@ function lifecycleTitle(eventType) {
   return normalized
     .replace(/[._-]+/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase()) || "Meeting event";
+}
+
+function array(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => safeString(value)).filter(Boolean))];
+}
+
+function evidenceSpeakers(segmentIds, segmentById) {
+  return uniqueStrings(
+    array(segmentIds).map((id) => segmentById.get(String(id))?.speaker?.label)
+  );
+}
+
+function buildMeetingReport({
+  title,
+  selected,
+  transcript,
+  timeline,
+  ownership,
+}) {
+  const summary = selected.summary?.contentJson || {};
+  const decisions = array(selected.decisions?.contentJson?.decisions);
+  const actions = array(selected.actions?.contentJson?.actionItems);
+  const segmentById = new Map(transcript.map((segment) => [String(segment.id), segment]));
+  const ownershipByAction = new Map(
+    ownership.map((item) => [String(item.metadata?.actionItemId || ""), item])
+  );
+  const discussionHighlights = array(
+    summary.speakerHighlights || summary.discussionHighlights
+  ).map((item, index) => ({
+    id: item.id || `highlight-${index + 1}`,
+    speaker:
+      safeString(item.speaker) ||
+      evidenceSpeakers(item.evidenceSegmentIds, segmentById).join(", ") ||
+      "Participants",
+    text: safeString(item.text || item.highlight),
+    evidenceSegmentIds: array(item.evidenceSegmentIds),
+  })).filter((item) => item.text);
+  const keyPoints = array(summary.keyPoints).map((item, index) => ({
+    id: item.id || `point-${index + 1}`,
+    text: safeString(item.text || item.point),
+    evidenceSegmentIds: array(item.evidenceSegmentIds),
+  })).filter((item) => item.text);
+  const openQuestions = array(summary.openQuestions).map((item, index) => ({
+    id: item.id || `question-${index + 1}`,
+    question: safeString(item.question || item.text),
+    raisedBy:
+      safeString(item.raisedBy) ||
+      evidenceSpeakers(item.evidenceSegmentIds, segmentById).join(", ") ||
+      null,
+    evidenceSegmentIds: array(item.evidenceSegmentIds),
+  })).filter((item) => item.question);
+  const reportDecisions = decisions.map((item, index) => ({
+    ...item,
+    id: item.id || `decision-${index + 1}`,
+    participants: uniqueStrings([
+      ...array(item.participants),
+      ...evidenceSpeakers(item.evidenceSegmentIds, segmentById),
+    ]),
+  }));
+  const reportActions = actions.map((item, index) => {
+    const resolution = ownershipByAction.get(String(item.id || ""));
+    return {
+      ...item,
+      id: item.id || `action-${index + 1}`,
+      owner: resolution
+        ? {
+            userId:
+              resolution.resolvedOwnerUserId ||
+              resolution.suggestedOwnerUserId ||
+              null,
+            label:
+              resolution.metadata?.resolvedOwnerLabel ||
+              resolution.metadata?.ownerLabel ||
+              item.suggestedOwner?.label ||
+              "Unassigned",
+            status: resolution.status,
+            confidence: resolution.confidence,
+          }
+        : item.suggestedOwner || null,
+      participants: evidenceSpeakers(item.evidenceSegmentIds, segmentById),
+    };
+  });
+  const chronologicalConversation = array(summary.chronologicalSummary).length
+    ? array(summary.chronologicalSummary)
+    : [
+        ...discussionHighlights.map((item) => ({
+          id: item.id,
+          title: item.speaker,
+          description: item.text,
+          evidenceSegmentIds: item.evidenceSegmentIds,
+          occurredAt:
+            segmentById.get(String(item.evidenceSegmentIds?.[0] || ""))?.startedAt ||
+            null,
+        })),
+        ...timeline
+          .filter((entry) => entry.entryType !== "system")
+          .map((entry) => ({
+            id: entry.id,
+            title: entry.title || entry.entryType,
+            description: entry.description,
+            evidenceSegmentIds: entry.transcriptSegmentId
+              ? [entry.transcriptSegmentId]
+              : [],
+            occurredAt: entry.occurredAt,
+          })),
+      ].sort(
+        (left, right) =>
+          new Date(left.occurredAt || 0).getTime() -
+          new Date(right.occurredAt || 0).getTime()
+      );
+  const risks = array(summary.risksRaised).length
+    ? array(summary.risksRaised)
+    : [...keyPoints, ...openQuestions]
+        .filter((item) =>
+          /\b(risk|block|concern|delay|dependency|uncertain|issue)\b/i.test(
+            item.text || item.question || ""
+          )
+        )
+        .map((item) => ({
+          id: `risk-${item.id}`,
+          text: item.text || item.question,
+          evidenceSegmentIds: item.evidenceSegmentIds || [],
+        }));
+  return {
+    schemaVersion: 2,
+    title,
+    executiveSummary: {
+      purpose: safeString(summary.purpose) || safeString(summary.title) || title,
+      outcome:
+        safeString(summary.outcome) ||
+        safeString(summary.overview) ||
+        "No executive summary is available yet.",
+      conclusions: array(summary.conclusions).length
+        ? array(summary.conclusions)
+        : keyPoints,
+      unresolved: openQuestions,
+      evidenceSegmentIds: array(summary.overviewEvidenceSegmentIds),
+    },
+    discussionHighlights,
+    keyPoints,
+    chronologicalConversation,
+    decisions: reportDecisions,
+    actionItems: reportActions,
+    ownershipSuggestions: ownership,
+    openQuestions,
+    risks,
+    outcomes: array(summary.meetingOutcomes).length
+      ? array(summary.meetingOutcomes)
+      : [
+          ...reportDecisions.map((item) => ({
+            type: "decision",
+            text: item.decision || item.title,
+            evidenceSegmentIds: array(item.evidenceSegmentIds),
+          })),
+          ...reportActions.map((item) => ({
+            type: "action_item",
+            text: item.title,
+            owner: item.owner,
+            evidenceSegmentIds: array(item.evidenceSegmentIds),
+          })),
+        ],
+  };
 }
 
 async function loadMeetingContext({ workspaceId, sessionId, client = null }) {
@@ -192,6 +359,7 @@ export async function getMeetingIntelligenceReview({
     memoryCandidates,
     digests,
     jobs,
+    actionTasks,
   ] = await Promise.all([
     loadMeetingContext({ workspaceId, sessionId, client }),
     listHuddleArtifacts({
@@ -253,6 +421,11 @@ export async function getMeetingIntelligenceReview({
       limit: 200,
       client,
     }),
+    listHuddleActionTasks({
+      workspaceId,
+      sessionId,
+      client,
+    }),
   ]);
 
   const selected = {
@@ -293,6 +466,13 @@ export async function getMeetingIntelligenceReview({
   );
   const decisionCount = artifactCounts(selected.decisions);
   const actionItemCount = artifactCounts(selected.actions);
+  const report = buildMeetingReport({
+    title: context.title,
+    selected,
+    transcript,
+    timeline: combinedTimeline,
+    ownership,
+  });
 
   return {
     session: {
@@ -315,7 +495,8 @@ export async function getMeetingIntelligenceReview({
       canEditApprovedArtifacts: privileged,
       canReviewOwnership: privileged || host,
       canReviewMemory: privileged || host,
-      canCreateTasks: false,
+      canCreateTasks: privileged,
+      canUseCopilot: true,
     },
     status: {
       summaryAvailable: Boolean(selected.summary?.status === "ready"),
@@ -342,6 +523,8 @@ export async function getMeetingIntelligenceReview({
     timeline: combinedTimeline,
     ownership,
     memoryCandidates,
+    actionTasks,
+    report,
     digest: latestDigest,
     jobs,
     export: {
