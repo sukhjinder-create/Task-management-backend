@@ -1469,7 +1469,8 @@ export async function listCaptionEvents({ workspaceId, sessionId, actorUserId, r
     params.push(afterTimestamp);
     idx += 1;
   }
-  params.push(Math.min(Math.max(Number(limit) || 200, 1), 1000));
+  params.push(Math.min(Math.max(Number(limit) || 200, 1), 5000));
+  const direction = afterTimestamp ? "ASC" : "DESC";
   const { rows } = await runner(client).query(
     `
     SELECT
@@ -1502,12 +1503,16 @@ export async function listCaptionEvents({ workspaceId, sessionId, actorUserId, r
     LEFT JOIN huddle_guests g
       ON g.id = COALESCE(a.speaker_guest_id, s.speaker_guest_id)
     WHERE ${conditions.join(" AND ")}
-    ORDER BY c.emitted_at ASC, c.sequence_number ASC NULLS LAST, c.created_at ASC
+    ORDER BY
+      c.emitted_at ${direction},
+      c.sequence_number ${direction} NULLS LAST,
+      c.created_at ${direction}
     LIMIT $${idx}
     `,
     params
   );
-  return rows.map(serializeCaption);
+  const orderedRows = afterTimestamp ? rows : [...rows].reverse();
+  return orderedRows.map(serializeCaption);
 }
 
 export async function createTimelineEntry({ workspaceId, sessionId, actorUserId, role = "user", input = {}, client = null }) {

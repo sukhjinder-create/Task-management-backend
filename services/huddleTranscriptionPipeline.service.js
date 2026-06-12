@@ -237,14 +237,22 @@ async function getParticipantForActor({
   }
   const stateClause = includeInactive
     ? ""
-    : "AND left_at IS NULL\n      AND join_state IN ('joining', 'joined', 'reconnecting', 'invited')";
+    : "AND p.left_at IS NULL\n      AND p.join_state IN ('joining', 'joined', 'reconnecting', 'invited')";
   const { rows } = await runner(client).query(
     `
-    SELECT *
-    FROM huddle_session_participants
-    WHERE ${clauses.join(" AND ")}
+    SELECT
+      p.*,
+      COALESCE(
+        NULLIF(u.username, ''),
+        NULLIF(g.display_name, ''),
+        NULLIF(p.metadata->>'displayName', '')
+      ) AS display_name
+    FROM huddle_session_participants p
+    LEFT JOIN users u ON u.id = p.user_id
+    LEFT JOIN huddle_guests g ON g.id = p.guest_id
+    WHERE ${clauses.map((clause) => `p.${clause}`).join(" AND ")}
       ${stateClause}
-    ORDER BY joined_at DESC NULLS LAST, created_at DESC
+    ORDER BY p.joined_at DESC NULLS LAST, p.created_at DESC
     LIMIT 1
     `,
     params
@@ -824,6 +832,7 @@ export async function ingestTranscriptionProviderEvent({
   client = null,
 } = {}) {
   return withTransaction(client, async (tx) => {
+    const backendReceivedAt = new Date().toISOString();
     const session = await getSessionRow({ workspaceId, sessionId, client: tx });
     if (session.ended_at || session.state === "ended") {
       throw createServiceError("Huddle session has ended", 409, "huddle_session_ended");
@@ -942,7 +951,11 @@ export async function ingestTranscriptionProviderEvent({
           speakerKind: participant?.participant_kind || "workspace_user",
           speakerUserId: participant?.user_id || actorUserId || null,
           speakerGuestId: participant?.guest_id || null,
-          speakerLabel: input.speakerLabel || input.speaker_label,
+          speakerLabel:
+            input.speakerLabel ||
+            input.speaker_label ||
+            participant?.display_name ||
+            null,
           sourceProvider: normalized.providerName,
           sourceSegmentId: normalized.sourceSegmentId,
           language: normalized.language,
@@ -978,7 +991,11 @@ export async function ingestTranscriptionProviderEvent({
           speakerKind: participant.participant_kind || "workspace_user",
           speakerUserId: participant.user_id || actorUserId || null,
           speakerGuestId: participant.guest_id || null,
-          speakerLabel: input.speakerLabel || input.speaker_label,
+          speakerLabel:
+            input.speakerLabel ||
+            input.speaker_label ||
+            participant.display_name ||
+            null,
           confidence: normalized.confidence,
           attributionSource: "provider",
           providerName: normalized.providerName,
@@ -1012,6 +1029,15 @@ export async function ingestTranscriptionProviderEvent({
           metadata: {
             transcriptionSessionId: effectiveTranscriptionSessionId,
             providerEventId: normalized.providerEventId,
+            sourceSegmentId: normalized.sourceSegmentId,
+            clientCapturedAt:
+              input.clientCapturedAt || input.client_captured_at || null,
+            clientProviderReceivedAt:
+              input.clientProviderReceivedAt ||
+              input.client_provider_received_at ||
+              null,
+            clientPostedAt: input.clientPostedAt || input.client_posted_at || null,
+            backendReceivedAt,
           },
         },
         client: tx,

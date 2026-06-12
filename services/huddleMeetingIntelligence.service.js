@@ -59,6 +59,53 @@ function uniqueStrings(values) {
   return [...new Set(values.map((value) => safeString(value)).filter(Boolean))];
 }
 
+function participantAliasEntries(participants = []) {
+  const names = uniqueStrings(
+    participants
+      .map((participant) => participant.displayName)
+      .filter((name) => name && !/^participant(?:\s+\d+)?$/i.test(name))
+  );
+  return names.map((name, index) => [`Participant ${index + 1}`, name]);
+}
+
+function resolveParticipantAliases(value, participants = []) {
+  if (typeof value === "string") {
+    let resolved = value;
+    for (const [alias, name] of participantAliasEntries(participants)) {
+      resolved = resolved.replace(
+        new RegExp(`\\b${alias.replace(" ", "\\s+")}\\b`, "gi"),
+        name
+      );
+    }
+    if (participants.length === 1) {
+      resolved = resolved.replace(
+        /\bParticipant\b/gi,
+        participants[0].displayName || "Participant"
+      );
+    }
+    return resolved;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveParticipantAliases(item, participants));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      resolveParticipantAliases(nested, participants),
+    ])
+  );
+}
+
+function resolveArtifactParticipantNames(artifact, participants) {
+  if (!artifact) return null;
+  return {
+    ...artifact,
+    contentText: resolveParticipantAliases(artifact.contentText, participants),
+    contentJson: resolveParticipantAliases(artifact.contentJson, participants),
+  };
+}
+
 function evidenceSpeakers(segmentIds, segmentById) {
   return uniqueStrings(
     array(segmentIds).map((id) => segmentById.get(String(id))?.speaker?.label)
@@ -468,11 +515,26 @@ export async function getMeetingIntelligenceReview({
   ]);
 
   const selected = {
-    transcript: latestArtifact(artifacts, "transcript"),
-    summary: latestArtifact(artifacts, "summary"),
-    decisions: latestArtifact(artifacts, "decision"),
-    actions: latestArtifact(artifacts, "action_item"),
-    timeline: latestArtifact(artifacts, "timeline"),
+    transcript: resolveArtifactParticipantNames(
+      latestArtifact(artifacts, "transcript"),
+      context.participants
+    ),
+    summary: resolveArtifactParticipantNames(
+      latestArtifact(artifacts, "summary"),
+      context.participants
+    ),
+    decisions: resolveArtifactParticipantNames(
+      latestArtifact(artifacts, "decision"),
+      context.participants
+    ),
+    actions: resolveArtifactParticipantNames(
+      latestArtifact(artifacts, "action_item"),
+      context.participants
+    ),
+    timeline: resolveArtifactParticipantNames(
+      latestArtifact(artifacts, "timeline"),
+      context.participants
+    ),
   };
   const selectedArtifacts = Object.values(selected).filter(Boolean);
   const sourcePairs = await Promise.all(
@@ -498,7 +560,9 @@ export async function getMeetingIntelligenceReview({
   const combinedTimeline = [
     ...timeline,
     ...context.lifecycleEvents,
-  ].sort(
+  ].map((entry) =>
+    resolveParticipantAliases(entry, context.participants)
+  ).sort(
     (left, right) =>
       new Date(left.occurredAt || 0).getTime() -
       new Date(right.occurredAt || 0).getTime()
@@ -510,7 +574,7 @@ export async function getMeetingIntelligenceReview({
     selected,
     transcript,
     timeline: combinedTimeline,
-    ownership,
+    ownership: resolveParticipantAliases(ownership, context.participants),
   });
 
   return {
@@ -560,8 +624,11 @@ export async function getMeetingIntelligenceReview({
     },
     transcript,
     timeline: combinedTimeline,
-    ownership,
-    memoryCandidates,
+    ownership: resolveParticipantAliases(ownership, context.participants),
+    memoryCandidates: resolveParticipantAliases(
+      memoryCandidates,
+      context.participants
+    ),
     actionTasks,
     report,
     digest: latestDigest,

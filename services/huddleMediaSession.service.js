@@ -1157,6 +1157,15 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const averageBitrateKbps = average(
     aggregates.map((item) => item.totalBitrateKbps)
   );
+  const averageSendBitrateKbps = average(
+    aggregates.map((item) => item.sendBitrateKbps)
+  );
+  const averageReceiveBitrateKbps = average(
+    aggregates.map((item) => item.receiveBitrateKbps)
+  );
+  const estimatedMegabytesPerHour = average(
+    aggregates.map((item) => item.estimatedMegabytesPerHour)
+  );
   const maxReceiveWidth = Math.max(
     0,
     ...finiteValues(aggregates.map((item) => item.maxReceiveWidth))
@@ -1199,6 +1208,13 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   if (averageBitrateKbps !== null && averageBitrateKbps < 350) {
     score -= 15;
     observations.push("Observed aggregate bitrate is low");
+  }
+  if (
+    estimatedMegabytesPerHour !== null &&
+    estimatedMegabytesPerHour > 750
+  ) {
+    score -= 15;
+    observations.push("Estimated media data usage is unusually high");
   }
   if (receiveVideo.length && !receiveVideo.some((track) => track.adaptiveStreamAttached)) {
     score -= 15;
@@ -1249,6 +1265,9 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageRttMs,
       averagePacketLoss,
       averageBitrateKbps,
+      averageSendBitrateKbps,
+      averageReceiveBitrateKbps,
+      estimatedMegabytesPerHour,
       maxSendResolution:
         maxSendWidth && maxSendHeight ? `${maxSendWidth}x${maxSendHeight}` : null,
       maxReceiveResolution:

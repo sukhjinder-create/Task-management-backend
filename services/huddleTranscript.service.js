@@ -134,7 +134,7 @@ function serializeTranscriptSegment(row = {}) {
       kind: row.speaker_kind,
       userId: row.speaker_user_id,
       guestId: row.speaker_guest_id,
-      label: row.speaker_label,
+      label: row.resolved_speaker_label || row.speaker_label,
     },
     sourceProvider: row.source_provider,
     sourceSegmentId: row.source_segment_id,
@@ -646,11 +646,24 @@ export async function getTranscriptSegment({
 }) {
   const { rows } = await runner(client).query(
     `
-    SELECT *
-    FROM huddle_transcript_segments
-    WHERE id = $1
-      AND workspace_id = $2
-      AND deleted_at IS NULL
+    SELECT
+      s.*,
+      COALESCE(
+        NULLIF(s.speaker_label, ''),
+        NULLIF(u.username, ''),
+        NULLIF(g.display_name, ''),
+        NULLIF(p.metadata->>'displayName', '')
+      ) AS resolved_speaker_label
+    FROM huddle_transcript_segments s
+    LEFT JOIN users u ON u.id = s.speaker_user_id
+    LEFT JOIN huddle_guests g ON g.id = s.speaker_guest_id
+    LEFT JOIN huddle_session_participants p
+      ON p.id = s.participant_id
+     AND p.workspace_id = s.workspace_id
+     AND p.session_id = s.session_id
+    WHERE s.id = $1
+      AND s.workspace_id = $2
+      AND s.deleted_at IS NULL
     LIMIT 1
     `,
     [segmentId, workspaceId]
@@ -706,31 +719,31 @@ export async function listTranscriptSegments({
 
   const params = [workspaceId, sessionId];
   const conditions = [
-    "workspace_id = $1",
-    "session_id = $2",
-    "deleted_at IS NULL",
+    "s.workspace_id = $1",
+    "s.session_id = $2",
+    "s.deleted_at IS NULL",
   ];
   let idx = 3;
 
   const normalizedStatus = status ? normalizeStatus(status, null) : null;
   if (normalizedStatus) {
-    conditions.push(`status = $${idx}`);
+    conditions.push(`s.status = $${idx}`);
     params.push(normalizedStatus);
     idx += 1;
   } else if (!includeRetracted) {
-    conditions.push("status != 'retracted'");
+    conditions.push("s.status != 'retracted'");
   }
 
   const provider = safeString(sourceProvider, 80);
   if (provider) {
-    conditions.push(`source_provider = $${idx}`);
+    conditions.push(`s.source_provider = $${idx}`);
     params.push(provider);
     idx += 1;
   }
 
   const afterTimestamp = safeTimestamp(after);
   if (afterTimestamp) {
-    conditions.push(`updated_at > $${idx}`);
+    conditions.push(`s.updated_at > $${idx}`);
     params.push(afterTimestamp);
     idx += 1;
   }
@@ -739,10 +752,23 @@ export async function listTranscriptSegments({
 
   const { rows } = await runner(client).query(
     `
-    SELECT *
-    FROM huddle_transcript_segments
+    SELECT
+      s.*,
+      COALESCE(
+        NULLIF(s.speaker_label, ''),
+        NULLIF(u.username, ''),
+        NULLIF(g.display_name, ''),
+        NULLIF(p.metadata->>'displayName', '')
+      ) AS resolved_speaker_label
+    FROM huddle_transcript_segments s
+    LEFT JOIN users u ON u.id = s.speaker_user_id
+    LEFT JOIN huddle_guests g ON g.id = s.speaker_guest_id
+    LEFT JOIN huddle_session_participants p
+      ON p.id = s.participant_id
+     AND p.workspace_id = s.workspace_id
+     AND p.session_id = s.session_id
     WHERE ${conditions.join(" AND ")}
-    ORDER BY started_at ASC, created_at ASC
+    ORDER BY s.started_at ASC, s.created_at ASC
     LIMIT $${idx}
     `,
     params
