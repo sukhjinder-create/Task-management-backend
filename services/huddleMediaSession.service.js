@@ -1177,15 +1177,17 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const averageBitrateKbps = average(
     aggregates.map((item) => item.totalBitrateKbps)
   );
-  const averageSendBitrateKbps = average(
-    aggregates.map((item) => item.sendBitrateKbps)
-  );
-  const averageReceiveBitrateKbps = average(
-    aggregates.map((item) => item.receiveBitrateKbps)
-  );
-  const estimatedMegabytesPerHour = average(
-    aggregates.map((item) => item.estimatedMegabytesPerHour)
-  );
+  const averageSendBitrateKbps =
+    average(aggregates.map((item) => item.sendBitrateKbps)) ??
+    average(sendVideo.map((track) => track.bitrateKbps));
+  const averageReceiveBitrateKbps =
+    average(aggregates.map((item) => item.receiveBitrateKbps)) ??
+    average(receiveVideo.map((track) => track.bitrateKbps));
+  const estimatedMegabytesPerHour =
+    average(aggregates.map((item) => item.estimatedMegabytesPerHour)) ??
+    (averageBitrateKbps === null
+      ? null
+      : Number(((averageBitrateKbps * 3600) / 8 / 1000).toFixed(2)));
   const maxReceiveWidth = Math.max(
     0,
     ...finiteValues(aggregates.map((item) => item.maxReceiveWidth))
@@ -1224,6 +1226,13 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   if (maxReceiveWidth !== null && maxReceiveWidth < 640) {
     score -= 20;
     observations.push("Received video never exceeded 640 px");
+  } else if (maxReceiveHeight !== null && maxReceiveHeight < 720) {
+    score -= 8;
+    observations.push("Received video did not reach 720p");
+  }
+  if (averageReceiveFps !== null && averageReceiveFps < 24) {
+    score -= averageReceiveFps < 18 ? 15 : 8;
+    observations.push("Received video frame rate remained below 24 fps");
   }
   if (averageBitrateKbps !== null && averageBitrateKbps < 350) {
     score -= 15;
@@ -1240,6 +1249,12 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     score -= 15;
     observations.push("Remote video was not attached through LiveKit adaptive streaming");
   }
+  if (qualityLimitationReasons.bandwidth) {
+    score -= 10;
+    observations.push(
+      `Bandwidth limited ${qualityLimitationReasons.bandwidth} video track samples`
+    );
+  }
   const connectionScore = Math.max(
     0,
     100 -
@@ -1250,11 +1265,14 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     0,
     100 -
       (maxReceiveWidth !== null && maxReceiveWidth < 640 ? 30 : 0) -
+      (maxReceiveHeight !== null && maxReceiveHeight < 720 ? 10 : 0) -
+      (averageReceiveFps !== null && averageReceiveFps < 24 ? 10 : 0) -
       (averageBitrateKbps !== null && averageBitrateKbps < 350 ? 25 : 0) -
       (receiveVideo.length &&
       !receiveVideo.some((track) => track.adaptiveStreamAttached)
         ? 20
         : 0) -
+      (qualityLimitationReasons.bandwidth ? 10 : 0) -
       (averagePacketLoss > 0.05 ? 25 : averagePacketLoss > 0.02 ? 10 : 0)
   );
   const audioTracks = tracks.filter((track) => track.kind === "audio");
