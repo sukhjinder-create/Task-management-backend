@@ -701,6 +701,43 @@ async function emitHuddleLiveEvent(scope, room, event, payload, options = {}) {
   });
 }
 
+async function endHuddleAndNotify(
+  scope,
+  huddleId,
+  endedBy,
+  reason = "legacy_huddle_ended"
+) {
+  const sessionResult = await huddleCompatibilityAdapter.endLegacyHuddle({
+    workspaceId: scope.workspaceId,
+    channelId: scope.channelId,
+    huddleId,
+    userId: endedBy?.userId ? String(endedBy.userId) : null,
+    username: endedBy?.username || null,
+    scope,
+    reason,
+  });
+  if (!sessionResult?.ok) {
+    return {
+      ok: false,
+      reason: sessionResult?.reason || "huddle_end_failed",
+    };
+  }
+
+  huddleRealtimeService.deleteRoom({ workspaceId: scope.workspaceId, huddleId });
+  const sessionId = sessionResult?.sessionId || null;
+
+  const out = {
+    channelId: scope.channelId,
+    workspaceId: scope.workspaceId,
+    huddleId,
+    endedBy,
+    at: new Date().toISOString(),
+    ...(sessionId ? { sessionId } : {}),
+  };
+  await emitHuddleInviteEvent(scope, "huddle:ended", out);
+  return { ok: true, payload: out, sessionResult };
+}
+
 function huddleDisconnectTimerKey({ userId, socketId }) {
   return `${String(userId || "")}:${String(socketId || "")}`;
 }
@@ -1434,43 +1471,6 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   /* -----------------------------------------------------
      HUDDLES
   ----------------------------------------------------- */
-  async function endHuddleAndNotify(
-    scope,
-    huddleId,
-    endedBy,
-    reason = "legacy_huddle_ended"
-  ) {
-    const sessionResult = await huddleCompatibilityAdapter.endLegacyHuddle({
-      workspaceId: scope.workspaceId,
-      channelId: scope.channelId,
-      huddleId,
-      userId: endedBy?.userId ? String(endedBy.userId) : null,
-      username: endedBy?.username || null,
-      scope,
-      reason,
-    });
-    if (!sessionResult?.ok) {
-      return {
-        ok: false,
-        reason: sessionResult?.reason || "huddle_end_failed",
-      };
-    }
-
-    huddleRealtimeService.deleteRoom({ workspaceId: scope.workspaceId, huddleId });
-    const sessionId = sessionResult?.sessionId || null;
-
-    const out = {
-      channelId: scope.channelId,
-      workspaceId: scope.workspaceId,
-      huddleId,
-      endedBy,
-      at: new Date().toISOString(),
-      ...(sessionId ? { sessionId } : {}),
-    };
-    await emitHuddleInviteEvent(scope, "huddle:ended", out);
-    return { ok: true, payload: out, sessionResult };
-  }
-
   socket.on("huddle:start", async (payload = {}) => {
     let { channelId, huddleId } = payload;
     channelId = normalizeSocketId(channelId);

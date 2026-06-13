@@ -21,6 +21,7 @@ const huddleWindow = readFrontend("src/huddle/GlobalHuddleWindow.jsx");
 const meetingIntelligence = readFrontend("src/pages/HuddleMeetingIntelligence.jsx");
 const artifact = readBackend("services/huddleArtifact.service.js");
 const generation = readBackend("services/huddleIntelligenceGeneration.service.js");
+const llm = readBackend("services/llm.js");
 const transcriptText = readBackend("utils/huddleTranscriptText.js");
 const { normalizeHuddleTranscriptText } = await import(
   "../utils/huddleTranscriptText.js"
@@ -39,6 +40,9 @@ assert.match(transcriptText, /unicodeNormalization: "NFC"/);
 assert.match(transcriptText, /utf8MojibakeRepaired/);
 assert.match(generation, /Never emit Participant 1, Participant 2/);
 assert.match(generation, /huddle-intelligence-report-v3/);
+assert.match(llm, /LLM_TRANSIENT_RETRY_ATTEMPTS/);
+assert.match(llm, /\[408, 425, 429\]/);
+assert.match(llm, /retry-after/);
 
 assert.match(transcriptionClient, /DEFAULT_TIMESLICE_MS = 250/);
 assert.match(transcriptionClient, /KEEP_ALIVE_INTERVAL_MS = 8000/);
@@ -57,7 +61,13 @@ assert.doesNotMatch(
   liveKitConnection,
   /const layers = \[\s*videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h720/
 );
-assert.match(liveKitConnection, /maxBitrate: mobile \? 600_000 : 1_000_000/);
+assert.match(liveKitConnection, /maxBitrate: mobile \? 1_000_000 : 1_500_000/);
+assert.match(
+  liveKitConnection,
+  /Promise\.allSettled\(\[\s*fetchLiveKitRoomDescriptor\(params\),\s*fetchLiveKitToken\(params\)/
+);
+assert.match(liveKitProvider, /enableCameraAndMicrophone/);
+assert.match(liveKitProvider, /aspectRatio: portrait \? 9 \/ 16 : 16 \/ 9/);
 assert.match(liveKitProvider, /estimatedMegabytesPerHour/);
 assert.match(media, /Estimated media data usage is unusually high/);
 assert.match(backgroundEffects, /constrainedDevice/);
@@ -70,11 +80,17 @@ assert.match(liveKitProvider, /renderTargetMismatchCount/);
 assert.match(liveKitProvider, /screenShareSendBitrateKbps/);
 assert.match(liveKitRenderTarget, /setVideoDimensions/);
 assert.match(huddleWindow, /presentingParticipant/);
+assert.match(
+  huddleWindow,
+  /screenShare \|\| portraitVideo \? "object-contain bg-black" : "object-cover"/
+);
 
 assert.doesNotMatch(meetingIntelligence, /downloadJsonExport/);
 assert.doesNotMatch(meetingIntelligence, /> JSON</);
 assert.match(meetingIntelligence, /downloadMarkdownExport/);
 assert.match(meetingIntelligence, /downloadPdfExport/);
+assert.match(meetingIntelligence, /shareMeetingIntelligence/);
+assert.match(meetingIntelligence, /navigator\.share/);
 assert.match(meetingIntelligence, /Asystence Huddle \| Page/);
 assert.match(meetingIntelligence, /\\uFEFF/);
 assert.match(meetingIntelligence, /NotoSansDevanagari/);

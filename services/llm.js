@@ -13,6 +13,59 @@ const PROVIDER     = process.env.LLM_PROVIDER  || "ollama";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "llama3.2:1b";
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
 const OLLAMA_NUM_GPU = parseInt(process.env.OLLAMA_NUM_GPU ?? "0");
+const TRANSIENT_RETRY_ATTEMPTS = Math.min(
+  Math.max(parseInt(process.env.LLM_TRANSIENT_RETRY_ATTEMPTS ?? "2", 10) || 0, 0),
+  4
+);
+const TRANSIENT_RETRY_BASE_MS = Math.min(
+  Math.max(parseInt(process.env.LLM_TRANSIENT_RETRY_BASE_MS ?? "1000", 10) || 1000, 250),
+  10000
+);
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function retryAfterMilliseconds(error) {
+  const raw = error?.response?.headers?.["retry-after"];
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
+}
+
+function isTransientLlmError(error) {
+  const status = Number(error?.response?.status || error?.status);
+  if ([408, 425, 429].includes(status) || status >= 500) return true;
+  return [
+    "ECONNABORTED",
+    "ECONNRESET",
+    "EPIPE",
+    "ETIMEDOUT",
+    "ERR_NETWORK",
+  ].includes(error?.code);
+}
+
+async function generateTextOnce({
+  prompt,
+  messages,
+  maxTokens,
+  json,
+  temperature,
+  signal,
+}) {
+  switch (PROVIDER) {
+    case "ollama":
+    case "local":       return _ollama(prompt, maxTokens, json, temperature, signal);
+    case "openai":      return _openai(prompt, maxTokens, json, temperature, messages);
+    case "grok":        return _grok(prompt, maxTokens, json, temperature, messages);
+    case "groq":        return _groq(prompt, maxTokens, json, temperature, messages);
+    case "huggingface": return _huggingface(prompt, maxTokens, temperature);
+    default:
+      throw new Error(`Unsupported LLM_PROVIDER: "${PROVIDER}". Valid values: ollama, openai, grok, groq, huggingface`);
+  }
+}
 
 /**
  * Generate text from the configured LLM provider.
@@ -32,15 +85,34 @@ export async function generateText({
   temperature = 0.4,
   signal,
 } = {}) {
-  switch (PROVIDER) {
-    case "ollama":
-    case "local":       return _ollama(prompt, maxTokens, json, temperature, signal);
-    case "openai":      return _openai(prompt, maxTokens, json, temperature, messages);
-    case "grok":        return _grok(prompt, maxTokens, json, temperature, messages);
-    case "groq":        return _groq(prompt, maxTokens, json, temperature, messages);
-    case "huggingface": return _huggingface(prompt, maxTokens, temperature);
-    default:
-      throw new Error(`Unsupported LLM_PROVIDER: "${PROVIDER}". Valid values: ollama, openai, grok, groq, huggingface`);
+  let attempt = 0;
+  while (true) {
+    try {
+      return await generateTextOnce({
+        prompt,
+        messages,
+        maxTokens,
+        json,
+        temperature,
+        signal,
+      });
+    } catch (error) {
+      const retryable =
+        error?.name !== "AbortError" &&
+        error?.code !== "ERR_CANCELED" &&
+        isTransientLlmError(error);
+      error.retryable = retryable;
+      if (!retryable || attempt >= TRANSIENT_RETRY_ATTEMPTS) throw error;
+
+      const retryAfterMs = retryAfterMilliseconds(error);
+      const exponentialMs = TRANSIENT_RETRY_BASE_MS * (2 ** attempt);
+      const delayMs = Math.min(
+        Math.max(retryAfterMs ?? exponentialMs, TRANSIENT_RETRY_BASE_MS),
+        15000
+      );
+      attempt += 1;
+      await sleep(delayMs);
+    }
   }
 }
 

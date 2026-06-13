@@ -1,5 +1,6 @@
 import express from "express";
 import { allowRoles } from "../middleware/role.middleware.js";
+import { findHuddleSessionByLegacy } from "../services/huddleSession.service.js";
 import {
   finalizeHuddleTranscript,
   getEffectiveTranscriptionPolicy,
@@ -12,6 +13,8 @@ import {
 
 const router = express.Router();
 const requireTranscriptionAdmin = allowRoles("admin", "manager", "owner");
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function actor(req) {
   return {
@@ -28,6 +31,30 @@ function errorResponse(res, error) {
   }
   return res.status(status).json({ ok: false, reason });
 }
+
+router.param("sessionId", async (req, res, next, rawSessionId) => {
+  try {
+    const sessionId = String(rawSessionId || "").trim();
+    if (UUID_PATTERN.test(sessionId)) {
+      req.params.sessionId = sessionId;
+      return next();
+    }
+
+    const session = await findHuddleSessionByLegacy({
+      workspaceId: req.workspaceId,
+      legacyHuddleId: sessionId,
+    });
+    if (!session) {
+      return res.status(404).json({ ok: false, reason: "huddle_session_not_found" });
+    }
+
+    req.params.sessionId = session.id;
+    req.huddleLegacySessionId = sessionId;
+    return next();
+  } catch (error) {
+    return errorResponse(res, error);
+  }
+});
 
 router.get("/diagnostics", (_req, res) => {
   res.json({
