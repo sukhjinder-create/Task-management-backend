@@ -1450,6 +1450,28 @@ export async function finalizeHuddleTranscript({
       client: tx,
     });
     if (!segments.length) {
+      await tx.query(
+        `
+        UPDATE huddle_transcription_sessions
+        SET status = 'finalized',
+            finalized_at = COALESCE(finalized_at, now()),
+            diagnostics = diagnostics || $3::jsonb,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND session_id = $2
+          AND status IN ('pending', 'active', 'paused', 'finalizing')
+        `,
+        [
+          workspaceId,
+          sessionId,
+          JSON.stringify({
+            finalizationReason: reason,
+            transcriptArtifactCreated: false,
+            noFinalSegments: true,
+            finalizedWithoutTranscriptAt: new Date().toISOString(),
+          }),
+        ]
+      );
       await updateTranscriptProcessingState({
         workspaceId,
         sessionId,
