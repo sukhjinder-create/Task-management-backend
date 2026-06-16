@@ -674,6 +674,74 @@ export function normalizeTranscriptionProviderEvent(input = {}) {
   };
 }
 
+function queueTranscriptionGrantAudit({
+  workspaceId,
+  sessionId,
+  actorUserId,
+  transcriptionSession,
+  participant,
+  grant,
+} = {}) {
+  const run = async () => {
+    try {
+      await insertProviderEvent({
+        workspaceId,
+        sessionId,
+        transcriptionSessionId: transcriptionSession.id,
+        participantId: participant?.id || null,
+        providerName: grant.provider,
+        normalized: {
+          providerEventId: `token:${transcriptionSession.id}:${Date.now()}`,
+          providerRequestId: null,
+          sourceSegmentId: null,
+          eventType: "token_granted",
+          status: "token_granted",
+          text: null,
+          language: grant.language,
+          confidence: null,
+          sequenceNumber: null,
+          startedAt: null,
+          endedAt: null,
+          metadata: { expiresAt: grant.expiresAt },
+        },
+        providerPayload: {
+          transport: grant.transport,
+          expiresIn: grant.expiresIn,
+          grantCacheHit: Boolean(grant.grantCacheHit),
+          grantSharedInFlight: Boolean(grant.grantSharedInFlight),
+        },
+        status: "processed",
+      });
+      await createHuddleSessionEvent({
+        sessionId,
+        workspaceId,
+        actorUserId,
+        eventType: HUDDLE_TRANSCRIPTION_EVENTS.TOKEN_GRANTED,
+        eventPayload: {
+          transcriptionSessionId: transcriptionSession.id,
+          provider: grant.provider,
+          model: grant.model,
+          language: grant.language,
+          keytermCount: grant.keytermCount,
+        },
+      });
+    } catch (error) {
+      console.warn("[huddle:transcription:grant_audit_failed]", {
+        workspaceId,
+        sessionId,
+        transcriptionSessionId: transcriptionSession?.id || null,
+        reason: error?.reason || error?.message || "grant_audit_failed",
+      });
+    }
+  };
+
+  if (typeof setImmediate === "function") {
+    setImmediate(run);
+  } else {
+    setTimeout(run, 0);
+  }
+}
+
 export async function grantTranscriptionProviderToken({
   workspaceId,
   sessionId,
@@ -683,7 +751,8 @@ export async function grantTranscriptionProviderToken({
   language = null,
   client = null,
 } = {}) {
-  return withTransaction(client, async (tx) => {
+  let auditPayload = null;
+  const result = await withTransaction(client, async (tx) => {
     const session = await getSessionRow({ workspaceId, sessionId, client: tx });
     if (session.ended_at || session.state === "ended") {
       throw createServiceError("Huddle session has ended", 409, "huddle_session_ended");
@@ -754,49 +823,14 @@ export async function grantTranscriptionProviderToken({
       grant,
       client: tx,
     });
-    await insertProviderEvent({
+    auditPayload = {
       workspaceId,
       sessionId,
-      transcriptionSessionId: transcriptionSession.id,
-      participantId: participant?.id || null,
-      providerName: grant.provider,
-      normalized: {
-        providerEventId: `token:${transcriptionSession.id}:${Date.now()}`,
-        providerRequestId: null,
-        sourceSegmentId: null,
-        eventType: "token_granted",
-        status: "token_granted",
-        text: null,
-        language: grant.language,
-        confidence: null,
-        sequenceNumber: null,
-        startedAt: null,
-        endedAt: null,
-        metadata: { expiresAt: grant.expiresAt },
-      },
-      providerPayload: {
-        transport: grant.transport,
-        expiresIn: grant.expiresIn,
-        grantCacheHit: Boolean(grant.grantCacheHit),
-        grantSharedInFlight: Boolean(grant.grantSharedInFlight),
-      },
-      status: "processed",
-      client: tx,
-    });
-    const event = await createHuddleSessionEvent({
-      sessionId,
-      workspaceId,
       actorUserId,
-      eventType: HUDDLE_TRANSCRIPTION_EVENTS.TOKEN_GRANTED,
-      eventPayload: {
-        transcriptionSessionId: transcriptionSession.id,
-        provider: grant.provider,
-        model: grant.model,
-        language: grant.language,
-        keytermCount: grant.keytermCount,
-      },
-      client: tx,
-    });
+      transcriptionSession,
+      participant,
+      grant,
+    };
     return {
       provider: grant.provider,
       model: grant.model,
@@ -812,9 +846,14 @@ export async function grantTranscriptionProviderToken({
       transcriptionSession: serializeTranscriptionSession(transcriptionSession),
       policy,
       consent,
-      event,
+      event: null,
+      eventQueued: true,
     };
   });
+  if (!client && auditPayload) {
+    queueTranscriptionGrantAudit(auditPayload);
+  }
+  return result;
 }
 
 async function findSegmentBySource({ workspaceId, sessionId, sourceProvider, sourceSegmentId, client }) {

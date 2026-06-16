@@ -871,6 +871,8 @@ function sanitizeQualityStartup(raw = {}) {
     captionGrantLatencyMs: safeNumber(startup.captionGrantLatencyMs),
     captionWebsocketOpenLatencyMs: safeNumber(startup.captionWebsocketOpenLatencyMs),
     captionRecorderStartLatencyMs: safeNumber(startup.captionRecorderStartLatencyMs),
+    captionTransportReadyLatencyMs: safeNumber(startup.captionTransportReadyLatencyMs),
+    captionTransportReadyFromIntentMs: safeNumber(startup.captionTransportReadyFromIntentMs),
     captionFirstProviderResultLatencyMs: safeNumber(startup.captionFirstProviderResultLatencyMs),
     captionFirstBackendEventLatencyMs: safeNumber(startup.captionFirstBackendEventLatencyMs),
     captionFirstLocalCaptionLatencyMs: safeNumber(startup.captionFirstLocalCaptionLatencyMs),

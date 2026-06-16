@@ -79,7 +79,9 @@ assert.match(liveKitConnection, /roomEndpointLatencyMs = null/);
 assert.match(liveKitConnection, /tokenEndpointLatencyMs = tokenRequest\.latencyMs/);
 assert.match(liveKitConnection, /source: "token_endpoint"/);
 assert.match(liveKitProvider, /enableCameraAndMicrophone/);
-assert.match(liveKitProvider, /setCameraEnabled\?\.\(\s*true,\s*cameraCaptureOptions\(\),\s*cameraPublishOptions\(\)/);
+assert.match(liveKitProvider, /liveKitCameraSimulcastLayers/);
+assert.match(liveKitProvider, /videoSimulcastLayers: layers/);
+assert.match(liveKitProvider, /cameraPublishOptions\(LIVEKIT_QUALITY_MODES\.AUTO, sdk\)/);
 assert.match(liveKitProvider, /maxFramerate: mobile \? 24 : 30/);
 assert.match(huddleContext, /requestIdleCallback\(preload, \{ timeout: 1500 \}\)/);
 assert.match(liveKitProvider, /aspectRatio: portrait \? 9 \/ 16 : 16 \/ 9/);
@@ -100,6 +102,7 @@ assert.match(liveKitProvider, /screenShareSendBitrateKbps/);
 assert.match(liveKitRenderTarget, /setVideoDimensions/);
 assert.match(liveKitRenderTarget, /contentCssWidth/);
 assert.match(liveKitRenderTarget, /sourcePortrait/);
+assert.match(liveKitRenderTarget, /minimumCameraWidth/);
 assert.match(huddleWindow, /presentingParticipant/);
 assert.match(
   huddleWindow,
