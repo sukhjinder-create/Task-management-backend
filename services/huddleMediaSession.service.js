@@ -1308,6 +1308,32 @@ export function summarizeLiveKitQualitySamples(samples = []) {
         ).toFixed(4)
       )
     : null;
+  const averageRequestedReceiveWidth = average(
+    targetedReceiveVideo.map((track) => track.requestedWidth)
+  );
+  const averageRequestedReceiveHeight = average(
+    targetedReceiveVideo.map((track) => track.requestedHeight)
+  );
+  const averageRequestedContentReceiveWidth = average(
+    targetedReceiveVideo.map((track) => track.requestedContentWidth)
+  );
+  const averageRequestedContentReceiveHeight = average(
+    targetedReceiveVideo.map((track) => track.requestedContentHeight)
+  );
+  const visibleTargetWidth =
+    averageRequestedContentReceiveWidth ?? averageRequestedReceiveWidth;
+  const visibleTargetHeight =
+    averageRequestedContentReceiveHeight ?? averageRequestedReceiveHeight;
+  const visibleTargetLongEdge =
+    visibleTargetWidth && visibleTargetHeight
+      ? Math.max(visibleTargetWidth, visibleTargetHeight)
+      : null;
+  const visibleTargetShortEdge =
+    visibleTargetWidth && visibleTargetHeight
+      ? Math.min(visibleTargetWidth, visibleTargetHeight)
+      : null;
+  const renderTargetSatisfied =
+    renderTargetMatchRate !== null && renderTargetMatchRate >= 0.9;
   const totalFreezeCount = aggregates.reduce(
     (total, item) => total + (Number(item.totalFreezeCount) || 0),
     0
@@ -1330,6 +1356,30 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     (total, item) => total + (Number(item.totalFramesRendered) || 0),
     0
   );
+  const receiveBelowVisibleTarget =
+    visibleTargetLongEdge !== null &&
+    maxReceiveLongEdge !== null &&
+    maxReceiveLongEdge < visibleTargetLongEdge * 0.9;
+  const receiveBelowMinimum =
+    maxReceiveLongEdge !== null &&
+    maxReceiveLongEdge < 640 &&
+    (visibleTargetLongEdge === null || receiveBelowVisibleTarget);
+  const receiveBelowHdExpectation =
+    maxReceiveLongEdge !== null &&
+    maxReceiveLongEdge < 720 &&
+    (visibleTargetLongEdge === null || visibleTargetLongEdge >= 720);
+  const receiveShortBelowVisibleTarget =
+    visibleTargetShortEdge !== null &&
+    maxReceiveShortEdge !== null &&
+    maxReceiveShortEdge < visibleTargetShortEdge * 0.9;
+  const lowBitrateActionable =
+    averageBitrateKbps !== null &&
+    averageBitrateKbps < 350 &&
+    (!renderTargetSatisfied ||
+      averageReceiveFps === null ||
+      averageReceiveFps < 18 ||
+      totalFreezeCount > 0 ||
+      Boolean(qualityLimitationReasons.bandwidth));
   let score = source.length ? 100 : 0;
   const observations = [];
   if (!realDeviceSamples.length && ordered.length) {
@@ -1349,10 +1399,13 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     score -= 15;
     observations.push("Packet loss is above 2%");
   }
-  if (maxReceiveLongEdge !== null && maxReceiveLongEdge < 640) {
+  if (receiveBelowMinimum) {
     score -= 20;
     observations.push("Received video never exceeded 640 px");
-  } else if (maxReceiveLongEdge !== null && maxReceiveLongEdge < 720) {
+  } else if (receiveBelowVisibleTarget) {
+    score -= 12;
+    observations.push("Received video remained below the visible tile target");
+  } else if (receiveBelowHdExpectation) {
     score -= 8;
     observations.push("Received video did not reach 720p");
   }
@@ -1360,7 +1413,7 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     score -= averageReceiveFps < 18 ? 15 : 8;
     observations.push("Received video frame rate remained below 24 fps");
   }
-  if (averageBitrateKbps !== null && averageBitrateKbps < 350) {
+  if (lowBitrateActionable) {
     score -= 15;
     observations.push("Observed aggregate bitrate is low");
   }
@@ -1400,11 +1453,15 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const videoScore = Math.max(
     0,
     100 -
-      (maxReceiveLongEdge !== null && maxReceiveLongEdge < 640 ? 30 : 0) -
-      (maxReceiveLongEdge !== null && maxReceiveLongEdge < 720 ? 10 : 0) -
-      (maxReceiveShortEdge !== null && maxReceiveShortEdge < 360 ? 10 : 0) -
+      (receiveBelowMinimum ? 30 : receiveBelowVisibleTarget ? 15 : receiveBelowHdExpectation ? 10 : 0) -
+      (receiveShortBelowVisibleTarget ||
+      (visibleTargetShortEdge === null &&
+        maxReceiveShortEdge !== null &&
+        maxReceiveShortEdge < 360)
+        ? 10
+        : 0) -
       (averageReceiveFps !== null && averageReceiveFps < 24 ? 10 : 0) -
-      (averageBitrateKbps !== null && averageBitrateKbps < 350 ? 25 : 0) -
+      (lowBitrateActionable ? 25 : 0) -
       (receiveVideo.length &&
       !receiveVideo.some((track) => track.adaptiveStreamAttached)
         ? 20
@@ -1474,18 +1531,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       renderTargetTrackCount,
       renderTargetMismatchCount,
       renderTargetMatchRate,
-      averageRequestedReceiveWidth: average(
-        targetedReceiveVideo.map((track) => track.requestedWidth)
-      ),
-      averageRequestedReceiveHeight: average(
-        targetedReceiveVideo.map((track) => track.requestedHeight)
-      ),
-      averageRequestedContentReceiveWidth: average(
-        targetedReceiveVideo.map((track) => track.requestedContentWidth)
-      ),
-      averageRequestedContentReceiveHeight: average(
-        targetedReceiveVideo.map((track) => track.requestedContentHeight)
-      ),
+      averageRequestedReceiveWidth,
+      averageRequestedReceiveHeight,
+      averageRequestedContentReceiveWidth,
+      averageRequestedContentReceiveHeight,
       averageScreenShareSendBitrateKbps: average(
         aggregates.map((item) => item.screenShareSendBitrateKbps)
       ),

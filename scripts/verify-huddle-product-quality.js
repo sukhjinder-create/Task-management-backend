@@ -161,6 +161,47 @@ assert.equal(qualitySummary.metrics.averageRequestedContentReceiveWidth, 960);
 assert.equal(qualitySummary.metrics.totalFreezeCount, 2);
 assert.equal(qualitySummary.metrics.totalFramesDropped, 4);
 
+const visibleTileSummary = summarizeLiveKitQualitySamples([{
+  observedAt: "2026-06-11T10:01:00.000Z",
+  aggregate: {
+    averageRttMs: 32,
+    averagePacketLoss: 0,
+    totalBitrateKbps: 318,
+    receiveBitrateKbps: 138,
+    maxReceiveWidth: 640,
+    maxReceiveHeight: 360,
+    renderTargetTrackCount: 2,
+    renderTargetMismatchCount: 0,
+    selectedHighLayerCount: 2,
+    totalFreezeCount: 0,
+  },
+  tracks: [{
+    direction: "receive",
+    kind: "video",
+    videoQuality: "high",
+    attachedElementCount: 1,
+    adaptiveStreamAttached: true,
+    width: 640,
+    height: 360,
+    framesPerSecond: 30,
+    bitrateKbps: 138,
+    renderedWidth: 562,
+    renderedHeight: 316,
+    requestedWidth: 562,
+    requestedHeight: 316,
+    requestedContentWidth: 562,
+    requestedContentHeight: 316,
+    renderTargetVisible: true,
+  }],
+  browser: { userAgent: "Chrome real device" },
+}]);
+assert.equal(visibleTileSummary.metrics.renderTargetMatchRate, 1);
+assert.equal(visibleTileSummary.metrics.maxReceiveLongEdge, 640);
+assert.doesNotMatch(
+  visibleTileSummary.observations.join("\n"),
+  /Received video did not reach 720p|Observed aggregate bitrate is low/
+);
+
 const listenUrl = new URL(buildDeepgramListenUrl({
   model: "nova-3",
   language: "multi",

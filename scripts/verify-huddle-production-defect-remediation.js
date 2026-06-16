@@ -16,6 +16,7 @@ const transcriptionClient = readFrontend("src/huddle/media/LiveTranscriptionClie
 const liveKitProvider = readFrontend("src/huddle/media/LiveKitMediaProvider.js");
 const liveKitRenderTarget = readFrontend("src/huddle/media/LiveKitRenderTarget.js");
 const liveKitConnection = readFrontend("src/huddle/media/LiveKitConnection.js");
+const huddleContext = readFrontend("src/context/HuddleContext.jsx");
 const backgroundEffects = readFrontend("src/huddle/media/BackgroundEffects.js");
 const huddleWindow = readFrontend("src/huddle/GlobalHuddleWindow.jsx");
 const meetingIntelligence = readFrontend("src/pages/HuddleMeetingIntelligence.jsx");
@@ -71,6 +72,9 @@ assert.match(
   /Promise\.allSettled\(\[\s*fetchLiveKitRoomDescriptor\(params\),\s*fetchLiveKitToken\(params\)/
 );
 assert.match(liveKitProvider, /enableCameraAndMicrophone/);
+assert.match(liveKitProvider, /setCameraEnabled\?\.\(\s*true,\s*cameraCaptureOptions\(\),\s*cameraPublishOptions\(\)/);
+assert.match(liveKitProvider, /maxFramerate: mobile \? 24 : 30/);
+assert.match(huddleContext, /requestIdleCallback\(preload, \{ timeout: 1500 \}\)/);
 assert.match(liveKitProvider, /aspectRatio: portrait \? 9 \/ 16 : 16 \/ 9/);
 assert.match(liveKitProvider, /estimatedMegabytesPerHour/);
 assert.match(media, /Estimated media data usage is unusually high/);
