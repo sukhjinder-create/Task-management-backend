@@ -70,10 +70,11 @@ assert.match(liveKitConnection, /maxBitrate: mobile \? 1_400_000 : 2_200_000/);
 assert.match(liveKitConnection, /async function timedLiveKitRequest/);
 assert.match(
   liveKitConnection,
-  /Promise\.all\(\[\s*timedLiveKitRequest\(\(\) => fetchLiveKitRoomDescriptor\(params\)\),\s*timedLiveKitRequest\(\(\) => fetchLiveKitToken\(params\)\)/
+  /const tokenRequest = await timedLiveKitRequest\(\(\) => fetchLiveKitToken\(params\)\)/
 );
-assert.match(liveKitConnection, /roomEndpointLatencyMs = roomRequest\.latencyMs/);
+assert.match(liveKitConnection, /roomEndpointLatencyMs = null/);
 assert.match(liveKitConnection, /tokenEndpointLatencyMs = tokenRequest\.latencyMs/);
+assert.match(liveKitConnection, /source: "token_endpoint"/);
 assert.match(liveKitProvider, /enableCameraAndMicrophone/);
 assert.match(liveKitProvider, /setCameraEnabled\?\.\(\s*true,\s*cameraCaptureOptions\(\),\s*cameraPublishOptions\(\)/);
 assert.match(liveKitProvider, /maxFramerate: mobile \? 24 : 30/);
