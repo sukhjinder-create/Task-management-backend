@@ -117,6 +117,8 @@ assert.match(huddleWindow, /CURATED_HUDDLE_BACKGROUNDS/);
 assert.match(huddleWindow, /\(!isMobileDevice \|\| isMaximized\)/);
 assert.match(media, /averageSendFps/);
 assert.match(media, /averageReceiveFps/);
+assert.match(media, /averageConnectLatencyMs/);
+assert.match(media, /averageSendMediaSourceFps/);
 assert.match(media, /qualityLimitationReasons/);
 assert.match(media, /renderTargetMatchRate/);
 

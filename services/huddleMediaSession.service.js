@@ -844,6 +844,11 @@ function sanitizeQualityStartup(raw = {}) {
     firstAudioMs: safeNumber(startup.firstAudioMs),
     firstVideoMs: safeNumber(startup.firstVideoMs),
     captionsActiveMs: safeNumber(startup.captionsActiveMs),
+    prepareLatencyMs: safeNumber(startup.prepareLatencyMs),
+    roomEndpointLatencyMs: safeNumber(startup.roomEndpointLatencyMs),
+    tokenEndpointLatencyMs: safeNumber(startup.tokenEndpointLatencyMs),
+    connectLatencyMs: safeNumber(startup.connectLatencyMs),
+    totalJoinLatencyMs: safeNumber(startup.totalJoinLatencyMs),
   };
 }
 
@@ -899,6 +904,13 @@ function sanitizeQualityTrack(raw = {}) {
     width: safeNumber(track.width),
     height: safeNumber(track.height),
     framesPerSecond: safeNumber(track.framesPerSecond),
+    mediaSourceWidth: safeNumber(track.mediaSourceWidth),
+    mediaSourceHeight: safeNumber(track.mediaSourceHeight),
+    mediaSourceFrameRate: safeNumber(track.mediaSourceFrameRate),
+    mediaSourceFacingMode: boundedString(track.mediaSourceFacingMode, 40),
+    mediaSourceResizeMode: boundedString(track.mediaSourceResizeMode, 40),
+    mediaSourceDisplaySurface: boundedString(track.mediaSourceDisplaySurface, 40),
+    mediaTrackContentHint: boundedString(track.mediaTrackContentHint, 80),
     bitrateKbps: safeNumber(track.bitrateKbps),
     availableOutgoingBitrateKbps: safeNumber(track.availableOutgoingBitrateKbps),
     availableIncomingBitrateKbps: safeNumber(track.availableIncomingBitrateKbps),
@@ -1238,6 +1250,12 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const averageReceiveFps = average(
     receiveVideo.map((track) => track.framesPerSecond)
   );
+  const averageSendMediaSourceFps = average(
+    sendVideo.map((track) => track.mediaSourceFrameRate)
+  );
+  const averageReceiveMediaSourceFps = average(
+    receiveVideo.map((track) => track.mediaSourceFrameRate)
+  );
   const videoCodecs = uniqueStrings(
     tracks
       .filter((track) => track.kind === "video")
@@ -1503,6 +1521,8 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageReceiveBitrateKbps,
       averageSendFps,
       averageReceiveFps,
+      averageSendMediaSourceFps,
+      averageReceiveMediaSourceFps,
       videoCodecs,
       qualityLimitationReasons,
       estimatedMegabytesPerHour,
@@ -1511,6 +1531,21 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       ),
       averageJoinMs: average(startupSamples.map((item) => item.joinMs)),
       averagePublishMs: average(startupSamples.map((item) => item.publishMs)),
+      averagePrepareLatencyMs: average(
+        startupSamples.map((item) => item.prepareLatencyMs)
+      ),
+      averageRoomEndpointLatencyMs: average(
+        startupSamples.map((item) => item.roomEndpointLatencyMs)
+      ),
+      averageTokenEndpointLatencyMs: average(
+        startupSamples.map((item) => item.tokenEndpointLatencyMs)
+      ),
+      averageConnectLatencyMs: average(
+        startupSamples.map((item) => item.connectLatencyMs)
+      ),
+      averageTotalJoinLatencyMs: average(
+        startupSamples.map((item) => item.totalJoinLatencyMs)
+      ),
       averageFirstAudioMs: average(
         startupSamples.map((item) => item.firstAudioMs)
       ),
