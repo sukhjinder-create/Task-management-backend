@@ -878,6 +878,9 @@ function sanitizeQualityStartup(raw = {}) {
     captionFirstLocalCaptionLatencyMs: safeNumber(startup.captionFirstLocalCaptionLatencyMs),
     captionGrantCacheHit: Boolean(startup.captionGrantCacheHit),
     captionGrantSharedInFlight: Boolean(startup.captionGrantSharedInFlight),
+    mediaPrewarmLatencyMs: safeNumber(startup.mediaPrewarmLatencyMs),
+    mediaPrewarmOk: safeBoolean(startup.mediaPrewarmOk),
+    mediaPrewarmTrackCount: safeNumber(startup.mediaPrewarmTrackCount),
   };
 }
 
@@ -1563,6 +1566,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       ),
       averageJoinMs: positiveAverage(startupSamples.map((item) => item.joinMs)),
       averagePublishMs: positiveAverage(startupSamples.map((item) => item.publishMs)),
+      averageMediaPrewarmLatencyMs: positiveAverage(
+        startupSamples.map((item) => item.mediaPrewarmLatencyMs)
+      ),
+      mediaPrewarmSuccessCount: startupSamples.filter((item) => item.mediaPrewarmOk).length,
       averagePrepareLatencyMs: positiveAverage(
         startupSamples.map((item) => item.prepareLatencyMs)
       ),
