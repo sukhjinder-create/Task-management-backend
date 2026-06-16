@@ -67,10 +67,13 @@ assert.match(
   /\[videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h720\]/
 );
 assert.match(liveKitConnection, /maxBitrate: mobile \? 1_400_000 : 2_200_000/);
+assert.match(liveKitConnection, /async function timedLiveKitRequest/);
 assert.match(
   liveKitConnection,
-  /Promise\.allSettled\(\[\s*fetchLiveKitRoomDescriptor\(params\),\s*fetchLiveKitToken\(params\)/
+  /Promise\.all\(\[\s*timedLiveKitRequest\(\(\) => fetchLiveKitRoomDescriptor\(params\)\),\s*timedLiveKitRequest\(\(\) => fetchLiveKitToken\(params\)\)/
 );
+assert.match(liveKitConnection, /roomEndpointLatencyMs = roomRequest\.latencyMs/);
+assert.match(liveKitConnection, /tokenEndpointLatencyMs = tokenRequest\.latencyMs/);
 assert.match(liveKitProvider, /enableCameraAndMicrophone/);
 assert.match(liveKitProvider, /setCameraEnabled\?\.\(\s*true,\s*cameraCaptureOptions\(\),\s*cameraPublishOptions\(\)/);
 assert.match(liveKitProvider, /maxFramerate: mobile \? 24 : 30/);

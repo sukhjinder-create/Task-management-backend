@@ -1216,6 +1216,14 @@ function average(values) {
   );
 }
 
+function positiveAverage(values) {
+  const numbers = finiteValues(values).filter((value) => value > 0);
+  if (!numbers.length) return null;
+  return Number(
+    (numbers.reduce((total, value) => total + value, 0) / numbers.length).toFixed(2)
+  );
+}
+
 function uniqueStrings(values) {
   return [...new Set(values.map((value) => boundedString(value, 80)).filter(Boolean))];
 }
@@ -1352,28 +1360,15 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       : null;
   const renderTargetSatisfied =
     renderTargetMatchRate !== null && renderTargetMatchRate >= 0.9;
-  const totalFreezeCount = aggregates.reduce(
-    (total, item) => total + (Number(item.totalFreezeCount) || 0),
-    0
-  );
+  const maxAggregateNumber = (key) =>
+    Math.max(0, ...finiteValues(aggregates.map((item) => item[key]))) || 0;
+  const totalFreezeCount = maxAggregateNumber("totalFreezeCount");
   const totalFreezeDurationSeconds = Number(
-    aggregates.reduce(
-      (total, item) => total + (Number(item.totalFreezeDurationSeconds) || 0),
-      0
-    ).toFixed(3)
+    maxAggregateNumber("totalFreezeDurationSeconds").toFixed(3)
   );
-  const totalFramesDropped = aggregates.reduce(
-    (total, item) => total + (Number(item.totalFramesDropped) || 0),
-    0
-  );
-  const totalFramesDecoded = aggregates.reduce(
-    (total, item) => total + (Number(item.totalFramesDecoded) || 0),
-    0
-  );
-  const totalFramesRendered = aggregates.reduce(
-    (total, item) => total + (Number(item.totalFramesRendered) || 0),
-    0
-  );
+  const totalFramesDropped = maxAggregateNumber("totalFramesDropped");
+  const totalFramesDecoded = maxAggregateNumber("totalFramesDecoded");
+  const totalFramesRendered = maxAggregateNumber("totalFramesRendered");
   const receiveBelowVisibleTarget =
     visibleTargetLongEdge !== null &&
     maxReceiveLongEdge !== null &&
@@ -1453,7 +1448,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     );
   }
   if (totalFreezeCount > 0) {
-    score -= Math.min(20, Math.max(5, totalFreezeCount));
+    score -= Math.min(
+      20,
+      Math.max(5, Math.ceil(totalFreezeDurationSeconds || totalFreezeCount / 2))
+    );
     observations.push("Receiver reported decoded video freezes");
   }
   if (qualityLimitationReasons.bandwidth) {
@@ -1485,7 +1483,12 @@ export function summarizeLiveKitQualitySamples(samples = []) {
         ? 20
         : 0) -
       (renderTargetMatchRate !== null && renderTargetMatchRate < 0.8 ? 20 : 0) -
-      (totalFreezeCount > 0 ? Math.min(25, Math.max(10, totalFreezeCount)) : 0) -
+      (totalFreezeCount > 0
+        ? Math.min(
+            25,
+            Math.max(8, Math.ceil(totalFreezeDurationSeconds || totalFreezeCount / 2))
+          )
+        : 0) -
       (qualityLimitationReasons.bandwidth ? 10 : 0) -
       (averagePacketLoss > 0.05 ? 25 : averagePacketLoss > 0.02 ? 10 : 0)
   );
@@ -1526,33 +1529,33 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       videoCodecs,
       qualityLimitationReasons,
       estimatedMegabytesPerHour,
-      averageIntentToJoinMs: average(
+      averageIntentToJoinMs: positiveAverage(
         startupSamples.map((item) => item.intentToJoinMs)
       ),
-      averageJoinMs: average(startupSamples.map((item) => item.joinMs)),
-      averagePublishMs: average(startupSamples.map((item) => item.publishMs)),
-      averagePrepareLatencyMs: average(
+      averageJoinMs: positiveAverage(startupSamples.map((item) => item.joinMs)),
+      averagePublishMs: positiveAverage(startupSamples.map((item) => item.publishMs)),
+      averagePrepareLatencyMs: positiveAverage(
         startupSamples.map((item) => item.prepareLatencyMs)
       ),
-      averageRoomEndpointLatencyMs: average(
+      averageRoomEndpointLatencyMs: positiveAverage(
         startupSamples.map((item) => item.roomEndpointLatencyMs)
       ),
-      averageTokenEndpointLatencyMs: average(
+      averageTokenEndpointLatencyMs: positiveAverage(
         startupSamples.map((item) => item.tokenEndpointLatencyMs)
       ),
-      averageConnectLatencyMs: average(
+      averageConnectLatencyMs: positiveAverage(
         startupSamples.map((item) => item.connectLatencyMs)
       ),
-      averageTotalJoinLatencyMs: average(
+      averageTotalJoinLatencyMs: positiveAverage(
         startupSamples.map((item) => item.totalJoinLatencyMs)
       ),
-      averageFirstAudioMs: average(
+      averageFirstAudioMs: positiveAverage(
         startupSamples.map((item) => item.firstAudioMs)
       ),
-      averageFirstVideoMs: average(
+      averageFirstVideoMs: positiveAverage(
         startupSamples.map((item) => item.firstVideoMs)
       ),
-      averageCaptionsActiveMs: average(
+      averageCaptionsActiveMs: positiveAverage(
         startupSamples.map((item) => item.captionsActiveMs)
       ),
       backgroundEffectModes: uniqueStrings(
