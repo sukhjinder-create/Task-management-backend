@@ -62,6 +62,14 @@ function isEnabled(value) {
   return safeString(value).toLowerCase() === "true";
 }
 
+function nowMs() {
+  return Number(process.hrtime.bigint() / 1000000n);
+}
+
+function elapsedMs(startedAt) {
+  return Math.max(0, nowMs() - startedAt);
+}
+
 function splitCsv(value) {
   return safeString(value)
     .split(",")
@@ -175,6 +183,16 @@ function safeErrorPayload({ reason, authorization, diagnostics = {} }) {
 }
 
 async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
+  const totalStartedAt = nowMs();
+  const timings = {
+    authorizationTotalMs: null,
+    scopeResolutionMs: null,
+    durableSessionResolutionMs: null,
+    providerLockLookupMs: null,
+    providerSelectionMs: null,
+    providerLockAcquisitionMs: null,
+    providerLockInheritedWithoutWrite: false,
+  };
   const workspaceId = req.workspaceId;
   const userId = req.user?.id;
   const channelId = safeString(body.channelId);
@@ -231,11 +249,13 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
   if (!checks.sessionProvided) return { ok: false, status: 400, reason: "session_required", checks };
   if (!checks.planEntitled) return { ok: false, status: 403, reason: "video_huddle_entitlement_required", checks };
 
+  const scopeStartedAt = nowMs();
   const scopeResult = await resolveHuddleScope({
     channelId,
     workspaceId,
     actorUserId: userId,
   });
+  timings.scopeResolutionMs = elapsedMs(scopeStartedAt);
   checks.scopeAccess = Boolean(scopeResult.ok);
   if (!scopeResult.ok) {
       return {
@@ -246,12 +266,14 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
     };
   }
 
+  const durableStartedAt = nowMs();
   const durableSession = await resolveDurableHuddleSession({
     workspaceId,
     channelId,
     sessionId,
     huddleId: safeString(body.huddleId) || sessionId,
   });
+  timings.durableSessionResolutionMs = elapsedMs(durableStartedAt);
   checks.durableSessionResolved = Boolean(durableSession.ok);
   if (!durableSession.ok) {
     return {
@@ -263,6 +285,7 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
     };
   }
 
+  const lockLookupStartedAt = nowMs();
   const providerLock = await findLockedMediaSession({
     workspaceId,
     sessionId: durableSession.session.id,
@@ -270,6 +293,8 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
     providerType: HUDDLE_MEDIA_PROVIDERS.MESH,
     diagnostics: { providerLockLookupError: error.message },
   }));
+  timings.providerLockLookupMs = elapsedMs(lockLookupStartedAt);
+  const selectorStartedAt = nowMs();
   selector = selectHuddleMediaProvider({
     requestedProvider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
     workspaceId,
@@ -284,6 +309,7 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
     tokenConfig,
     providerLock,
   });
+  timings.providerSelectionMs = elapsedMs(selectorStartedAt);
   checks.canaryEnabled = Boolean(selector.livekitCanaryEnabled);
   checks.workspaceAllowed = Boolean(selector.livekitCanaryWorkspaceAllowed);
   checks.canaryEligible = Boolean(selector.livekitCanaryEligible);
@@ -343,6 +369,7 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
         durableSession: durableSession.session,
       };
     }
+    timings.authorizationTotalMs = elapsedMs(totalStartedAt);
     return {
       ok: true,
       workspaceId,
@@ -357,6 +384,7 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
       providerLock: providerLock.providerLock,
       roomConfig,
       tokenConfig,
+      timings,
       checks: {
         ...checks,
         providerLocked: true,
@@ -376,28 +404,47 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
       legacyHuddleId: safeString(body.huddleId) || sessionId,
       legacyChannelKey: channelId,
     });
-  const lockResult = await createOrGetLockedMediaSession({
-    session: durableSession.session,
-    workspaceId,
-    providerSelection: selector,
-    providerRoomId,
-    providerMetadata: {
-      roomName: providerRoomId,
+  let lockResult = null;
+  if (
+    providerLock?.providerType === HUDDLE_MEDIA_PROVIDERS.LIVEKIT &&
+    providerLock?.providerLock?.locked
+  ) {
+    timings.providerLockInheritedWithoutWrite = true;
+    timings.providerLockAcquisitionMs = 0;
+    lockResult = {
+      ok: true,
+      inherited: true,
+      mismatch: false,
+      mediaSession: providerLock,
+      providerType: providerLock.providerType,
+      providerLock: providerLock.providerLock,
+    };
+  } else {
+    const lockStartedAt = nowMs();
+    lockResult = await createOrGetLockedMediaSession({
+      session: durableSession.session,
+      workspaceId,
+      providerSelection: selector,
+      providerRoomId,
+      providerMetadata: {
+        roomName: providerRoomId,
+        diagnostics: {
+          endpointKind,
+          selector: selector.selectionReason,
+        },
+      },
       diagnostics: {
         endpointKind,
-        selector: selector.selectionReason,
+        selector: getProviderSelectionDiagnostics(selector),
+        providerLock: {
+          locked: true,
+          immutable: true,
+          providerType: selector.selectedProvider,
+        },
       },
-    },
-    diagnostics: {
-      endpointKind,
-      selector: getProviderSelectionDiagnostics(selector),
-      providerLock: {
-        locked: true,
-        immutable: true,
-        providerType: selector.selectedProvider,
-      },
-    },
-  });
+    });
+    timings.providerLockAcquisitionMs = elapsedMs(lockStartedAt);
+  }
   if (lockResult.mismatch || lockResult.providerType !== HUDDLE_MEDIA_PROVIDERS.LIVEKIT) {
     return {
       ok: false,
@@ -424,6 +471,7 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
   checks.providerLockRejected = false;
   checks.rejectionReason = null;
 
+  timings.authorizationTotalMs = elapsedMs(totalStartedAt);
   return {
     ok: true,
     workspaceId,
@@ -438,6 +486,7 @@ async function authorizeLiveKitRequest(req, body = {}, endpointKind = "room") {
     providerLock: lockResult.providerLock,
     roomConfig,
     tokenConfig,
+    timings,
     checks,
   };
 }
@@ -636,8 +685,11 @@ router.post("/livekit/room", async (req, res) => {
 });
 
 router.post("/livekit/token", async (req, res) => {
+  const endpointStartedAt = nowMs();
   try {
+    const authorizationStartedAt = nowMs();
     const authz = await authorizeLiveKitRequest(req, req.body, "token");
+    const authorizationMs = elapsedMs(authorizationStartedAt);
     if (!authz.ok) {
       recordHuddleMediaOperationalEvent({
         providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
@@ -668,6 +720,7 @@ router.post("/livekit/token", async (req, res) => {
       req.user?.displayName ||
       req.user?.email
     );
+    const tokenStartedAt = nowMs();
     const tokenResult = await huddleMediaTokenService.requestToken({
       request: createMediaTokenRequest({
         workspaceId: authz.workspaceId,
@@ -695,6 +748,7 @@ router.post("/livekit/token", async (req, res) => {
         role: req.user?.role || "participant",
       }),
     });
+    const tokenIssuanceMs = elapsedMs(tokenStartedAt);
 
     if (!tokenResult.ok) {
       recordHuddleMediaOperationalEvent({
@@ -710,7 +764,8 @@ router.post("/livekit/token", async (req, res) => {
       });
     }
 
-    await upsertMediaProviderIdentity({
+    const identityPersistStartedAt = nowMs();
+    const persistIdentity = () => upsertMediaProviderIdentity({
       workspaceId: authz.workspaceId,
       mediaSessionId: authz.mediaSession.mediaSessionId,
       sessionId: authz.sessionId,
@@ -726,6 +781,13 @@ router.post("/livekit/token", async (req, res) => {
         tokenIssued: true,
         endpointKind: "token",
       },
+    }).then(() => {
+      recordHuddleMediaOperationalEvent({
+        providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+        eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.TOKEN_ISSUANCE,
+        outcome: HUDDLE_MEDIA_OPERATIONAL_OUTCOMES.SUCCESS,
+        reason: "provider_identity_persisted_async",
+      });
     }).catch((error) => {
       console.warn("[huddle:media:livekit:identity_persist_failed]", {
         workspaceId: authz.workspaceId,
@@ -733,6 +795,11 @@ router.post("/livekit/token", async (req, res) => {
         error: error.message,
       });
     });
+    if (typeof setImmediate === "function") {
+      setImmediate(persistIdentity);
+    } else {
+      void persistIdentity();
+    }
 
     recordHuddleMediaOperationalEvent({
       providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
@@ -755,6 +822,13 @@ router.post("/livekit/token", async (req, res) => {
         authorization: authz.checks,
         selector: getProviderSelectionDiagnostics(authz.selector),
         providerLock: authz.providerLock,
+        timings: {
+          endpointTotalMs: elapsedMs(endpointStartedAt),
+          authorizationMs,
+          tokenIssuanceMs,
+          identityPersistQueuedMs: elapsedMs(identityPersistStartedAt),
+          ...(authz.timings || {}),
+        },
       },
     });
   } catch (error) {

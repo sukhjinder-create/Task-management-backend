@@ -836,6 +836,7 @@ function sanitizeQualityAggregate(raw = {}) {
 
 function sanitizeQualityStartup(raw = {}) {
   const startup = objectOrEmpty(raw);
+  const tokenEndpointBackendTimings = objectOrEmpty(startup.tokenEndpointBackendTimings);
   return {
     joinMs: safeNumber(startup.joinMs),
     publishMs: safeNumber(startup.publishMs),
@@ -845,10 +846,34 @@ function sanitizeQualityStartup(raw = {}) {
     firstVideoMs: safeNumber(startup.firstVideoMs),
     captionsActiveMs: safeNumber(startup.captionsActiveMs),
     prepareLatencyMs: safeNumber(startup.prepareLatencyMs),
+    sdkLoadLatencyMs: safeNumber(startup.sdkLoadLatencyMs),
     roomEndpointLatencyMs: safeNumber(startup.roomEndpointLatencyMs),
     tokenEndpointLatencyMs: safeNumber(startup.tokenEndpointLatencyMs),
+    tokenEndpointBackendTimings: {
+      endpointTotalMs: safeNumber(tokenEndpointBackendTimings.endpointTotalMs),
+      authorizationMs: safeNumber(tokenEndpointBackendTimings.authorizationMs),
+      tokenIssuanceMs: safeNumber(tokenEndpointBackendTimings.tokenIssuanceMs),
+      identityPersistQueuedMs: safeNumber(tokenEndpointBackendTimings.identityPersistQueuedMs),
+      authorizationTotalMs: safeNumber(tokenEndpointBackendTimings.authorizationTotalMs),
+      scopeResolutionMs: safeNumber(tokenEndpointBackendTimings.scopeResolutionMs),
+      durableSessionResolutionMs: safeNumber(tokenEndpointBackendTimings.durableSessionResolutionMs),
+      providerLockLookupMs: safeNumber(tokenEndpointBackendTimings.providerLockLookupMs),
+      providerSelectionMs: safeNumber(tokenEndpointBackendTimings.providerSelectionMs),
+      providerLockAcquisitionMs: safeNumber(tokenEndpointBackendTimings.providerLockAcquisitionMs),
+      providerLockInheritedWithoutWrite: safeBoolean(
+        tokenEndpointBackendTimings.providerLockInheritedWithoutWrite
+      ),
+    },
+    preconnectLatencyMs: safeNumber(startup.preconnectLatencyMs),
+    preconnectInserted: safeBoolean(startup.preconnectInserted),
     connectLatencyMs: safeNumber(startup.connectLatencyMs),
     totalJoinLatencyMs: safeNumber(startup.totalJoinLatencyMs),
+    captionGrantLatencyMs: safeNumber(startup.captionGrantLatencyMs),
+    captionWebsocketOpenLatencyMs: safeNumber(startup.captionWebsocketOpenLatencyMs),
+    captionRecorderStartLatencyMs: safeNumber(startup.captionRecorderStartLatencyMs),
+    captionFirstProviderResultLatencyMs: safeNumber(startup.captionFirstProviderResultLatencyMs),
+    captionFirstBackendEventLatencyMs: safeNumber(startup.captionFirstBackendEventLatencyMs),
+    captionFirstLocalCaptionLatencyMs: safeNumber(startup.captionFirstLocalCaptionLatencyMs),
   };
 }
 
