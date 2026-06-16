@@ -72,8 +72,16 @@ const sanitized = sanitizeLiveKitQualityDiagnostics({
     maxScreenShareReceiveHeight: 1080,
     renderTargetTrackCount: 2,
     renderTargetMismatchCount: 1,
+    maxRequestedContentReceiveWidth: 960,
+    maxRequestedContentReceiveHeight: 540,
     screenShareSendBitrateKbps: 1800,
     screenShareReceiveBitrateKbps: 1400,
+    freezeTrackCount: 1,
+    totalFreezeCount: 2,
+    totalFreezeDurationSeconds: 0.75,
+    totalFramesDropped: 4,
+    totalFramesDecoded: 240,
+    totalFramesRendered: 232,
   },
   startup: {
     intentToJoinMs: 920,
@@ -107,9 +115,18 @@ const sanitized = sanitizeLiveKitQualityDiagnostics({
     renderedHeight: 720,
     requestedWidth: 1280,
     requestedHeight: 720,
+    requestedContentWidth: 960,
+    requestedContentHeight: 540,
+    requestedSourceWidth: 1280,
+    requestedSourceHeight: 720,
     requestedFramesPerSecond: 30,
     requestedPixelRatio: 2,
     renderTargetVisible: true,
+    framesDecoded: 240,
+    framesRendered: 232,
+    freezeCount: 2,
+    totalFreezesDuration: 0.75,
+    framesDropped: 4,
   }],
 });
 assert.equal(sanitized.aggregate.selectedHighLayerCount, 3);
@@ -117,6 +134,9 @@ assert.equal(sanitized.aggregate.adaptiveStreamAttachedTrackCount, 4);
 assert.equal(sanitized.tracks[0].adaptiveStreamAttached, true);
 assert.equal(sanitized.tracks[0].renderedWidth, 1280);
 assert.equal(sanitized.tracks[0].requestedWidth, 1280);
+assert.equal(sanitized.tracks[0].requestedContentWidth, 960);
+assert.equal(sanitized.tracks[0].framesDecoded, 240);
+assert.equal(sanitized.tracks[0].freezeCount, 2);
 assert.equal(sanitized.tracks[0].renderTargetVisible, true);
 assert.equal(sanitized.startup.intentToJoinMs, 920);
 assert.equal(sanitized.startup.firstVideoMs, 1430);
@@ -137,6 +157,9 @@ assert.equal(qualitySummary.metrics.averageFirstAudioMs, 1180);
 assert.deepEqual(qualitySummary.metrics.backgroundEffectModes, ["blur"]);
 assert.equal(qualitySummary.metrics.renderTargetMatchRate, 0.5);
 assert.equal(qualitySummary.metrics.averageScreenShareSendBitrateKbps, 1800);
+assert.equal(qualitySummary.metrics.averageRequestedContentReceiveWidth, 960);
+assert.equal(qualitySummary.metrics.totalFreezeCount, 2);
+assert.equal(qualitySummary.metrics.totalFramesDropped, 4);
 
 const listenUrl = new URL(buildDeepgramListenUrl({
   model: "nova-3",

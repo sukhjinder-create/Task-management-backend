@@ -57,11 +57,15 @@ assert.match(liveKitProvider, /LIVE_CAPTION_CURSOR_OVERLAP_MS = 2000/);
 assert.match(liveKitProvider, /captionCursorRef/);
 
 assert.match(liveKitConnection, /videoSimulcastLayers: layers/);
-assert.doesNotMatch(
+assert.match(
   liveKitConnection,
-  /const layers = \[\s*videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h720/
+  /\[videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h540\]/
 );
-assert.match(liveKitConnection, /maxBitrate: mobile \? 1_000_000 : 1_500_000/);
+assert.match(
+  liveKitConnection,
+  /\[videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h720\]/
+);
+assert.match(liveKitConnection, /maxBitrate: mobile \? 1_400_000 : 2_200_000/);
 assert.match(
   liveKitConnection,
   /Promise\.allSettled\(\[\s*fetchLiveKitRoomDescriptor\(params\),\s*fetchLiveKitToken\(params\)/
@@ -75,10 +79,16 @@ assert.match(backgroundEffects, /preloadBackgroundEffects/);
 assert.match(backgroundEffects, /totalPreloadMs/);
 assert.match(liveKitProvider, /background_effect_automatically_disabled/);
 assert.match(liveKitProvider, /background_replacement_degraded_to_blur/);
+assert.match(liveKitProvider, /background_effect_disabled_on_mobile_for_call_quality/);
+assert.match(liveKitProvider, /mobileDisabledForCallQuality/);
 assert.match(liveKitProvider, /intentToJoinLatencyMs/);
 assert.match(liveKitProvider, /renderTargetMismatchCount/);
+assert.match(liveKitProvider, /freezeTrackCount/);
+assert.match(liveKitProvider, /markExistingSubscribedTracks/);
 assert.match(liveKitProvider, /screenShareSendBitrateKbps/);
 assert.match(liveKitRenderTarget, /setVideoDimensions/);
+assert.match(liveKitRenderTarget, /contentCssWidth/);
+assert.match(liveKitRenderTarget, /sourcePortrait/);
 assert.match(huddleWindow, /presentingParticipant/);
 assert.match(
   huddleWindow,

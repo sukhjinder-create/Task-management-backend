@@ -802,6 +802,9 @@ function sanitizeQualityAggregate(raw = {}) {
     averageRttMs: safeNumber(aggregate.averageRttMs),
     averagePacketLoss: safeNumber(aggregate.averagePacketLoss),
     totalBitrateKbps: safeNumber(aggregate.totalBitrateKbps),
+    sendBitrateKbps: safeNumber(aggregate.sendBitrateKbps),
+    receiveBitrateKbps: safeNumber(aggregate.receiveBitrateKbps),
+    estimatedMegabytesPerHour: safeNumber(aggregate.estimatedMegabytesPerHour),
     maxSendWidth: safeNumber(aggregate.maxSendWidth),
     maxSendHeight: safeNumber(aggregate.maxSendHeight),
     maxReceiveWidth: safeNumber(aggregate.maxReceiveWidth),
@@ -812,6 +815,8 @@ function sanitizeQualityAggregate(raw = {}) {
     maxScreenShareReceiveHeight: safeNumber(aggregate.maxScreenShareReceiveHeight),
     maxRequestedReceiveWidth: safeNumber(aggregate.maxRequestedReceiveWidth),
     maxRequestedReceiveHeight: safeNumber(aggregate.maxRequestedReceiveHeight),
+    maxRequestedContentReceiveWidth: safeNumber(aggregate.maxRequestedContentReceiveWidth),
+    maxRequestedContentReceiveHeight: safeNumber(aggregate.maxRequestedContentReceiveHeight),
     renderTargetTrackCount: safeNumber(aggregate.renderTargetTrackCount, 0),
     renderTargetMismatchCount: safeNumber(aggregate.renderTargetMismatchCount, 0),
     screenShareSendBitrateKbps: safeNumber(aggregate.screenShareSendBitrateKbps),
@@ -820,6 +825,12 @@ function sanitizeQualityAggregate(raw = {}) {
     selectedLowLayerCount: safeNumber(aggregate.selectedLowLayerCount, 0),
     selectedMediumLayerCount: safeNumber(aggregate.selectedMediumLayerCount, 0),
     selectedHighLayerCount: safeNumber(aggregate.selectedHighLayerCount, 0),
+    freezeTrackCount: safeNumber(aggregate.freezeTrackCount, 0),
+    totalFreezeCount: safeNumber(aggregate.totalFreezeCount),
+    totalFreezeDurationSeconds: safeNumber(aggregate.totalFreezeDurationSeconds),
+    totalFramesDropped: safeNumber(aggregate.totalFramesDropped),
+    totalFramesDecoded: safeNumber(aggregate.totalFramesDecoded),
+    totalFramesRendered: safeNumber(aggregate.totalFramesRendered),
   };
 }
 
@@ -899,6 +910,12 @@ function sanitizeQualityTrack(raw = {}) {
     bytesSent: safeNumber(track.bytesSent),
     bytesReceived: safeNumber(track.bytesReceived),
     framesDropped: safeNumber(track.framesDropped),
+    framesDecoded: safeNumber(track.framesDecoded),
+    framesRendered: safeNumber(track.framesRendered),
+    freezeCount: safeNumber(track.freezeCount),
+    totalFreezesDuration: safeNumber(track.totalFreezesDuration),
+    pauseCount: safeNumber(track.pauseCount),
+    totalPausesDuration: safeNumber(track.totalPausesDuration),
     codec: boundedString(track.codec, 80),
     mimeType: boundedString(track.mimeType, 80),
     rid: boundedString(track.rid, 32),
@@ -913,6 +930,10 @@ function sanitizeQualityTrack(raw = {}) {
     renderedHeight: safeNumber(track.renderedHeight),
     requestedWidth: safeNumber(track.requestedWidth),
     requestedHeight: safeNumber(track.requestedHeight),
+    requestedContentWidth: safeNumber(track.requestedContentWidth),
+    requestedContentHeight: safeNumber(track.requestedContentHeight),
+    requestedSourceWidth: safeNumber(track.requestedSourceWidth),
+    requestedSourceHeight: safeNumber(track.requestedSourceHeight),
     requestedFramesPerSecond: safeNumber(track.requestedFramesPerSecond),
     requestedPixelRatio: safeNumber(track.requestedPixelRatio),
     renderTargetVisible:
@@ -1255,6 +1276,14 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     0,
     ...finiteValues(aggregates.map((item) => item.maxReceiveHeight))
   ) || null;
+  const maxReceiveLongEdge =
+    maxReceiveWidth && maxReceiveHeight
+      ? Math.max(maxReceiveWidth, maxReceiveHeight)
+      : null;
+  const maxReceiveShortEdge =
+    maxReceiveWidth && maxReceiveHeight
+      ? Math.min(maxReceiveWidth, maxReceiveHeight)
+      : null;
   const maxSendWidth = Math.max(
     0,
     ...finiteValues(aggregates.map((item) => item.maxSendWidth))
@@ -1279,6 +1308,28 @@ export function summarizeLiveKitQualitySamples(samples = []) {
         ).toFixed(4)
       )
     : null;
+  const totalFreezeCount = aggregates.reduce(
+    (total, item) => total + (Number(item.totalFreezeCount) || 0),
+    0
+  );
+  const totalFreezeDurationSeconds = Number(
+    aggregates.reduce(
+      (total, item) => total + (Number(item.totalFreezeDurationSeconds) || 0),
+      0
+    ).toFixed(3)
+  );
+  const totalFramesDropped = aggregates.reduce(
+    (total, item) => total + (Number(item.totalFramesDropped) || 0),
+    0
+  );
+  const totalFramesDecoded = aggregates.reduce(
+    (total, item) => total + (Number(item.totalFramesDecoded) || 0),
+    0
+  );
+  const totalFramesRendered = aggregates.reduce(
+    (total, item) => total + (Number(item.totalFramesRendered) || 0),
+    0
+  );
   let score = source.length ? 100 : 0;
   const observations = [];
   if (!realDeviceSamples.length && ordered.length) {
@@ -1298,10 +1349,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     score -= 15;
     observations.push("Packet loss is above 2%");
   }
-  if (maxReceiveWidth !== null && maxReceiveWidth < 640) {
+  if (maxReceiveLongEdge !== null && maxReceiveLongEdge < 640) {
     score -= 20;
     observations.push("Received video never exceeded 640 px");
-  } else if (maxReceiveHeight !== null && maxReceiveHeight < 720) {
+  } else if (maxReceiveLongEdge !== null && maxReceiveLongEdge < 720) {
     score -= 8;
     observations.push("Received video did not reach 720p");
   }
@@ -1330,6 +1381,10 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       "Received video frequently remained below the dimensions requested by visible tiles"
     );
   }
+  if (totalFreezeCount > 0) {
+    score -= Math.min(20, Math.max(5, totalFreezeCount));
+    observations.push("Receiver reported decoded video freezes");
+  }
   if (qualityLimitationReasons.bandwidth) {
     score -= 10;
     observations.push(
@@ -1345,8 +1400,9 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const videoScore = Math.max(
     0,
     100 -
-      (maxReceiveWidth !== null && maxReceiveWidth < 640 ? 30 : 0) -
-      (maxReceiveHeight !== null && maxReceiveHeight < 720 ? 10 : 0) -
+      (maxReceiveLongEdge !== null && maxReceiveLongEdge < 640 ? 30 : 0) -
+      (maxReceiveLongEdge !== null && maxReceiveLongEdge < 720 ? 10 : 0) -
+      (maxReceiveShortEdge !== null && maxReceiveShortEdge < 360 ? 10 : 0) -
       (averageReceiveFps !== null && averageReceiveFps < 24 ? 10 : 0) -
       (averageBitrateKbps !== null && averageBitrateKbps < 350 ? 25 : 0) -
       (receiveVideo.length &&
@@ -1354,6 +1410,7 @@ export function summarizeLiveKitQualitySamples(samples = []) {
         ? 20
         : 0) -
       (renderTargetMatchRate !== null && renderTargetMatchRate < 0.8 ? 20 : 0) -
+      (totalFreezeCount > 0 ? Math.min(25, Math.max(10, totalFreezeCount)) : 0) -
       (qualityLimitationReasons.bandwidth ? 10 : 0) -
       (averagePacketLoss > 0.05 ? 25 : averagePacketLoss > 0.02 ? 10 : 0)
   );
@@ -1423,6 +1480,12 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageRequestedReceiveHeight: average(
         targetedReceiveVideo.map((track) => track.requestedHeight)
       ),
+      averageRequestedContentReceiveWidth: average(
+        targetedReceiveVideo.map((track) => track.requestedContentWidth)
+      ),
+      averageRequestedContentReceiveHeight: average(
+        targetedReceiveVideo.map((track) => track.requestedContentHeight)
+      ),
       averageScreenShareSendBitrateKbps: average(
         aggregates.map((item) => item.screenShareSendBitrateKbps)
       ),
@@ -1435,6 +1498,13 @@ export function summarizeLiveKitQualitySamples(samples = []) {
         maxReceiveWidth && maxReceiveHeight
           ? `${maxReceiveWidth}x${maxReceiveHeight}`
           : null,
+      maxReceiveLongEdge,
+      maxReceiveShortEdge,
+      totalFreezeCount,
+      totalFreezeDurationSeconds,
+      totalFramesDropped,
+      totalFramesDecoded,
+      totalFramesRendered,
       sendVideoTrackCount: sendVideo.length,
       receiveVideoTrackCount: receiveVideo.length,
       screenShareTrackCount: screenShare.length,
