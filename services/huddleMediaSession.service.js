@@ -920,6 +920,19 @@ function sanitizeQualityParticipant(raw = {}) {
   };
 }
 
+function sanitizeQualitySenderEncoding(raw = {}) {
+  const encoding = objectOrEmpty(raw);
+  return {
+    index: safeNumber(encoding.index),
+    rid: boundedString(encoding.rid, 32),
+    active: safeBoolean(encoding.active),
+    scaleResolutionDownBy: safeNumber(encoding.scaleResolutionDownBy),
+    maxBitrateKbps: safeNumber(encoding.maxBitrateKbps),
+    maxFramerate: safeNumber(encoding.maxFramerate),
+    scalabilityMode: boundedString(encoding.scalabilityMode, 60),
+  };
+}
+
 function sanitizeQualityTrack(raw = {}) {
   const track = objectOrEmpty(raw);
   return {
@@ -967,6 +980,11 @@ function sanitizeQualityTrack(raw = {}) {
     simulcastLayer: boundedString(track.simulcastLayer, 40),
     streamState: boundedString(track.streamState, 40),
     videoQuality: boundedString(track.videoQuality, 40),
+    senderEncodingCount: safeNumber(track.senderEncodingCount),
+    senderActiveEncodingCount: safeNumber(track.senderActiveEncodingCount),
+    senderEncodings: boundedArray(track.senderEncodings, 5).map(
+      sanitizeQualitySenderEncoding
+    ),
     qualityLimitationReason: boundedString(track.qualityLimitationReason, 60),
     publicationWidth: safeNumber(track.publicationWidth),
     publicationHeight: safeNumber(track.publicationHeight),
