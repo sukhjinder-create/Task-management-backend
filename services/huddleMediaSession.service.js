@@ -874,6 +874,8 @@ function sanitizeQualityStartup(raw = {}) {
     captionFirstProviderResultLatencyMs: safeNumber(startup.captionFirstProviderResultLatencyMs),
     captionFirstBackendEventLatencyMs: safeNumber(startup.captionFirstBackendEventLatencyMs),
     captionFirstLocalCaptionLatencyMs: safeNumber(startup.captionFirstLocalCaptionLatencyMs),
+    captionGrantCacheHit: Boolean(startup.captionGrantCacheHit),
+    captionGrantSharedInFlight: Boolean(startup.captionGrantSharedInFlight),
   };
 }
 

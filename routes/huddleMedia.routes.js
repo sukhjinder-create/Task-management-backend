@@ -31,6 +31,7 @@ import {
 } from "../services/huddleMediaOperationalReadiness.service.js";
 import { resolveHuddleScope } from "../services/huddleScopeResolver.service.js";
 import { findHuddleSessionByLegacy } from "../services/huddleSession.service.js";
+import { primeSttProviderGrantCache } from "../services/huddleSttProvider.service.js";
 
 const router = express.Router();
 
@@ -799,6 +800,19 @@ router.post("/livekit/token", async (req, res) => {
       setImmediate(persistIdentity);
     } else {
       void persistIdentity();
+    }
+
+    const primeTranscriptionGrant = () => {
+      primeSttProviderGrantCache().catch((error) => {
+        console.warn("[huddle:media:livekit:transcription_grant_prime_failed]", {
+          reason: error?.reason || error?.message || "transcription_grant_prime_failed",
+        });
+      });
+    };
+    if (typeof setImmediate === "function") {
+      setImmediate(primeTranscriptionGrant);
+    } else {
+      void primeTranscriptionGrant();
     }
 
     recordHuddleMediaOperationalEvent({

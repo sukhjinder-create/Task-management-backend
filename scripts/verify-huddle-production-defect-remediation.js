@@ -45,7 +45,9 @@ assert.match(llm, /LLM_TRANSIENT_RETRY_ATTEMPTS/);
 assert.match(llm, /\[408, 425, 429\]/);
 assert.match(llm, /retry-after/);
 
-assert.match(transcriptionClient, /DEFAULT_TIMESLICE_MS = 250/);
+assert.match(transcriptionClient, /DEFAULT_TIMESLICE_MS = 100/);
+assert.match(transcriptionClient, /preconnectDeepgram/);
+assert.match(transcriptionClient, /grantCacheHit/);
 assert.match(transcriptionClient, /KEEP_ALIVE_INTERVAL_MS = 8000/);
 assert.match(transcriptionClient, /MAX_RECONNECT_DELAY_MS = 15000/);
 assert.match(transcriptionClient, /pendingPartialEvent/);
@@ -56,6 +58,7 @@ assert.match(transcriptionClient, /status: "reconnecting"/);
 assert.match(liveKitProvider, /LIVE_CAPTION_POLL_INTERVAL_MS = 500/);
 assert.match(liveKitProvider, /LIVE_CAPTION_CURSOR_OVERLAP_MS = 2000/);
 assert.match(liveKitProvider, /captionCursorRef/);
+assert.match(liveKitProvider, /captionGrantCacheHit/);
 
 assert.match(liveKitConnection, /videoSimulcastLayers: layers/);
 assert.match(

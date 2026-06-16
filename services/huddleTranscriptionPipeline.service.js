@@ -774,7 +774,12 @@ export async function grantTranscriptionProviderToken({
         endedAt: null,
         metadata: { expiresAt: grant.expiresAt },
       },
-      providerPayload: { transport: grant.transport, expiresIn: grant.expiresIn },
+      providerPayload: {
+        transport: grant.transport,
+        expiresIn: grant.expiresIn,
+        grantCacheHit: Boolean(grant.grantCacheHit),
+        grantSharedInFlight: Boolean(grant.grantSharedInFlight),
+      },
       status: "processed",
       client: tx,
     });
@@ -801,6 +806,8 @@ export async function grantTranscriptionProviderToken({
       accessToken: grant.accessToken,
       expiresIn: grant.expiresIn,
       expiresAt: grant.expiresAt,
+      grantCacheHit: Boolean(grant.grantCacheHit),
+      grantSharedInFlight: Boolean(grant.grantSharedInFlight),
       keytermCount: grant.keytermCount,
       transcriptionSession: serializeTranscriptionSession(transcriptionSession),
       policy,

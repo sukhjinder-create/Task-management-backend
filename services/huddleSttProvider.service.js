@@ -21,6 +21,15 @@ export const HUDDLE_STT_PROVIDER_FEATURES = Object.freeze({
 const DEFAULT_DEEPGRAM_MODEL = "nova-3";
 const DEFAULT_DEEPGRAM_LANGUAGE = "multi";
 const DEFAULT_DEEPGRAM_TOKEN_TTL_SECONDS = 300;
+const DEEPGRAM_TOKEN_CACHE_SKEW_MS = 30000;
+
+const deepgramTemporaryTokenCache = {
+  cacheKey: null,
+  accessToken: null,
+  expiresIn: null,
+  expiresAtMs: 0,
+  inFlight: null,
+};
 
 function safeString(value, maxLength = null) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -151,6 +160,80 @@ async function createDeepgramTemporaryToken({
   };
 }
 
+async function getCachedDeepgramTemporaryToken({
+  apiKey,
+  grantUrl,
+  ttlSeconds,
+  forceRefresh = false,
+} = {}) {
+  const resolvedGrantUrl = grantUrl || "https://api.deepgram.com/v1/auth/grant";
+  const resolvedTtlSeconds = Math.min(Math.max(Number(ttlSeconds) || DEFAULT_DEEPGRAM_TOKEN_TTL_SECONDS, 30), 3600);
+  const cacheKey = `${resolvedGrantUrl}:${resolvedTtlSeconds}`;
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    deepgramTemporaryTokenCache.cacheKey === cacheKey &&
+    deepgramTemporaryTokenCache.accessToken &&
+    deepgramTemporaryTokenCache.expiresAtMs > now + DEEPGRAM_TOKEN_CACHE_SKEW_MS
+  ) {
+    return {
+      accessToken: deepgramTemporaryTokenCache.accessToken,
+      expiresIn: Math.max(
+        30,
+        Math.round((deepgramTemporaryTokenCache.expiresAtMs - now) / 1000)
+      ),
+      cached: true,
+    };
+  }
+
+  if (deepgramTemporaryTokenCache.inFlight) {
+    const token = await deepgramTemporaryTokenCache.inFlight;
+    return { ...token, cached: true, sharedInFlight: true };
+  }
+
+  deepgramTemporaryTokenCache.inFlight = createDeepgramTemporaryToken({
+    apiKey,
+    grantUrl: resolvedGrantUrl,
+    ttlSeconds: resolvedTtlSeconds,
+  }).then((token) => {
+    const expiresIn = Number(token.expiresIn) || resolvedTtlSeconds;
+    deepgramTemporaryTokenCache.cacheKey = cacheKey;
+    deepgramTemporaryTokenCache.accessToken = token.accessToken;
+    deepgramTemporaryTokenCache.expiresIn = expiresIn;
+    deepgramTemporaryTokenCache.expiresAtMs = Date.now() + expiresIn * 1000;
+    return { ...token, cached: false };
+  }).finally(() => {
+    deepgramTemporaryTokenCache.inFlight = null;
+  });
+
+  return deepgramTemporaryTokenCache.inFlight;
+}
+
+export async function primeSttProviderGrantCache({ env = process.env } = {}) {
+  const config = getHuddleSttConfig(env);
+  if (!config.enabled) {
+    return { ok: false, reason: "huddle_transcription_disabled" };
+  }
+  if (config.provider !== HUDDLE_STT_PROVIDERS.DEEPGRAM) {
+    return { ok: false, reason: "selected_provider_not_implemented" };
+  }
+  if (!config.deepgram.apiKeyConfigured) {
+    return { ok: false, reason: "deepgram_api_key_missing" };
+  }
+  const token = await getCachedDeepgramTemporaryToken({
+    apiKey: env.DEEPGRAM_API_KEY,
+    grantUrl: config.deepgram.grantUrl,
+    ttlSeconds: config.tokenTtlSeconds,
+  });
+  return {
+    ok: true,
+    provider: HUDDLE_STT_PROVIDERS.DEEPGRAM,
+    cached: Boolean(token.cached),
+    sharedInFlight: Boolean(token.sharedInFlight),
+    expiresIn: token.expiresIn,
+  };
+}
+
 export async function createSttProviderGrant({
   workspaceId,
   sessionId,
@@ -175,7 +258,7 @@ export async function createSttProviderGrant({
     throw err;
   }
 
-  const token = await createDeepgramTemporaryToken({
+  const token = await getCachedDeepgramTemporaryToken({
     apiKey: env.DEEPGRAM_API_KEY,
     grantUrl: config.deepgram.grantUrl,
     ttlSeconds: config.tokenTtlSeconds,
@@ -198,6 +281,8 @@ export async function createSttProviderGrant({
     accessToken: token.accessToken,
     expiresIn: token.expiresIn,
     expiresAt: new Date(Date.now() + token.expiresIn * 1000).toISOString(),
+    grantCacheHit: Boolean(token.cached),
+    grantSharedInFlight: Boolean(token.sharedInFlight),
     listenUrl,
     keytermCount: [...new Set(
       (Array.isArray(keyterms) ? keyterms : []).map((item) => safeString(item, 100)).filter(Boolean)
@@ -253,5 +338,6 @@ export default {
   getProviderCapabilities,
   buildDeepgramListenUrl,
   createSttProviderGrant,
+  primeSttProviderGrantCache,
   getHuddleSttProviderDiagnostics,
 };
