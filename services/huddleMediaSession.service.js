@@ -1658,6 +1658,34 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageCaptionsActiveMs: positiveAverage(
         startupSamples.map((item) => item.captionsActiveMs)
       ),
+      averageCaptionTransportReadyMs: positiveAverage(
+        startupSamples.map((item) => item.captionTransportReadyLatencyMs)
+      ),
+      averageCaptionTransportReadyFromIntentMs: positiveAverage(
+        startupSamples.map((item) => item.captionTransportReadyFromIntentMs)
+      ),
+      averageCaptionGrantMs: positiveAverage(
+        startupSamples.map((item) => item.captionGrantLatencyMs)
+      ),
+      averageCaptionWebsocketOpenMs: positiveAverage(
+        startupSamples.map((item) => item.captionWebsocketOpenLatencyMs)
+      ),
+      averageCaptionRecorderStartMs: positiveAverage(
+        startupSamples.map((item) => item.captionRecorderStartLatencyMs)
+      ),
+      averageCaptionFirstProviderResultMs: positiveAverage(
+        startupSamples.map((item) => item.captionFirstProviderResultLatencyMs)
+      ),
+      averageCaptionFirstBackendEventMs: positiveAverage(
+        startupSamples.map((item) => item.captionFirstBackendEventLatencyMs)
+      ),
+      averageCaptionFirstLocalCaptionMs: positiveAverage(
+        startupSamples.map((item) => item.captionFirstLocalCaptionLatencyMs)
+      ),
+      captionGrantCacheHitCount: startupSamples.filter((item) => item.captionGrantCacheHit).length,
+      captionGrantSharedInFlightCount: startupSamples.filter(
+        (item) => item.captionGrantSharedInFlight
+      ).length,
       backgroundEffectModes: uniqueStrings(
         backgroundEffectSamples.map((item) => item.mode)
       ),
