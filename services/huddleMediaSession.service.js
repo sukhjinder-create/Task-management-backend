@@ -826,11 +826,23 @@ function sanitizeQualityAggregate(raw = {}) {
     selectedMediumLayerCount: safeNumber(aggregate.selectedMediumLayerCount, 0),
     selectedHighLayerCount: safeNumber(aggregate.selectedHighLayerCount, 0),
     freezeTrackCount: safeNumber(aggregate.freezeTrackCount, 0),
+    freezeDeltaTrackCount: safeNumber(aggregate.freezeDeltaTrackCount, 0),
     totalFreezeCount: safeNumber(aggregate.totalFreezeCount),
     totalFreezeDurationSeconds: safeNumber(aggregate.totalFreezeDurationSeconds),
     totalFramesDropped: safeNumber(aggregate.totalFramesDropped),
     totalFramesDecoded: safeNumber(aggregate.totalFramesDecoded),
     totalFramesRendered: safeNumber(aggregate.totalFramesRendered),
+    totalFreezeCountCumulative: safeNumber(aggregate.totalFreezeCountCumulative),
+    totalFreezeDurationCumulativeSeconds: safeNumber(
+      aggregate.totalFreezeDurationCumulativeSeconds
+    ),
+    totalFramesDroppedCumulative: safeNumber(aggregate.totalFramesDroppedCumulative),
+    totalFramesDecodedCumulative: safeNumber(aggregate.totalFramesDecodedCumulative),
+    totalFramesRenderedCumulative: safeNumber(aggregate.totalFramesRenderedCumulative),
+    turnRelayTrackCount: safeNumber(aggregate.turnRelayTrackCount, 0),
+    selectedCandidatePairCount: safeNumber(aggregate.selectedCandidatePairCount, 0),
+    localRelayCandidateTrackCount: safeNumber(aggregate.localRelayCandidateTrackCount, 0),
+    remoteRelayCandidateTrackCount: safeNumber(aggregate.remoteRelayCandidateTrackCount, 0),
   };
 }
 
@@ -971,8 +983,15 @@ function sanitizeQualityTrack(raw = {}) {
     framesRendered: safeNumber(track.framesRendered),
     freezeCount: safeNumber(track.freezeCount),
     totalFreezesDuration: safeNumber(track.totalFreezesDuration),
+    framesDroppedDelta: safeNumber(track.framesDroppedDelta),
+    framesDecodedDelta: safeNumber(track.framesDecodedDelta),
+    framesRenderedDelta: safeNumber(track.framesRenderedDelta),
+    freezeCountDelta: safeNumber(track.freezeCountDelta),
+    totalFreezesDurationDelta: safeNumber(track.totalFreezesDurationDelta),
     pauseCount: safeNumber(track.pauseCount),
     totalPausesDuration: safeNumber(track.totalPausesDuration),
+    pauseCountDelta: safeNumber(track.pauseCountDelta),
+    totalPausesDurationDelta: safeNumber(track.totalPausesDurationDelta),
     codec: boundedString(track.codec, 80),
     mimeType: boundedString(track.mimeType, 80),
     rid: boundedString(track.rid, 32),
@@ -1005,6 +1024,18 @@ function sanitizeQualityTrack(raw = {}) {
     attachedElementCount: safeNumber(track.attachedElementCount, 0),
     adaptiveStreamAttached: safeBoolean(track.adaptiveStreamAttached),
     currentBitrateKbps: safeNumber(track.currentBitrateKbps),
+    selectedCandidatePairId: boundedString(track.selectedCandidatePairId, 120),
+    candidatePairState: boundedString(track.candidatePairState, 40),
+    candidatePairNominated: safeBoolean(track.candidatePairNominated),
+    candidatePairSelected: safeBoolean(track.candidatePairSelected),
+    localCandidateType: boundedString(track.localCandidateType, 40),
+    remoteCandidateType: boundedString(track.remoteCandidateType, 40),
+    localCandidateProtocol: boundedString(track.localCandidateProtocol, 40),
+    remoteCandidateProtocol: boundedString(track.remoteCandidateProtocol, 40),
+    localRelayProtocol: boundedString(track.localRelayProtocol, 40),
+    remoteRelayProtocol: boundedString(track.remoteRelayProtocol, 40),
+    localNetworkType: boundedString(track.localNetworkType, 40),
+    usingTurnRelay: safeBoolean(track.usingTurnRelay),
   };
 }
 
@@ -1419,6 +1450,21 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const totalFramesDropped = maxAggregateNumber("totalFramesDropped");
   const totalFramesDecoded = maxAggregateNumber("totalFramesDecoded");
   const totalFramesRendered = maxAggregateNumber("totalFramesRendered");
+  const totalFreezeCountCumulative = maxAggregateNumber("totalFreezeCountCumulative");
+  const totalFreezeDurationCumulativeSeconds = Number(
+    maxAggregateNumber("totalFreezeDurationCumulativeSeconds").toFixed(3)
+  );
+  const turnRelayTrackCount = maxAggregateNumber("turnRelayTrackCount");
+  const selectedCandidatePairCount = maxAggregateNumber("selectedCandidatePairCount");
+  const localRelayCandidateTrackCount = maxAggregateNumber("localRelayCandidateTrackCount");
+  const remoteRelayCandidateTrackCount = maxAggregateNumber("remoteRelayCandidateTrackCount");
+  const candidateTypes = tracks.reduce((counts, track) => {
+    const localType = boundedString(track.localCandidateType, 40);
+    const remoteType = boundedString(track.remoteCandidateType, 40);
+    const key = localType || remoteType ? `${localType || "unknown"}:${remoteType || "unknown"}` : null;
+    if (key) counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
   const receiveBelowVisibleTarget =
     visibleTargetLongEdge !== null &&
     maxReceiveLongEdge !== null &&
@@ -1643,9 +1689,16 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       maxReceiveShortEdge,
       totalFreezeCount,
       totalFreezeDurationSeconds,
+      totalFreezeCountCumulative,
+      totalFreezeDurationCumulativeSeconds,
       totalFramesDropped,
       totalFramesDecoded,
       totalFramesRendered,
+      turnRelayTrackCount,
+      selectedCandidatePairCount,
+      localRelayCandidateTrackCount,
+      remoteRelayCandidateTrackCount,
+      candidateTypes,
       sendVideoTrackCount: sendVideo.length,
       receiveVideoTrackCount: receiveVideo.length,
       screenShareTrackCount: screenShare.length,
