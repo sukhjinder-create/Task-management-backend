@@ -13,7 +13,7 @@ import {
 } from "./huddleIntelligence.service.js";
 
 const GENERATION_VERSION = 3;
-const PROMPT_VERSION = "huddle-intelligence-report-v3";
+const PROMPT_VERSION = "huddle-intelligence-report-v4";
 const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 120000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 4800;
 
@@ -730,6 +730,8 @@ function promptFor({ artifactType, packet, participants }) {
     "Do not invent facts. Cite only segment IDs present in the transcript.",
     "Preserve names and mixed-language wording. Do not translate quoted speech.",
     "Use exact participant display names from the participant directory. Never use numbered participant aliases.",
+    "If the transcript line contains a generic speaker label but participant IDs map to a directory name, use the directory name.",
+    "Write for a manager who did not attend: clear context, concrete outcomes, and no filler.",
     "Return one JSON object and no markdown.",
   ].join(" ");
   const task = {
@@ -737,23 +739,25 @@ function promptFor({ artifactType, packet, participants }) {
 Return:
 {"title":"...","purpose":"why the meeting happened","purposeEvidenceSegmentIds":["uuid"],"overview":"2-5 substantive paragraphs","overviewEvidenceSegmentIds":["uuid"],"discussionSummary":[{"text":"a stage of the discussion and its context","evidenceSegmentIds":["uuid"]}],"discussionHighlights":[{"speaker":"exact participant display name","text":"what this person contributed and why it mattered","evidenceSegmentIds":["uuid"]}],"keyPoints":[{"text":"important discussion point","evidenceSegmentIds":["uuid"]}],"conclusions":[{"text":"supported conclusion","evidenceSegmentIds":["uuid"]}],"openQuestions":[{"question":"unresolved question or issue","raisedBy":"exact participant display name or null","evidenceSegmentIds":["uuid"]}],"risksRaised":[{"text":"risk, blocker, dependency, or uncertainty","evidenceSegmentIds":["uuid"]}],"nextSteps":[{"text":"evidence-backed next step, not an invented commitment","evidenceSegmentIds":["uuid"]}],"meetingOutcomes":[{"text":"observable outcome from this meeting","evidenceSegmentIds":["uuid"]}],"chronologicalSummary":[{"title":"discussion stage","description":"what happened","occurredAt":"ISO timestamp or null","evidenceSegmentIds":["uuid"]}],"confidence":0.0}
 Write a complete, useful meeting report rather than a generic short summary.
-The overview should normally be 2-5 substantive paragraphs, depending on meeting length.
-Explain the meeting purpose, discussion progression, outcomes, unresolved work, and ownership.
+The overview should normally be 3-5 substantive paragraphs for real meetings and should explain who contributed what, what changed, and what still needs attention.
+Explain the meeting purpose, discussion progression, outcomes, unresolved work, ownership, risks, blockers, and disagreement if present.
 Discussion highlights must attribute contributions to the actual speaker shown in the transcript.
 Use only exact names from the participant directory. Never emit Participant 1, Participant 2, or invented names.
-Use several distinct transcript segments when the meeting contains enough evidence.
+Use several distinct transcript segments when the meeting contains enough evidence; do not cite the same segment for every claim.
 Do not duplicate decisions or action items verbatim; provide the context that makes them understandable.
 Do not turn questions, possibilities, or vague discussion into decisions, commitments, risks, or next steps.
 Preserve Hindi, Punjabi, Hinglish, and code-switched wording. Do not translate or romanize quoted speech.
+Prefer specific statements like "Asha raised the rollout risk" over vague statements like "the team discussed risks".
+When the transcript is short, still produce the most useful evidence-grounded report possible and say what was not discussed through empty arrays, not invented claims.
 Every claim, highlight, point, and open question must cite evidence. Return an empty openQuestions array only when the transcript contains no unresolved issue.`,
     decision: `
 Return:
 {"decisions":[{"title":"...","decision":"...","rationale":"...","confidence":0.0,"evidenceSegmentIds":["uuid"]}]}
-Include only explicit or strongly evidenced decisions. Return an empty decisions array when none exist.`,
+Include only explicit or strongly evidenced decisions. The rationale must explain why this was a decision and who drove or confirmed it when the transcript supports that. Return an empty decisions array when none exist.`,
     action_item: `
 Return:
 {"actionItems":[{"title":"...","description":"...","dueDate":"YYYY-MM-DD or null","confidence":0.0,"evidenceSegmentIds":["uuid"],"suggestedOwner":{"participantId":"uuid or null","userId":"uuid or null","label":"...","confidence":0.0}}]}
-Include only explicit or strongly evidenced commitments. Owner suggestions must come from the participant directory. Return an empty actionItems array when none exist.`,
+Include only explicit or strongly evidenced commitments. Descriptions must explain the requested work, context, and acceptance signal when the transcript supports it. Owner suggestions must come from the participant directory. Return an empty actionItems array when none exist.`,
   }[artifactType];
   return {
     system: `${common}${task}`,
