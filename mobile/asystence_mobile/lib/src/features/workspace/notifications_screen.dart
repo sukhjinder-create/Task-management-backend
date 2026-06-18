@@ -8,7 +8,9 @@ import '../../core/ui.dart';
 import '../../state/app_scope.dart';
 
 class NotificationsScreen extends StatefulWidget {
-  const NotificationsScreen({super.key});
+  const NotificationsScreen({super.key, this.onOpen});
+
+  final ValueChanged<NotificationItem>? onOpen;
 
   @override
   State<NotificationsScreen> createState() => _NotificationsScreenState();
@@ -101,10 +103,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                     if (!item.read) {
                       await scope.api.markNotificationRead(item.id);
                     }
-                    scope.navigationIntents.fromPushData({
-                      ...item.raw,
-                      if (item.url != null) 'url': item.url,
-                    });
+                    if (widget.onOpen != null) {
+                      widget.onOpen!(item);
+                    } else {
+                      scope.navigationIntents.fromPushData({
+                        ...item.raw,
+                        if (item.url != null) 'url': item.url,
+                      });
+                    }
                     await _refresh();
                   },
                 );

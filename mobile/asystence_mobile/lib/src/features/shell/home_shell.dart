@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/models.dart';
 import '../../core/navigation_intent_service.dart';
 import '../../state/app_scope.dart';
+import '../../state/theme_store.dart';
 import '../workspace/chat_screen.dart';
 import '../workspace/dashboard_screen.dart';
 import '../workspace/leave_screen.dart';
@@ -29,6 +31,10 @@ class _HomeShellState extends State<HomeShell> {
   int _chatInstanceKey = 0;
   StreamSubscription<AppNavigationIntent>? _intentSub;
   StreamSubscription<JsonMap>? _huddleSub;
+  String _attendanceStatus = 'offline';
+  bool _attendanceBusy = false;
+
+  static const _attendanceStorageKey = 'asystence.attendance.status';
 
   List<_ShellTab> get _tabs {
     final role = AppScope.of(context).auth.user?.role;
@@ -46,10 +52,10 @@ class _HomeShellState extends State<HomeShell> {
           initialHuddleId: _chatHuddleId,
         ),
       ),
-      const _ShellTab(
+      _ShellTab(
         'Alerts',
         Icons.notifications_outlined,
-        NotificationsScreen(),
+        NotificationsScreen(onOpen: _openNotification),
       ),
     ];
   }
@@ -72,6 +78,7 @@ class _HomeShellState extends State<HomeShell> {
         if (startedById == scope.auth.user?.id) return;
         _showIncomingHuddle(event);
       });
+      unawaited(_restoreAttendanceStatus());
     });
   }
 
@@ -92,6 +99,16 @@ class _HomeShellState extends State<HomeShell> {
       appBar: AppBar(
         title: Text(tabs[_index].label),
         actions: [
+          TextButton.icon(
+            onPressed: _attendanceBusy ? null : _openAttendanceMenu,
+            icon: Icon(_attendanceIcon, size: 18),
+            label: Text(_attendanceLabel),
+          ),
+          IconButton(
+            tooltip: 'Appearance',
+            onPressed: _openThemePicker,
+            icon: const Icon(Icons.palette_outlined),
+          ),
           IconButton(
             tooltip: 'More',
             onPressed: _openMore,
@@ -137,6 +154,15 @@ class _HomeShellState extends State<HomeShell> {
             Icons.event_available_outlined,
             const LeaveScreen(),
           ),
+          ListTile(
+            leading: const Icon(Icons.palette_outlined),
+            title: const Text('Appearance'),
+            subtitle: Text(AppScope.of(context).themes.selection.label),
+            onTap: () {
+              Navigator.pop(context);
+              _openThemePicker();
+            },
+          ),
           const Divider(),
           ListTile(
             leading: const Icon(Icons.logout),
@@ -171,6 +197,211 @@ class _HomeShellState extends State<HomeShell> {
     _scaffoldKey.currentState?.openDrawer();
   }
 
+  Future<void> _restoreAttendanceStatus() async {
+    final preferences = await SharedPreferences.getInstance();
+    final value = preferences.getString(_attendanceStorageKey);
+    if (!mounted || value == null) return;
+    if (!{'offline', 'available', 'aws', 'lunch'}.contains(value)) return;
+    setState(() => _attendanceStatus = value);
+  }
+
+  String get _attendanceLabel {
+    switch (_attendanceStatus) {
+      case 'available':
+        return 'Available';
+      case 'aws':
+        return 'AWS';
+      case 'lunch':
+        return 'Lunch';
+      default:
+        return 'Sign in';
+    }
+  }
+
+  IconData get _attendanceIcon {
+    switch (_attendanceStatus) {
+      case 'available':
+        return Icons.check_circle_outline;
+      case 'aws':
+        return Icons.timer_outlined;
+      case 'lunch':
+        return Icons.restaurant_outlined;
+      default:
+        return Icons.login;
+    }
+  }
+
+  Future<void> _openAttendanceMenu() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Attendance',
+                style: Theme.of(sheetContext).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Current status: $_attendanceLabel',
+                style: Theme.of(sheetContext).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 16),
+              if (_attendanceStatus == 'offline')
+                FilledButton.icon(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_updateAttendance('sign-in'));
+                  },
+                  icon: const Icon(Icons.login),
+                  label: const Text('Sign in'),
+                )
+              else ...[
+                if (_attendanceStatus == 'available') ...[
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      unawaited(_updateAttendance('lunch'));
+                    },
+                    icon: const Icon(Icons.restaurant_outlined),
+                    label: const Text('Start lunch break'),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Away from system',
+                    style: Theme.of(sheetContext).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final minutes in const [15, 30, 60])
+                        ActionChip(
+                          avatar: const Icon(Icons.timer_outlined, size: 17),
+                          label: Text('AWS $minutes min'),
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(
+                              _updateAttendance(
+                                'aws',
+                                body: {'minutes': minutes},
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                ],
+                if (_attendanceStatus == 'aws' || _attendanceStatus == 'lunch')
+                  FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      unawaited(_updateAttendance('available'));
+                    },
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Mark available'),
+                  ),
+                const SizedBox(height: 10),
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_updateAttendance('sign-off'));
+                  },
+                  icon: const Icon(Icons.logout),
+                  label: const Text('Sign off'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _updateAttendance(
+    String action, {
+    JsonMap body = const {},
+  }) async {
+    if (_attendanceBusy) return;
+    setState(() => _attendanceBusy = true);
+    try {
+      await AppScope.of(context).api.attendance(action, body: body);
+      final nextStatus = switch (action) {
+        'sign-in' || 'available' => 'available',
+        'aws' => 'aws',
+        'lunch' => 'lunch',
+        _ => 'offline',
+      };
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(_attendanceStorageKey, nextStatus);
+      if (!mounted) return;
+      setState(() => _attendanceStatus = nextStatus);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Attendance updated: $_attendanceLabel')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not update attendance: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _attendanceBusy = false);
+    }
+  }
+
+  Future<void> _openThemePicker() async {
+    final themes = AppScope.of(context).themes;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: const Text('Appearance'),
+              subtitle:
+                  const Text('Choose how Asystence looks on this device.'),
+              trailing: const Icon(Icons.palette_outlined),
+            ),
+            for (final option in AppThemeOption.values)
+              ListTile(
+                title: Text(option.label),
+                leading: Icon(_themeIcon(option)),
+                trailing: option == themes.selection
+                    ? const Icon(Icons.check_circle)
+                    : const Icon(Icons.circle_outlined),
+                onTap: () {
+                  unawaited(themes.select(option));
+                  Navigator.pop(sheetContext);
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  IconData _themeIcon(AppThemeOption option) {
+    switch (option) {
+      case AppThemeOption.system:
+        return Icons.brightness_auto_outlined;
+      case AppThemeOption.light:
+        return Icons.light_mode_outlined;
+      case AppThemeOption.dark:
+        return Icons.dark_mode_outlined;
+      default:
+        return Icons.color_lens_outlined;
+    }
+  }
+
   void _handleIntent(AppNavigationIntent intent) {
     if (intent.kind == AppNavigationIntentKind.chat &&
         intent.channelId != null) {
@@ -201,6 +432,14 @@ class _HomeShellState extends State<HomeShell> {
         MaterialPageRoute(builder: (_) => const LeaveScreen()),
       );
     }
+  }
+
+  void _openNotification(NotificationItem notification) {
+    final intent = AppScope.of(context).navigationIntents.resolve({
+      ...notification.raw,
+      if (notification.url != null) 'url': notification.url,
+    });
+    if (intent != null) _handleIntent(intent);
   }
 
   void _openChat(String channelId, {String? huddleId}) {

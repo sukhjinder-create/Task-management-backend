@@ -29,6 +29,8 @@ import { logAudit } from "../services/audit.service.js";
 const router = express.Router();
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const MOBILE_APP_AUTH_CALLBACK =
+  process.env.MOBILE_APP_AUTH_CALLBACK || "asystence://auth/callback";
 const GOOGLE_CLIENT_ID    = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL;
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
@@ -41,6 +43,14 @@ function getRequestIpHash(req) {
 
 function buildFrontendRedirect(path, params = {}) {
   const url = new URL(path, FRONTEND_URL);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+function buildMobileAuthRedirect(params = {}) {
+  const url = new URL(MOBILE_APP_AUTH_CALLBACK);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
   }
@@ -511,7 +521,9 @@ router.get("/google", (req, res) => {
   }
 
   const mode = String(req.query.mode || "").trim().toLowerCase();
+  const client = String(req.query.client || "").trim().toLowerCase();
   const isSignup = ["signup", "register", "trial"].includes(mode);
+  const isMobileClient = client === "mobile";
   const workspaceName = String(req.query.workspaceName || "").trim();
   const trialBillingConsent =
     isConsentAccepted(req.query.trialBillingConsent) ||
@@ -537,11 +549,11 @@ router.get("/google", (req, res) => {
     prompt:        "select_account",
   });
 
-  if (isSignup) {
+  if (isSignup || isMobileClient) {
     params.set("state", signGoogleState({
-      mode: "signup",
-      workspaceName,
-      trialBillingConsent,
+      mode: isSignup ? "signup" : "login",
+      client: isMobileClient ? "mobile" : "web",
+      ...(isSignup ? { workspaceName, trialBillingConsent } : {}),
     }));
   }
 
@@ -562,9 +574,13 @@ router.get("/google/callback", async (req, res) => {
   }
 
   const isSignup = googleState?.mode === "signup";
+  const isMobileClient = googleState?.client === "mobile";
   const errorPath = isSignup ? "/signup" : "/login";
 
   if (error || !code) {
+    if (isMobileClient) {
+      return res.redirect(buildMobileAuthRedirect({ error: "google_cancelled" }));
+    }
     return res.redirect(buildFrontendRedirect(errorPath, { error: "google_cancelled" }));
   }
 
@@ -642,15 +658,22 @@ router.get("/google/callback", async (req, res) => {
       metadata: { method: "google" },
     });
 
-    res.redirect(
-      buildFrontendRedirect("/auth/callback", {
+    const redirectParams = {
         token: data.token,
         refreshToken,
-      })
+      };
+    res.redirect(
+      isMobileClient
+        ? buildMobileAuthRedirect(redirectParams)
+        : buildFrontendRedirect("/auth/callback", redirectParams)
     );
   } catch (err) {
     console.error("Google SSO callback error:", err.message);
-    res.redirect(buildFrontendRedirect(errorPath, { error: err.message }));
+    res.redirect(
+      isMobileClient
+        ? buildMobileAuthRedirect({ error: err.message })
+        : buildFrontendRedirect(errorPath, { error: err.message })
+    );
   }
 });
 

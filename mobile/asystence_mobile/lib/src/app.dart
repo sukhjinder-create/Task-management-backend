@@ -7,6 +7,7 @@ import 'core/models.dart';
 import 'features/auth/login_screen.dart';
 import 'features/shell/home_shell.dart';
 import 'state/app_scope.dart';
+import 'state/theme_store.dart';
 
 class AsystenceApp extends StatefulWidget {
   const AsystenceApp({super.key});
@@ -90,9 +91,11 @@ class _AsystenceAppState extends State<AsystenceApp>
 
   @override
   Widget build(BuildContext context) {
-    final auth = AppScope.of(context).auth;
+    final scope = AppScope.of(context);
+    final auth = scope.auth;
+    final themes = scope.themes;
     return AnimatedBuilder(
-      animation: auth,
+      animation: Listenable.merge([auth, themes]),
       builder: (context, _) {
         if (auth.initialized && !_authReadyCheckScheduled) {
           _authReadyCheckScheduled = true;
@@ -102,9 +105,9 @@ class _AsystenceAppState extends State<AsystenceApp>
           title: AppConfig.appName,
           navigatorKey: _navigatorKey,
           debugShowCheckedModeBanner: false,
-          theme: _theme(Brightness.light),
-          darkTheme: _theme(Brightness.dark),
-          themeMode: ThemeMode.system,
+          theme: _theme(Brightness.light, themes.selection),
+          darkTheme: _theme(Brightness.dark, themes.selection),
+          themeMode: themes.selection.themeMode,
           home: !auth.initialized
               ? const _BootScreen()
               : auth.isLoggedIn
@@ -115,36 +118,37 @@ class _AsystenceAppState extends State<AsystenceApp>
     );
   }
 
-  ThemeData _theme(Brightness brightness) {
+  ThemeData _theme(Brightness brightness, AppThemeOption option) {
+    final palette = _ThemePalette.forOption(option, brightness);
     final colorScheme = ColorScheme.fromSeed(
-      seedColor: AppConfig.primary,
-      brightness: Brightness.dark,
+      seedColor: palette.primary,
+      brightness: palette.brightness,
     ).copyWith(
-      primary: AppConfig.primary,
-      onPrimary: AppConfig.primaryContrast,
-      secondary: AppConfig.primaryHover,
-      surface: AppConfig.surface,
-      onSurface: AppConfig.text,
-      surfaceContainerHighest: AppConfig.surfaceStrong,
-      onSurfaceVariant: AppConfig.textMuted,
-      outline: AppConfig.border,
-      outlineVariant: AppConfig.borderStrong,
+      primary: palette.primary,
+      onPrimary: palette.primaryContrast,
+      secondary: palette.primaryHover,
+      surface: palette.surface,
+      onSurface: palette.text,
+      surfaceContainerHighest: palette.surfaceStrong,
+      onSurfaceVariant: palette.textMuted,
+      outline: palette.border,
+      outlineVariant: palette.borderStrong,
       error: const Color(0xffef4444),
     );
 
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: palette.brightness,
       colorScheme: colorScheme,
       fontFamily: 'Inter',
-      scaffoldBackgroundColor: AppConfig.appBg,
-      appBarTheme: const AppBarTheme(
-        backgroundColor: AppConfig.appBg,
-        foregroundColor: AppConfig.text,
+      scaffoldBackgroundColor: palette.appBg,
+      appBarTheme: AppBarTheme(
+        backgroundColor: palette.appBg,
+        foregroundColor: palette.text,
         elevation: 0,
         centerTitle: false,
         titleTextStyle: TextStyle(
-          color: AppConfig.text,
+          color: palette.text,
           fontSize: 17,
           fontWeight: FontWeight.w700,
           letterSpacing: 0,
@@ -155,53 +159,53 @@ class _AsystenceAppState extends State<AsystenceApp>
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
-          side: const BorderSide(color: AppConfig.border),
+          side: BorderSide(color: palette.border),
         ),
-        color: AppConfig.surface,
+        color: palette.surface,
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: AppConfig.surfaceSoft,
-        labelStyle: const TextStyle(color: AppConfig.textMuted),
-        hintStyle: const TextStyle(color: AppConfig.textSoft),
-        prefixIconColor: AppConfig.textSoft,
-        suffixIconColor: AppConfig.textSoft,
+        fillColor: palette.surfaceSoft,
+        labelStyle: TextStyle(color: palette.textMuted),
+        hintStyle: TextStyle(color: palette.textSoft),
+        prefixIconColor: palette.textSoft,
+        suffixIconColor: palette.textSoft,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppConfig.border),
+          borderSide: BorderSide(color: palette.border),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppConfig.border),
+          borderSide: BorderSide(color: palette.border),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppConfig.primary),
+          borderSide: BorderSide(color: palette.primary),
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          backgroundColor: AppConfig.primary,
-          foregroundColor: AppConfig.primaryContrast,
+          backgroundColor: palette.primary,
+          foregroundColor: palette.primaryContrast,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           textStyle: const TextStyle(fontWeight: FontWeight.w700),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          foregroundColor: AppConfig.primary,
-          side: const BorderSide(color: AppConfig.borderStrong),
+          foregroundColor: palette.primary,
+          side: BorderSide(color: palette.borderStrong),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       ),
       navigationBarTheme: NavigationBarThemeData(
-        backgroundColor: AppConfig.appBg,
-        indicatorColor: AppConfig.surfaceStrong,
+        backgroundColor: palette.appBg,
+        indicatorColor: palette.surfaceStrong,
         iconTheme: WidgetStateProperty.resolveWith(
           (states) => IconThemeData(
             color: states.contains(WidgetState.selected)
-                ? AppConfig.primary
-                : AppConfig.textMuted,
+                ? palette.primary
+                : palette.textMuted,
           ),
         ),
         labelTextStyle: WidgetStateProperty.resolveWith(
@@ -213,7 +217,137 @@ class _AsystenceAppState extends State<AsystenceApp>
           ),
         ),
       ),
-      drawerTheme: const DrawerThemeData(backgroundColor: AppConfig.appBg),
+      drawerTheme: DrawerThemeData(backgroundColor: palette.appBg),
+    );
+  }
+}
+
+class _ThemePalette {
+  const _ThemePalette({
+    required this.brightness,
+    required this.appBg,
+    required this.surface,
+    required this.surfaceSoft,
+    required this.surfaceStrong,
+    required this.border,
+    required this.borderStrong,
+    required this.text,
+    required this.textMuted,
+    required this.textSoft,
+    required this.primary,
+    required this.primaryHover,
+    required this.primaryContrast,
+  });
+
+  final Brightness brightness;
+  final Color appBg;
+  final Color surface;
+  final Color surfaceSoft;
+  final Color surfaceStrong;
+  final Color border;
+  final Color borderStrong;
+  final Color text;
+  final Color textMuted;
+  final Color textSoft;
+  final Color primary;
+  final Color primaryHover;
+  final Color primaryContrast;
+
+  factory _ThemePalette.forOption(
+    AppThemeOption option,
+    Brightness systemBrightness,
+  ) {
+    if (option == AppThemeOption.light ||
+        (option == AppThemeOption.system &&
+            systemBrightness == Brightness.light)) {
+      return const _ThemePalette(
+        brightness: Brightness.light,
+        appBg: Color(0xfff7f7f8),
+        surface: Color(0xffffffff),
+        surfaceSoft: Color(0xfff1f1f3),
+        surfaceStrong: Color(0xffe7e7eb),
+        border: Color(0xffdedee3),
+        borderStrong: Color(0xffc9c9d0),
+        text: Color(0xff17171a),
+        textMuted: Color(0xff62626b),
+        textSoft: Color(0xff858590),
+        primary: AppConfig.primary,
+        primaryHover: Color(0xffe99100),
+        primaryContrast: Color(0xff17171a),
+      );
+    }
+
+    switch (option) {
+      case AppThemeOption.ocean:
+        return _darkAccent(
+          primary: const Color(0xff38bdf8),
+          hover: const Color(0xff7dd3fc),
+          bg: const Color(0xff06131d),
+          surface: const Color(0xff0a1b28),
+        );
+      case AppThemeOption.forest:
+        return _darkAccent(
+          primary: const Color(0xff4ade80),
+          hover: const Color(0xff86efac),
+          bg: const Color(0xff07150d),
+          surface: const Color(0xff0c2014),
+        );
+      case AppThemeOption.sunset:
+        return _darkAccent(
+          primary: const Color(0xffff7043),
+          hover: const Color(0xffff9a76),
+          bg: const Color(0xff1a0b08),
+          surface: const Color(0xff26100c),
+        );
+      case AppThemeOption.yellow:
+        return _darkAccent(
+          primary: const Color(0xfffacc15),
+          hover: const Color(0xfffde047),
+          bg: const Color(0xff171407),
+          surface: const Color(0xff211d09),
+        );
+      default:
+        return _darkAccent(
+          primary: AppConfig.primary,
+          hover: AppConfig.primaryHover,
+          bg: AppConfig.appBg,
+          surface: AppConfig.surface,
+        );
+    }
+  }
+
+  static _ThemePalette _darkAccent({
+    required Color primary,
+    required Color hover,
+    required Color bg,
+    required Color surface,
+  }) {
+    return _ThemePalette(
+      brightness: Brightness.dark,
+      appBg: bg,
+      surface: surface,
+      surfaceSoft: Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.035),
+        surface,
+      ),
+      surfaceStrong: Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.08),
+        surface,
+      ),
+      border: Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.11),
+        surface,
+      ),
+      borderStrong: Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.18),
+        surface,
+      ),
+      text: const Color(0xfffafafa),
+      textMuted: const Color(0xffa0a0aa),
+      textSoft: const Color(0xff74747e),
+      primary: primary,
+      primaryHover: hover,
+      primaryContrast: const Color(0xff0a0a0b),
     );
   }
 }

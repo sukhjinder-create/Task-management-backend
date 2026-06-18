@@ -59,39 +59,54 @@ class NavigationIntentService {
   }
 
   void fromPushData(Map<String, dynamic> data) {
-    final urlData = _fieldsFromUrl(readString(data, ['url', 'deep_link']));
+    final intent = resolve(data);
+    if (intent != null) _emit(intent);
+  }
+
+  AppNavigationIntent? resolve(Map<String, dynamic> data) {
+    final urlData = _fieldsFromUrl(
+      readString(data, ['url', 'deep_link', 'action_url']),
+    );
     final enriched = <String, dynamic>{...urlData, ...data};
     final type = readString(enriched, ['type']);
     if (type == 'huddle') {
-      openHuddle(enriched);
-      return;
+      final channelId = readString(enriched, ['channelId', 'channel_id']);
+      final huddleId = readString(enriched, ['huddleId', 'huddle_id']);
+      if (channelId == null || huddleId == null) return null;
+      return AppNavigationIntent.huddle(
+        channelId: channelId,
+        huddleId: huddleId,
+        data: enriched,
+      );
     }
     final channelId =
         readString(enriched, ['channelId', 'channel_id', 'channelKey']);
     if (channelId != null) {
-      openChat(channelId);
-      return;
+      return AppNavigationIntent.chat(channelId);
     }
     final taskId = readString(enriched, ['taskId', 'task_id', 'task']);
     if (taskId != null) {
-      openTask(taskId);
-      return;
+      return AppNavigationIntent.task(taskId);
     }
     final projectId =
         readString(enriched, ['projectId', 'project_id', 'project']);
     if (projectId != null) {
-      openProject(projectId);
-      return;
+      return AppNavigationIntent.project(projectId);
     }
     if (urlData['screen'] == 'tasks') {
-      openTask(null);
-      return;
+      return AppNavigationIntent.task(null);
     }
     if (urlData['screen'] == 'leave') {
-      openLeave();
-      return;
+      return const AppNavigationIntent._(
+        kind: AppNavigationIntentKind.leave,
+      );
     }
-    if (urlData['screen'] == 'notifications') openNotifications();
+    if (urlData['screen'] == 'notifications') {
+      return const AppNavigationIntent._(
+        kind: AppNavigationIntentKind.notifications,
+      );
+    }
+    return null;
   }
 
   JsonMap _fieldsFromUrl(String? rawUrl) {

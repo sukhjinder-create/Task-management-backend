@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 import '../core/api_client.dart';
@@ -74,6 +76,30 @@ class AuthStore extends ChangeNotifier {
     });
   }
 
+  Future<void> completeExternalLogin({
+    required String token,
+    required String refreshToken,
+  }) async {
+    await _guard(() async {
+      final payload = _decodeJwtPayload(token);
+      final provisionalUser = User.fromJson(payload);
+      var session = AuthSession(
+        token: token,
+        refreshToken: refreshToken,
+        user: provisionalUser,
+      );
+      await _replaceSession(session);
+      try {
+        final user = await api.me();
+        session = session.copyWith(user: user);
+        await _replaceSession(session);
+      } catch (_) {
+        // The signed JWT already contains the identity and workspace needed
+        // to enter the app. A later profile refresh can fill optional fields.
+      }
+    });
+  }
+
   Future<void> refreshMe() async {
     final current = _session;
     if (current == null) return;
@@ -135,5 +161,18 @@ class AuthStore extends ChangeNotifier {
       baseUrl: client.currentBaseUrl,
       token: session.token,
     );
+  }
+
+  JsonMap _decodeJwtPayload(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) {
+      throw ApiException('Invalid Google sign-in response');
+    }
+    try {
+      final normalized = base64Url.normalize(parts[1]);
+      final decoded = jsonDecode(utf8.decode(base64Url.decode(normalized)));
+      if (decoded is Map) return JsonMap.from(decoded);
+    } catch (_) {}
+    throw ApiException('Invalid Google sign-in response');
   }
 }

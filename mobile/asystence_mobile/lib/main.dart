@@ -10,6 +10,7 @@ import 'src/core/session_store.dart';
 import 'src/core/socket_service.dart';
 import 'src/state/app_scope.dart';
 import 'src/state/auth_store.dart';
+import 'src/state/theme_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,8 +31,12 @@ Future<void> main() async {
     socketService: socketService,
     sessionStore: sessionStore,
   );
+  final themeStore = ThemeStore();
 
-  await authStore.restore();
+  await Future.wait([
+    authStore.restore(),
+    themeStore.restore(),
+  ]);
 
   runApp(
     AppScope(
@@ -40,6 +45,7 @@ Future<void> main() async {
       client: apiClient,
       socket: socketService,
       navigationIntents: navigationIntents,
+      themes: themeStore,
       child: const AsystenceApp(),
     ),
   );

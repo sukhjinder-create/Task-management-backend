@@ -5,6 +5,7 @@ import '../core/api_service.dart';
 import '../core/navigation_intent_service.dart';
 import '../core/socket_service.dart';
 import 'auth_store.dart';
+import 'theme_store.dart';
 
 class AppScope extends InheritedWidget {
   const AppScope({
@@ -14,6 +15,7 @@ class AppScope extends InheritedWidget {
     required this.client,
     required this.socket,
     required this.navigationIntents,
+    required this.themes,
     required super.child,
   });
 
@@ -22,6 +24,7 @@ class AppScope extends InheritedWidget {
   final ApiClient client;
   final SocketService socket;
   final NavigationIntentService navigationIntents;
+  final ThemeStore themes;
 
   static AppScope of(BuildContext context) {
     final scope = context.dependOnInheritedWidgetOfExactType<AppScope>();
@@ -35,6 +38,7 @@ class AppScope extends InheritedWidget {
         api != oldWidget.api ||
         client != oldWidget.client ||
         socket != oldWidget.socket ||
-        navigationIntents != oldWidget.navigationIntents;
+        navigationIntents != oldWidget.navigationIntents ||
+        themes != oldWidget.themes;
   }
 }
