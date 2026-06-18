@@ -330,12 +330,12 @@ class _ThemePalette {
         surfaceStrong: Color(0xffe7e7eb),
         border: Color(0xffdedee3),
         borderStrong: Color(0xffc9c9d0),
-        text: Color(0xff17171a),
-        textMuted: Color(0xff62626b),
-        textSoft: Color(0xff858590),
+        text: Color(0xff2c2c32),
+        textMuted: Color(0xff6d6d76),
+        textSoft: Color(0xff8b8b94),
         primary: AppConfig.primary,
         primaryHover: Color(0xffe99100),
-        primaryContrast: Color(0xff17171a),
+        primaryContrast: Color(0xff242429),
       );
     }
 

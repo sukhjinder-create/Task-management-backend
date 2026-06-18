@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/formatters.dart';
 import '../../core/models.dart';
 import '../../core/navigation_intent_service.dart';
 import '../../core/ui.dart';
@@ -30,6 +31,7 @@ class _HomeShellState extends State<HomeShell> {
   String? _chatChannelKey;
   String? _chatHuddleId;
   int _chatInstanceKey = 0;
+  bool _chatImmersive = false;
   StreamSubscription<AppNavigationIntent>? _intentSub;
   StreamSubscription<JsonMap>? _huddleSub;
   String _attendanceStatus = 'offline';
@@ -51,6 +53,10 @@ class _HomeShellState extends State<HomeShell> {
           key: ValueKey('chat-$_chatInstanceKey-${_chatChannelKey ?? 'home'}'),
           initialChannelKey: _chatChannelKey,
           initialHuddleId: _chatHuddleId,
+          onImmersiveChanged: (value) {
+            if (!mounted || _chatImmersive == value) return;
+            setState(() => _chatImmersive = value);
+          },
         ),
       ),
       _ShellTab(
@@ -95,86 +101,96 @@ class _HomeShellState extends State<HomeShell> {
     final auth = AppScope.of(context).auth;
     final user = auth.user;
     final tabs = _tabs;
+    final chatImmersive = _index == 3 && _chatImmersive;
     return Scaffold(
       key: _scaffoldKey,
-      appBar: AppBar(
-        title: Text(tabs[_index].label),
-        actions: [
-          TextButton.icon(
-            onPressed: _attendanceBusy ? null : _openAttendanceMenu,
-            icon: Icon(_attendanceIcon, size: 18),
-            label: Text(_attendanceLabel),
-          ),
-          IconButton(
-            tooltip: 'Appearance',
-            onPressed: _openThemePicker,
-            icon: const Icon(Icons.palette_outlined),
-          ),
-          IconButton(
-            tooltip: 'More',
-            onPressed: _openMore,
-            icon: const Icon(Icons.more_horiz),
-          ),
-        ],
-      ),
+      appBar: chatImmersive
+          ? null
+          : AppBar(
+              title: Text(tabs[_index].label),
+              actions: [
+                TextButton.icon(
+                  onPressed: _attendanceBusy ? null : _openAttendanceMenu,
+                  icon: Icon(_attendanceIcon, size: 18),
+                  label: Text(_attendanceLabel),
+                ),
+                IconButton(
+                  tooltip: 'Appearance',
+                  onPressed: _openThemePicker,
+                  icon: const Icon(Icons.palette_outlined),
+                ),
+                IconButton(
+                  tooltip: 'More',
+                  onPressed: _openMore,
+                  icon: const Icon(Icons.more_horiz),
+                ),
+              ],
+            ),
       body: IndexedStack(
         index: _index,
         children: tabs.map((tab) => tab.screen).toList(growable: false),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: (value) => setState(() => _index = value),
-        destinations: [
-          for (final tab in tabs)
-            NavigationDestination(
-              icon: Icon(tab.icon),
-              selectedIcon: Icon(_selectedIcon(tab.icon)),
-              label: tab.label,
+      bottomNavigationBar: chatImmersive
+          ? null
+          : NavigationBar(
+              selectedIndex: _index,
+              onDestinationSelected: (value) => setState(() {
+                _index = value;
+                if (value != 3) _chatImmersive = false;
+              }),
+              destinations: [
+                for (final tab in tabs)
+                  NavigationDestination(
+                    icon: Icon(tab.icon),
+                    selectedIcon: Icon(_selectedIcon(tab.icon)),
+                    label: tab.label,
+                  ),
+              ],
             ),
-        ],
-      ),
-      drawer: NavigationDrawer(
-        selectedIndex: null,
-        children: [
-          UserAccountsDrawerHeader(
-            accountName: Text(user?.displayName ?? 'Asystence'),
-            accountEmail: Text(user?.email ?? user?.role ?? ''),
-            currentAccountPicture: CircleAvatar(
-              child: Text(_initial(user?.displayName)),
+      drawer: chatImmersive
+          ? null
+          : NavigationDrawer(
+              selectedIndex: null,
+              children: [
+                UserAccountsDrawerHeader(
+                  accountName: Text(user?.displayName ?? 'Asystence'),
+                  accountEmail: Text(user?.email ?? user?.role ?? ''),
+                  currentAccountPicture: CircleAvatar(
+                    child: Text(_initial(user?.displayName)),
+                  ),
+                ),
+                _drawerItem(
+                  context,
+                  'Profile',
+                  Icons.person_outline,
+                  const ProfileScreen(),
+                ),
+                _drawerItem(
+                  context,
+                  'Leave',
+                  Icons.event_available_outlined,
+                  const LeaveScreen(),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.palette_outlined),
+                  title: const Text('Appearance'),
+                  subtitle: Text(AppScope.of(context).themes.selection.label),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _openThemePicker();
+                  },
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.logout),
+                  title: const Text('Sign out'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    auth.logout();
+                  },
+                ),
+              ],
             ),
-          ),
-          _drawerItem(
-            context,
-            'Profile',
-            Icons.person_outline,
-            const ProfileScreen(),
-          ),
-          _drawerItem(
-            context,
-            'Leave',
-            Icons.event_available_outlined,
-            const LeaveScreen(),
-          ),
-          ListTile(
-            leading: const Icon(Icons.palette_outlined),
-            title: const Text('Appearance'),
-            subtitle: Text(AppScope.of(context).themes.selection.label),
-            onTap: () {
-              Navigator.pop(context);
-              _openThemePicker();
-            },
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.logout),
-            title: const Text('Sign out'),
-            onTap: () {
-              Navigator.pop(context);
-              auth.logout();
-            },
-          ),
-        ],
-      ),
     );
   }
 
@@ -440,11 +456,113 @@ class _HomeShellState extends State<HomeShell> {
       ...notification.raw,
       if (notification.url != null) 'url': notification.url,
     });
-    if (intent != null) {
+    if (intent != null &&
+        intent.kind != AppNavigationIntentKind.notifications) {
       _handleIntent(intent);
     } else {
-      showSnack(context, 'This notification does not have an app destination.');
+      unawaited(_showNotificationDetails(notification));
     }
+  }
+
+  Future<void> _showNotificationDetails(NotificationItem notification) async {
+    final type = readString(notification.raw, [
+      'type',
+      'category',
+      'event',
+      'event_type',
+    ]);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (context) {
+        final scheme = Theme.of(context).colorScheme;
+        final created = longDateTime(notification.createdAt);
+        return SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: scheme.primaryContainer,
+                      foregroundColor: scheme.onPrimaryContainer,
+                      child: Icon(
+                        notification.read
+                            ? Icons.notifications_none
+                            : Icons.notifications_active_outlined,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            notification.title,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleLarge
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          if (created.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              created,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: scheme.onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                if (notification.body != null &&
+                    notification.body!.trim().isNotEmpty) ...[
+                  const SizedBox(height: 18),
+                  Text(
+                    notification.body!,
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                ],
+                if (type != null && type.trim().isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Chip(
+                    avatar: const Icon(Icons.info_outline, size: 18),
+                    label: Text(type),
+                  ),
+                ],
+                const SizedBox(height: 20),
+                Text(
+                  'This alert did not include a task, project, chat, or leave target, so it opens here for review.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Done'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   void _openChat(String channelId, {String? huddleId}) {
@@ -452,6 +570,7 @@ class _HomeShellState extends State<HomeShell> {
       _chatChannelKey = channelId;
       _chatHuddleId = huddleId;
       _chatInstanceKey += 1;
+      _chatImmersive = true;
       _index = 3;
     });
   }

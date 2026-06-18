@@ -14,10 +14,16 @@ import '../../state/app_scope.dart';
 import 'huddle_call_controller.dart';
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, this.initialChannelKey, this.initialHuddleId});
+  const ChatScreen({
+    super.key,
+    this.initialChannelKey,
+    this.initialHuddleId,
+    this.onImmersiveChanged,
+  });
 
   final String? initialChannelKey;
   final String? initialHuddleId;
+  final ValueChanged<bool>? onImmersiveChanged;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -44,10 +50,14 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _pendingInitialChannelKey;
   String? _pendingInitialHuddleId;
   final Set<String> _joinedHuddles = {};
+  final Set<String> _locallyStartedHuddles = {};
   final List<ChatAttachment> _pendingAttachments = [];
   final _message = TextEditingController();
   HuddleCallController? _call;
   bool _mobileHuddleControlsVisible = false;
+  bool _immersiveReported = false;
+  String? _huddleActionMessage;
+  final ValueNotifier<int> _huddleUiVersion = ValueNotifier<int>(0);
 
   @override
   void initState() {
@@ -65,9 +75,7 @@ class _ChatScreenState extends State<ChatScreen> {
           apiBaseUrlProvider: () => appScope.client.baseUrl,
         );
         _call = call;
-        call.addListener(() {
-          if (mounted) setState(() {});
-        });
+        call.addListener(_handleCallChanged);
         unawaited(call.initialize());
       }
       _socketSub = socket.messages.listen((event) {
@@ -112,6 +120,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _setImmersive(false);
     _socketSub?.cancel();
     _historySub?.cancel();
     _notificationSub?.cancel();
@@ -119,9 +128,37 @@ class _ChatScreenState extends State<ChatScreen> {
     _huddleParticipantSub?.cancel();
     final call = _call;
     _call = null;
-    if (call != null) unawaited(call.disposeController());
+    if (call != null) {
+      call.removeListener(_handleCallChanged);
+      unawaited(call.disposeController());
+    }
+    _huddleUiVersion.dispose();
     _message.dispose();
     super.dispose();
+  }
+
+  void _setImmersive(bool value) {
+    if (_immersiveReported == value) return;
+    _immersiveReported = value;
+    widget.onImmersiveChanged?.call(value);
+  }
+
+  void _bumpHuddleUi() {
+    if (!mounted) return;
+    _huddleUiVersion.value += 1;
+  }
+
+  void _setHuddleAction(String? message) {
+    if (_huddleActionMessage == message) return;
+    _huddleActionMessage = message;
+    if (mounted) setState(() {});
+    _bumpHuddleUi();
+  }
+
+  void _handleCallChanged() {
+    if (!mounted) return;
+    setState(() {});
+    _bumpHuddleUi();
   }
 
   Future<void> _refreshChannels() async {
@@ -140,6 +177,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _message.clear();
       _loadingMessages = true;
     });
+    _setImmersive(true);
     final channelKey = channel.openKey;
     AppScope.of(context).socket.joinChannel(channelKey);
     try {
@@ -349,6 +387,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     _pendingAttachments.clear();
                     _message.clear();
                   });
+                  _setImmersive(false);
                 },
                 icon: const Icon(Icons.arrow_back),
               ),
@@ -672,6 +711,7 @@ class _ChatScreenState extends State<ChatScreen> {
             if (_pendingAttachments.isNotEmpty || _uploadingAttachment)
               _pendingAttachmentStrip(),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 IconButton(
                   tooltip: 'Attach file',
@@ -684,31 +724,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         )
                       : const Icon(Icons.attach_file),
                 ),
-                IconButton(
-                  tooltip: 'Bold',
-                  onPressed: () => _wrapSelection('**', '**'),
-                  icon: const Icon(Icons.format_bold),
-                ),
-                IconButton(
-                  tooltip: 'Italic',
-                  onPressed: () => _wrapSelection('_', '_'),
-                  icon: const Icon(Icons.format_italic),
-                ),
-                IconButton(
-                  tooltip: 'List',
-                  onPressed: _insertBullet,
-                  icon: const Icon(Icons.format_list_bulleted),
-                ),
-                IconButton(
-                  tooltip: 'Code',
-                  onPressed: () => _wrapSelection('`', '`'),
-                  icon: const Icon(Icons.code),
-                ),
-              ],
-            ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
                 Expanded(
                   child: TextField(
                     controller: _message,
@@ -717,6 +732,56 @@ class _ChatScreenState extends State<ChatScreen> {
                     textInputAction: TextInputAction.newline,
                     decoration: const InputDecoration(hintText: 'Message'),
                   ),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: 'Formatting',
+                  icon: const Icon(Icons.text_fields),
+                  onSelected: (value) {
+                    switch (value) {
+                      case 'bold':
+                        _wrapSelection('**', '**');
+                        break;
+                      case 'italic':
+                        _wrapSelection('_', '_');
+                        break;
+                      case 'list':
+                        _insertBullet();
+                        break;
+                      case 'code':
+                        _wrapSelection('`', '`');
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 'bold',
+                      child: ListTile(
+                        leading: Icon(Icons.format_bold),
+                        title: Text('Bold'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'italic',
+                      child: ListTile(
+                        leading: Icon(Icons.format_italic),
+                        title: Text('Italic'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'list',
+                      child: ListTile(
+                        leading: Icon(Icons.format_list_bulleted),
+                        title: Text('List'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'code',
+                      child: ListTile(
+                        leading: Icon(Icons.code),
+                        title: Text('Code'),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(width: 8),
                 IconButton.filled(
@@ -991,28 +1056,34 @@ class _ChatScreenState extends State<ChatScreen> {
         (action == 'huddle:start' || action == 'huddle:join')) {
       if (channelId == null && huddleId == null) return;
       setState(() {
+        _huddleActionMessage = null;
         if (channelId != null) _activeHuddles.remove(channelId);
         if (huddleId != null) {
           _joinedHuddles.remove(huddleId);
+          _locallyStartedHuddles.remove(huddleId);
           _huddleParticipants.remove(huddleId);
         }
       });
       if (_call?.huddleId == huddleId || _call?.channelId == channelId) {
         unawaited(_call?.leave(emitLeave: false));
       }
+      _bumpHuddleUi();
       return;
     }
 
     if (channelId == null || huddleId == null) return;
     setState(() {
       if (eventType == 'ended' || eventType == 'declined') {
+        _huddleActionMessage = null;
         _activeHuddles.remove(channelId);
         _joinedHuddles.remove(huddleId);
+        _locallyStartedHuddles.remove(huddleId);
         _huddleParticipants.remove(huddleId);
       } else {
         _activeHuddles[channelId] = event;
       }
     });
+    _bumpHuddleUi();
 
     if (eventType == 'started') {
       unawaited(_joinStartedHuddleIfNeeded(event, channelId, huddleId));
@@ -1049,16 +1120,23 @@ class _ChatScreenState extends State<ChatScreen> {
     final shouldJoin = startedByUserId != null &&
         currentUserId != null &&
         startedByUserId.toString() == currentUserId.toString();
+    final locallyStarted = _locallyStartedHuddles.contains(huddleId);
 
-    if (!shouldJoin && !alreadyJoined) return;
+    if (!shouldJoin && !locallyStarted && !alreadyJoined) return;
 
-    await call.join(
-      channelId: channelId,
-      huddleId: huddleId,
-      participants: _huddleParticipants[huddleId] ?? const [],
-    );
-    if (!mounted) return;
-    setState(() => _joinedHuddles.add(huddleId));
+    _setHuddleAction('Opening huddle...');
+    try {
+      await call.join(
+        channelId: channelId,
+        huddleId: huddleId,
+        participants: _huddleParticipants[huddleId] ?? const [],
+      );
+      if (!mounted) return;
+      setState(() => _joinedHuddles.add(huddleId));
+      _bumpHuddleUi();
+    } finally {
+      if (mounted) _setHuddleAction(null);
+    }
   }
 
   void _handleHuddleParticipantEvent(JsonMap event) {
@@ -1072,6 +1150,7 @@ class _ChatScreenState extends State<ChatScreen> {
           .map((item) => JsonMap.from(item))
           .toList(growable: false);
       setState(() => _huddleParticipants[huddleId] = next);
+      _bumpHuddleUi();
       return;
     }
     final userId = readString(event, ['userId', 'user_id']);
@@ -1081,6 +1160,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (event['event'] == 'joined') participants.add(event);
     setState(() => _huddleParticipants[huddleId] = participants);
+    _bumpHuddleUi();
   }
 
   void _showCreateChannelSheet() {
@@ -1297,6 +1377,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 _selected = null;
                                 _messages = const [];
                               });
+                              _setImmersive(false);
                               await _refreshChannels();
                             } catch (err) {
                               if (mounted) showSnack(this.context, '$err');
@@ -1326,6 +1407,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               _selected = null;
                               _messages = const [];
                             });
+                            _setImmersive(false);
                             await _refreshChannels();
                           } catch (err) {
                             if (mounted) showSnack(this.context, '$err');
@@ -1385,186 +1467,251 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            final current = _activeHuddles[channelKey] ?? active;
-            final huddleId =
-                readString(current ?? const {}, ['huddleId', 'huddle_id']);
-            final call = _call;
-            final joined = huddleId != null &&
-                (call?.joined == true && call?.huddleId == huddleId);
-            if (joined && call != null) {
-              return _fullscreenHuddle(
-                call,
-                channelKey,
-                huddleId,
-                setSheetState,
-              );
-            }
-            final participants = huddleId == null
-                ? const <JsonMap>[]
-                : (_huddleParticipants[huddleId] ?? const []);
-            final sheetHeight =
-                MediaQuery.of(context).size.height * (joined ? 0.92 : 0.48);
-            return SizedBox(
-              height: sheetHeight,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(18, 6, 18, 18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
+            return ValueListenableBuilder<int>(
+              valueListenable: _huddleUiVersion,
+              builder: (context, _, __) {
+                final current = _activeHuddles[channelKey] ?? active;
+                final huddleId =
+                    readString(current ?? const {}, ['huddleId', 'huddle_id']);
+                final call = _call;
+                final joined = huddleId != null &&
+                    (call?.joined == true && call?.huddleId == huddleId);
+                if (joined && call != null) {
+                  return _fullscreenHuddle(
+                    call,
+                    channelKey,
+                    huddleId,
+                    setSheetState,
+                  );
+                }
+                final participants = huddleId == null
+                    ? const <JsonMap>[]
+                    : (_huddleParticipants[huddleId] ?? const []);
+                final huddleBusy =
+                    _huddleActionMessage != null || (call?.starting == true);
+                final huddleAction = _huddleActionMessage ??
+                    (call?.starting == true ? 'Connecting media...' : null);
+                final busyLabel = huddleAction == 'Starting huddle...'
+                    ? 'Starting...'
+                    : 'Joining...';
+                final sheetHeight =
+                    MediaQuery.of(context).size.height * (joined ? 0.92 : 0.58);
+                return SizedBox(
+                  height: sheetHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 6, 18, 18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(
-                          child: Text(
-                            current == null ? 'Start huddle' : 'Huddle',
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                current == null ? 'Start huddle' : 'Huddle',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .headlineSmall
+                                    ?.copyWith(fontWeight: FontWeight.w800),
+                              ),
+                            ),
+                            if (joined)
+                              IconButton.filled(
+                                tooltip: _selected?.isDm == true
+                                    ? 'End call'
+                                    : 'Leave call',
+                                style: IconButton.styleFrom(
+                                  backgroundColor:
+                                      Theme.of(context).colorScheme.error,
+                                  foregroundColor: Colors.white,
+                                ),
+                                onPressed: () async {
+                                  await _leaveHuddle(channelKey, huddleId);
+                                  if (context.mounted) {
+                                    Navigator.of(context).pop();
+                                  }
+                                },
+                                icon: const Icon(Icons.call_end),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          current == null
+                              ? 'Start a live huddle in ${_selected?.name ?? 'this chat'}.'
+                              : 'Live huddle in ${_selected?.name ?? 'this chat'}.',
+                          style:
+                              Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Meeting intelligence is created after the huddle ends when transcription is available, whether the huddle was started on mobile or web.',
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                        ),
+                        if (huddleAction != null) ...[
+                          const SizedBox(height: 12),
+                          LinearProgressIndicator(
+                            minHeight: 3,
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            huddleAction,
+                            style: Theme.of(context).textTheme.labelMedium,
+                          ),
+                        ],
+                        if (call?.error != null) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            call!.error!,
                             style: Theme.of(context)
                                 .textTheme
-                                .headlineSmall
-                                ?.copyWith(fontWeight: FontWeight.w800),
+                                .bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.error,
+                                ),
                           ),
-                        ),
-                        if (joined)
-                          IconButton.filled(
-                            tooltip: _selected?.isDm == true
-                                ? 'End call'
-                                : 'Leave call',
-                            style: IconButton.styleFrom(
-                              backgroundColor:
-                                  Theme.of(context).colorScheme.error,
-                              foregroundColor: Colors.white,
-                            ),
-                            onPressed: () async {
-                              await _leaveHuddle(channelKey, huddleId);
-                              if (context.mounted) Navigator.of(context).pop();
-                            },
-                            icon: const Icon(Icons.call_end),
+                        ],
+                        if (joined && call != null) ...[
+                          const SizedBox(height: 14),
+                          Expanded(child: _huddleVideoGrid(call)),
+                          const SizedBox(height: 12),
+                          _huddleControls(
+                            call,
+                            channelKey,
+                            huddleId,
+                            setSheetState,
                           ),
+                        ] else
+                          const Spacer(),
+                        if (participants.isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          Text(
+                            'Participants',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final participant in participants)
+                                Chip(
+                                  avatar: _Avatar(
+                                    name: readString(
+                                          participant,
+                                          ['username', 'name'],
+                                        ) ??
+                                        'User',
+                                    size: 22,
+                                  ),
+                                  label: Text(
+                                    readString(
+                                          participant,
+                                          ['username', 'name'],
+                                        ) ??
+                                        'User',
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ],
+                        if (!joined) ...[
+                          const SizedBox(height: 18),
+                          Row(
+                            children: [
+                              if (current == null)
+                                Expanded(
+                                  child: FilledButton.icon(
+                                    onPressed: socket.connected && !huddleBusy
+                                        ? () async {
+                                            await _startHuddle(channelKey);
+                                            if (!context.mounted) return;
+                                            setSheetState(() {});
+                                          }
+                                        : null,
+                                    icon: huddleBusy
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(Icons.call),
+                                    label: Text(
+                                      huddleBusy
+                                          ? 'Starting...'
+                                          : 'Start huddle',
+                                    ),
+                                  ),
+                                )
+                              else ...[
+                                Expanded(
+                                  child: FilledButton.icon(
+                                    onPressed: socket.connected &&
+                                            huddleId != null &&
+                                            !huddleBusy
+                                        ? () async {
+                                            await _toggleJoinHuddle(
+                                              channelKey,
+                                              huddleId,
+                                              participants,
+                                              joined,
+                                            );
+                                            if (!context.mounted) return;
+                                            setSheetState(() {});
+                                          }
+                                        : null,
+                                    icon: huddleBusy
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(Icons.call),
+                                    label: Text(
+                                      huddleBusy ? busyLabel : 'Join huddle',
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                IconButton.filledTonal(
+                                  tooltip: _selected?.isDm == true
+                                      ? 'End call'
+                                      : 'End for all',
+                                  onPressed: huddleId == null
+                                      ? null
+                                      : () async {
+                                          await _endHuddleForAll(
+                                            channelKey,
+                                            huddleId,
+                                          );
+                                          if (context.mounted) {
+                                            Navigator.of(context).pop();
+                                          }
+                                        },
+                                  icon: const Icon(Icons.call_end),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ],
                       ],
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      current == null
-                          ? 'Start a live huddle in ${_selected?.name ?? 'this chat'}.'
-                          : 'Live huddle in ${_selected?.name ?? 'this chat'}.',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color:
-                                Theme.of(context).colorScheme.onSurfaceVariant,
-                          ),
-                    ),
-                    if (call?.error != null) ...[
-                      const SizedBox(height: 10),
-                      Text(
-                        call!.error!,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
-                      ),
-                    ],
-                    if (joined && call != null) ...[
-                      const SizedBox(height: 14),
-                      Expanded(child: _huddleVideoGrid(call)),
-                      const SizedBox(height: 12),
-                      _huddleControls(
-                        call,
-                        channelKey,
-                        huddleId,
-                        setSheetState,
-                      ),
-                    ] else
-                      const Spacer(),
-                    if (participants.isNotEmpty) ...[
-                      const SizedBox(height: 14),
-                      Text(
-                        'Participants',
-                        style: Theme.of(context).textTheme.labelLarge,
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final participant in participants)
-                            Chip(
-                              avatar: _Avatar(
-                                name: readString(
-                                      participant,
-                                      ['username', 'name'],
-                                    ) ??
-                                    'User',
-                                size: 22,
-                              ),
-                              label: Text(
-                                readString(
-                                      participant,
-                                      ['username', 'name'],
-                                    ) ??
-                                    'User',
-                              ),
-                            ),
-                        ],
-                      ),
-                    ],
-                    if (!joined) ...[
-                      const SizedBox(height: 18),
-                      Row(
-                        children: [
-                          if (current == null)
-                            Expanded(
-                              child: FilledButton.icon(
-                                onPressed: socket.connected
-                                    ? () async {
-                                        await _startHuddle(channelKey);
-                                        if (!context.mounted) return;
-                                        setSheetState(() {});
-                                      }
-                                    : null,
-                                icon: const Icon(Icons.call),
-                                label: const Text('Start huddle'),
-                              ),
-                            )
-                          else ...[
-                            Expanded(
-                              child: FilledButton.icon(
-                                onPressed: socket.connected && huddleId != null
-                                    ? () async {
-                                        await _toggleJoinHuddle(
-                                          channelKey,
-                                          huddleId,
-                                          participants,
-                                          joined,
-                                        );
-                                        if (!context.mounted) return;
-                                        setSheetState(() {});
-                                      }
-                                    : null,
-                                icon: const Icon(Icons.call),
-                                label: const Text('Join huddle'),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            IconButton.filledTonal(
-                              tooltip: _selected?.isDm == true
-                                  ? 'End call'
-                                  : 'End for all',
-                              onPressed: huddleId == null
-                                  ? null
-                                  : () async {
-                                      await _endHuddleForAll(
-                                        channelKey,
-                                        huddleId,
-                                      );
-                                      if (context.mounted) {
-                                        Navigator.of(context).pop();
-                                      }
-                                    },
-                              icon: const Icon(Icons.call_end),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             );
           },
         );
@@ -1574,8 +1721,30 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _startHuddle(String channelKey) async {
     final id = 'huddle-${DateTime.now().millisecondsSinceEpoch}';
-    final socket = AppScope.of(context).socket;
+    final scope = AppScope.of(context);
+    final socket = scope.socket;
+    final user = scope.auth.user;
+    _setHuddleAction('Starting huddle...');
+    _locallyStartedHuddles.add(id);
+    setState(() {
+      _activeHuddles[channelKey] = {
+        'event': 'starting',
+        'channelId': channelKey,
+        'huddleId': id,
+        'startedBy': {
+          if (user?.id != null) 'userId': user!.id,
+          if (user?.displayName != null) 'username': user!.displayName,
+        },
+      };
+    });
+    _bumpHuddleUi();
     socket.startHuddle(channelId: channelKey, huddleId: id);
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 8)).then((_) {
+        if (!mounted || _huddleActionMessage != 'Starting huddle...') return;
+        _setHuddleAction(null);
+      }),
+    );
   }
 
   Future<void> _toggleJoinHuddle(
@@ -1586,13 +1755,21 @@ class _ChatScreenState extends State<ChatScreen> {
   ) async {
     if (joined) return;
     _mobileHuddleControlsVisible = false;
-    await _call?.join(
-      channelId: channelKey,
-      huddleId: huddleId,
-      participants: participants,
-    );
-    if (!mounted) return;
-    setState(() => _joinedHuddles.add(huddleId));
+    _setHuddleAction('Joining huddle...');
+    try {
+      await _call?.join(
+        channelId: channelKey,
+        huddleId: huddleId,
+        participants: participants,
+      );
+      if (!mounted) return;
+      setState(() => _joinedHuddles.add(huddleId));
+      _bumpHuddleUi();
+    } catch (_) {
+      if (mounted) showSnack(context, 'Could not join huddle.');
+    } finally {
+      if (mounted) _setHuddleAction(null);
+    }
   }
 
   Future<void> _leaveHuddle(String channelKey, String huddleId) async {
@@ -1600,6 +1777,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     setState(() {
       _joinedHuddles.remove(huddleId);
+      _locallyStartedHuddles.remove(huddleId);
       if (_selected?.isDm == true) {
         _activeHuddles.remove(channelKey);
         _huddleParticipants.remove(huddleId);
@@ -1615,6 +1793,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _activeHuddles.remove(channelKey);
       _joinedHuddles.remove(huddleId);
+      _locallyStartedHuddles.remove(huddleId);
       _huddleParticipants.remove(huddleId);
     });
   }
