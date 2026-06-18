@@ -36,6 +36,7 @@ router.post("/", allowRoles("admin", "manager"), async (req, res) => {
 
     // 🔐 enforce workspace from middleware (never from client)
     req.body.workspaceId = req.workspaceId;
+    req.body.added_by = req.user.id;
 
     const project = await projectService.create(req.body);
 

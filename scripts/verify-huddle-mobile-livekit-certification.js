@@ -36,7 +36,11 @@ function assertNotContains(source, pattern, message) {
   assert.doesNotMatch(source, pattern, message);
 }
 
-assertContains(pubspec, /livekit_client:\s*2\.4\.0/, "Mobile app must pin LiveKit SDK for canary parity");
+assertContains(
+  pubspec,
+  /livekit_client:\s*2\.8\.0/,
+  "Mobile app must pin the API-36 compatible LiveKit SDK"
+);
 assertContains(providerContract, /HuddleMediaProviderKind\s*{[\s\S]*mesh,[\s\S]*livekit,/,
   "Provider contract must add LiveKit without removing mesh");
 assertContains(providerContract, /Widget\?\s+buildLocalVideoView/,
@@ -59,10 +63,10 @@ assertContains(service, /MeshHuddleMediaProvider/,
 assertContains(service, /LiveKitHuddleMediaProvider/,
   "LiveKit mobile provider must be additive");
 
-assertContains(provider, /\/huddle\/media\/livekit\/room/,
-  "Mobile provider must use the existing LiveKit room endpoint");
 assertContains(provider, /\/huddle\/media\/livekit\/token/,
   "Mobile provider must use the existing LiveKit token endpoint");
+assertNotContains(provider, /\/huddle\/media\/livekit\/room/,
+  "Mobile provider should skip the separate room endpoint on the join fast-path");
 assertContains(provider, /'provider':\s*'livekit'/,
   "Mobile provider must explicitly request LiveKit");
 assertContains(provider, /'clientCapabilities'/,
@@ -171,7 +175,7 @@ assertNotContains(provider, /active-session provider switching/i,
 console.log("Huddle Mobile LiveKit Canary Certification");
 console.log("- Mesh remains the default and force-mesh rollback is available.");
 console.log("- Mobile LiveKit is additive and gated by mobile canary flags.");
-console.log("- Mobile sends capability negotiation data to existing LiveKit room/token endpoints.");
+console.log("- Mobile sends capability negotiation data through the existing LiveKit token endpoint fast-path.");
 console.log("- Provider lock compliance is enforced by the backend and consumed by mobile fallback handling.");
 console.log("- Media State V2 maps participants, devices, tracks, publication/subscription, active speaker, and network quality.");
 console.log("- Mic/camera publication, provider cleanup, pre-lock mesh fallback, and locked-session fail-closed behavior are covered by static certification checks.");

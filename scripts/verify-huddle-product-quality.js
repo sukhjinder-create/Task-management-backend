@@ -94,20 +94,11 @@ const sanitized = sanitizeLiveKitQualityDiagnostics({
     totalJoinLatencyMs: 790,
     firstAudioMs: 1180,
     firstVideoMs: 1430,
+    firstRemoteParticipantMs: 980,
+    firstAudioAfterParticipantMs: 200,
+    firstVideoAfterParticipantMs: 450,
     captionsActiveMs: 1750,
-  },
-  backgroundEffect: {
-    mode: "blur",
-    active: true,
-    diagnostics: {
-      reason: "background_replacement_degraded_to_blur",
-      timings: {
-        moduleLoadMs: 45,
-        processorAttachMs: 70,
-        switchMs: 25,
-        totalMs: 140,
-      },
-    },
+    firstCaptionMs: 2100,
   },
   tracks: [{
     direction: "receive",
@@ -152,8 +143,9 @@ assert.equal(sanitized.tracks[0].renderTargetVisible, true);
 assert.equal(sanitized.startup.intentToJoinMs, 920);
 assert.equal(sanitized.startup.connectLatencyMs, 540);
 assert.equal(sanitized.startup.firstVideoMs, 1430);
-assert.equal(sanitized.backgroundEffect.mode, "blur");
-assert.equal(sanitized.backgroundEffect.timings.totalMs, 140);
+assert.equal(sanitized.startup.firstRemoteParticipantMs, 980);
+assert.equal(sanitized.startup.firstVideoAfterParticipantMs, 450);
+assert.equal("backgroundEffect" in sanitized, false);
 const qualitySummary = summarizeLiveKitQualitySamples([{
   observedAt: sanitized.observedAt,
   aggregate: sanitized.aggregate,
@@ -161,14 +153,15 @@ const qualitySummary = summarizeLiveKitQualitySamples([{
   browser: { userAgent: "Chrome real device" },
   metadata: {
     startup: sanitized.startup,
-    backgroundEffect: sanitized.backgroundEffect,
   },
 }]);
 assert.equal(qualitySummary.metrics.averageIntentToJoinMs, 920);
 assert.equal(qualitySummary.metrics.averageConnectLatencyMs, 540);
 assert.equal(qualitySummary.metrics.averageReceiveMediaSourceFps, 30);
 assert.equal(qualitySummary.metrics.averageFirstAudioMs, 1180);
-assert.deepEqual(qualitySummary.metrics.backgroundEffectModes, ["blur"]);
+assert.equal(qualitySummary.metrics.averageFirstRemoteParticipantMs, 980);
+assert.equal(qualitySummary.metrics.averageFirstVideoAfterParticipantMs, 450);
+assert.equal("backgroundEffectModes" in qualitySummary.metrics, false);
 assert.equal(qualitySummary.metrics.renderTargetMatchRate, 0.5);
 assert.equal(qualitySummary.metrics.averageScreenShareSendBitrateKbps, 1800);
 assert.equal(qualitySummary.metrics.averageRequestedContentReceiveWidth, 960);

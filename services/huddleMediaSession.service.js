@@ -856,7 +856,15 @@ function sanitizeQualityStartup(raw = {}) {
     intentToJoinMs: safeNumber(startup.intentToJoinMs),
     firstAudioMs: safeNumber(startup.firstAudioMs),
     firstVideoMs: safeNumber(startup.firstVideoMs),
+    firstRemoteParticipantMs: safeNumber(startup.firstRemoteParticipantMs),
+    firstAudioAfterParticipantMs: safeNumber(
+      startup.firstAudioAfterParticipantMs
+    ),
+    firstVideoAfterParticipantMs: safeNumber(
+      startup.firstVideoAfterParticipantMs
+    ),
     captionsActiveMs: safeNumber(startup.captionsActiveMs),
+    firstCaptionMs: safeNumber(startup.firstCaptionMs),
     prepareLatencyMs: safeNumber(startup.prepareLatencyMs),
     sdkLoadLatencyMs: safeNumber(startup.sdkLoadLatencyMs),
     roomEndpointLatencyMs: safeNumber(startup.roomEndpointLatencyMs),
@@ -888,30 +896,12 @@ function sanitizeQualityStartup(raw = {}) {
     captionFirstProviderResultLatencyMs: safeNumber(startup.captionFirstProviderResultLatencyMs),
     captionFirstBackendEventLatencyMs: safeNumber(startup.captionFirstBackendEventLatencyMs),
     captionFirstLocalCaptionLatencyMs: safeNumber(startup.captionFirstLocalCaptionLatencyMs),
+    captionFirstDeliveryLatencyMs: safeNumber(startup.captionFirstDeliveryLatencyMs),
     captionGrantCacheHit: Boolean(startup.captionGrantCacheHit),
     captionGrantSharedInFlight: Boolean(startup.captionGrantSharedInFlight),
     mediaPrewarmLatencyMs: safeNumber(startup.mediaPrewarmLatencyMs),
     mediaPrewarmOk: safeBoolean(startup.mediaPrewarmOk),
     mediaPrewarmTrackCount: safeNumber(startup.mediaPrewarmTrackCount),
-  };
-}
-
-function sanitizeBackgroundEffectDiagnostics(raw = {}) {
-  const effect = objectOrEmpty(raw);
-  const diagnostics = objectOrEmpty(effect.diagnostics);
-  const timings = objectOrEmpty(diagnostics.timings);
-  return {
-    mode: boundedString(effect.mode, 40) || "off",
-    active: safeBoolean(effect.active),
-    reason: boundedString(diagnostics.reason, 100),
-    trigger: boundedString(diagnostics.trigger, 80),
-    framesPerSecond: safeNumber(diagnostics.framesPerSecond),
-    timings: {
-      moduleLoadMs: safeNumber(timings.moduleLoadMs),
-      processorAttachMs: safeNumber(timings.processorAttachMs),
-      switchMs: safeNumber(timings.switchMs),
-      totalMs: safeNumber(timings.totalMs),
-    },
   };
 }
 
@@ -1051,9 +1041,6 @@ export function sanitizeLiveKitQualityDiagnostics(raw = {}) {
     dynacast: safeBoolean(diagnostics.dynacast),
     browser: sanitizeQualityBrowser(diagnostics.browser),
     startup: sanitizeQualityStartup(diagnostics.startup),
-    backgroundEffect: sanitizeBackgroundEffectDiagnostics(
-      diagnostics.backgroundEffect
-    ),
     aggregate: sanitizeQualityAggregate({
       ...diagnostics.aggregate,
       participantCount: diagnostics.aggregate?.participantCount ?? participants.length,
@@ -1178,7 +1165,6 @@ export async function recordLiveKitQualityDiagnostics({
         adaptiveStream: sanitized.adaptiveStream,
         dynacast: sanitized.dynacast,
         startup: sanitized.startup,
-        backgroundEffect: sanitized.backgroundEffect,
       }),
     ]
   );
@@ -1321,9 +1307,6 @@ export function summarizeLiveKitQualitySamples(samples = []) {
   const source = realDeviceSamples.length ? realDeviceSamples : ordered;
   const aggregates = source.map((sample) => sample.aggregate || {});
   const startupSamples = source.map((sample) => sample.metadata?.startup || {});
-  const backgroundEffectSamples = source
-    .map((sample) => sample.metadata?.backgroundEffect || {})
-    .filter((effect) => effect.mode || effect.reason);
   const tracks = source.flatMap((sample) => sample.tracks || []);
   const receiveVideo = tracks.filter(
     (track) => track.kind === "video" && track.direction === "receive"
@@ -1377,11 +1360,15 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       : Number(((averageBitrateKbps * 3600) / 8 / 1000).toFixed(2)));
   const maxReceiveWidth = Math.max(
     0,
-    ...finiteValues(aggregates.map((item) => item.maxReceiveWidth))
+    ...finiteValues(receiveVideo.map((track) => track.width))
   ) || null;
   const maxReceiveHeight = Math.max(
     0,
-    ...finiteValues(aggregates.map((item) => item.maxReceiveHeight))
+    ...finiteValues(
+      receiveVideo
+        .filter((track) => Number(track.width) === maxReceiveWidth)
+        .map((track) => track.height)
+    )
   ) || null;
   const maxReceiveLongEdge =
     maxReceiveWidth && maxReceiveHeight
@@ -1393,11 +1380,15 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       : null;
   const maxSendWidth = Math.max(
     0,
-    ...finiteValues(aggregates.map((item) => item.maxSendWidth))
+    ...finiteValues(sendVideo.map((track) => track.width))
   ) || null;
   const maxSendHeight = Math.max(
     0,
-    ...finiteValues(aggregates.map((item) => item.maxSendHeight))
+    ...finiteValues(
+      sendVideo
+        .filter((track) => Number(track.width) === maxSendWidth)
+        .map((track) => track.height)
+    )
   ) || null;
   const renderTargetTrackCount = aggregates.reduce(
     (total, item) => total + (Number(item.renderTargetTrackCount) || 0),
@@ -1655,8 +1646,20 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageFirstVideoMs: positiveAverage(
         startupSamples.map((item) => item.firstVideoMs)
       ),
+      averageFirstRemoteParticipantMs: positiveAverage(
+        startupSamples.map((item) => item.firstRemoteParticipantMs)
+      ),
+      averageFirstAudioAfterParticipantMs: positiveAverage(
+        startupSamples.map((item) => item.firstAudioAfterParticipantMs)
+      ),
+      averageFirstVideoAfterParticipantMs: positiveAverage(
+        startupSamples.map((item) => item.firstVideoAfterParticipantMs)
+      ),
       averageCaptionsActiveMs: positiveAverage(
         startupSamples.map((item) => item.captionsActiveMs)
+      ),
+      averageFirstCaptionMs: positiveAverage(
+        startupSamples.map((item) => item.firstCaptionMs)
       ),
       averageCaptionTransportReadyMs: positiveAverage(
         startupSamples.map((item) => item.captionTransportReadyLatencyMs)
@@ -1682,17 +1685,12 @@ export function summarizeLiveKitQualitySamples(samples = []) {
       averageCaptionFirstLocalCaptionMs: positiveAverage(
         startupSamples.map((item) => item.captionFirstLocalCaptionLatencyMs)
       ),
+      averageCaptionFirstDeliveryMs: positiveAverage(
+        startupSamples.map((item) => item.captionFirstDeliveryLatencyMs)
+      ),
       captionGrantCacheHitCount: startupSamples.filter((item) => item.captionGrantCacheHit).length,
       captionGrantSharedInFlightCount: startupSamples.filter(
         (item) => item.captionGrantSharedInFlight
-      ).length,
-      backgroundEffectModes: uniqueStrings(
-        backgroundEffectSamples.map((item) => item.mode)
-      ),
-      backgroundEffectDegradationCount: backgroundEffectSamples.filter(
-        (item) =>
-          item.reason === "background_replacement_degraded_to_blur" ||
-          item.reason === "background_effect_automatically_disabled"
       ).length,
       renderTargetTrackCount,
       renderTargetMismatchCount,

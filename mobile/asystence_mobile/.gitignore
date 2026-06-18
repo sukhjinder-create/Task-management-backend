@@ -1,0 +1,21 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+coverage/
+android/key.properties
+android/keystore/*.jks
+android/keystore/*.keystore
+android/keystore/*.p12
+linux/
+macos/
+web/
+windows/
+*.iml
+
+# The vendored file_picker package is kept only for its runtime sources.
+vendor/file_picker/example/
+vendor/file_picker/test/

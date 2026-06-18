@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "461313609501",
+    "project_id": "asystence-8b8ac",
+    "storage_bucket": "asystence-8b8ac.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:461313609501:android:cb0c05b7d17a0dada1dbf4",
+        "android_client_info": {
+          "package_name": "com.proxima.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDXzTGHjlC-HAd4Aemg2Q91yIgh83N22dg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

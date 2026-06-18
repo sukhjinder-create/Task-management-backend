@@ -93,7 +93,10 @@ async function logProjectHistory({
 ------------------------------------------------------- */
 
 // Get a single task by id (with subtask counts)
-export async function getTaskById(id) {
+export async function getTaskById(id, workspaceId = null) {
+  const values = [id];
+  const workspaceClause = workspaceId ? "AND t.workspace_id = $2" : "";
+  if (workspaceId) values.push(workspaceId);
   const { rows } = await pool.query(
     `
     SELECT
@@ -101,7 +104,8 @@ export async function getTaskById(id) {
       COALESCE(st.total_subtasks, 0)     AS subtasks_total,
       COALESCE(st.completed_subtasks, 0) AS subtasks_completed,
       CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
-           THEN p.project_code || '-' || t.ticket_number END AS display_id
+           THEN p.project_code || '-' || t.ticket_number END AS display_id,
+      p.name AS project_name
     FROM tasks t
     LEFT JOIN projects p ON p.id = t.project_id
     LEFT JOIN (
@@ -113,8 +117,9 @@ export async function getTaskById(id) {
       GROUP BY task_id
     ) st ON st.task_id = t.id
     WHERE t.id = $1
+      ${workspaceClause}
     `,
-    [id]
+    values
   );
   if (rows.length === 0) {
     throw new Error("Task not found");

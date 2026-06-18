@@ -48,12 +48,18 @@ class ProjectRepository {
     }
 
     const query = `
-      INSERT INTO projects (name, added_by, workspace_id, project_code)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO projects (name, description, added_by, workspace_id, project_code)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *;
     `;
 
-    const values = [data.name, data.added_by, workspaceId, code];
+    const values = [
+      data.name,
+      data.description || null,
+      data.added_by,
+      workspaceId,
+      code,
+    ];
     const result = await pool.query(query, values);
     return result.rows[0];
   }
@@ -129,14 +135,16 @@ class ProjectRepository {
     const query = `
       UPDATE projects
       SET name = $1,
+          description = $2,
           updated_at = NOW()
-      WHERE id = $2
-        AND workspace_id = $3
+      WHERE id = $3
+        AND workspace_id = $4
       RETURNING *;
     `;
 
     const values = [
       data.name,
+      data.description ?? null,
       id,
       data.workspaceId || "GLOBAL",
     ];

@@ -1,25 +1,13 @@
 import pool from "../db.js";
 import express from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+import { deleteFile, uploadFile } from "../services/storage.service.js";
 
 // Multer setup for task attachments
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const uploadDir = path.join(__dirname, "..", "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 const taskAttachmentUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      cb(null, unique + path.extname(file.originalname));
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
 });
 import {
@@ -533,7 +521,13 @@ router.post(
       const file = req.file;
       if (!file) return res.status(400).json({ error: "No file uploaded" });
 
-      const publicUrl = `/uploads/${file.filename}`;
+      await getTaskById(taskId, req.workspaceId);
+      const publicUrl = await uploadFile({
+        buffer: file.buffer,
+        originalname: file.originalname,
+        mimetype: file.mimetype,
+        folder: "uploads/task-attachments",
+      });
 
       const { rows } = await pool.query(
         `INSERT INTO task_attachments
@@ -564,11 +558,16 @@ router.post(
  */
 router.delete("/:taskId/attachments/:attachmentId", async (req, res) => {
   try {
-    const { attachmentId } = req.params;
-    await pool.query(
-      `DELETE FROM task_attachments WHERE id = $1 AND workspace_id = $2`,
-      [attachmentId, req.workspaceId]
+    const { taskId, attachmentId } = req.params;
+    await getTaskById(taskId, req.workspaceId);
+    const { rows } = await pool.query(
+      `DELETE FROM task_attachments
+       WHERE id = $1 AND task_id = $2 AND workspace_id = $3
+       RETURNING url`,
+      [attachmentId, taskId, req.workspaceId]
     );
+    if (!rows[0]) return res.status(404).json({ error: "Attachment not found" });
+    await deleteFile(rows[0].url);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete attachment" });
@@ -655,8 +654,9 @@ router.get("/:id/logs", async (req, res) => {
   LEFT JOIN users newUser 
     ON newUser.id::text = (l.new_value->>'assigned_to')
   WHERE l.task_id = $1
+    AND l.workspace_id = $2
   ORDER BY l.created_at ASC
-`, [taskId]);
+`, [taskId, req.workspaceId]);
 
     res.json(rows);
 

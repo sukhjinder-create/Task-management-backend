@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const backendRoot = process.cwd();
@@ -17,13 +17,19 @@ const liveKitProvider = readFrontend("src/huddle/media/LiveKitMediaProvider.js")
 const liveKitRenderTarget = readFrontend("src/huddle/media/LiveKitRenderTarget.js");
 const liveKitConnection = readFrontend("src/huddle/media/LiveKitConnection.js");
 const huddleContext = readFrontend("src/context/HuddleContext.jsx");
-const backgroundEffects = readFrontend("src/huddle/media/BackgroundEffects.js");
 const huddleWindow = readFrontend("src/huddle/GlobalHuddleWindow.jsx");
+const frontendPackage = readFrontend("package.json");
 const meetingIntelligence = readFrontend("src/pages/HuddleMeetingIntelligence.jsx");
 const artifact = readBackend("services/huddleArtifact.service.js");
 const generation = readBackend("services/huddleIntelligenceGeneration.service.js");
 const llm = readBackend("services/llm.js");
 const transcriptText = readBackend("utils/huddleTranscriptText.js");
+const mobileChat = readBackend(
+  "mobile/asystence_mobile/lib/src/features/workspace/chat_screen.dart"
+);
+const mobileLiveKit = readBackend(
+  "mobile/asystence_mobile/lib/src/features/workspace/huddle_media/livekit_huddle_media_provider.dart"
+);
 const { normalizeHuddleTranscriptText } = await import(
   "../utils/huddleTranscriptText.js"
 );
@@ -55,7 +61,7 @@ assert.match(transcriptionClient, /pendingFinalEvents/);
 assert.match(transcriptionClient, /coalescedPartialEvents/);
 assert.match(transcriptionClient, /enqueueProviderEvent/);
 assert.match(transcriptionClient, /status: "reconnecting"/);
-assert.match(liveKitProvider, /LIVE_CAPTION_POLL_INTERVAL_MS = 500/);
+assert.match(liveKitProvider, /LIVE_CAPTION_POLL_INTERVAL_MS = 2000/);
 assert.match(liveKitProvider, /LIVE_CAPTION_CURSOR_OVERLAP_MS = 2000/);
 assert.match(liveKitProvider, /captionCursorRef/);
 assert.match(liveKitProvider, /captionGrantCacheHit/);
@@ -63,17 +69,15 @@ assert.match(liveKitProvider, /captionGrantCacheHit/);
 assert.match(liveKitConnection, /videoSimulcastLayers: layers/);
 assert.match(
   liveKitConnection,
-  /\[videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h540\]/
+  /videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h540/
 );
-assert.match(
-  liveKitConnection,
-  /\[videoPresets\.h180,\s*videoPresets\.h360,\s*videoPresets\.h720\]/
-);
-assert.match(liveKitConnection, /maxBitrate: mobile \? 1_400_000 : 2_200_000/);
+assert.doesNotMatch(liveKitConnection, /videoPresets\.h720/);
+assert.match(liveKitConnection, /maxBitrate: mobile \? 750_000 : 900_000/);
+assert.match(liveKitConnection, /dynacast: true/);
 assert.match(liveKitConnection, /async function timedLiveKitRequest/);
 assert.match(
   liveKitConnection,
-  /const tokenRequest = await timedLiveKitRequest\(\(\) => fetchLiveKitToken\(params\)\)/
+  /const tokenRequest = await timedLiveKitRequest\(async \(\) => \([\s\S]*consumePrefetchedLiveKitToken\(params\)[\s\S]*fetchLiveKitToken\(params\)[\s\S]*\)\)/
 );
 assert.match(liveKitConnection, /roomEndpointLatencyMs = null/);
 assert.match(liveKitConnection, /tokenEndpointLatencyMs = tokenRequest\.latencyMs/);
@@ -85,18 +89,20 @@ assert.match(liveKitProvider, /prewarmInitialLiveKitTracks/);
 assert.match(liveKitProvider, /publishPrewarmedLiveKitMedia/);
 assert.match(liveKitProvider, /cameraPublishOptions\(mode, sdk\)/);
 assert.match(liveKitProvider, /mediaPrewarmLatencyMs/);
-assert.match(liveKitProvider, /maxFramerate: mobile \? 24 : 30/);
+assert.match(liveKitProvider, /maxFramerate: 24/);
 assert.match(huddleContext, /requestIdleCallback\(preload, \{ timeout: 1500 \}\)/);
-assert.match(liveKitProvider, /aspectRatio: portrait \? 9 \/ 16 : 16 \/ 9/);
+assert.doesNotMatch(liveKitProvider, /aspectRatio:\s*3\s*\/\s*4/);
+assert.doesNotMatch(liveKitConnection, /aspectRatio:\s*3\s*\/\s*4/);
 assert.match(liveKitProvider, /estimatedMegabytesPerHour/);
 assert.match(media, /Estimated media data usage is unusually high/);
-assert.match(backgroundEffects, /constrainedDevice/);
-assert.match(backgroundEffects, /preloadBackgroundEffects/);
-assert.match(backgroundEffects, /totalPreloadMs/);
-assert.match(liveKitProvider, /background_effect_automatically_disabled/);
-assert.match(liveKitProvider, /background_replacement_degraded_to_blur/);
-assert.match(liveKitProvider, /background_effect_disabled_on_mobile_for_call_quality/);
-assert.match(liveKitProvider, /mobileDisabledForCallQuality/);
+assert.equal(
+  existsSync(join(frontendRoot, "src/huddle/media/BackgroundEffects.js")),
+  false
+);
+assert.doesNotMatch(frontendPackage, /@livekit\/track-processors/);
+assert.doesNotMatch(frontendPackage, /@mediapipe\/selfie_segmentation/);
+assert.doesNotMatch(liveKitProvider, /backgroundEffect/);
+assert.doesNotMatch(huddleWindow, /Background effects|CURATED_HUDDLE_BACKGROUNDS/);
 assert.match(liveKitProvider, /intentToJoinLatencyMs/);
 assert.match(liveKitProvider, /renderTargetMismatchCount/);
 assert.match(liveKitProvider, /freezeTrackCount/);
@@ -109,7 +115,7 @@ assert.match(liveKitRenderTarget, /minimumCameraWidth/);
 assert.match(huddleWindow, /presentingParticipant/);
 assert.match(
   huddleWindow,
-  /screenShare \|\| portraitVideo \? "object-contain bg-black" : "object-cover"/
+  /screenShare \|\| portraitVideo \|\| mobileViewport[\s\S]*"object-contain bg-black"[\s\S]*"object-cover"/
 );
 
 assert.doesNotMatch(meetingIntelligence, /downloadJsonExport/);
@@ -127,14 +133,32 @@ assert.match(meetingIntelligence, /aria-label="Meeting participants"/);
 assert.match(huddleWindow, /Meeting transcript/);
 assert.match(huddleWindow, /captionStatusLabel/);
 assert.match(huddleWindow, /followLatestCaption/);
-assert.match(huddleWindow, /CURATED_HUDDLE_BACKGROUNDS/);
-assert.match(huddleWindow, /\(!isMobileDevice \|\| isMaximized\)/);
+assert.match(huddleWindow, /mobileControlsVisible/);
+assert.match(huddleWindow, /translate-y-full opacity-0 pointer-events-none/);
+assert.match(huddleWindow, /visualViewport\?\.offsetTop/);
+assert.match(huddleWindow, /requestAnimationFrame\(sync\)/);
+assert.match(huddleWindow, /const CallTimer = memo/);
+assert.match(huddleWindow, /const MemoizedVideoTile = memo/);
+assert.match(huddleWindow, /body\.style\.overflow = "hidden"/);
+assert.match(huddleWindow, /touchAction: "pan-y"/);
+assert.match(huddleWindow, /!isMaximized && !isMobileDevice/);
+assert.match(mobileChat, /_mobileHuddleControlsVisible/);
+assert.match(mobileChat, /Widget _fullscreenHuddle/);
+assert.match(mobileChat, /AnimatedPositioned/);
+assert.match(mobileChat, /RTCVideoViewObjectFitContain/);
+assert.match(mobileLiveKit, /adaptiveStream: true/);
+assert.match(mobileLiveKit, /dynacast: true/);
+assert.match(mobileLiveKit, /VideoParametersPresets\.h540_43/);
+assert.match(mobileLiveKit, /maxBitrate: 750000/);
+assert.doesNotMatch(mobileLiveKit, /\/huddle\/media\/livekit\/room/);
+assert.match(mobileLiveKit, /Duration\(milliseconds: 200\)/);
 assert.match(media, /averageSendFps/);
 assert.match(media, /averageReceiveFps/);
 assert.match(media, /averageConnectLatencyMs/);
 assert.match(media, /averageSendMediaSourceFps/);
 assert.match(media, /qualityLimitationReasons/);
 assert.match(media, /renderTargetMatchRate/);
+assert.doesNotMatch(media, /backgroundEffect/);
 
 const hindiSample =
   "\u092e\u0941\u091d\u0947 \u0939\u093f\u0902\u0926\u0940 \u0914\u0930 Hinglish \u0920\u0940\u0915 \u091a\u093e\u0939\u093f\u090f";

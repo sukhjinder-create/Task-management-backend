@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 process.env.DATABASE_URL = " ";
@@ -22,7 +22,6 @@ const meetingService = read("services/huddleMeetingIntelligence.service.js");
 const intelligenceRoutes = read("routes/huddleIntelligence.routes.js");
 const frontendRoot = join(root, "..", "Task-management");
 const frontend = (path) => readFileSync(join(frontendRoot, path), "utf8");
-const backgroundEffects = frontend("src/huddle/media/BackgroundEffects.js");
 const liveKitProvider = frontend("src/huddle/media/LiveKitMediaProvider.js");
 const liveKitRenderTarget = frontend("src/huddle/media/LiveKitRenderTarget.js");
 const meetingView = frontend("src/pages/HuddleMeetingIntelligence.jsx");
@@ -95,11 +94,11 @@ const reviewerRoutes = intelligenceRoutes.slice(0, reviewerRoutesEnd);
 assert.match(reviewerRoutes, /ownership\/:ownershipResolutionId/);
 assert.match(reviewerRoutes, /memory-candidates\/:memoryCandidateId/);
 
-assert.match(backgroundEffects, /import\("@livekit\/track-processors"\)/);
-assert.doesNotMatch(backgroundEffects, /^import .*@livekit\/track-processors/m);
-assert.match(backgroundEffects, /background-blur/);
-assert.match(backgroundEffects, /virtual-background/);
-assert.match(liveKitProvider, /setBackgroundEffect/);
+assert.equal(
+  existsSync(join(frontendRoot, "src/huddle/media/BackgroundEffects.js")),
+  false
+);
+assert.doesNotMatch(liveKitProvider, /backgroundEffect|setBackgroundEffect/);
 assert.match(liveKitProvider, /setScreenShareEnabled\(\s*true,\s*captureOptions,\s*publishOptions/);
 assert.match(liveKitRenderTarget, /setVideoDimensions/);
 assert.match(liveKitRenderTarget, /setVideoFPS/);
@@ -116,8 +115,7 @@ assert.match(meetingView, /downloadMarkdownExport/);
 assert.match(meetingView, /Media quality/);
 assert.match(callWindow, /What did I miss/);
 assert.match(callWindow, /setInterval/);
-assert.match(callWindow, /Blur background/);
-assert.match(callWindow, /Replace background/);
+assert.doesNotMatch(callWindow, /Blur background|Replace background/);
 assert.match(callWindow, /Video quality/);
 
 for (const token of [
@@ -159,7 +157,7 @@ console.log("- Artifact and ownership reviews are serialized, idempotent, and au
 console.log("- Reports include speaker-attributed discussion highlights and open questions.");
 console.log("- Memory promotion requires artifact approval, candidate approval, and explicit promotion.");
 console.log("- What Did I Miss is canonical-transcript backed.");
-console.log("- Background processors remain lazy-loaded with unsupported-browser fallback.");
+console.log("- Background effects, processors, UI, and telemetry are absent.");
 console.log("- Approved actions create idempotent source-linked tasks only after ownership review.");
 console.log("- Meeting Copilot rejects uncited answers and persists evidence-bound audit records.");
 console.log("- Copilot can retrieve permission-filtered, approved evidence across meetings.");

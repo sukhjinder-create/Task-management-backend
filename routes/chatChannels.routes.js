@@ -100,6 +100,57 @@ router.post("/", handleCreateChannel);
 router.post("/channels", handleCreateChannel);
 
 /* -------------------------------------------------------
+   UPDATE CHANNEL
+------------------------------------------------------- */
+router.put("/channels/:channelId", async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const { name } = req.body;
+    const isPrivate = getIsPrivateFromBody(req.body);
+    const currentUserId = req.user.id;
+
+    const channel = await chatSvc.getChannelById(channelId);
+    if (!channel || String(channel.workspaceId) !== String(req.workspaceId)) {
+      return res.status(404).json({ error: "Channel not found" });
+    }
+    if (channel.type === "dm" || channel.key?.startsWith("dm:")) {
+      return res.status(400).json({ error: "Direct messages cannot be edited as channels" });
+    }
+
+    const isAdmin = await chatSvc
+      .isChannelAdmin(channelId, currentUserId)
+      .catch(() => false);
+
+    if (
+      !isAdmin &&
+      String(channel.createdBy) !== String(currentUserId) &&
+      String(channel.created_by) !== String(currentUserId)
+    ) {
+      return res.status(403).json({ error: "Only channel admins can edit this channel" });
+    }
+
+    if (!name?.trim()) {
+      return res.status(400).json({ error: "Channel name is required" });
+    }
+
+    const updated = await chatSvc.updateChannel({
+      channelId,
+      name: name.trim(),
+      isPrivate,
+      workspaceId: req.workspaceId,
+    });
+
+    if (!updated) {
+      return res.status(404).json({ error: "Channel not found" });
+    }
+    return res.json(updated);
+  } catch (err) {
+    console.error("PUT /chat/channels/:id error:", err);
+    return res.status(500).json({ error: "Failed to update channel" });
+  }
+});
+
+/* -------------------------------------------------------
    MEMBERSHIP: ADD / REMOVE / LIST
 ------------------------------------------------------- */
 
@@ -341,6 +392,7 @@ router.get("/channels", async (req, res) => {
 router.get("/for-user", async (req, res) => {
   try {
     const userId = req.user.id;
+    const workspaceId = req.workspaceId || req.user?.workspaceId || null;
     const channels = await chatSvc.getChannelsForUserInWorkspace(userId, workspaceId)
 ;
     return res.json(channels);
@@ -366,7 +418,7 @@ router.post("/:channelKey/members", async (req, res) => {
 
     const channel =
       (chatSvc.getChannelByKey &&
-        (await chatSvc.getChannelByKey(channelKey))) ||
+        (await chatSvc.getChannelByKey(channelKey, req.workspaceId))) ||
       (await chatSvc.getOrCreateChannelByKey({
         key: channelKey,
         type: "channel",
