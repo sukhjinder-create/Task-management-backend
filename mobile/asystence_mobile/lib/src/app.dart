@@ -154,6 +154,12 @@ class _AsystenceAppState extends State<AsystenceApp>
           letterSpacing: 0,
         ),
       ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: palette.surface,
+        modalBackgroundColor: palette.surface,
+        surfaceTintColor: Colors.transparent,
+        dragHandleColor: palette.borderStrong,
+      ),
       cardTheme: CardThemeData(
         elevation: 0,
         margin: EdgeInsets.zero,
@@ -162,6 +168,27 @@ class _AsystenceAppState extends State<AsystenceApp>
           side: BorderSide(color: palette.border),
         ),
         color: palette.surface,
+        surfaceTintColor: Colors.transparent,
+      ),
+      chipTheme: ChipThemeData(
+        backgroundColor: palette.surfaceStrong,
+        selectedColor: palette.primary.withValues(alpha: 0.18),
+        disabledColor: palette.surfaceSoft,
+        secondarySelectedColor: palette.primary.withValues(alpha: 0.22),
+        labelStyle: TextStyle(color: palette.text),
+        secondaryLabelStyle: TextStyle(color: palette.text),
+        brightness: palette.brightness,
+        side: BorderSide(color: palette.border),
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: palette.surface,
+        surfaceTintColor: Colors.transparent,
+        titleTextStyle: TextStyle(
+          color: palette.text,
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+        ),
+        contentTextStyle: TextStyle(color: palette.textMuted),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
@@ -182,6 +209,13 @@ class _AsystenceAppState extends State<AsystenceApp>
           borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide(color: palette.primary),
         ),
+      ),
+      listTileTheme: ListTileThemeData(
+        iconColor: palette.textMuted,
+        textColor: palette.text,
+        subtitleTextStyle: TextStyle(color: palette.textMuted),
+        tileColor: palette.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
@@ -218,6 +252,34 @@ class _AsystenceAppState extends State<AsystenceApp>
         ),
       ),
       drawerTheme: DrawerThemeData(backgroundColor: palette.appBg),
+      popupMenuTheme: PopupMenuThemeData(
+        color: palette.surface,
+        surfaceTintColor: Colors.transparent,
+        textStyle: TextStyle(color: palette.text),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: palette.brightness == Brightness.light
+            ? const Color(0xff202024)
+            : palette.surfaceStrong,
+        contentTextStyle: const TextStyle(color: Colors.white),
+      ),
+      switchTheme: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) return palette.primary;
+          return palette.textMuted;
+        }),
+        trackColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
+            return palette.primary.withValues(alpha: 0.32);
+          }
+          return palette.surfaceStrong;
+        }),
+      ),
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: palette.primary,
+        selectionColor: palette.primary.withValues(alpha: 0.26),
+        selectionHandleColor: palette.primary,
+      ),
     );
   }
 }

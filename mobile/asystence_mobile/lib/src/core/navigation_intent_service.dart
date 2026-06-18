@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'dart:async';
 
 import 'models.dart';
@@ -64,12 +66,24 @@ class NavigationIntentService {
   }
 
   AppNavigationIntent? resolve(Map<String, dynamic> data) {
+    final normalized = _normalizedPayload(data);
     final urlData = _fieldsFromUrl(
-      readString(data, ['url', 'deep_link', 'action_url']),
+      readString(normalized, [
+        'url',
+        'deep_link',
+        'deepLink',
+        'action_url',
+        'actionUrl',
+        'click_action',
+        'link',
+      ]),
     );
-    final enriched = <String, dynamic>{...urlData, ...data};
-    final type = readString(enriched, ['type']);
-    if (type == 'huddle') {
+    final enriched = <String, dynamic>{...urlData, ...normalized};
+    final type = readString(enriched, ['type', 'notification_type'])
+            ?.toLowerCase()
+            .trim() ??
+        '';
+    if (type == 'huddle' || type.startsWith('huddle_')) {
       final channelId = readString(enriched, ['channelId', 'channel_id']);
       final huddleId = readString(enriched, ['huddleId', 'huddle_id']);
       if (channelId == null || huddleId == null) return null;
@@ -79,24 +93,66 @@ class NavigationIntentService {
         data: enriched,
       );
     }
-    final channelId =
-        readString(enriched, ['channelId', 'channel_id', 'channelKey']);
+    final channelId = readString(enriched, [
+      'channelId',
+      'channel_id',
+      'channelKey',
+      'channel_key',
+      'channel',
+      'chatChannelId',
+      'chat_channel_id',
+    ]);
     if (channelId != null) {
       return AppNavigationIntent.chat(channelId);
     }
-    final taskId = readString(enriched, ['taskId', 'task_id', 'task']);
+    final taskId = readString(enriched, [
+      'taskId',
+      'task_id',
+      'task',
+      'targetTaskId',
+      'target_task_id',
+    ]);
     if (taskId != null) {
       return AppNavigationIntent.task(taskId);
     }
-    final projectId =
-        readString(enriched, ['projectId', 'project_id', 'project']);
+    final projectId = readString(enriched, [
+      'projectId',
+      'project_id',
+      'project',
+      'targetProjectId',
+      'target_project_id',
+    ]);
     if (projectId != null) {
       return AppNavigationIntent.project(projectId);
+    }
+    final entityType = readString(enriched, [
+          'entityType',
+          'entity_type',
+          'targetType',
+          'target_type',
+        ])?.toLowerCase().trim() ??
+        '';
+    final entityId = readString(enriched, [
+      'entityId',
+      'entity_id',
+      'targetId',
+      'target_id',
+    ]);
+    if (entityId != null) {
+      if (entityType == 'task' || type.contains('task')) {
+        return AppNavigationIntent.task(entityId);
+      }
+      if (entityType == 'project' || type.contains('project')) {
+        return AppNavigationIntent.project(entityId);
+      }
+      if (entityType == 'chat' || entityType == 'channel') {
+        return AppNavigationIntent.chat(entityId);
+      }
     }
     if (urlData['screen'] == 'tasks') {
       return AppNavigationIntent.task(null);
     }
-    if (urlData['screen'] == 'leave') {
+    if (urlData['screen'] == 'leave' || type.contains('leave')) {
       return const AppNavigationIntent._(
         kind: AppNavigationIntentKind.leave,
       );
@@ -105,6 +161,40 @@ class NavigationIntentService {
       return const AppNavigationIntent._(
         kind: AppNavigationIntentKind.notifications,
       );
+    }
+    return null;
+  }
+
+  JsonMap _normalizedPayload(Map<String, dynamic> data) {
+    final out = <String, dynamic>{};
+
+    void merge(Map<dynamic, dynamic> source) {
+      for (final entry in source.entries) {
+        out['${entry.key}'] = entry.value;
+      }
+    }
+
+    merge(data);
+    for (final key in [
+      'metadata',
+      'data',
+      'payload',
+      'extraData',
+      'notification',
+    ]) {
+      final nested = _mapFromValue(out[key]);
+      if (nested != null) merge(nested);
+    }
+    return out;
+  }
+
+  JsonMap? _mapFromValue(Object? value) {
+    if (value is Map) return JsonMap.from(value);
+    if (value is String && value.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is Map) return JsonMap.from(decoded);
+      } catch (_) {}
     }
     return null;
   }
@@ -129,8 +219,18 @@ class NavigationIntentService {
           segments.first == 'projects' &&
           segments.length > 1) {
         data['projectId'] = segments[1];
+      } else if (segments.isNotEmpty &&
+          (segments.first == 'tasks' || segments.first == 'task') &&
+          segments.length > 1) {
+        data['taskId'] = segments[1];
       } else if (segments.isNotEmpty && segments.first == 'my-tasks') {
-        data['screen'] = 'tasks';
+        if (segments.length > 1) {
+          data['taskId'] = segments[1];
+        } else {
+          data['screen'] = 'tasks';
+        }
+      } else if (segments.isNotEmpty && segments.first == 'chat') {
+        data['screen'] = 'chat';
       } else if (segments.isNotEmpty && segments.first == 'notifications') {
         data['screen'] = 'notifications';
       } else if (segments.isNotEmpty && segments.first == 'leave') {

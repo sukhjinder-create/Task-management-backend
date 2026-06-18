@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-import '../config/app_config.dart';
 import 'models.dart';
 
 class SectionCard extends StatelessWidget {
@@ -17,8 +16,9 @@ class SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Card(
-      color: AppConfig.surface,
+      color: theme.cardTheme.color ?? theme.colorScheme.surface,
       child: Padding(
         padding: padding,
         child: child,
@@ -44,13 +44,14 @@ class EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 42, color: AppConfig.primary),
+            Icon(icon, size: 42, color: scheme.primary),
             const SizedBox(height: 12),
             Text(
               title,

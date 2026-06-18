@@ -26,12 +26,12 @@ class AppConfig {
 
   static const version = String.fromEnvironment(
     'APP_VERSION',
-    defaultValue: '1.0.12',
+    defaultValue: '1.0.14',
   );
 
   static const versionCode = int.fromEnvironment(
     'APP_VERSION_CODE',
-    defaultValue: 13,
+    defaultValue: 15,
   );
 
   static const allowApiOverride = bool.fromEnvironment(

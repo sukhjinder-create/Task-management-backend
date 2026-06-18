@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
-import '../../config/app_config.dart';
 import '../../core/models.dart';
 import '../../core/ui.dart';
 import '../../state/app_scope.dart';
@@ -36,6 +35,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget build(BuildContext context) {
     final auth = AppScope.of(context).auth;
     final user = auth.user;
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Profile')),
       body: ListView(
@@ -46,7 +46,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               children: [
                 CircleAvatar(
                   radius: 34,
-                  backgroundColor: AppConfig.surfaceStrong,
+                  backgroundColor: scheme.surfaceContainerHighest,
+                  foregroundColor: scheme.primary,
                   backgroundImage: user?.avatarUrl == null
                       ? null
                       : NetworkImage(user!.avatarUrl!),

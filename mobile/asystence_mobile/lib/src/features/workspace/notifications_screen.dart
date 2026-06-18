@@ -101,7 +101,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                   onTap: () async {
                     final scope = AppScope.of(context);
                     if (!item.read) {
-                      await scope.api.markNotificationRead(item.id);
+                      try {
+                        await scope.api.markNotificationRead(item.id);
+                      } catch (_) {
+                        if (context.mounted) {
+                          showSnack(
+                            context,
+                            'Could not mark notification as read',
+                          );
+                        }
+                      }
                     }
                     if (widget.onOpen != null) {
                       widget.onOpen!(item);

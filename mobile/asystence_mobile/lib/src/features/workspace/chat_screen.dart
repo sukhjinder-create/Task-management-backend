@@ -7,7 +7,6 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../config/app_config.dart';
 import '../../core/formatters.dart';
 import '../../core/models.dart';
 import '../../core/ui.dart';
@@ -238,12 +237,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _sectionTitle(BuildContext context, String title) {
+    final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Text(
         title,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: AppConfig.primary,
+              color: scheme.primary,
               fontWeight: FontWeight.w800,
             ),
       ),
@@ -251,6 +251,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _channelSectionHeader(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
@@ -259,7 +260,7 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Text(
               'Channels',
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: AppConfig.primary,
+                    color: scheme.primary,
                     fontWeight: FontWeight.w800,
                   ),
             ),
@@ -275,6 +276,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _userTile(JsonMap user) {
+    final scheme = Theme.of(context).colorScheme;
     final me = AppScope.of(context).auth.user;
     final otherId = '${user['id'] ?? ''}';
     final ids = [me?.id ?? '', otherId]..sort();
@@ -282,10 +284,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final name = readString(user, ['username', 'name', 'email']) ?? 'Teammate';
     final unread = _unreadByChannel[key] ?? 0;
     return ListTile(
-      tileColor: AppConfig.surface,
+      tileColor: scheme.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
-        side: const BorderSide(color: AppConfig.border),
+        side: BorderSide(color: scheme.outlineVariant),
       ),
       leading: _Avatar(
         name: name,
@@ -300,17 +302,18 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _channelTile(ChatChannel channel) {
+    final scheme = Theme.of(context).colorScheme;
     final unread = _unreadByChannel[channel.openKey] ?? 0;
     return ListTile(
-      tileColor: AppConfig.surface,
+      tileColor: scheme.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
-        side: const BorderSide(color: AppConfig.border),
+        side: BorderSide(color: scheme.outlineVariant),
       ),
       leading: CircleAvatar(
-        backgroundColor: AppConfig.surfaceStrong,
+        backgroundColor: scheme.surfaceContainerHighest,
         foregroundColor:
-            channel.isReadOnly ? AppConfig.textMuted : AppConfig.primary,
+            channel.isReadOnly ? scheme.onSurfaceVariant : scheme.primary,
         child: Icon(channel.isReadOnly ? Icons.campaign_outlined : Icons.tag),
       ),
       title: Text(channel.name),
@@ -323,6 +326,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _channelView(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final currentUserId = AppScope.of(context).auth.user?.id;
     final channelKey = _selected!.openKey;
     final activeHuddle = _activeHuddles[channelKey];
@@ -414,7 +418,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: AppConfig.textMuted),
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ),
           )
@@ -425,21 +429,22 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _huddleBanner(String channelKey, JsonMap activeHuddle) {
+    final scheme = Theme.of(context).colorScheme;
     final huddleId = readString(activeHuddle, ['huddleId', 'huddle_id']) ?? '';
     final joined = _joinedHuddles.contains(huddleId);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      color: AppConfig.primary,
+      color: scheme.primary,
       child: Row(
         children: [
-          const Icon(Icons.call, color: AppConfig.primaryContrast, size: 18),
+          Icon(Icons.call, color: scheme.onPrimary, size: 18),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               joined ? 'You are in this huddle' : 'Huddle live in this chat',
               style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: AppConfig.primaryContrast,
+                    color: scheme.onPrimary,
                     fontWeight: FontWeight.w800,
                   ),
             ),
@@ -447,7 +452,7 @@ class _ChatScreenState extends State<ChatScreen> {
           TextButton(
             onPressed: () => _showHuddleSheet(channelKey),
             style: TextButton.styleFrom(
-              foregroundColor: AppConfig.primaryContrast,
+              foregroundColor: scheme.onPrimary,
             ),
             child: Text(joined ? 'Manage' : 'Join'),
           ),
@@ -457,12 +462,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _messageRow(ChatMessage message, bool mine) {
+    final scheme = Theme.of(context).colorScheme;
     final senderName =
         message.senderName ?? _nameForUser(message.senderId) ?? 'Teammate';
     final avatarUrl =
         message.senderAvatarUrl ?? _avatarUrlForUser(message.senderId);
-    final bubbleColor = mine ? AppConfig.primary : AppConfig.surface;
-    final textColor = mine ? AppConfig.primaryContrast : AppConfig.text;
+    final bubbleColor = mine ? scheme.primary : scheme.surface;
+    final textColor = mine ? scheme.onPrimary : scheme.onSurface;
 
     final bubble = Container(
       constraints: const BoxConstraints(maxWidth: 320),
@@ -470,7 +476,7 @@ class _ChatScreenState extends State<ChatScreen> {
       decoration: BoxDecoration(
         color: bubbleColor,
         borderRadius: BorderRadius.circular(8),
-        border: mine ? null : Border.all(color: AppConfig.border),
+        border: mine ? null : Border.all(color: scheme.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -479,7 +485,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Text(
               senderName,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: AppConfig.primary,
+                    color: scheme.primary,
                     fontWeight: FontWeight.w800,
                   ),
             ),
@@ -498,8 +504,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 code: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: textColor,
                       backgroundColor: mine
-                          ? AppConfig.primaryContrast.withValues(alpha: 0.16)
-                          : AppConfig.surfaceStrong,
+                          ? scheme.onPrimary.withValues(alpha: 0.16)
+                          : scheme.surfaceContainerHighest,
                     ),
               ),
               onTapLink: (_, href, __) => _openUrl(href),
@@ -523,8 +529,8 @@ class _ChatScreenState extends State<ChatScreen> {
               longDateTime(message.createdAt),
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
                     color: mine
-                        ? AppConfig.primaryContrast.withValues(alpha: 0.78)
-                        : AppConfig.textMuted,
+                        ? scheme.onPrimary.withValues(alpha: 0.78)
+                        : scheme.onSurfaceVariant,
                   ),
             ),
           ],
@@ -558,7 +564,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _attachmentPreview(ChatAttachment attachment, bool mine) {
-    final labelColor = mine ? AppConfig.primaryContrast : AppConfig.text;
+    final scheme = Theme.of(context).colorScheme;
+    final labelColor = mine ? scheme.onPrimary : scheme.onSurface;
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: InkWell(
@@ -568,13 +575,13 @@ class _ChatScreenState extends State<ChatScreen> {
           width: double.infinity,
           decoration: BoxDecoration(
             color: mine
-                ? AppConfig.primaryContrast.withValues(alpha: 0.12)
-                : AppConfig.surfaceStrong,
+                ? scheme.onPrimary.withValues(alpha: 0.12)
+                : scheme.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
               color: mine
-                  ? AppConfig.primaryContrast.withValues(alpha: 0.22)
-                  : AppConfig.border,
+                  ? scheme.onPrimary.withValues(alpha: 0.22)
+                  : scheme.outlineVariant,
             ),
           ),
           child: attachment.isImage
@@ -651,13 +658,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _composer() {
+    final scheme = Theme.of(context).colorScheme;
     return SafeArea(
       top: false,
       child: Container(
         padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-        decoration: const BoxDecoration(
-          color: AppConfig.appBg,
-          border: Border(top: BorderSide(color: AppConfig.border)),
+        decoration: BoxDecoration(
+          color: scheme.surface,
+          border: Border(top: BorderSide(color: scheme.outlineVariant)),
         ),
         child: Column(
           children: [
@@ -1082,7 +1090,7 @@ class _ChatScreenState extends State<ChatScreen> {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppConfig.surface,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       showDragHandle: true,
       builder: (context) {
         return StatefulBuilder(
@@ -1212,7 +1220,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppConfig.surface,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       showDragHandle: true,
       builder: (context) {
         return StatefulBuilder(
@@ -1370,7 +1378,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       isScrollControlled: true,
       useSafeArea: false,
-      backgroundColor: AppConfig.surface,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       showDragHandle: false,
       enableDrag: false,
       isDismissible: !initiallyJoined,
@@ -1437,10 +1445,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       current == null
                           ? 'Start a live huddle in ${_selected?.name ?? 'this chat'}.'
                           : 'Live huddle in ${_selected?.name ?? 'this chat'}.',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodyMedium
-                          ?.copyWith(color: AppConfig.textMuted),
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
                     ),
                     if (call?.error != null) ...[
                       const SizedBox(height: 10),
@@ -1923,6 +1931,7 @@ class _ChatScreenState extends State<ChatScreen> {
     RTCVideoViewObjectFit objectFit =
         RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
   }) {
+    final scheme = Theme.of(context).colorScheme;
     final hasStream = renderer?.srcObject != null;
     final hasMediaView = mediaView != null;
     return ClipRRect(
@@ -1930,7 +1939,7 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Container(color: AppConfig.surfaceStrong),
+          Container(color: scheme.surfaceContainerHighest),
           if (hasMediaView)
             mediaView
           else if (hasStream)
@@ -1946,7 +1955,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 children: [
                   Icon(
                     emptyIcon,
-                    color: AppConfig.textMuted,
+                    color: scheme.onSurfaceVariant,
                     size: compact ? 24 : 42,
                   ),
                   if (helper != null && !compact) ...[
@@ -1957,7 +1966,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       style: Theme.of(context)
                           .textTheme
                           .bodySmall
-                          ?.copyWith(color: AppConfig.textMuted),
+                          ?.copyWith(color: scheme.onSurfaceVariant),
                     ),
                   ],
                 ],
@@ -2037,14 +2046,15 @@ class _Avatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final imageUrl = url?.trim();
     final trimmed = name.trim();
     final initial =
         trimmed.isEmpty ? 'U' : trimmed.substring(0, 1).toUpperCase();
     return CircleAvatar(
       radius: size / 2,
-      backgroundColor: AppConfig.surfaceStrong,
-      foregroundColor: AppConfig.primary,
+      backgroundColor: scheme.surfaceContainerHighest,
+      foregroundColor: scheme.primary,
       backgroundImage:
           imageUrl == null || imageUrl.isEmpty ? null : NetworkImage(imageUrl),
       child: imageUrl == null || imageUrl.isEmpty
@@ -2066,19 +2076,20 @@ class _UnreadBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (count <= 0) return const Icon(Icons.chevron_right);
+    final scheme = Theme.of(context).colorScheme;
     final label = count > 99 ? '99+' : '$count';
     return Container(
       constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
-        color: AppConfig.primary,
+        color: scheme.primary,
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         label,
         textAlign: TextAlign.center,
         style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: AppConfig.primaryContrast,
+              color: scheme.onPrimary,
               fontWeight: FontWeight.w800,
             ),
       ),

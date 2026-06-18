@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/models.dart';
 import '../../core/navigation_intent_service.dart';
+import '../../core/ui.dart';
 import '../../state/app_scope.dart';
 import '../../state/theme_store.dart';
 import '../workspace/chat_screen.dart';
@@ -439,7 +440,11 @@ class _HomeShellState extends State<HomeShell> {
       ...notification.raw,
       if (notification.url != null) 'url': notification.url,
     });
-    if (intent != null) _handleIntent(intent);
+    if (intent != null) {
+      _handleIntent(intent);
+    } else {
+      showSnack(context, 'This notification does not have an app destination.');
+    }
   }
 
   void _openChat(String channelId, {String? huddleId}) {
@@ -478,13 +483,18 @@ class _HomeShellState extends State<HomeShell> {
             (item) => item?.id == projectId,
             orElse: () => null,
           );
-      if (project == null) return;
+      if (project == null) {
+        showSnack(context, 'Project is no longer available.');
+        return;
+      }
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => ProjectDetailScreen(project: project),
         ),
       );
-    } catch (_) {}
+    } catch (_) {
+      if (mounted) showSnack(context, 'Could not open project.');
+    }
   }
 
   Future<void> _showIncomingHuddle(JsonMap data) async {
