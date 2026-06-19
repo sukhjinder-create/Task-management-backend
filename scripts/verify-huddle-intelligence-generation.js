@@ -137,6 +137,7 @@ for (const token of [
   "evidenceSegmentIds",
   "transcriptHash",
   "HARD_MAX_TRANSCRIPT_CHARACTERS",
+  "HARD_MAX_OUTPUT_TOKENS",
   "selectionStrategy",
   "promptHash",
   "approvalStatus: \"pending\"",

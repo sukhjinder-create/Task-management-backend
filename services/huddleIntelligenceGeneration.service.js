@@ -14,9 +14,10 @@ import {
 
 const GENERATION_VERSION = 3;
 const PROMPT_VERSION = "huddle-intelligence-report-v4";
-const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 42000;
-const HARD_MAX_TRANSCRIPT_CHARACTERS = 45000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 4800;
+const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 12000;
+const HARD_MAX_TRANSCRIPT_CHARACTERS = 12000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 2200;
+const HARD_MAX_OUTPUT_TOKENS = 2600;
 
 export const HUDDLE_GENERATION_TYPES = Object.freeze({
   SUMMARY: "summary",
@@ -110,7 +111,8 @@ function generationConfig(env = process.env) {
           DEFAULT_MAX_OUTPUT_TOKENS,
         800
       ),
-      8000
+      Number(env.HUDDLE_INTELLIGENCE_HARD_OUTPUT_TOKEN_LIMIT) ||
+        HARD_MAX_OUTPUT_TOKENS
     ),
   };
 }
