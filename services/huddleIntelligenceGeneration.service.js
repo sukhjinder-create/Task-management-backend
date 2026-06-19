@@ -18,6 +18,8 @@ const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 12000;
 const HARD_MAX_TRANSCRIPT_CHARACTERS = 12000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 2200;
 const HARD_MAX_OUTPUT_TOKENS = 2600;
+const DEFAULT_MAX_TRANSCRIPT_SEGMENTS = 48;
+const HARD_MAX_TRANSCRIPT_SEGMENTS = 64;
 
 export const HUDDLE_GENERATION_TYPES = Object.freeze({
   SUMMARY: "summary",
@@ -100,10 +102,19 @@ function generationConfig(env = process.env) {
       Math.max(
         Number(env.HUDDLE_INTELLIGENCE_MAX_TRANSCRIPT_CHARACTERS) ||
           DEFAULT_MAX_TRANSCRIPT_CHARACTERS,
-        10000
+        2500
       ),
       Number(env.HUDDLE_INTELLIGENCE_HARD_TRANSCRIPT_CHARACTER_LIMIT) ||
         HARD_MAX_TRANSCRIPT_CHARACTERS
+    ),
+    maxTranscriptSegments: Math.min(
+      Math.max(
+        Number(env.HUDDLE_INTELLIGENCE_MAX_TRANSCRIPT_SEGMENTS) ||
+          DEFAULT_MAX_TRANSCRIPT_SEGMENTS,
+        12
+      ),
+      Number(env.HUDDLE_INTELLIGENCE_HARD_TRANSCRIPT_SEGMENT_LIMIT) ||
+        HARD_MAX_TRANSCRIPT_SEGMENTS
     ),
     maxOutputTokens: Math.min(
       Math.max(
@@ -217,19 +228,26 @@ function transcriptLine(segment) {
   return `[${segment.id}] [${at}] ${speaker}: ${segment.text}`;
 }
 
-function buildTranscriptPacket(segments, maxCharacters) {
+function buildTranscriptPacket(segments, {
+  maxCharacters = DEFAULT_MAX_TRANSCRIPT_CHARACTERS,
+  maxSegments = DEFAULT_MAX_TRANSCRIPT_SEGMENTS,
+} = {}) {
   const lines = segments.map((segment) => ({ segment, line: transcriptLine(segment) }));
   const totalCharacters = lines.reduce((sum, item) => sum + item.line.length + 1, 0);
-  const budget = Math.max(Number(maxCharacters) || DEFAULT_MAX_TRANSCRIPT_CHARACTERS, 10000);
+  const budget = Math.max(Number(maxCharacters) || DEFAULT_MAX_TRANSCRIPT_CHARACTERS, 2500);
+  const segmentBudget = Math.min(
+    Math.max(Number(maxSegments) || DEFAULT_MAX_TRANSCRIPT_SEGMENTS, 12),
+    lines.length || DEFAULT_MAX_TRANSCRIPT_SEGMENTS
+  );
   const selectedIndexes = new Set();
 
-  if (totalCharacters <= budget) {
+  if (totalCharacters <= budget && lines.length <= segmentBudget) {
     lines.forEach((_item, index) => selectedIndexes.add(index));
   } else {
     const averageLineLength = Math.max(1, Math.ceil(totalCharacters / Math.max(lines.length, 1)));
     const targetCount = Math.max(
       12,
-      Math.min(lines.length, Math.floor(budget / averageLineLength))
+      Math.min(lines.length, segmentBudget, Math.floor(budget / averageLineLength))
     );
     if (targetCount >= lines.length) {
       lines.forEach((_item, index) => selectedIndexes.add(index));
@@ -262,7 +280,10 @@ function buildTranscriptPacket(segments, maxCharacters) {
     totalSegmentCount: segments.length,
     includedSegmentCount: included.length,
     truncated: included.length < segments.length,
-    selectionStrategy: totalCharacters <= budget ? "full" : "evenly_sampled",
+    selectionStrategy:
+      totalCharacters <= budget && lines.length <= segmentBudget
+        ? "full"
+        : "evenly_sampled",
     totalCharacters,
     usedCharacters,
   };
@@ -872,7 +893,10 @@ export async function generateHuddleArtifact({
       statusCode: 422,
     });
   }
-  const packet = buildTranscriptPacket(segments, access.config.maxTranscriptCharacters);
+  const packet = buildTranscriptPacket(segments, {
+    maxCharacters: access.config.maxTranscriptCharacters,
+    maxSegments: access.config.maxTranscriptSegments,
+  });
   const prompt = promptFor({
     artifactType: artifact.artifactType,
     packet,
@@ -913,6 +937,7 @@ export async function generateHuddleArtifact({
         totalSegmentCount: packet.totalSegmentCount,
         transcriptTruncated: packet.truncated,
         transcriptSelectionStrategy: packet.selectionStrategy,
+        maxTranscriptSegments: access.config.maxTranscriptSegments,
       },
     },
     client,
@@ -976,6 +1001,7 @@ export async function generateHuddleArtifact({
           totalSegmentCount: packet.totalSegmentCount,
           transcriptTruncated: packet.truncated,
           transcriptSelectionStrategy: packet.selectionStrategy,
+          maxTranscriptSegments: access.config.maxTranscriptSegments,
           aiConsentReason: consent.reason,
           taskCreationEnabled: false,
         },
@@ -1002,6 +1028,7 @@ export async function generateHuddleArtifact({
         totalSegmentCount: packet.totalSegmentCount,
         transcriptTruncated: packet.truncated,
         transcriptSelectionStrategy: packet.selectionStrategy,
+        maxTranscriptSegments: access.config.maxTranscriptSegments,
         evidenceSegmentCount: evidenceSegmentIds.length,
         approvalRequired: true,
         taskCreationEnabled: false,

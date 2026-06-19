@@ -138,6 +138,8 @@ for (const token of [
   "transcriptHash",
   "HARD_MAX_TRANSCRIPT_CHARACTERS",
   "HARD_MAX_OUTPUT_TOKENS",
+  "HARD_MAX_TRANSCRIPT_SEGMENTS",
+  "maxTranscriptSegments",
   "selectionStrategy",
   "promptHash",
   "approvalStatus: \"pending\"",
