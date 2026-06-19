@@ -4,6 +4,8 @@
 // adding optional workspace-scoped rooms for newer clients.
 import pool from "../db.js";
 import { Server } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
+import { createClient } from "redis";
 import jwt from "jsonwebtoken";
 
 import {
@@ -41,6 +43,14 @@ import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
 import { recomputeWorkspaceHealth } from "../services/workspaceHealth.service.js";
 
 let io;
+let socketRealtimeDiagnostics = {
+  adapter: "local",
+  distributed: false,
+  ready: false,
+  required: false,
+  reason: "socket_io_not_initialized",
+  configuredAt: null,
+};
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const WORKSPACE_GLOBAL = "GLOBAL";
 const parsedHuddleDisconnectGraceMs = Number(process.env.HUDDLE_DISCONNECT_GRACE_MS || 15000);
@@ -66,6 +76,117 @@ function legacyRoomName(channelKey) {
 function workspaceRoomName(channelKey, workspaceId = WORKSPACE_GLOBAL) {
   const ws = workspaceId || WORKSPACE_GLOBAL;
   return `workspace:${ws}:channel:${channelKey}`;
+}
+
+function boolEnv(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function getSocketRedisUrl() {
+  return (
+    process.env.SOCKET_IO_REDIS_URL ||
+    process.env.HUDDLE_SOCKET_REDIS_URL ||
+    process.env.REDIS_URL ||
+    process.env.HUDDLE_REDIS_URL ||
+    ""
+  ).trim();
+}
+
+function redactRedisUrl(value) {
+  if (!value) return "";
+  try {
+    const parsed = new URL(value);
+    if (parsed.password) parsed.password = "***";
+    if (parsed.username) parsed.username = "***";
+    return parsed.toString();
+  } catch {
+    return "(invalid redis url)";
+  }
+}
+
+async function configureSocketIoRedisAdapter(ioInstance) {
+  const redisUrl = getSocketRedisUrl();
+  const required = boolEnv(process.env.SOCKET_IO_REDIS_REQUIRED, false);
+  socketRealtimeDiagnostics = {
+    adapter: "local",
+    distributed: false,
+    ready: false,
+    required,
+    reason: redisUrl ? "redis_adapter_connecting" : "redis_url_missing",
+    configuredAt: new Date().toISOString(),
+  };
+
+  if (!redisUrl) {
+    console.warn("[socket:redis_adapter:disabled]", {
+      reason: "redis_url_missing",
+      maxScaleRisk: "cross_instance_socket_emits_are_local_only",
+    });
+    if (required) {
+      throw new Error("socket_io_redis_required_but_missing");
+    }
+    return;
+  }
+
+  const pubClient = createClient({ url: redisUrl });
+  const subClient = pubClient.duplicate();
+  const onRedisError = (role) => (error) => {
+    socketRealtimeDiagnostics = {
+      ...socketRealtimeDiagnostics,
+      adapter: "redis",
+      distributed: false,
+      ready: false,
+      reason: `redis_${role}_error:${error.message}`,
+      errorAt: new Date().toISOString(),
+    };
+    console.error("[socket:redis_adapter:error]", {
+      role,
+      error: error.message,
+      url: redactRedisUrl(redisUrl),
+    });
+  };
+
+  pubClient.on("error", onRedisError("pub"));
+  subClient.on("error", onRedisError("sub"));
+
+  try {
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    ioInstance.adapter(createAdapter(pubClient, subClient));
+    socketRealtimeDiagnostics = {
+      adapter: "redis",
+      distributed: true,
+      ready: true,
+      required,
+      reason: "redis_adapter_ready",
+      configuredAt: socketRealtimeDiagnostics.configuredAt,
+      readyAt: new Date().toISOString(),
+      url: redactRedisUrl(redisUrl),
+    };
+    console.log("[socket:redis_adapter:ready]", {
+      distributed: true,
+      url: redactRedisUrl(redisUrl),
+    });
+  } catch (error) {
+    socketRealtimeDiagnostics = {
+      adapter: "redis",
+      distributed: false,
+      ready: false,
+      required,
+      reason: `redis_adapter_connect_failed:${error.message}`,
+      configuredAt: socketRealtimeDiagnostics.configuredAt,
+      errorAt: new Date().toISOString(),
+      url: redactRedisUrl(redisUrl),
+    };
+    console.error("[socket:redis_adapter:failed]", {
+      error: error.message,
+      url: redactRedisUrl(redisUrl),
+      required,
+    });
+    try {
+      await Promise.allSettled([pubClient.quit(), subClient.quit()]);
+    } catch {}
+    if (required) throw error;
+  }
 }
 
 function dmParticipantIds(channelId) {
@@ -854,6 +975,14 @@ export function initSocket(server, frontendUrl) {
       origin: frontendUrl || process.env.FRONTEND_BASE_URL,
       credentials: true,
     },
+  });
+  configureSocketIoRedisAdapter(io).catch((error) => {
+    console.error("[socket:redis_adapter:init_failed]", error.message);
+    if (boolEnv(process.env.SOCKET_IO_REDIS_REQUIRED, false)) {
+      process.nextTick(() => {
+        throw error;
+      });
+    }
   });
   huddleRealtimeService.configure({ io, workspaceRoomName });
 
@@ -2422,6 +2551,16 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 export function getIO() {
   if (!io) throw new Error("Socket.io not initialized");
   return io;
+}
+
+export function getSocketRealtimeDiagnostics() {
+  return {
+    ...socketRealtimeDiagnostics,
+    cloudRunMaxScaleRisk:
+      socketRealtimeDiagnostics.distributed
+        ? false
+        : "Socket.IO emits are process-local unless max instances is 1 or Redis adapter is ready.",
+  };
 }
 
 /* =====================================================

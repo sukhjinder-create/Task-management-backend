@@ -14,7 +14,8 @@ import {
 
 const GENERATION_VERSION = 3;
 const PROMPT_VERSION = "huddle-intelligence-report-v4";
-const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 120000;
+const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 42000;
+const HARD_MAX_TRANSCRIPT_CHARACTERS = 45000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 4800;
 
 export const HUDDLE_GENERATION_TYPES = Object.freeze({
@@ -100,7 +101,8 @@ function generationConfig(env = process.env) {
           DEFAULT_MAX_TRANSCRIPT_CHARACTERS,
         10000
       ),
-      300000
+      Number(env.HUDDLE_INTELLIGENCE_HARD_TRANSCRIPT_CHARACTER_LIMIT) ||
+        HARD_MAX_TRANSCRIPT_CHARACTERS
     ),
     maxOutputTokens: Math.min(
       Math.max(
@@ -214,11 +216,38 @@ function transcriptLine(segment) {
 }
 
 function buildTranscriptPacket(segments, maxCharacters) {
+  const lines = segments.map((segment) => ({ segment, line: transcriptLine(segment) }));
+  const totalCharacters = lines.reduce((sum, item) => sum + item.line.length + 1, 0);
+  const budget = Math.max(Number(maxCharacters) || DEFAULT_MAX_TRANSCRIPT_CHARACTERS, 10000);
+  const selectedIndexes = new Set();
+
+  if (totalCharacters <= budget) {
+    lines.forEach((_item, index) => selectedIndexes.add(index));
+  } else {
+    const averageLineLength = Math.max(1, Math.ceil(totalCharacters / Math.max(lines.length, 1)));
+    const targetCount = Math.max(
+      12,
+      Math.min(lines.length, Math.floor(budget / averageLineLength))
+    );
+    if (targetCount >= lines.length) {
+      lines.forEach((_item, index) => selectedIndexes.add(index));
+    } else if (targetCount === 1) {
+      selectedIndexes.add(0);
+    } else {
+      for (let index = 0; index < targetCount; index += 1) {
+        selectedIndexes.add(Math.round(index * (lines.length - 1) / (targetCount - 1)));
+      }
+    }
+  }
+
+  const candidates = [...selectedIndexes]
+    .sort((left, right) => left - right)
+    .map((index) => lines[index])
+    .filter(Boolean);
   const included = [];
   let usedCharacters = 0;
-  for (const segment of segments) {
-    const line = transcriptLine(segment);
-    if (included.length > 0 && usedCharacters + line.length + 1 > maxCharacters) break;
+  for (const { segment, line } of candidates) {
+    if (included.length > 0 && usedCharacters + line.length + 1 > budget) break;
     included.push(segment);
     usedCharacters += line.length + 1;
   }
@@ -231,6 +260,8 @@ function buildTranscriptPacket(segments, maxCharacters) {
     totalSegmentCount: segments.length,
     includedSegmentCount: included.length,
     truncated: included.length < segments.length,
+    selectionStrategy: totalCharacters <= budget ? "full" : "evenly_sampled",
+    totalCharacters,
     usedCharacters,
   };
 }
@@ -879,6 +910,7 @@ export async function generateHuddleArtifact({
         includedSegmentCount: packet.includedSegmentCount,
         totalSegmentCount: packet.totalSegmentCount,
         transcriptTruncated: packet.truncated,
+        transcriptSelectionStrategy: packet.selectionStrategy,
       },
     },
     client,
@@ -941,6 +973,7 @@ export async function generateHuddleArtifact({
           includedSegmentCount: packet.includedSegmentCount,
           totalSegmentCount: packet.totalSegmentCount,
           transcriptTruncated: packet.truncated,
+          transcriptSelectionStrategy: packet.selectionStrategy,
           aiConsentReason: consent.reason,
           taskCreationEnabled: false,
         },
@@ -966,6 +999,7 @@ export async function generateHuddleArtifact({
         includedSegmentCount: packet.includedSegmentCount,
         totalSegmentCount: packet.totalSegmentCount,
         transcriptTruncated: packet.truncated,
+        transcriptSelectionStrategy: packet.selectionStrategy,
         evidenceSegmentCount: evidenceSegmentIds.length,
         approvalRequired: true,
         taskCreationEnabled: false,
@@ -1051,10 +1085,14 @@ export async function createOwnershipSuggestions({
       artifact.contentJson?.generationState === "generated_pending_approval"
   );
   if (!actionArtifact) {
-    throw generationError("generated_action_artifact_required", {
-      retryable: true,
-      statusCode: 409,
-    });
+    return {
+      actionArtifactId: null,
+      suggestionCount: 0,
+      suggestions: [],
+      approvalRequired: true,
+      taskCreationEnabled: false,
+      reason: "generated_action_artifact_unavailable",
+    };
   }
   const participantIds = new Set(participants.map((participant) => participant.participantId));
   const userIds = new Set(participants.map((participant) => participant.userId).filter(Boolean));

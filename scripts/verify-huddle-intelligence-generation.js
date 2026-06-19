@@ -136,6 +136,8 @@ assert.equal(diagnostics.taskCreationEnabled, false);
 for (const token of [
   "evidenceSegmentIds",
   "transcriptHash",
+  "HARD_MAX_TRANSCRIPT_CHARACTERS",
+  "selectionStrategy",
   "promptHash",
   "approvalStatus: \"pending\"",
   "orchestrationOnly: false",
@@ -149,6 +151,8 @@ for (const token of [
 assert.match(generatorSource, /createOwnershipResolution/, "ownership suggestions must use the existing review model");
 assert.match(workerSource, /generateHuddleArtifact/, "worker must execute artifact generation");
 assert.match(workerSource, /createOwnershipSuggestions/, "worker must execute ownership suggestions");
+assert.match(workerSource, /transcript available/, "meeting digest must truthfully notify when only transcript is available");
+assert.match(generatorSource, /generated_action_artifact_unavailable/, "ownership should not block digest delivery when action generation fails");
 assert.match(artifactSource, /HUDDLE_INTELLIGENCE_GENERATION_ENABLED/, "artifact diagnostics must reflect generation");
 assert.match(routeSource, /generation\/diagnostics/, "generation diagnostics API required");
 assert.match(llmSource, /response_format/, "LLM client must support JSON responses");

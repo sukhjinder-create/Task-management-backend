@@ -79,6 +79,11 @@ assertNotMatches(huddleLeaveHandler, /legacyRoomName|socket\.leave\(workspaceRoo
 assertIncludes(huddleInviteBroadcast, "huddleRealtimeService.broadcastInvite", "huddle realtime invite boundary");
 assertIncludes(huddleLiveBroadcast, "huddleRealtimeService.broadcastLive", "huddle realtime live boundary");
 assertIncludes(socket, "huddleRealtimeService.configure", "huddle realtime service initialization");
+assertIncludes(socket, "@socket.io/redis-adapter", "Socket.IO Redis adapter dependency");
+assertIncludes(socket, "configureSocketIoRedisAdapter", "distributed Socket.IO adapter setup");
+assertIncludes(socket, "getSocketRealtimeDiagnostics", "Socket.IO realtime diagnostics");
+assertIncludes(socket, "SOCKET_IO_REDIS_URL", "Socket.IO Redis URL configuration");
+assertIncludes(socket, "SOCKET_IO_REDIS_REQUIRED", "Socket.IO Redis required fail-closed configuration");
 assertIncludes(socket, "huddleRealtimeService.joinDevice", "huddle realtime join boundary");
 assertIncludes(socket, "huddleRealtimeService.leaveDevice", "huddle realtime leave boundary");
 assertIncludes(socket, "huddleRealtimeService.getRecoverySnapshots", "huddle realtime recovery boundary");

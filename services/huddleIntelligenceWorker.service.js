@@ -297,6 +297,7 @@ async function processMeetingDigest(job, client = null) {
     ? actions.contentJson.actionItems.length
     : 0;
   const reviewPath = `/huddles/${job.sessionId}/intelligence`;
+  const summaryLabel = summary ? "summary available" : "transcript available";
   const existing = existingDigests.find(
     (digest) => digest.generatedByJobId === job.id
   );
@@ -346,7 +347,7 @@ async function processMeetingDigest(job, client = null) {
         workspaceId: job.workspaceId,
         type: "huddle_intelligence_ready",
         title: "Meeting intelligence is ready",
-        message: `${delivery.title}: summary available, ${decisionCount} decision${decisionCount === 1 ? "" : "s"}, ${actionItemCount} action item${actionItemCount === 1 ? "" : "s"}.`,
+        message: `${delivery.title}: ${summaryLabel}, ${decisionCount} decision${decisionCount === 1 ? "" : "s"}, ${actionItemCount} action item${actionItemCount === 1 ? "" : "s"}.`,
         action_url: reviewPath,
         source_key: `huddle-intelligence:${job.sessionId}:${userId}`,
         metadata: {

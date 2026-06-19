@@ -32,6 +32,7 @@ import {
 import { resolveHuddleScope } from "../services/huddleScopeResolver.service.js";
 import { findHuddleSessionByLegacy } from "../services/huddleSession.service.js";
 import { primeSttProviderGrantCache } from "../services/huddleSttProvider.service.js";
+import { getSocketRealtimeDiagnostics } from "../realtime/socket.js";
 
 const router = express.Router();
 
@@ -534,6 +535,7 @@ router.get("/livekit/diagnostics", (req, res) => {
     selector: getProviderSelectionDiagnostics(selector),
     room: getLiveKitRoomEndpointConfig({ workspaceId: req.workspaceId }),
     token: getLiveKitTokenEndpointConfig({ workspaceId: req.workspaceId }),
+    realtime: getSocketRealtimeDiagnostics(),
     readinessDashboard,
     epic5Readiness: createFinalEpic5ReadinessReport({
       workspaceId: req.workspaceId,

@@ -57,6 +57,8 @@ for (const fn of [
 
 assert.match(service, /FOR UPDATE SKIP LOCKED/, "job claims and recovery must be concurrency safe");
 assert.match(service, /dependency\.dependency_type = 'hard'/, "hard dependencies must gate claims");
+assert.match(service, /meeting_digest_generation', 'ownership_resolution'/, "digest and ownership jobs must tolerate terminal failed generation dependencies");
+assert.match(service, /upstream\.status IN \('failed', 'cancelled'\)/, "terminal failed dependencies must not strand delivery jobs");
 assert.match(service, /retry_scheduled/, "retry attempts must be auditable");
 for (const [name, source] of [
   ["intelligence", service],

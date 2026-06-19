@@ -763,6 +763,10 @@ export async function claimNextIntelligenceJob({
             WHERE dependency.job_id = j.id
               AND dependency.dependency_type = 'hard'
               AND upstream.status <> 'completed'
+              AND NOT (
+                j.job_type IN ('meeting_digest_generation', 'ownership_resolution')
+                AND upstream.status IN ('failed', 'cancelled')
+              )
           )
         ORDER BY j.priority ASC, j.scheduled_at ASC, j.created_at ASC
         LIMIT 1
