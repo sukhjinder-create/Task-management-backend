@@ -35,6 +35,8 @@ class _HomeShellState extends State<HomeShell> {
   bool _chatImmersive = false;
   StreamSubscription<AppNavigationIntent>? _intentSub;
   StreamSubscription<JsonMap>? _huddleSub;
+  final Set<String> _presentingIncomingHuddles = {};
+  final Set<String> _openedIncomingHuddles = {};
   String _attendanceStatus = 'offline';
   bool _attendanceBusy = false;
 
@@ -79,13 +81,26 @@ class _HomeShellState extends State<HomeShell> {
         _handleIntent(intent);
       }
       _huddleSub = scope.socket.huddles.listen((event) {
-        if (event['event'] != 'started') return;
+        final eventType = readString(event, ['event']);
+        final huddleId = readString(event, ['huddleId', 'huddle_id']);
+        if (huddleId == null) return;
+        if (eventType == 'ended' || eventType == 'declined') {
+          _presentingIncomingHuddles.remove(huddleId);
+          _openedIncomingHuddles.remove(huddleId);
+          return;
+        }
+        if (eventType != 'started') return;
         final startedBy = event['startedBy'];
         final startedById = startedBy is Map
             ? readString(JsonMap.from(startedBy), ['userId', 'user_id'])
             : null;
         if (startedById == scope.auth.user?.id) return;
-        _showIncomingHuddle(event);
+        if (_presentingIncomingHuddles.contains(huddleId) ||
+            _openedIncomingHuddles.contains(huddleId) ||
+            (_index == 3 && _chatHuddleId == huddleId)) {
+          return;
+        }
+        unawaited(_showIncomingHuddle(event));
       });
       unawaited(_restoreAttendanceStatus());
     });
@@ -576,11 +591,20 @@ class _HomeShellState extends State<HomeShell> {
     String? huddleId,
     JsonMap? huddleData,
   }) {
+    if (huddleId != null) {
+      _openedIncomingHuddles.add(huddleId);
+    }
+    final sameOpenHuddle = huddleId != null &&
+        _index == 3 &&
+        _chatChannelKey == channelId &&
+        _chatHuddleId == huddleId;
     setState(() {
       _chatChannelKey = channelId;
       _chatHuddleId = huddleId;
       _chatHuddleData = huddleData;
-      _chatInstanceKey += 1;
+      if (!sameOpenHuddle) {
+        _chatInstanceKey += 1;
+      }
       _chatImmersive = true;
       _index = 3;
     });
@@ -632,6 +656,12 @@ class _HomeShellState extends State<HomeShell> {
     final channelId = readString(data, ['channelId', 'channel_id']);
     final huddleId = readString(data, ['huddleId', 'huddle_id']);
     if (channelId == null || huddleId == null) return;
+    if (_presentingIncomingHuddles.contains(huddleId) ||
+        _openedIncomingHuddles.contains(huddleId) ||
+        (_index == 3 && _chatHuddleId == huddleId)) {
+      return;
+    }
+    _presentingIncomingHuddles.add(huddleId);
     final startedBy = data['startedBy'];
     final startedByName = startedBy is Map
         ? readString(JsonMap.from(startedBy), ['username', 'name'])
@@ -639,38 +669,46 @@ class _HomeShellState extends State<HomeShell> {
     final initiatorUserId = startedBy is Map
         ? readString(JsonMap.from(startedBy), ['userId', 'user_id'])
         : readString(data, ['startedBy', 'started_by']);
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Incoming huddle'),
-        content: Text('${startedByName ?? 'Someone'} is calling in chat.'),
-        actions: [
-          TextButton(
-            onPressed: () {
-              AppScope.of(context).socket.declineHuddle(
-                    channelId: channelId,
-                    huddleId: huddleId,
-                    initiatorUserId: initiatorUserId,
-                  );
-              Navigator.of(context).pop();
-            },
-            child: const Text('Decline'),
-          ),
-          FilledButton.icon(
-            onPressed: () {
-              Navigator.of(context).pop();
-              _openChat(
-                channelId,
-                huddleId: huddleId,
-                huddleData: data,
-              );
-            },
-            icon: const Icon(Icons.call),
-            label: const Text('Open call'),
-          ),
-        ],
-      ),
-    );
+    try {
+      final accepted = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: const Text('Incoming huddle'),
+          content: Text('${startedByName ?? 'Someone'} is calling in chat.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Decline'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.call),
+              label: const Text('Open call'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (accepted == true) {
+        _openedIncomingHuddles.add(huddleId);
+        _openChat(
+          channelId,
+          huddleId: huddleId,
+          huddleData: data,
+        );
+        return;
+      }
+      if (accepted == false) {
+        AppScope.of(context).socket.declineHuddle(
+              channelId: channelId,
+              huddleId: huddleId,
+              initiatorUserId: initiatorUserId,
+            );
+      }
+    } finally {
+      _presentingIncomingHuddles.remove(huddleId);
+    }
   }
 
   IconData _selectedIcon(IconData icon) {

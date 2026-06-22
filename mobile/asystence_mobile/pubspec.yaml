@@ -1,7 +1,7 @@
 name: asystence_mobile
 description: Native Flutter mobile app for the Asystence task management platform.
 publish_to: "none"
-version: 1.0.16+17
+version: 1.0.17+18
 
 environment:
   sdk: ">=3.6.0 <4.0.0"

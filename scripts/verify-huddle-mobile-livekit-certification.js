@@ -21,6 +21,7 @@ const controller = read(
   "mobile/asystence_mobile/lib/src/features/workspace/huddle_call_controller.dart"
 );
 const chat = read("mobile/asystence_mobile/lib/src/features/workspace/chat_screen.dart");
+const shell = read("mobile/asystence_mobile/lib/src/features/shell/home_shell.dart");
 const socket = read("mobile/asystence_mobile/lib/src/core/socket_service.dart");
 const config = read("mobile/asystence_mobile/lib/src/config/app_config.dart");
 const pubspec = read("mobile/asystence_mobile/pubspec.yaml");
@@ -143,6 +144,18 @@ assertContains(chat, /mediaView: call\.buildRemoteVideoView/,
   "UI must support LiveKit remote video without removing RTC renderer support");
 assertContains(chat, /RTCVideoView/,
   "Existing mesh RTC renderer path must remain in the UI");
+assertContains(shell, /_presentingIncomingHuddles/,
+  "Incoming Huddle dialogs must be deduplicated while presentation is active");
+assertContains(shell, /_openedIncomingHuddles/,
+  "Opened Huddles must ignore duplicate sync and invite presentation");
+assertContains(shell, /sameOpenHuddle[\s\S]*_chatInstanceKey \+= 1/,
+  "Opening the same Huddle must not recreate the Chat media controller");
+assertContains(chat, /_callInitialization/,
+  "Huddle join must retain the media-controller initialization future");
+assertContains(chat, /_requireReadyCall/,
+  "Huddle join must wait for media-controller initialization");
+assertContains(chat, /callReady[\s\S]*Preparing call/,
+  "Join controls must remain disabled until call media is ready");
 
 assertContains(stateV2, /huddleMediaProviderLiveKit/,
   "Media State V2 must model LiveKit as a provider-neutral provider");

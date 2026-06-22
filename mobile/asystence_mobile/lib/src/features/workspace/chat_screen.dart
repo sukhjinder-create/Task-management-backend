@@ -58,6 +58,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatAttachment> _pendingAttachments = [];
   final _message = TextEditingController();
   HuddleCallController? _call;
+  Future<void>? _callInitialization;
+  bool _callReady = false;
+  String? _callInitializationError;
   bool _mobileHuddleControlsVisible = false;
   bool _immersiveReported = false;
   String? _huddleActionMessage;
@@ -81,7 +84,9 @@ class _ChatScreenState extends State<ChatScreen> {
         );
         _call = call;
         call.addListener(_handleCallChanged);
-        unawaited(call.initialize());
+        final initialization = call.initialize();
+        _callInitialization = initialization;
+        unawaited(_observeCallInitialization(call, initialization));
       }
       _socketSub = socket.messages.listen((event) {
         final msg = ChatMessage.fromJson(event);
@@ -133,6 +138,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _huddleParticipantSub?.cancel();
     final call = _call;
     _call = null;
+    _callInitialization = null;
+    _callReady = false;
     if (call != null) {
       call.removeListener(_handleCallChanged);
       unawaited(call.disposeController());
@@ -164,6 +171,41 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     setState(() {});
     _bumpHuddleUi();
+  }
+
+  Future<void> _observeCallInitialization(
+    HuddleCallController call,
+    Future<void> initialization,
+  ) async {
+    try {
+      await initialization;
+      if (!mounted || _call != call) return;
+      setState(() {
+        _callReady = true;
+        _callInitializationError = null;
+      });
+      _bumpHuddleUi();
+    } catch (_) {
+      if (!mounted || _call != call) return;
+      setState(() {
+        _callReady = false;
+        _callInitializationError = 'Could not prepare call media.';
+      });
+      _bumpHuddleUi();
+    }
+  }
+
+  Future<HuddleCallController> _requireReadyCall() async {
+    final call = _call;
+    final initialization = _callInitialization;
+    if (call == null || initialization == null) {
+      throw StateError('Call media is still preparing.');
+    }
+    await initialization;
+    if (_call != call || !_callReady) {
+      throw StateError('Call media is still preparing.');
+    }
+    return call;
   }
 
   Future<void> _refreshChannels() async {
@@ -1224,9 +1266,6 @@ class _ChatScreenState extends State<ChatScreen> {
     String channelId,
     String huddleId,
   ) async {
-    final call = _call;
-    if (call == null) return;
-
     final startedBy = event['startedBy'];
     String? startedByUserId;
     if (startedBy is Map) {
@@ -1244,8 +1283,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     final currentUserId = AppScope.of(context).auth.user?.id;
+    final currentCall = _call;
     final alreadyJoined = _joinedHuddles.contains(huddleId) ||
-        (call.joined == true && call.huddleId == huddleId);
+        (currentCall?.joined == true && currentCall?.huddleId == huddleId);
     final shouldJoin = startedByUserId != null &&
         currentUserId != null &&
         startedByUserId.toString() == currentUserId.toString();
@@ -1255,6 +1295,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _setHuddleAction('Opening huddle...');
     try {
+      final call = await _requireReadyCall();
       await call.join(
         channelId: channelId,
         huddleId: huddleId,
@@ -1271,7 +1312,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         showSnack(
           context,
-          call.error ?? error.toString().replaceFirst('Bad state: ', ''),
+          _call?.error ?? error.toString().replaceFirst('Bad state: ', ''),
         );
       }
     } finally {
@@ -1615,6 +1656,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     readString(current ?? const {}, ['huddleId', 'huddle_id']);
                 final provider = _providerForHuddle(current);
                 final call = _call;
+                final callReady = _callReady && call != null;
                 final joined = huddleId != null &&
                     (call?.joined == true && call?.huddleId == huddleId);
                 if (joined && call != null) {
@@ -1721,6 +1763,18 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ),
                           ),
                         ],
+                        if (_callInitializationError != null) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            _callInitializationError!,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.error,
+                                ),
+                          ),
+                        ],
                         if (joined && call != null) ...[
                           const SizedBox(height: 14),
                           Expanded(child: _huddleVideoGrid(call)),
@@ -1801,6 +1855,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onPressed: socket.connected &&
                                             huddleId != null &&
                                             provider != null &&
+                                            callReady &&
                                             !huddleBusy
                                         ? () async {
                                             await _toggleJoinHuddle(
@@ -1828,7 +1883,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                           ? busyLabel
                                           : provider == null
                                               ? 'Syncing call...'
-                                              : 'Join huddle',
+                                              : !callReady
+                                                  ? 'Preparing call...'
+                                                  : 'Join huddle',
                                     ),
                                   ),
                                 ),
@@ -1910,20 +1967,26 @@ class _ChatScreenState extends State<ChatScreen> {
     _mobileHuddleControlsVisible = false;
     _setHuddleAction('Joining huddle...');
     try {
-      await _call?.join(
+      final call = await _requireReadyCall();
+      await call.join(
         channelId: channelKey,
         huddleId: huddleId,
         provider: provider,
         participants: participants,
       );
-      if (_call?.joined != true) {
-        throw StateError(_call?.error ?? 'Could not join huddle');
+      if (!call.joined) {
+        throw StateError(call.error ?? 'Could not join huddle');
       }
       if (!mounted) return;
       setState(() => _joinedHuddles.add(huddleId));
       _bumpHuddleUi();
-    } catch (_) {
-      if (mounted) showSnack(context, 'Could not join huddle.');
+    } catch (error) {
+      if (mounted) {
+        showSnack(
+          context,
+          _call?.error ?? error.toString().replaceFirst('Bad state: ', ''),
+        );
+      }
     } finally {
       if (mounted) _setHuddleAction(null);
     }
