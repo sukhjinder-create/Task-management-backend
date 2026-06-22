@@ -2079,7 +2079,7 @@ export async function upsertMeetingDigest({
     assertSessionPermission(context, "write");
     const normalized = objectOrEmpty(input);
     const digestType = safeString(normalized.digestType || normalized.digest_type, 80) || "post_meeting";
-    const values = [
+    const updateValues = [
       workspaceId,
       sessionId,
       digestType,
@@ -2092,8 +2092,20 @@ export async function upsertMeetingDigest({
       json(normalized.provenance || normalized.provenance_json),
       json(normalized.metadata),
       safeUuid(normalized.generatedByJobId || normalized.generated_by_job_id),
+    ];
+    const insertValues = [
+      ...updateValues,
       actorUserId,
     ];
+
+    console.log("[huddle:intelligence:digest_upsert]", {
+      sessionId,
+      digestType,
+      updateParamCount: updateValues.length,
+      insertParamCount: insertValues.length,
+      hasSummaryArtifact: Boolean(updateValues[4]),
+      hasActionsArtifact: Boolean(updateValues[6]),
+    });
 
     const updateResult = await tx.query(
       `
@@ -2114,7 +2126,7 @@ export async function upsertMeetingDigest({
         AND digest_type = $3
       RETURNING *
       `,
-      values.slice(0, 12)
+      updateValues
     );
     let record = updateResult.rows[0];
     if (!record) {
@@ -2128,7 +2140,7 @@ export async function upsertMeetingDigest({
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13)
         RETURNING *
         `,
-        values
+        insertValues
       );
       record = insertResult.rows[0];
     }
