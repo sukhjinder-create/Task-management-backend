@@ -445,6 +445,18 @@ class _HomeShellState extends State<HomeShell> {
     if (intent.kind == AppNavigationIntentKind.huddle &&
         intent.channelId != null &&
         intent.huddleId != null) {
+      unawaited(
+        AppScope.of(context).api.recordHuddleCallTrace(
+          step: 'incoming_call_displayed',
+          channelId: intent.channelId!,
+          huddleId: intent.huddleId!,
+          sessionId: readString(intent.data, ['sessionId', 'session_id']),
+          status: 'success',
+          metadata: {
+            'source': 'android_push_intent',
+          },
+        ),
+      );
       _openChat(
         intent.channelId!,
         huddleId: intent.huddleId,
@@ -670,6 +682,20 @@ class _HomeShellState extends State<HomeShell> {
         ? readString(JsonMap.from(startedBy), ['userId', 'user_id'])
         : readString(data, ['startedBy', 'started_by']);
     try {
+      unawaited(
+        AppScope.of(context).api.recordHuddleCallTrace(
+          step: 'incoming_call_displayed',
+          channelId: channelId,
+          huddleId: huddleId,
+          sessionId: readString(data, ['sessionId', 'session_id']),
+          targetUserId: initiatorUserId,
+          status: 'success',
+          metadata: {
+            'source': 'android_incoming_dialog',
+            'startedByName': startedByName,
+          },
+        ),
+      );
       final accepted = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
@@ -691,6 +717,17 @@ class _HomeShellState extends State<HomeShell> {
       );
       if (!mounted) return;
       if (accepted == true) {
+        unawaited(
+          AppScope.of(context).api.recordHuddleCallTrace(
+            step: 'answer_pressed',
+            channelId: channelId,
+            huddleId: huddleId,
+            sessionId: readString(data, ['sessionId', 'session_id']),
+            targetUserId: initiatorUserId,
+            status: 'success',
+            metadata: {'source': 'android_incoming_dialog'},
+          ),
+        );
         _openedIncomingHuddles.add(huddleId);
         _openChat(
           channelId,
@@ -700,6 +737,17 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
       if (accepted == false) {
+        unawaited(
+          AppScope.of(context).api.recordHuddleCallTrace(
+            step: 'decline_pressed',
+            channelId: channelId,
+            huddleId: huddleId,
+            sessionId: readString(data, ['sessionId', 'session_id']),
+            targetUserId: initiatorUserId,
+            status: 'success',
+            metadata: {'source': 'android_incoming_dialog'},
+          ),
+        );
         AppScope.of(context).socket.declineHuddle(
               channelId: channelId,
               huddleId: huddleId,

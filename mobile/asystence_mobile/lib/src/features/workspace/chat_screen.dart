@@ -1294,6 +1294,24 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!shouldJoin && !locallyStarted && !alreadyJoined) return;
 
     _setHuddleAction('Opening huddle...');
+    final sessionId = readString(event, ['sessionId', 'session_id']);
+    unawaited(
+      AppScope.of(context).api.recordHuddleCallTrace(
+        step: 'join_request_sent',
+        channelId: channelId,
+        huddleId: huddleId,
+        sessionId: sessionId,
+        status: 'attempted',
+        metadata: {
+          'source': shouldJoin
+              ? 'android_started_huddle'
+              : locallyStarted
+                  ? 'android_local_start'
+                  : 'android_rejoin',
+          'provider': _providerForHuddle(event),
+        },
+      ),
+    );
     try {
       final call = await _requireReadyCall();
       await call.join(
@@ -1309,6 +1327,20 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _joinedHuddles.add(huddleId));
       _bumpHuddleUi();
     } catch (error) {
+      unawaited(
+        AppScope.of(context).api.recordHuddleCallTrace(
+          step: 'join_request_sent',
+          channelId: channelId,
+          huddleId: huddleId,
+          sessionId: sessionId,
+          status: 'failure',
+          reason: error.toString().replaceFirst('Bad state: ', ''),
+          metadata: {
+            'source': 'android_auto_join',
+            'provider': _providerForHuddle(event),
+          },
+        ),
+      );
       if (mounted) {
         showSnack(
           context,
@@ -1966,6 +1998,37 @@ class _ChatScreenState extends State<ChatScreen> {
     if (joined) return;
     _mobileHuddleControlsVisible = false;
     _setHuddleAction('Joining huddle...');
+    final activeHuddle = _activeHuddles[channelKey];
+    final sessionId = readString(activeHuddle ?? const {}, [
+      'sessionId',
+      'session_id',
+    ]);
+    unawaited(
+      AppScope.of(context).api.recordHuddleCallTrace(
+        step: 'answer_pressed',
+        channelId: channelKey,
+        huddleId: huddleId,
+        sessionId: sessionId,
+        status: 'success',
+        metadata: {
+          'source': 'android_huddle_sheet',
+          'provider': provider,
+        },
+      ),
+    );
+    unawaited(
+      AppScope.of(context).api.recordHuddleCallTrace(
+        step: 'join_request_sent',
+        channelId: channelKey,
+        huddleId: huddleId,
+        sessionId: sessionId,
+        status: 'attempted',
+        metadata: {
+          'source': 'android_huddle_sheet',
+          'provider': provider,
+        },
+      ),
+    );
     try {
       final call = await _requireReadyCall();
       await call.join(
@@ -1981,6 +2044,20 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _joinedHuddles.add(huddleId));
       _bumpHuddleUi();
     } catch (error) {
+      unawaited(
+        AppScope.of(context).api.recordHuddleCallTrace(
+          step: 'join_request_sent',
+          channelId: channelKey,
+          huddleId: huddleId,
+          sessionId: sessionId,
+          status: 'failure',
+          reason: error.toString().replaceFirst('Bad state: ', ''),
+          metadata: {
+            'source': 'android_huddle_sheet',
+            'provider': provider,
+          },
+        ),
+      );
       if (mounted) {
         showSnack(
           context,

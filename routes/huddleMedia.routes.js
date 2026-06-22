@@ -33,6 +33,11 @@ import { resolveHuddleScope } from "../services/huddleScopeResolver.service.js";
 import { findHuddleSessionByLegacy } from "../services/huddleSession.service.js";
 import { primeSttProviderGrantCache } from "../services/huddleSttProvider.service.js";
 import { getSocketRealtimeDiagnostics } from "../realtime/socket.js";
+import {
+  HUDDLE_CALL_DELIVERY_STATUSES,
+  HUDDLE_CALL_DELIVERY_STEPS,
+  recordHuddleCallStep,
+} from "../services/huddleCallDeliveryTrace.service.js";
 
 const router = express.Router();
 
@@ -70,6 +75,10 @@ function nowMs() {
 
 function elapsedMs(startedAt) {
   return Math.max(0, nowMs() - startedAt);
+}
+
+function traceHuddleCallStep(input = {}) {
+  recordHuddleCallStep(input).catch(() => {});
 }
 
 function splitCsv(value) {
@@ -635,8 +644,33 @@ router.post("/livekit/diagnostics", async (req, res) => {
 
 router.post("/livekit/room", async (req, res) => {
   try {
+    traceHuddleCallStep({
+      workspaceId: req.workspaceId,
+      huddleId: req.body?.huddleId || req.body?.huddle_id,
+      channelId: req.body?.channelId || req.body?.channel_id,
+      sessionId: req.body?.sessionId || req.body?.session_id,
+      actorUserId: req.user?.id,
+      platform: req.body?.platform || req.get("x-client-platform") || "web",
+      clientSurface: req.get("x-client-type") || "web",
+      step: HUDDLE_CALL_DELIVERY_STEPS.ROOM_CONNECT_STARTED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.ATTEMPTED,
+      metadata: { endpoint: "livekit_room" },
+    });
     const authz = await authorizeLiveKitRequest(req, req.body, "room");
     if (!authz.ok) {
+      traceHuddleCallStep({
+        workspaceId: req.workspaceId,
+        huddleId: req.body?.huddleId || req.body?.huddle_id,
+        channelId: req.body?.channelId || req.body?.channel_id,
+        sessionId: req.body?.sessionId || req.body?.session_id,
+        actorUserId: req.user?.id,
+        platform: req.body?.platform || req.get("x-client-platform") || "web",
+        clientSurface: req.get("x-client-type") || "web",
+        step: HUDDLE_CALL_DELIVERY_STEPS.ROOM_CONNECT_FAILED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+        reason: authz.reason,
+        metadata: { endpoint: "livekit_room", authorization: authz.checks },
+      });
       recordHuddleMediaOperationalEvent({
         providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
         eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.ROOM_PROVISIONING,
@@ -654,6 +688,22 @@ router.post("/livekit/room", async (req, res) => {
     }
 
     const { providerRoomId, room, liveKitUrl } = buildRoomPayload(authz, req.body);
+    traceHuddleCallStep({
+      workspaceId: authz.workspaceId,
+      huddleId: req.body?.huddleId || req.body?.huddle_id,
+      channelId: req.body?.channelId || req.body?.channel_id,
+      sessionId: authz.sessionId,
+      actorUserId: authz.userId,
+      platform: req.body?.platform || req.get("x-client-platform") || "web",
+      clientSurface: req.get("x-client-type") || "web",
+      step: HUDDLE_CALL_DELIVERY_STEPS.ROOM_CONNECT_SUCCESS,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: {
+        endpoint: "livekit_room",
+        roomName: providerRoomId,
+        providerLock: authz.providerLock,
+      },
+    });
     recordHuddleMediaOperationalEvent({
       providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
       eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.ROOM_PROVISIONING,
@@ -677,6 +727,18 @@ router.post("/livekit/room", async (req, res) => {
     });
   } catch (error) {
     console.error("[huddle:media:livekit:room]", error.message);
+    traceHuddleCallStep({
+      workspaceId: req.workspaceId,
+      huddleId: req.body?.huddleId || req.body?.huddle_id,
+      channelId: req.body?.channelId || req.body?.channel_id,
+      sessionId: req.body?.sessionId || req.body?.session_id,
+      actorUserId: req.user?.id,
+      platform: req.body?.platform || req.get("x-client-platform") || "web",
+      clientSurface: req.get("x-client-type") || "web",
+      step: HUDDLE_CALL_DELIVERY_STEPS.ROOM_CONNECT_FAILED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+      reason: "livekit_room_endpoint_failed",
+    });
     recordHuddleMediaOperationalEvent({
       providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
       eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.ROOM_PROVISIONING,
@@ -690,10 +752,35 @@ router.post("/livekit/room", async (req, res) => {
 router.post("/livekit/token", async (req, res) => {
   const endpointStartedAt = nowMs();
   try {
+    traceHuddleCallStep({
+      workspaceId: req.workspaceId,
+      huddleId: req.body?.huddleId || req.body?.huddle_id,
+      channelId: req.body?.channelId || req.body?.channel_id,
+      sessionId: req.body?.sessionId || req.body?.session_id,
+      actorUserId: req.user?.id,
+      platform: req.body?.platform || req.get("x-client-platform") || "web",
+      clientSurface: req.get("x-client-type") || "web",
+      step: HUDDLE_CALL_DELIVERY_STEPS.TOKEN_REQUESTED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.ATTEMPTED,
+      metadata: { endpoint: "livekit_token" },
+    });
     const authorizationStartedAt = nowMs();
     const authz = await authorizeLiveKitRequest(req, req.body, "token");
     const authorizationMs = elapsedMs(authorizationStartedAt);
     if (!authz.ok) {
+      traceHuddleCallStep({
+        workspaceId: req.workspaceId,
+        huddleId: req.body?.huddleId || req.body?.huddle_id,
+        channelId: req.body?.channelId || req.body?.channel_id,
+        sessionId: req.body?.sessionId || req.body?.session_id,
+        actorUserId: req.user?.id,
+        platform: req.body?.platform || req.get("x-client-platform") || "web",
+        clientSurface: req.get("x-client-type") || "web",
+        step: HUDDLE_CALL_DELIVERY_STEPS.TOKEN_ISSUED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+        reason: authz.reason,
+        metadata: { endpoint: "livekit_token", authorization: authz.checks },
+      });
       recordHuddleMediaOperationalEvent({
         providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
         eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.TOKEN_ISSUANCE,
@@ -754,6 +841,19 @@ router.post("/livekit/token", async (req, res) => {
     const tokenIssuanceMs = elapsedMs(tokenStartedAt);
 
     if (!tokenResult.ok) {
+      traceHuddleCallStep({
+        workspaceId: authz.workspaceId,
+        huddleId: req.body?.huddleId || req.body?.huddle_id,
+        channelId: req.body?.channelId || req.body?.channel_id,
+        sessionId: authz.sessionId,
+        actorUserId: authz.userId,
+        platform: req.body?.platform || req.get("x-client-platform") || "web",
+        clientSurface: req.get("x-client-type") || "web",
+        step: HUDDLE_CALL_DELIVERY_STEPS.TOKEN_ISSUED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+        reason: tokenResult.reason,
+        metadata: { endpoint: "livekit_token", diagnostics: tokenResult.diagnostics },
+      });
       recordHuddleMediaOperationalEvent({
         providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
         eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.TOKEN_ISSUANCE,
@@ -823,6 +923,29 @@ router.post("/livekit/token", async (req, res) => {
       outcome: HUDDLE_MEDIA_OPERATIONAL_OUTCOMES.SUCCESS,
       reason: "token_issued",
     });
+    traceHuddleCallStep({
+      workspaceId: authz.workspaceId,
+      huddleId: req.body?.huddleId || req.body?.huddle_id,
+      channelId: req.body?.channelId || req.body?.channel_id,
+      sessionId: authz.sessionId,
+      actorUserId: authz.userId,
+      deviceId: authz.deviceId,
+      platform: req.body?.platform || req.get("x-client-platform") || "web",
+      clientSurface: req.get("x-client-type") || "web",
+      step: HUDDLE_CALL_DELIVERY_STEPS.TOKEN_ISSUED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: {
+        endpoint: "livekit_token",
+        roomName: providerRoomId,
+        identity: providerIdentity,
+        providerLock: authz.providerLock,
+        timings: {
+          endpointTotalMs: elapsedMs(endpointStartedAt),
+          authorizationMs,
+          tokenIssuanceMs,
+        },
+      },
+    });
     return res.json({
       ok: true,
       provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
@@ -849,6 +972,18 @@ router.post("/livekit/token", async (req, res) => {
     });
   } catch (error) {
     console.error("[huddle:media:livekit:token]", error.message);
+    traceHuddleCallStep({
+      workspaceId: req.workspaceId,
+      huddleId: req.body?.huddleId || req.body?.huddle_id,
+      channelId: req.body?.channelId || req.body?.channel_id,
+      sessionId: req.body?.sessionId || req.body?.session_id,
+      actorUserId: req.user?.id,
+      platform: req.body?.platform || req.get("x-client-platform") || "web",
+      clientSurface: req.get("x-client-type") || "web",
+      step: HUDDLE_CALL_DELIVERY_STEPS.TOKEN_ISSUED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+      reason: "livekit_token_endpoint_failed",
+    });
     recordHuddleMediaOperationalEvent({
       providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
       eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.TOKEN_ISSUANCE,

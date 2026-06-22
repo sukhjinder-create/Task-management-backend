@@ -78,6 +78,41 @@ class ApiService {
     await client.post('/push/unsubscribe', body: {'fcmToken': fcmToken});
   }
 
+  Future<void> recordHuddleCallTrace({
+    required String step,
+    required String huddleId,
+    String? channelId,
+    String? sessionId,
+    String? targetUserId,
+    String? deviceId,
+    String platform = 'android',
+    String clientSurface = 'android_app',
+    String status = 'observed',
+    String? reason,
+    JsonMap metadata = const {},
+  }) async {
+    try {
+      await client.post(
+        '/huddle/call-trace/events',
+        body: {
+          'step': step,
+          'huddleId': huddleId,
+          if (channelId != null) 'channelId': channelId,
+          if (sessionId != null) 'sessionId': sessionId,
+          if (targetUserId != null) 'targetUserId': targetUserId,
+          if (deviceId != null) 'deviceId': deviceId,
+          'platform': platform,
+          'clientSurface': clientSurface,
+          'status': status,
+          if (reason != null) 'reason': reason,
+          'metadata': metadata,
+        },
+      );
+    } catch (_) {
+      // Call tracing is diagnostic only and must never block Huddle UX.
+    }
+  }
+
   Future<Map<String, dynamic>> dashboardOverview() async {
     return Map<String, dynamic>.from(
       await client.get('/dashboard/overview') as Map,

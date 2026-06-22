@@ -211,9 +211,48 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
       );
       _room = room;
       _attachRoomListener(room);
+      unawaited(
+        _recordCallTrace(
+          step: 'room_connect_started',
+          channelId: channelId,
+          huddleId: huddleId,
+          status: 'attempted',
+          metadata: {
+            'source': 'android_livekit_provider',
+            'liveKitUrlPresent': liveKitUrl.isNotEmpty,
+          },
+        ),
+      );
       await room.connect(liveKitUrl, token);
+      unawaited(
+        _recordCallTrace(
+          step: 'room_connect_success',
+          channelId: channelId,
+          huddleId: huddleId,
+          status: 'success',
+          metadata: {'source': 'android_livekit_provider'},
+        ),
+      );
       await _setMicrophoneEnabled(true);
+      unawaited(
+        _recordCallTrace(
+          step: 'audio_connected',
+          channelId: channelId,
+          huddleId: huddleId,
+          status: 'success',
+          metadata: {'source': 'android_livekit_provider'},
+        ),
+      );
       await _setCameraEnabled(true);
+      unawaited(
+        _recordCallTrace(
+          step: 'video_connected',
+          channelId: channelId,
+          huddleId: huddleId,
+          status: 'success',
+          metadata: {'source': 'android_livekit_provider'},
+        ),
+      );
       socket.joinHuddle(
         channelId: channelId,
         huddleId: huddleId,
@@ -230,6 +269,19 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
       final reason = err is _LiveKitJoinFailure
           ? err.reason
           : 'mobile_livekit_join_failed';
+      unawaited(
+        _recordCallTrace(
+          step: 'room_connect_failed',
+          channelId: channelId,
+          huddleId: huddleId,
+          status: 'failure',
+          reason: reason,
+          metadata: {
+            'source': 'android_livekit_provider',
+            'error': '$err',
+          },
+        ),
+      );
       if (_providerLockEstablished ||
           (err is _LiveKitJoinFailure && err.providerLocked)) {
         await _failLockedLiveKitSession(reason, err);
@@ -421,6 +473,44 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
       readString(lastPayload ?? const {}, ['reason']) ??
           'mobile_livekit_endpoint_failed',
     );
+  }
+
+  Future<void> _recordCallTrace({
+    required String step,
+    required String channelId,
+    required String huddleId,
+    String status = 'observed',
+    String? reason,
+    JsonMap metadata = const {},
+  }) async {
+    try {
+      final baseUrl = await _resolvedApiBaseUrl();
+      final authToken = socket.authToken;
+      if (authToken == null || authToken.isEmpty) return;
+      await _httpClient.post(
+        Uri.parse('$baseUrl/huddle/call-trace/events'),
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': 'Bearer $authToken',
+          'Content-Type': 'application/json',
+          'x-client-type': 'mobile',
+          'x-client-platform': _platformName,
+        },
+        body: jsonEncode({
+          'step': step,
+          'channelId': channelId,
+          'huddleId': huddleId,
+          'sessionId': huddleId,
+          'platform': _platformName,
+          'clientSurface': 'android_app',
+          'status': status,
+          if (reason != null) 'reason': reason,
+          'metadata': metadata,
+        }),
+      );
+    } catch (_) {
+      // Diagnostics only; never block media setup.
+    }
   }
 
   Future<String> _resolvedApiBaseUrl() async {

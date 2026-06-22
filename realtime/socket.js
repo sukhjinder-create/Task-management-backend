@@ -37,6 +37,11 @@ import {
   HUDDLE_MEDIA_PROVIDERS,
   normalizeMediaProviderType,
 } from "../services/huddleMediaSession.service.js";
+import {
+  HUDDLE_CALL_DELIVERY_STATUSES,
+  HUDDLE_CALL_DELIVERY_STEPS,
+  recordHuddleCallStep,
+} from "../services/huddleCallDeliveryTrace.service.js";
 
 import workspaceService from "../services/workspace.service.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
@@ -52,6 +57,10 @@ let socketRealtimeDiagnostics = {
   reason: "socket_io_not_initialized",
   configuredAt: null,
 };
+
+function traceHuddleCallStep(input = {}) {
+  recordHuddleCallStep(input).catch(() => {});
+}
 const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
 const WORKSPACE_GLOBAL = "GLOBAL";
 const parsedHuddleDisconnectGraceMs = Number(process.env.HUDDLE_DISCONNECT_GRACE_MS || 15000);
@@ -811,6 +820,7 @@ async function emitHuddleInviteEvent(scope, event, payload, options = {}) {
     exceptUserId,
     includeWorkspaceRoom,
   });
+  return { recipientIds, includeWorkspaceRoom };
 }
 
 async function emitHuddleLiveEvent(scope, room, event, payload, options = {}) {
@@ -1708,7 +1718,35 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       return;
     }
     const sessionId = startResult?.sessionId || null;
+    traceHuddleCallStep({
+      workspaceId,
+      sessionId,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.CALL_STARTED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: {
+        requestedProvider: resolveSocketRequestedProvider(payload),
+        hasClientCapabilities: Boolean(resolveSocketClientCapabilities(payload)),
+      },
+    });
     if (!sessionId || !startResult?.providerLock?.locked) {
+      traceHuddleCallStep({
+        workspaceId,
+        sessionId,
+        huddleId,
+        channelId,
+        actorUserId: String(userId),
+        clientSurface: "socket",
+        step: HUDDLE_CALL_DELIVERY_STEPS.PROVIDER_LOCK_RESOLVED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+        reason: "provider_lock_required",
+        metadata: { providerLock: startResult?.providerLockDiagnostics || null },
+      });
       emitHuddleDenied(socket, "huddle:start", "provider_lock_required", {
         channelId,
         huddleId,
@@ -1726,6 +1764,32 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
         userId: String(userId),
         deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
       });
+    traceHuddleCallStep({
+      workspaceId,
+      sessionId,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.PROVIDER_LOCK_RESOLVED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: { providerLock: providerLockDiagnostics },
+    });
+    traceHuddleCallStep({
+      workspaceId,
+      sessionId,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.SESSION_RESOLVED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: { source: "huddle:start" },
+    });
 
     const out = {
       channelId,
@@ -1766,10 +1830,27 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
     socket.emit("huddle:started", out);
 
-    await emitHuddleInviteEvent(scope, "huddle:started", out, {
+    const inviteResult = await emitHuddleInviteEvent(scope, "huddle:started", out, {
       exceptUserId: scope.type === "dm" || scope.isPrivate ? userId : null,
       includeWorkspaceRoom: scope.type !== "dm" && !scope.isPrivate,
     });
+    for (const recipientId of inviteResult.recipientIds || []) {
+      traceHuddleCallStep({
+        workspaceId,
+        sessionId,
+        huddleId,
+        channelId,
+        actorUserId: String(userId),
+        targetUserId: recipientId,
+        clientSurface: "socket",
+        step: HUDDLE_CALL_DELIVERY_STEPS.INCOMING_CALL_DELIVERED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.ATTEMPTED,
+        metadata: {
+          event: "huddle:started",
+          includeWorkspaceRoom: inviteResult.includeWorkspaceRoom,
+        },
+      });
+    }
 
     // Send FCM push notification only to relevant participants (not entire workspace for DMs)
     try {
@@ -1796,6 +1877,22 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
               null,
             ...(sessionId ? { sessionId } : {}),
           },
+        }).then(() => {
+          traceHuddleCallStep({
+            workspaceId,
+            sessionId,
+            huddleId,
+            channelId,
+            actorUserId: String(userId),
+            targetUserId: uid,
+            clientSurface: "push",
+            step: HUDDLE_CALL_DELIVERY_STEPS.INCOMING_CALL_DELIVERED,
+            status: HUDDLE_CALL_DELIVERY_STATUSES.ATTEMPTED,
+            metadata: {
+              type: "huddle",
+              url: `/chat?channel=${encodeURIComponent(channelId)}`,
+            },
+          });
         }).catch(() => {});
       }
     } catch (e) {
@@ -1848,6 +1945,22 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
     const ctx = await authorizeHuddleScope(socket, channelId, "huddle:join");
     if (!ctx.ok) return;
+    const joinDeviceContext = getHuddleSocketDeviceContext(socket);
+    traceHuddleCallStep({
+      workspaceId: ctx.scope.workspaceId,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      deviceId: joinDeviceContext.deviceId || null,
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.JOIN_REQUEST_RECEIVED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: {
+        requestedProvider: resolveSocketRequestedProvider(payload),
+        hasClientCapabilities: Boolean(resolveSocketClientCapabilities(payload)),
+      },
+    });
 
     const resolved = await getRoomOrActiveHuddle({
       channelId,
@@ -1856,6 +1969,18 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       scope: ctx.scope,
     });
     if (!resolved.ok) {
+      traceHuddleCallStep({
+        workspaceId: ctx.scope.workspaceId,
+        huddleId,
+        channelId,
+        actorUserId: String(userId),
+        deviceId: joinDeviceContext.deviceId || null,
+        platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+        clientSurface: "socket",
+        step: HUDDLE_CALL_DELIVERY_STEPS.SESSION_RESOLVED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+        reason: resolved.reason,
+      });
       emitHuddleDenied(socket, "huddle:join", resolved.reason, { channelId, huddleId });
       return;
     }
@@ -1868,11 +1993,24 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
         huddleId,
         active: resolved.active,
       });
-    const deviceContext = getHuddleSocketDeviceContext(socket);
+    const deviceContext = joinDeviceContext;
     const resolvedSession = getResolvedHuddleSession({
       room,
       active: resolved.active,
       session: resolved.session,
+    });
+    traceHuddleCallStep({
+      workspaceId,
+      sessionId: resolvedSession?.id || resolvedSession?.sessionId || room?.sessionId || null,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      deviceId: deviceContext.deviceId || null,
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.SESSION_RESOLVED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: { source: "huddle:join" },
     });
     const providerLockGuard = await enforceSocketHuddleProviderLock({
       workspaceId,
@@ -1887,6 +2025,20 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       createIfMissing: true,
     });
     if (!providerLockGuard.ok) {
+      traceHuddleCallStep({
+        workspaceId,
+        sessionId: resolvedSession?.id || resolvedSession?.sessionId || room?.sessionId || null,
+        huddleId,
+        channelId,
+        actorUserId: String(userId),
+        deviceId: deviceContext.deviceId || null,
+        platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+        clientSurface: "socket",
+        step: HUDDLE_CALL_DELIVERY_STEPS.PROVIDER_LOCK_RESOLVED,
+        status: HUDDLE_CALL_DELIVERY_STATUSES.FAILURE,
+        reason: providerLockGuard.reason || "provider_lock_mismatch",
+        metadata: { providerLock: providerLockGuard.diagnostics || null },
+      });
       emitHuddleDenied(socket, "huddle:join", providerLockGuard.reason || "provider_lock_mismatch", {
         channelId,
         huddleId,
@@ -1894,6 +2046,19 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       });
       return;
     }
+    traceHuddleCallStep({
+      workspaceId,
+      sessionId: resolvedSession?.id || resolvedSession?.sessionId || room?.sessionId || null,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      deviceId: deviceContext.deviceId || null,
+      platform: payload?.platform || socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.PROVIDER_LOCK_RESOLVED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: { providerLock: providerLockGuard.diagnostics || null },
+    });
 
     huddleRealtimeService.joinRealtimeRooms({
       socket,
@@ -2331,6 +2496,20 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       scope: ctx.scope,
     });
     const sessionId = sessionResult?.sessionId || resolved.room?.sessionId || null;
+    traceHuddleCallStep({
+      workspaceId,
+      sessionId,
+      huddleId,
+      channelId,
+      actorUserId: String(userId),
+      targetUserId: initiatorUserId,
+      deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+      platform: socket.handshake?.auth?.platform || "web",
+      clientSurface: "socket",
+      step: HUDDLE_CALL_DELIVERY_STEPS.DECLINE_PRESSED,
+      status: HUDDLE_CALL_DELIVERY_STATUSES.SUCCESS,
+      metadata: { source: "huddle:decline" },
+    });
 
     // Tell the initiator who declined (for the toast)
     huddleRealtimeService.sendToUser({

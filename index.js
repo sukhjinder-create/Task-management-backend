@@ -128,6 +128,7 @@ import huddleIntelligenceRoutes from "./routes/huddleIntelligence.routes.js";
 import huddleMediaRoutes from "./routes/huddleMedia.routes.js";
 import huddleTranscriptionRoutes from "./routes/huddleTranscription.routes.js";
 import huddleTranscriptRoutes from "./routes/huddleTranscript.routes.js";
+import huddleCallTraceRoutes from "./routes/huddleCallTrace.routes.js";
 
 
 
@@ -326,6 +327,7 @@ app.use("/chat/messages", authMiddleware, requireWorkspaceForUser, requirePlanFe
 app.use("/chat",          authMiddleware, requireWorkspaceForUser, requirePlanFeature("team_chat"), chatChannelRoutes);
 app.use("/huddle/artifacts", authMiddleware, requireWorkspaceForUser, huddleArtifactRoutes);
 app.use("/huddle/intelligence", authMiddleware, requireWorkspaceForUser, huddleIntelligenceRoutes);
+app.use("/huddle/call-trace", authMiddleware, requireWorkspaceForUser, huddleCallTraceRoutes);
 app.use("/huddle/media",  authMiddleware, requireWorkspaceForUser, huddleMediaRoutes);
 app.use("/huddle/transcription", authMiddleware, requireWorkspaceForUser, huddleTranscriptionRoutes);
 app.use("/huddle/transcripts", authMiddleware, requireWorkspaceForUser, huddleTranscriptRoutes);
