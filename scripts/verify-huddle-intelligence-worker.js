@@ -59,6 +59,9 @@ assert.match(service, /FOR UPDATE SKIP LOCKED/, "job claims and recovery must be
 assert.match(service, /dependency\.dependency_type = 'hard'/, "hard dependencies must gate claims");
 assert.match(service, /meeting_digest_generation', 'ownership_resolution'/, "digest and ownership jobs must tolerate terminal failed generation dependencies");
 assert.match(service, /upstream\.status IN \('failed', 'cancelled'\)/, "terminal failed dependencies must not strand delivery jobs");
+assert.match(service, /upsertMeetingDigest/, "digest jobs must refresh existing digest rows after artifact regeneration");
+assert.match(worker, /upsertMeetingDigest/, "worker must call the digest upsert path");
+assert.match(service, /ON CONFLICT \(workspace_id, session_id, digest_type\)/, "meeting digest upsert must target one canonical digest per session/type");
 assert.match(service, /retry_scheduled/, "retry attempts must be auditable");
 for (const [name, source] of [
   ["intelligence", service],

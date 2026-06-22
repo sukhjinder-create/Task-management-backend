@@ -2,13 +2,12 @@ import {
   HUDDLE_INTELLIGENCE_JOB_TYPES,
   claimNextIntelligenceJob,
   completeIntelligenceJob,
-  createMeetingDigest,
   enqueueIntelligenceJob,
   failIntelligenceJob,
   getHuddleIntelligenceDiagnostics,
   heartbeatIntelligenceJob,
-  listMeetingDigests,
   recoverStaleIntelligenceJobs,
+  upsertMeetingDigest,
 } from "./huddleIntelligence.service.js";
 import {
   createHuddleArtifact,
@@ -260,20 +259,13 @@ async function processOwnershipResolution(job, client = null) {
 
 async function processMeetingDigest(job, client = null) {
   const actor = jobActor(job);
-  const [artifacts, existingDigests, delivery] = await Promise.all([
+  const [artifacts, delivery] = await Promise.all([
     listHuddleArtifacts({
       workspaceId: job.workspaceId,
       sessionId: job.sessionId,
       ...actor,
       includeDeleted: false,
       limit: 100,
-      client,
-    }),
-    listMeetingDigests({
-      workspaceId: job.workspaceId,
-      sessionId: job.sessionId,
-      ...actor,
-      limit: 50,
       client,
     }),
     getMeetingIntelligenceDeliveryContext({
@@ -298,47 +290,42 @@ async function processMeetingDigest(job, client = null) {
     : 0;
   const reviewPath = `/huddles/${job.sessionId}/intelligence`;
   const summaryLabel = summary ? "summary available" : "transcript available";
-  const existing = existingDigests.find(
-    (digest) => digest.generatedByJobId === job.id
-  );
-  const result = existing
-    ? { meetingDigest: existing }
-    : await createMeetingDigest({
-        workspaceId: job.workspaceId,
-        sessionId: job.sessionId,
-        ...actor,
-        input: {
-          digestType: "post_meeting",
-          status: "ready",
-          summaryArtifactId: summary?.id,
-          decisionsArtifactId: decisions?.id,
-          actionsArtifactId: actions?.id,
-          timelineArtifactId: timeline?.id,
-          generatedByJobId: job.id,
-          digest: {
-            schemaVersion: 1,
-            generationState: "ready_for_review",
-            summaryAvailable: Boolean(summary),
-            decisionCount,
-            actionItemCount,
-            reviewPath,
-          },
-          provenance: {
-            source: "huddle_intelligence_worker",
-            sourceJobId: job.id,
-            transcriptArtifactId: job.artifactId || null,
-            summaryArtifactId: summary?.id || null,
-            decisionsArtifactId: decisions?.id || null,
-            actionsArtifactId: actions?.id || null,
-          },
-          metadata: {
-            orchestrationOnly: false,
-            deliveryImplemented: true,
-            taskCreationEnabled: false,
-          },
-        },
-        client,
-      });
+  const result = await upsertMeetingDigest({
+    workspaceId: job.workspaceId,
+    sessionId: job.sessionId,
+    ...actor,
+    input: {
+      digestType: "post_meeting",
+      status: "ready",
+      summaryArtifactId: summary?.id,
+      decisionsArtifactId: decisions?.id,
+      actionsArtifactId: actions?.id,
+      timelineArtifactId: timeline?.id,
+      generatedByJobId: job.id,
+      digest: {
+        schemaVersion: 1,
+        generationState: "ready_for_review",
+        summaryAvailable: Boolean(summary),
+        decisionCount,
+        actionItemCount,
+        reviewPath,
+      },
+      provenance: {
+        source: "huddle_intelligence_worker",
+        sourceJobId: job.id,
+        transcriptArtifactId: job.artifactId || null,
+        summaryArtifactId: summary?.id || null,
+        decisionsArtifactId: decisions?.id || null,
+        actionsArtifactId: actions?.id || null,
+      },
+      metadata: {
+        orchestrationOnly: false,
+        deliveryImplemented: true,
+        taskCreationEnabled: false,
+      },
+    },
+    client,
+  });
 
   await Promise.all(
     delivery.participantUserIds.map((userId) =>

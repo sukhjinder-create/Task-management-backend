@@ -2060,6 +2060,76 @@ export function createMeetingDigest(args) {
   });
 }
 
+export async function upsertMeetingDigest({
+  workspaceId,
+  sessionId,
+  actorUserId,
+  role = "user",
+  input,
+  client = null,
+}) {
+  return withTransaction(client, async (tx) => {
+    const context = await getSessionAccessContext({
+      workspaceId,
+      sessionId,
+      userId: actorUserId,
+      role,
+      client: tx,
+    });
+    assertSessionPermission(context, "write");
+    const normalized = objectOrEmpty(input);
+    const digestType = safeString(normalized.digestType || normalized.digest_type, 80) || "post_meeting";
+    const { rows } = await tx.query(
+      `
+      INSERT INTO huddle_meeting_digests (
+        workspace_id, session_id, digest_type, status, summary_artifact_id,
+        decisions_artifact_id, actions_artifact_id, timeline_artifact_id,
+        digest_json, provenance_json, metadata, generated_by_job_id, created_by
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13)
+      ON CONFLICT (workspace_id, session_id, digest_type)
+      DO UPDATE SET
+        status = EXCLUDED.status,
+        summary_artifact_id = EXCLUDED.summary_artifact_id,
+        decisions_artifact_id = EXCLUDED.decisions_artifact_id,
+        actions_artifact_id = EXCLUDED.actions_artifact_id,
+        timeline_artifact_id = EXCLUDED.timeline_artifact_id,
+        digest_json = EXCLUDED.digest_json,
+        provenance_json = EXCLUDED.provenance_json,
+        metadata = huddle_meeting_digests.metadata || EXCLUDED.metadata,
+        generated_by_job_id = COALESCE(EXCLUDED.generated_by_job_id, huddle_meeting_digests.generated_by_job_id),
+        updated_at = now()
+      RETURNING *
+      `,
+      [
+        workspaceId,
+        sessionId,
+        digestType,
+        safeString(normalized.status, 80) || "ready",
+        safeUuid(normalized.summaryArtifactId || normalized.summary_artifact_id),
+        safeUuid(normalized.decisionsArtifactId || normalized.decisions_artifact_id),
+        safeUuid(normalized.actionsArtifactId || normalized.actions_artifact_id),
+        safeUuid(normalized.timelineArtifactId || normalized.timeline_artifact_id),
+        json(normalized.digest || normalized.digestJson || normalized.digest_json),
+        json(normalized.provenance || normalized.provenance_json),
+        json(normalized.metadata),
+        safeUuid(normalized.generatedByJobId || normalized.generated_by_job_id),
+        actorUserId,
+      ]
+    );
+    const record = rows[0];
+    const event = await recordIntelligenceEvent({
+      eventType: HUDDLE_INTELLIGENCE_EVENTS.DIGEST_UPDATED,
+      workspaceId,
+      sessionId,
+      actorUserId,
+      payload: { meetingDigestId: record.id, upserted: true },
+      client: tx,
+    });
+    return { meetingDigest: serializeDigest(record), event: serializeEvent(event) };
+  });
+}
+
 export function recordIntelligenceConsent(args) {
   return insertSimpleStateRecord({
     ...args,
@@ -2196,6 +2266,7 @@ export default {
   createMemoryCandidate,
   updateMemoryCandidate,
   createMeetingDigest,
+  upsertMeetingDigest,
   recordIntelligenceConsent,
   createRetentionPolicy,
   listOwnershipResolutions,
