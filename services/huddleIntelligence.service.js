@@ -2114,7 +2114,7 @@ export async function upsertMeetingDigest({
         AND digest_type = $3
       RETURNING *
       `,
-      values
+      values.slice(0, 12)
     );
     let record = updateResult.rows[0];
     if (!record) {

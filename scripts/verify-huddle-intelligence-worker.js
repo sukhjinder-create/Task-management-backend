@@ -63,6 +63,7 @@ assert.match(service, /upsertMeetingDigest/, "digest jobs must refresh existing 
 assert.match(worker, /upsertMeetingDigest/, "worker must call the digest upsert path");
 assert.match(service, /UPDATE huddle_meeting_digests/, "meeting digest upsert must refresh the existing canonical digest row");
 assert.match(service, /WHERE workspace_id = \$1\s+AND session_id = \$2\s+AND digest_type = \$3/, "meeting digest refresh must target one canonical digest per session/type");
+assert.match(service, /values\.slice\(0,\s*12\)/, "meeting digest refresh update must pass only the 12 parameters used by the update SQL");
 assert.match(service, /INSERT INTO huddle_meeting_digests/, "meeting digest upsert must insert when no digest row exists");
 assert.match(service, /retry_scheduled/, "retry attempts must be auditable");
 for (const [name, source] of [
