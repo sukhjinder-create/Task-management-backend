@@ -12,17 +12,20 @@ import '../../core/models.dart';
 import '../../core/ui.dart';
 import '../../state/app_scope.dart';
 import 'huddle_call_controller.dart';
+import 'huddle_media/huddle_media_service.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
     super.key,
     this.initialChannelKey,
     this.initialHuddleId,
+    this.initialHuddleData,
     this.onImmersiveChanged,
   });
 
   final String? initialChannelKey;
   final String? initialHuddleId;
+  final JsonMap? initialHuddleData;
   final ValueChanged<bool>? onImmersiveChanged;
 
   @override
@@ -49,6 +52,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Map<String, int> _unreadByChannel = const {};
   String? _pendingInitialChannelKey;
   String? _pendingInitialHuddleId;
+  JsonMap? _pendingInitialHuddleData;
   final Set<String> _joinedHuddles = {};
   final Set<String> _locallyStartedHuddles = {};
   final List<ChatAttachment> _pendingAttachments = [];
@@ -64,6 +68,7 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _pendingInitialChannelKey = widget.initialChannelKey;
     _pendingInitialHuddleId = widget.initialHuddleId;
+    _pendingInitialHuddleData = widget.initialHuddleData;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final appScope = AppScope.of(context);
       final socket = appScope.socket;
@@ -501,6 +506,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _messageRow(ChatMessage message, bool mine) {
+    final huddleCall = message.huddleCall;
+    if (huddleCall != null) {
+      return _huddleCallMessage(message, huddleCall);
+    }
     final scheme = Theme.of(context).colorScheme;
     final senderName =
         message.senderName ?? _nameForUser(message.senderId) ?? 'Teammate';
@@ -598,6 +607,98 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _huddleCallMessage(ChatMessage message, JsonMap call) {
+    final scheme = Theme.of(context).colorScheme;
+    final currentUserId = AppScope.of(context).auth.user?.id;
+    final startedBy = readString(call, ['startedBy', 'started_by']);
+    final participantIds = readList(call, ['participantIds', 'participant_ids'])
+        .map((item) => '$item')
+        .toSet();
+    final status = readString(call, ['status']) ?? 'completed';
+    final durationSeconds =
+        readInt(call, ['durationSeconds', 'duration_seconds']) ?? 0;
+    final isOutgoing = currentUserId != null && startedBy == currentUserId;
+    final missed = status == 'missed' ||
+        (currentUserId != null &&
+            !isOutgoing &&
+            !participantIds.contains(currentUserId));
+    final title = missed
+        ? isOutgoing
+            ? 'Unanswered Huddle call'
+            : 'Missed Huddle call'
+        : isOutgoing
+            ? 'Outgoing Huddle call'
+            : 'Incoming Huddle call';
+    final minutes = durationSeconds ~/ 60;
+    final seconds = durationSeconds % 60;
+    final duration = durationSeconds <= 0
+        ? null
+        : minutes > 0
+            ? '${minutes}m${seconds > 0 ? ' ${seconds}s' : ''}'
+            : '${seconds}s';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Center(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 340),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color:
+                      missed ? scheme.errorContainer : scheme.primaryContainer,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  missed ? Icons.call_missed : Icons.videocam_outlined,
+                  size: 20,
+                  color: missed
+                      ? scheme.onErrorContainer
+                      : scheme.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      [
+                        if (duration != null) duration,
+                        if (message.createdAt != null)
+                          longDateTime(message.createdAt),
+                      ].join(' · '),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1006,23 +1107,42 @@ class _ChatScreenState extends State<ChatScreen> {
     final huddleId = _pendingInitialHuddleId;
     if (huddleId == null) return;
     _pendingInitialHuddleId = null;
+    final initialData = _pendingInitialHuddleData;
+    _pendingInitialHuddleData = null;
     setState(() {
       _activeHuddles[channelKey] = {
+        ...?initialData,
         'event': 'started',
         'channelId': channelKey,
         'huddleId': huddleId,
       };
     });
-    await _call?.join(
-      channelId: channelKey,
-      huddleId: huddleId,
-      participants: _huddleParticipants[huddleId] ?? const [],
-    );
-    if (!mounted) return;
-    setState(() => _joinedHuddles.add(huddleId));
+    AppScope.of(context).socket.syncHuddles();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _showHuddleSheet(channelKey);
     });
+  }
+
+  String? _providerForHuddle(JsonMap? huddle) {
+    if (huddle == null) return null;
+    final direct = readString(huddle, [
+      'provider',
+      'providerType',
+      'provider_type',
+      'selectedProvider',
+      'selected_provider',
+    ]);
+    if (direct == 'mesh' || direct == 'livekit') return direct;
+    final lock = huddle['providerLock'];
+    if (lock is! Map) return null;
+    final provider = readString(JsonMap.from(lock), [
+      'effectiveProvider',
+      'lockedProvider',
+      'selectedProvider',
+      'provider',
+      'providerType',
+    ]);
+    return provider == 'mesh' || provider == 'livekit' ? provider : null;
   }
 
   List<ChatMessage> _sortedUnique(List<ChatMessage> source) {
@@ -1055,6 +1175,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (eventType == 'error' &&
         (action == 'huddle:start' || action == 'huddle:join')) {
       if (channelId == null && huddleId == null) return;
+      final reason = readString(event, ['reason']) ?? 'Could not join huddle';
+      if (action == 'huddle:join') {
+        _setHuddleAction(null);
+        if (_call?.huddleId == huddleId || _call?.channelId == channelId) {
+          unawaited(_call?.leave(emitLeave: false));
+        }
+        if (mounted) showSnack(context, reason.replaceAll('_', ' '));
+        return;
+      }
       setState(() {
         _huddleActionMessage = null;
         if (channelId != null) _activeHuddles.remove(channelId);
@@ -1129,11 +1258,22 @@ class _ChatScreenState extends State<ChatScreen> {
       await call.join(
         channelId: channelId,
         huddleId: huddleId,
+        provider: _providerForHuddle(event),
         participants: _huddleParticipants[huddleId] ?? const [],
       );
+      if (!call.joined) {
+        throw StateError(call.error ?? 'Could not join huddle');
+      }
       if (!mounted) return;
       setState(() => _joinedHuddles.add(huddleId));
       _bumpHuddleUi();
+    } catch (error) {
+      if (mounted) {
+        showSnack(
+          context,
+          call.error ?? error.toString().replaceFirst('Bad state: ', ''),
+        );
+      }
     } finally {
       if (mounted) _setHuddleAction(null);
     }
@@ -1473,6 +1613,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 final current = _activeHuddles[channelKey] ?? active;
                 final huddleId =
                     readString(current ?? const {}, ['huddleId', 'huddle_id']);
+                final provider = _providerForHuddle(current);
                 final call = _call;
                 final joined = huddleId != null &&
                     (call?.joined == true && call?.huddleId == huddleId);
@@ -1659,6 +1800,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   child: FilledButton.icon(
                                     onPressed: socket.connected &&
                                             huddleId != null &&
+                                            provider != null &&
                                             !huddleBusy
                                         ? () async {
                                             await _toggleJoinHuddle(
@@ -1666,6 +1808,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                               huddleId,
                                               participants,
                                               joined,
+                                              provider,
                                             );
                                             if (!context.mounted) return;
                                             setSheetState(() {});
@@ -1681,7 +1824,11 @@ class _ChatScreenState extends State<ChatScreen> {
                                           )
                                         : const Icon(Icons.call),
                                     label: Text(
-                                      huddleBusy ? busyLabel : 'Join huddle',
+                                      huddleBusy
+                                          ? busyLabel
+                                          : provider == null
+                                              ? 'Syncing call...'
+                                              : 'Join huddle',
                                     ),
                                   ),
                                 ),
@@ -1738,7 +1885,12 @@ class _ChatScreenState extends State<ChatScreen> {
       };
     });
     _bumpHuddleUi();
-    socket.startHuddle(channelId: channelKey, huddleId: id);
+    socket.startHuddle(
+      channelId: channelKey,
+      huddleId: id,
+      provider: HuddleMediaService.requestedProvider,
+      clientCapabilities: HuddleMediaService.clientCapabilities,
+    );
     unawaited(
       Future<void>.delayed(const Duration(seconds: 8)).then((_) {
         if (!mounted || _huddleActionMessage != 'Starting huddle...') return;
@@ -1752,6 +1904,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String huddleId,
     List<JsonMap> participants,
     bool joined,
+    String provider,
   ) async {
     if (joined) return;
     _mobileHuddleControlsVisible = false;
@@ -1760,8 +1913,12 @@ class _ChatScreenState extends State<ChatScreen> {
       await _call?.join(
         channelId: channelKey,
         huddleId: huddleId,
+        provider: provider,
         participants: participants,
       );
+      if (_call?.joined != true) {
+        throw StateError(_call?.error ?? 'Could not join huddle');
+      }
       if (!mounted) return;
       setState(() => _joinedHuddles.add(huddleId));
       _bumpHuddleUi();

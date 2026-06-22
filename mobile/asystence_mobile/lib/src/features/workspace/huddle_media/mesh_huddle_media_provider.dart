@@ -106,10 +106,16 @@ class MeshHuddleMediaProvider extends HuddleMediaProvider {
   Future<void> join({
     required String channelId,
     required String huddleId,
+    String? provider,
     List<JsonMap> participants = const [],
   }) async {
     if (joined && this.huddleId == huddleId) {
-      socket.joinHuddle(channelId: channelId, huddleId: huddleId);
+      socket.joinHuddle(
+        channelId: channelId,
+        huddleId: huddleId,
+        provider: huddleMediaProviderMesh,
+        clientCapabilities: _clientCapabilities,
+      );
       return;
     }
     starting = true;
@@ -120,7 +126,12 @@ class MeshHuddleMediaProvider extends HuddleMediaProvider {
       this.channelId = channelId;
       this.huddleId = huddleId;
       await _ensureLocalMedia();
-      socket.joinHuddle(channelId: channelId, huddleId: huddleId);
+      socket.joinHuddle(
+        channelId: channelId,
+        huddleId: huddleId,
+        provider: huddleMediaProviderMesh,
+        clientCapabilities: _clientCapabilities,
+      );
       joined = true;
       starting = false;
       notifyListeners();
@@ -139,6 +150,13 @@ class MeshHuddleMediaProvider extends HuddleMediaProvider {
       notifyListeners();
     }
   }
+
+  JsonMap get _clientCapabilities => const {
+        'clientType': 'mobile',
+        'platform': 'mobile',
+        'supportedProviders': ['mesh'],
+        'providerVersions': {'mesh': 'mobile-mesh-1'},
+      };
 
   @override
   Future<void> leave({bool emitLeave = true}) async {

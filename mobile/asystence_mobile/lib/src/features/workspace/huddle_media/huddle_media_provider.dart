@@ -32,6 +32,7 @@ abstract class HuddleMediaProvider extends ChangeNotifier {
   Future<void> join({
     required String channelId,
     required String huddleId,
+    String? provider,
     List<JsonMap> participants = const [],
   });
 

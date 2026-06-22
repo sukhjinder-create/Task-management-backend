@@ -16,6 +16,7 @@ import {
   isChannelMember,
   isChannelAdmin,
   getChannelMembers,
+  createHuddleCallLogMessage,
 } from "../services/chat.service.js";
 
 import {
@@ -855,6 +856,21 @@ async function endHuddleAndNotify(
     at: new Date().toISOString(),
     ...(sessionId ? { sessionId } : {}),
   };
+  try {
+    await createHuddleCallLogMessage({
+      workspaceId: scope.workspaceId,
+      sessionId,
+      channelKey: scope.channelId,
+      huddleId,
+    });
+  } catch (error) {
+    console.warn("[huddle:call-log] creation failed", {
+      workspaceId: scope.workspaceId,
+      sessionId,
+      huddleId,
+      error: error?.message || String(error),
+    });
+  }
   await emitHuddleInviteEvent(scope, "huddle:ended", out);
   return { ok: true, payload: out, sessionResult };
 }
@@ -1165,11 +1181,16 @@ socket.emit("chat:history", {
   messages: orderedRows.map((m) => {
     // Detect AI-generated messages via the __from_ai flag stored in encrypted_json
     let isAiMessage = false;
+    let huddleCall = null;
     try {
       const enc = typeof m.encrypted_json === "string"
         ? JSON.parse(m.encrypted_json)
         : m.encrypted_json;
       isAiMessage = enc?.__from_ai === true;
+      huddleCall =
+        enc?.__huddle_call_log === true && enc?.huddleCall
+          ? enc.huddleCall
+          : null;
     } catch {}
 
     return {
@@ -1190,6 +1211,8 @@ socket.emit("chat:history", {
       senderPublicKeyJwk: m.sender_public_key,
       parentId: m.parent_id,
       isAiMessage,
+      messageType: huddleCall ? "huddle_call" : null,
+      huddleCall,
     };
   }),
 });
@@ -1251,6 +1274,15 @@ socket.emit("chat:history", {
         if (active && !socket.disconnected && !socket._isCleanedUp) {
           const starterUsername = active.starter_username || "User";
           const sessionId = activeResult?.sessionId || active.session_id || null;
+          const providerLockDiagnostics = await getProviderLockDiagnostics({
+            workspaceId: resolvedWorkspaceId,
+            sessionId,
+            action: "chat:join",
+            requestedProvider: "mesh",
+            userId: String(userId),
+            deviceId: getHuddleSocketDeviceContext(socket).deviceId || null,
+            allowLiveKitLifecycleJoin: true,
+          });
           socket.emit("huddle:started", {
             channelId: channelKey,
             workspaceId: channel.workspaceId || resolvedWorkspaceId,
@@ -1261,6 +1293,11 @@ socket.emit("chat:history", {
             },
             at: active.started_at,
             persisted: true,
+            provider:
+              providerLockDiagnostics?.effectiveProvider ||
+              providerLockDiagnostics?.lockedProvider ||
+              null,
+            providerLock: providerLockDiagnostics,
             ...(sessionId ? { sessionId } : {}),
           });
         }
@@ -1697,6 +1734,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       startedBy: { userId, username },
       at: new Date().toISOString(),
       persisted: true,
+      provider:
+        providerLockDiagnostics?.effectiveProvider ||
+        providerLockDiagnostics?.lockedProvider ||
+        null,
       providerLock: providerLockDiagnostics,
       ...(sessionId ? { sessionId } : {}),
     };
@@ -1749,6 +1790,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
             channelId,
             startedByName: username,
             startedBy: String(userId),
+            provider:
+              providerLockDiagnostics?.effectiveProvider ||
+              providerLockDiagnostics?.lockedProvider ||
+              null,
             ...(sessionId ? { sessionId } : {}),
           },
         }).catch(() => {});
@@ -2172,6 +2217,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
           startedBy: room.startedBy || { userId: "unknown", username: "Someone" },
           at: room.startedAt || new Date().toISOString(),
           persisted: true,
+          provider:
+            providerLockDiagnostics?.effectiveProvider ||
+            providerLockDiagnostics?.lockedProvider ||
+            null,
           providerLock: providerLockDiagnostics,
           ...(sessionId ? { sessionId } : {}),
         }, syncRecovery));
@@ -2229,6 +2278,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
           startedBy: { userId: h.started_by, username: h.starter_username },
           at: h.started_at,
           persisted: true,
+          provider:
+            providerLockDiagnostics?.effectiveProvider ||
+            providerLockDiagnostics?.lockedProvider ||
+            null,
           providerLock: providerLockDiagnostics,
           ...(sessionId ? { sessionId } : {}),
         }, syncRecovery));
@@ -2698,6 +2751,11 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     fallbackText: message.fallbackText || message.fallback_text || "",
     parentId: message.parentId || message.parent_id || null,
     isAiMessage: message.isAiMessage === true,
+    messageType:
+      message.messageType ||
+      message.message_type ||
+      (message.huddleCall ? "huddle_call" : null),
+    huddleCall: message.huddleCall || null,
   };
 
 io

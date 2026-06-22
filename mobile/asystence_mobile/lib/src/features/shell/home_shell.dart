@@ -30,6 +30,7 @@ class _HomeShellState extends State<HomeShell> {
   int _index = 0;
   String? _chatChannelKey;
   String? _chatHuddleId;
+  JsonMap? _chatHuddleData;
   int _chatInstanceKey = 0;
   bool _chatImmersive = false;
   StreamSubscription<AppNavigationIntent>? _intentSub;
@@ -53,6 +54,7 @@ class _HomeShellState extends State<HomeShell> {
           key: ValueKey('chat-$_chatInstanceKey-${_chatChannelKey ?? 'home'}'),
           initialChannelKey: _chatChannelKey,
           initialHuddleId: _chatHuddleId,
+          initialHuddleData: _chatHuddleData,
           onImmersiveChanged: (value) {
             if (!mounted || _chatImmersive == value) return;
             setState(() => _chatImmersive = value);
@@ -428,7 +430,11 @@ class _HomeShellState extends State<HomeShell> {
     if (intent.kind == AppNavigationIntentKind.huddle &&
         intent.channelId != null &&
         intent.huddleId != null) {
-      _openChat(intent.channelId!, huddleId: intent.huddleId);
+      _openChat(
+        intent.channelId!,
+        huddleId: intent.huddleId,
+        huddleData: intent.data,
+      );
       return;
     }
     if (intent.kind == AppNavigationIntentKind.task) {
@@ -565,10 +571,15 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  void _openChat(String channelId, {String? huddleId}) {
+  void _openChat(
+    String channelId, {
+    String? huddleId,
+    JsonMap? huddleData,
+  }) {
     setState(() {
       _chatChannelKey = channelId;
       _chatHuddleId = huddleId;
+      _chatHuddleData = huddleData;
       _chatInstanceKey += 1;
       _chatImmersive = true;
       _index = 3;
@@ -648,7 +659,11 @@ class _HomeShellState extends State<HomeShell> {
           FilledButton.icon(
             onPressed: () {
               Navigator.of(context).pop();
-              _openChat(channelId, huddleId: huddleId);
+              _openChat(
+                channelId,
+                huddleId: huddleId,
+                huddleData: data,
+              );
             },
             icon: const Icon(Icons.call),
             label: const Text('Open call'),

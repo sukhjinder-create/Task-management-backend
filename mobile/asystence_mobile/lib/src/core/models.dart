@@ -458,6 +458,27 @@ class ChatMessage {
   }
 
   bool get hasBody => text.trim().isNotEmpty;
+
+  JsonMap? get huddleCall {
+    final direct = raw['huddleCall'];
+    if (direct is Map) return JsonMap.from(direct);
+    for (final key in ['encrypted', 'encrypted_json']) {
+      Object? envelope = raw[key];
+      if (envelope is String && envelope.trim().isNotEmpty) {
+        try {
+          envelope = jsonDecode(envelope);
+        } catch (_) {
+          envelope = null;
+        }
+      }
+      if (envelope is Map &&
+          envelope['__huddle_call_log'] == true &&
+          envelope['huddleCall'] is Map) {
+        return JsonMap.from(envelope['huddleCall'] as Map);
+      }
+    }
+    return null;
+  }
 }
 
 String _cleanMessageText(String value) {

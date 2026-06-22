@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:socket_io_client/socket_io_client.dart' as io;
 
@@ -168,17 +169,35 @@ class SocketService {
   void startHuddle({
     required String channelId,
     required String huddleId,
+    String provider = 'mesh',
+    JsonMap? clientCapabilities,
   }) {
-    _socket
-        ?.emit('huddle:start', {'channelId': channelId, 'huddleId': huddleId});
+    _socket?.emit('huddle:start', {
+      'channelId': channelId,
+      'huddleId': huddleId,
+      'provider': provider,
+      'platform': _platformName,
+      if (clientCapabilities != null) 'clientCapabilities': clientCapabilities,
+    });
   }
 
   void joinHuddle({
     required String channelId,
     required String huddleId,
+    String provider = 'mesh',
+    JsonMap? clientCapabilities,
   }) {
-    _socket
-        ?.emit('huddle:join', {'channelId': channelId, 'huddleId': huddleId});
+    _socket?.emit('huddle:join', {
+      'channelId': channelId,
+      'huddleId': huddleId,
+      'provider': provider,
+      'platform': _platformName,
+      if (clientCapabilities != null) 'clientCapabilities': clientCapabilities,
+    });
+  }
+
+  void syncHuddles() {
+    _socket?.emit('huddle:sync');
   }
 
   void leaveHuddle({
@@ -254,5 +273,11 @@ class SocketService {
   JsonMap _map(Object? data) {
     if (data is Map) return Map<String, dynamic>.from(data);
     return {'data': data};
+  }
+
+  String get _platformName {
+    if (Platform.isAndroid) return 'android';
+    if (Platform.isIOS) return 'ios';
+    return 'mobile';
   }
 }

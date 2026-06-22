@@ -128,17 +128,27 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
   Future<void> join({
     required String channelId,
     required String huddleId,
+    String? provider,
     List<JsonMap> participants = const [],
   }) async {
-    if (AppConfig.huddleLiveKitMobileForceMesh ||
-        !AppConfig.huddleLiveKitMobileCanaryEnabled) {
+    final requestedProvider = (provider ?? '').trim().toLowerCase();
+    final liveKitLocked = requestedProvider == huddleMediaProviderLiveKit;
+    final meshLocked = requestedProvider == huddleMediaProviderMesh;
+
+    if (meshLocked ||
+        (!liveKitLocked &&
+            (AppConfig.huddleLiveKitMobileForceMesh ||
+                !AppConfig.huddleLiveKitMobileCanaryEnabled))) {
       _usingMeshFallback = true;
-      _lastFallbackReason = AppConfig.huddleLiveKitMobileForceMesh
-          ? 'mobile_livekit_force_mesh'
-          : 'mobile_livekit_canary_disabled';
+      _lastFallbackReason = meshLocked
+          ? 'session_provider_mesh'
+          : AppConfig.huddleLiveKitMobileForceMesh
+              ? 'mobile_livekit_force_mesh'
+              : 'mobile_livekit_canary_disabled';
       await _meshFallback.join(
         channelId: channelId,
         huddleId: huddleId,
+        provider: huddleMediaProviderMesh,
         participants: participants,
       );
       notifyListeners();
@@ -146,13 +156,18 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     }
 
     if (joined && this.huddleId == huddleId) {
-      socket.joinHuddle(channelId: channelId, huddleId: huddleId);
+      socket.joinHuddle(
+        channelId: channelId,
+        huddleId: huddleId,
+        provider: huddleMediaProviderLiveKit,
+        clientCapabilities: _clientCapabilities,
+      );
       return;
     }
     starting = true;
     joined = false;
     error = null;
-    _providerLockEstablished = false;
+    _providerLockEstablished = liveKitLocked;
     this.channelId = channelId;
     this.huddleId = huddleId;
     notifyListeners();
@@ -199,7 +214,12 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
       await room.connect(liveKitUrl, token);
       await _setMicrophoneEnabled(true);
       await _setCameraEnabled(true);
-      socket.joinHuddle(channelId: channelId, huddleId: huddleId);
+      socket.joinHuddle(
+        channelId: channelId,
+        huddleId: huddleId,
+        provider: huddleMediaProviderLiveKit,
+        clientCapabilities: _clientCapabilities,
+      );
       joined = true;
       starting = false;
       muted = false;
@@ -442,6 +462,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     await _meshFallback.join(
       channelId: channelId,
       huddleId: huddleId,
+      provider: huddleMediaProviderMesh,
       participants: participants,
     );
     _copyStateFromMeshFallback();

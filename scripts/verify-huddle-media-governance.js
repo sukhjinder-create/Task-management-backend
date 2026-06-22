@@ -216,6 +216,9 @@ const sessionService = read("services/huddleMediaSession.service.js");
 const providerSelector = read("services/huddleMediaProviderSelector.service.js");
 const mobileProvider = read("mobile/asystence_mobile/lib/src/features/workspace/huddle_media/huddle_media_provider.dart");
 const mobileService = read("mobile/asystence_mobile/lib/src/features/workspace/huddle_media/huddle_media_service.dart");
+const mobileLiveKitProvider = read(
+  "mobile/asystence_mobile/lib/src/features/workspace/huddle_media/livekit_huddle_media_provider.dart"
+);
 const envExample = read(".env.example");
 
 assert.match(route, /findLockedMediaSession/, "LiveKit route must resolve provider lock");
@@ -248,7 +251,16 @@ assert.match(envExample, /HUDDLE_LIVEKIT_CANARY_ENABLED=false/, "Canary shutdown
 assert.match(mobileProvider, /mesh,[\s\S]*livekit,/, "Mobile provider enum must preserve mesh and add LiveKit");
 assert.match(mobileService, /huddleLiveKitMobileCanaryEnabled/, "Mobile LiveKit must remain canary gated");
 assert.match(mobileService, /huddleLiveKitMobileForceMesh/, "Mobile force-mesh rollback must remain available");
-assert.match(mobileService, /MeshHuddleMediaProvider/, "Mobile media service must preserve mesh fallback");
+assert.match(
+  mobileService,
+  /LiveKitHuddleMediaProvider/,
+  "Mobile media service must route explicit provider-lock inheritance through the LiveKit wrapper"
+);
+assert.match(
+  mobileLiveKitProvider,
+  /MeshHuddleMediaProvider/,
+  "Mobile LiveKit wrapper must preserve mesh fallback"
+);
 
 console.log("Huddle media governance verification passed.");
 console.log("- Mesh remains the default when provider/capability data is absent.");

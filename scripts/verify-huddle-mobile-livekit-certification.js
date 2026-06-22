@@ -58,10 +58,10 @@ assertContains(service, /huddleLiveKitMobileCanaryEnabled/,
   "Provider selection must check the mobile canary flag");
 assertContains(service, /huddleLiveKitMobileForceMesh/,
   "Provider selection must check force mesh");
-assertContains(service, /MeshHuddleMediaProvider/,
-  "Mesh provider must remain available as the production default");
 assertContains(service, /LiveKitHuddleMediaProvider/,
   "LiveKit mobile provider must be additive");
+assertContains(provider, /MeshHuddleMediaProvider/,
+  "Mesh provider must remain available as the production fallback");
 
 assertContains(provider, /\/huddle\/media\/livekit\/token/,
   "Mobile provider must use the existing LiveKit token endpoint");

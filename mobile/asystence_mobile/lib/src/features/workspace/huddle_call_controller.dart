@@ -59,11 +59,13 @@ class HuddleCallController extends ChangeNotifier {
   Future<void> join({
     required String channelId,
     required String huddleId,
+    String? provider,
     List<JsonMap> participants = const [],
   }) {
     return _provider.join(
       channelId: channelId,
       huddleId: huddleId,
+      provider: provider,
       participants: participants,
     );
   }

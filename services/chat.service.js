@@ -365,6 +365,165 @@ export async function createChannel({
   }
 }
 
+function formatHuddleCallDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const remaining = total % 60;
+  return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`;
+}
+
+export async function createHuddleCallLogMessage({
+  workspaceId,
+  sessionId,
+  channelKey = null,
+  huddleId = null,
+}) {
+  if (!workspaceId || !sessionId) return null;
+
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query(
+      `
+      SELECT
+        s.id,
+        s.workspace_id,
+        s.legacy_huddle_id,
+        s.legacy_channel_key,
+        s.started_by,
+        s.started_at,
+        s.ended_at,
+        s.end_reason,
+        COALESCE(
+          array_agg(DISTINCT p.user_id) FILTER (
+            WHERE p.user_id IS NOT NULL AND p.joined_at IS NOT NULL
+          ),
+          ARRAY[]::uuid[]
+        ) AS participant_ids
+      FROM huddle_sessions s
+      LEFT JOIN huddle_session_participants p
+        ON p.session_id = s.id
+       AND p.workspace_id = s.workspace_id
+      WHERE s.id = $1
+        AND s.workspace_id = $2
+      GROUP BY s.id
+      LIMIT 1
+      `,
+      [sessionId, workspaceId]
+    );
+    const session = rows[0];
+    if (!session) return null;
+
+    const resolvedChannelKey =
+      channelKey || session.legacy_channel_key || null;
+    if (!resolvedChannelKey) return null;
+
+    const participantIds = (session.participant_ids || []).map(String);
+    const durationSeconds =
+      session.started_at && session.ended_at
+        ? Math.max(
+            0,
+            Math.round(
+              (new Date(session.ended_at).getTime() -
+                new Date(session.started_at).getTime()) /
+                1000
+            )
+          )
+        : 0;
+    const missed = participantIds.length <= 1;
+    const fallbackText = missed
+      ? "Missed Huddle call"
+      : `Huddle call · ${formatHuddleCallDuration(durationSeconds)} · ${participantIds.length} participants`;
+    const callMetadata = {
+      sessionId: String(session.id),
+      huddleId: huddleId || session.legacy_huddle_id || null,
+      channelId: resolvedChannelKey,
+      startedBy: String(session.started_by),
+      participantIds,
+      participantCount: participantIds.length,
+      startedAt: session.started_at,
+      endedAt: session.ended_at,
+      durationSeconds,
+      endReason: session.end_reason || null,
+      status: missed ? "missed" : "completed",
+    };
+    const envelope = {
+      message: fallbackText,
+      __huddle_call_log: true,
+      huddleCall: callMetadata,
+    };
+    const tempId = `huddle-call:${session.id}`;
+
+    const saved = await client.query(
+      `
+      INSERT INTO chat_messages (
+        id,
+        channel_key,
+        user_id,
+        text_html,
+        fallback_text,
+        encrypted_json,
+        workspace_id,
+        created_at,
+        attachments,
+        temp_id
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        $2,
+        $3,
+        $3,
+        $4::jsonb,
+        $5::uuid,
+        COALESCE($6, now()),
+        '[]'::jsonb,
+        $7
+      )
+      ON CONFLICT (workspace_id, temp_id) WHERE temp_id IS NOT NULL
+      DO UPDATE SET
+        text_html = EXCLUDED.text_html,
+        fallback_text = EXCLUDED.fallback_text,
+        encrypted_json = EXCLUDED.encrypted_json,
+        updated_at = now()
+      RETURNING *,
+        (SELECT u.username FROM users u WHERE u.id = user_id) AS username,
+        (SELECT u.avatar_url FROM users u WHERE u.id = user_id) AS avatar_url
+      `,
+      [
+        resolvedChannelKey,
+        session.started_by,
+        fallbackText,
+        JSON.stringify(envelope),
+        workspaceId,
+        session.ended_at,
+        tempId,
+      ]
+    );
+
+    const message = mapMessageRow(saved.rows[0]);
+    emitMessage(
+      resolvedChannelKey,
+      {
+        ...message,
+        channelId: resolvedChannelKey,
+        userId: message.user_id,
+        username: message.username,
+        avatarUrl: message.avatar_url,
+        textHtml: fallbackText,
+        fallbackText,
+        encrypted: envelope,
+        messageType: "huddle_call",
+        huddleCall: callMetadata,
+      },
+      workspaceId
+    );
+    return message;
+  } finally {
+    client.release();
+  }
+}
+
 export async function updateChannel({
   channelId,
   name,
