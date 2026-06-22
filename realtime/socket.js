@@ -1891,6 +1891,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
             metadata: {
               type: "huddle",
               url: `/chat?channel=${encodeURIComponent(channelId)}`,
+              provider:
+                providerLockDiagnostics?.effectiveProvider ||
+                providerLockDiagnostics?.lockedProvider ||
+                null,
             },
           });
         }).catch(() => {});

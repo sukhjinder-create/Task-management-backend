@@ -1151,13 +1151,14 @@ class _ChatScreenState extends State<ChatScreen> {
     _pendingInitialHuddleId = null;
     final initialData = _pendingInitialHuddleData;
     _pendingInitialHuddleData = null;
+    final initialHuddle = _withAuthoritativeHuddleProvider({
+      ...?initialData,
+      'event': 'started',
+      'channelId': channelKey,
+      'huddleId': huddleId,
+    });
     setState(() {
-      _activeHuddles[channelKey] = {
-        ...?initialData,
-        'event': 'started',
-        'channelId': channelKey,
-        'huddleId': huddleId,
-      };
+      _activeHuddles[channelKey] = initialHuddle;
     });
     AppScope.of(context).socket.syncHuddles();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1165,26 +1166,84 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  String? _normalizeHuddleProvider(Object? value) {
+    final text = value?.toString().trim().toLowerCase();
+    return text == 'mesh' || text == 'livekit' ? text : null;
+  }
+
+  JsonMap? _asJsonMap(Object? value) {
+    if (value is Map) return JsonMap.from(value);
+    return null;
+  }
+
+  String? _providerFromMap(JsonMap map) {
+    return _normalizeHuddleProvider(
+      readString(map, [
+        'effectiveProvider',
+        'effective_provider',
+        'lockedProvider',
+        'locked_provider',
+        'selectedProvider',
+        'selected_provider',
+        'providerType',
+        'provider_type',
+        'provider',
+      ]),
+    );
+  }
+
+  String? _providerFromProviderLock(Object? value) {
+    final map = _asJsonMap(value);
+    if (map == null) return _normalizeHuddleProvider(value);
+    final direct = _providerFromMap(map);
+    if (direct != null) return direct;
+    return _providerFromProviderLock(map['providerLock']) ??
+        _providerFromProviderLock(map['lock']) ??
+        _providerFromProviderLock(map['diagnostics']);
+  }
+
   String? _providerForHuddle(JsonMap? huddle) {
     if (huddle == null) return null;
-    final direct = readString(huddle, [
-      'provider',
-      'providerType',
-      'provider_type',
-      'selectedProvider',
-      'selected_provider',
-    ]);
-    if (direct == 'mesh' || direct == 'livekit') return direct;
-    final lock = huddle['providerLock'];
-    if (lock is! Map) return null;
-    final provider = readString(JsonMap.from(lock), [
-      'effectiveProvider',
-      'lockedProvider',
-      'selectedProvider',
-      'provider',
-      'providerType',
-    ]);
-    return provider == 'mesh' || provider == 'livekit' ? provider : null;
+    final lockedProvider = _providerFromProviderLock(huddle['providerLock']) ??
+        _providerFromProviderLock(huddle['providerLockDiagnostics']);
+    if (lockedProvider != null) return lockedProvider;
+    final direct = _providerFromMap(huddle);
+    if (direct != null) return direct;
+    return _providerFromProviderLock(huddle['providerSelection']) ??
+        _providerFromProviderLock(huddle['diagnostics']);
+  }
+
+  JsonMap _withAuthoritativeHuddleProvider(JsonMap huddle) {
+    final provider = _providerForHuddle(huddle);
+    if (provider == null) return huddle;
+    final providerLock = _asJsonMap(huddle['providerLock']) ?? const {};
+    return {
+      ...huddle,
+      'provider': provider,
+      'selectedProvider': provider,
+      'providerLock': {
+        ...providerLock,
+        'locked': true,
+        'providerType': provider,
+        'lockedProvider': provider,
+        'effectiveProvider': provider,
+      },
+    };
+  }
+
+  JsonMap _mergeHuddleState(
+    String channelId,
+    String huddleId,
+    JsonMap event,
+  ) {
+    final existing = _activeHuddles[channelId];
+    final merged = {
+      ...?existing,
+      ...event,
+      'channelId': channelId,
+      'huddleId': huddleId,
+    };
+    return _withAuthoritativeHuddleProvider(merged);
   }
 
   List<ChatMessage> _sortedUnique(List<ChatMessage> source) {
@@ -1251,7 +1310,8 @@ class _ChatScreenState extends State<ChatScreen> {
         _locallyStartedHuddles.remove(huddleId);
         _huddleParticipants.remove(huddleId);
       } else {
-        _activeHuddles[channelId] = event;
+        _activeHuddles[channelId] =
+            _mergeHuddleState(channelId, huddleId, event);
       }
     });
     _bumpHuddleUi();
@@ -1294,7 +1354,13 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!shouldJoin && !locallyStarted && !alreadyJoined) return;
 
     _setHuddleAction('Opening huddle...');
-    final sessionId = readString(event, ['sessionId', 'session_id']);
+    final activeHuddle = _activeHuddles[channelId];
+    final provider =
+        _providerForHuddle(activeHuddle) ?? _providerForHuddle(event);
+    final sessionId = readString(activeHuddle ?? event, [
+      'sessionId',
+      'session_id',
+    ]);
     unawaited(
       AppScope.of(context).api.recordHuddleCallTrace(
         step: 'join_request_sent',
@@ -1308,7 +1374,7 @@ class _ChatScreenState extends State<ChatScreen> {
               : locallyStarted
                   ? 'android_local_start'
                   : 'android_rejoin',
-          'provider': _providerForHuddle(event),
+          'provider': provider,
         },
       ),
     );
@@ -1317,7 +1383,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await call.join(
         channelId: channelId,
         huddleId: huddleId,
-        provider: _providerForHuddle(event),
+        provider: provider,
         participants: _huddleParticipants[huddleId] ?? const [],
       );
       if (!call.joined) {
@@ -1337,7 +1403,7 @@ class _ChatScreenState extends State<ChatScreen> {
           reason: error.toString().replaceFirst('Bad state: ', ''),
           metadata: {
             'source': 'android_auto_join',
-            'provider': _providerForHuddle(event),
+            'provider': provider,
           },
         ),
       );
@@ -1999,6 +2065,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _mobileHuddleControlsVisible = false;
     _setHuddleAction('Joining huddle...');
     final activeHuddle = _activeHuddles[channelKey];
+    final effectiveProvider = _providerForHuddle(activeHuddle) ?? provider;
     final sessionId = readString(activeHuddle ?? const {}, [
       'sessionId',
       'session_id',
@@ -2012,7 +2079,7 @@ class _ChatScreenState extends State<ChatScreen> {
         status: 'success',
         metadata: {
           'source': 'android_huddle_sheet',
-          'provider': provider,
+          'provider': effectiveProvider,
         },
       ),
     );
@@ -2025,7 +2092,7 @@ class _ChatScreenState extends State<ChatScreen> {
         status: 'attempted',
         metadata: {
           'source': 'android_huddle_sheet',
-          'provider': provider,
+          'provider': effectiveProvider,
         },
       ),
     );
@@ -2034,7 +2101,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await call.join(
         channelId: channelKey,
         huddleId: huddleId,
-        provider: provider,
+        provider: effectiveProvider,
         participants: participants,
       );
       if (!call.joined) {
@@ -2054,7 +2121,7 @@ class _ChatScreenState extends State<ChatScreen> {
           reason: error.toString().replaceFirst('Bad state: ', ''),
           metadata: {
             'source': 'android_huddle_sheet',
-            'provider': provider,
+            'provider': effectiveProvider,
           },
         ),
       );

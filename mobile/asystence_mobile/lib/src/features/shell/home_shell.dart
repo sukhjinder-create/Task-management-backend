@@ -681,6 +681,13 @@ class _HomeShellState extends State<HomeShell> {
     final initiatorUserId = startedBy is Map
         ? readString(JsonMap.from(startedBy), ['userId', 'user_id'])
         : readString(data, ['startedBy', 'started_by']);
+    final incomingProvider = readString(data, [
+      'provider',
+      'providerType',
+      'provider_type',
+      'selectedProvider',
+      'selected_provider',
+    ]);
     try {
       unawaited(
         AppScope.of(context).api.recordHuddleCallTrace(
@@ -693,6 +700,7 @@ class _HomeShellState extends State<HomeShell> {
           metadata: {
             'source': 'android_incoming_dialog',
             'startedByName': startedByName,
+            'provider': incomingProvider,
           },
         ),
       );
@@ -725,7 +733,10 @@ class _HomeShellState extends State<HomeShell> {
             sessionId: readString(data, ['sessionId', 'session_id']),
             targetUserId: initiatorUserId,
             status: 'success',
-            metadata: {'source': 'android_incoming_dialog'},
+            metadata: {
+              'source': 'android_incoming_dialog',
+              'provider': incomingProvider,
+            },
           ),
         );
         _openedIncomingHuddles.add(huddleId);
@@ -745,7 +756,10 @@ class _HomeShellState extends State<HomeShell> {
             sessionId: readString(data, ['sessionId', 'session_id']),
             targetUserId: initiatorUserId,
             status: 'success',
-            metadata: {'source': 'android_incoming_dialog'},
+            metadata: {
+              'source': 'android_incoming_dialog',
+              'provider': incomingProvider,
+            },
           ),
         );
         AppScope.of(context).socket.declineHuddle(
