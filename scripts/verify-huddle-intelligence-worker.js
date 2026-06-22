@@ -61,7 +61,9 @@ assert.match(service, /meeting_digest_generation', 'ownership_resolution'/, "dig
 assert.match(service, /upstream\.status IN \('failed', 'cancelled'\)/, "terminal failed dependencies must not strand delivery jobs");
 assert.match(service, /upsertMeetingDigest/, "digest jobs must refresh existing digest rows after artifact regeneration");
 assert.match(worker, /upsertMeetingDigest/, "worker must call the digest upsert path");
-assert.match(service, /ON CONFLICT \(workspace_id, session_id, digest_type\)/, "meeting digest upsert must target one canonical digest per session/type");
+assert.match(service, /UPDATE huddle_meeting_digests/, "meeting digest upsert must refresh the existing canonical digest row");
+assert.match(service, /WHERE workspace_id = \$1\s+AND session_id = \$2\s+AND digest_type = \$3/, "meeting digest refresh must target one canonical digest per session/type");
+assert.match(service, /INSERT INTO huddle_meeting_digests/, "meeting digest upsert must insert when no digest row exists");
 assert.match(service, /retry_scheduled/, "retry attempts must be auditable");
 for (const [name, source] of [
   ["intelligence", service],
