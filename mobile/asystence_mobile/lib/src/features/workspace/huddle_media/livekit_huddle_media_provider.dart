@@ -196,7 +196,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           adaptiveStream: true,
           dynacast: true,
           defaultCameraCaptureOptions: const lk.CameraCaptureOptions(
-            params: lk.VideoParametersPresets.h720_169,
+            params: lk.VideoParametersPresets.h720_43,
             maxFrameRate: 30,
           ),
           defaultVideoPublishOptions: const lk.VideoPublishOptions(
@@ -205,8 +205,8 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
               maxFramerate: 30,
             ),
             videoSimulcastLayers: [
-              lk.VideoParametersPresets.h180_169,
-              lk.VideoParametersPresets.h360_169,
+              lk.VideoParametersPresets.h180_43,
+              lk.VideoParametersPresets.h360_43,
             ],
           ),
         ),
