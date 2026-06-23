@@ -1286,10 +1286,14 @@ export async function listLiveKitQualitySamples({
     userId: row.user_id,
     deviceId: row.device_id,
     observedAt: row.observed_at,
-    aggregate: row.aggregate || {},
-    participants: row.participants || [],
-    tracks: row.tracks || [],
-    browser: row.browser || {},
+    aggregate: sanitizeQualityAggregate(row.aggregate || {}),
+    participants: boundedArray(row.participants, 40).map((participant) =>
+      sanitizeQualityParticipant(participant)
+    ),
+    tracks: boundedArray(row.tracks, 80).map((track) =>
+      sanitizeQualityTrack(track)
+    ),
+    browser: sanitizeQualityBrowser(row.browser || {}),
     metadata: row.metadata || {},
     createdAt: row.created_at,
   }));
@@ -1329,9 +1333,13 @@ export function summarizeLiveKitQualitySamples(samples = []) {
     (sample) => !/HeadlessChrome/i.test(sample.browser?.userAgent || "")
   );
   const source = realDeviceSamples.length ? realDeviceSamples : ordered;
-  const aggregates = source.map((sample) => sample.aggregate || {});
+  const aggregates = source.map((sample) =>
+    sanitizeQualityAggregate(sample.aggregate || {})
+  );
   const startupSamples = source.map((sample) => sample.metadata?.startup || {});
-  const tracks = source.flatMap((sample) => sample.tracks || []);
+  const tracks = source.flatMap((sample) =>
+    boundedArray(sample.tracks, 80).map((track) => sanitizeQualityTrack(track))
+  );
   const receiveVideo = tracks.filter(
     (track) => track.kind === "video" && track.direction === "receive"
   );
