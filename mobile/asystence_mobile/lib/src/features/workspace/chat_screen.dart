@@ -1205,15 +1205,16 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _providerForHuddle(JsonMap? huddle) {
     if (huddle == null) return null;
     final lockedProvider = _providerFromProviderLock(huddle['providerLock']) ??
-        _providerFromProviderLock(huddle['providerLockDiagnostics']);
+        _providerFromProviderLock(huddle['providerLockDiagnostics']) ??
+        _providerFromProviderLock(huddle['providerSelection']) ??
+        _providerFromProviderLock(huddle['diagnostics']);
     if (lockedProvider != null) return lockedProvider;
     final direct = _providerFromMap(huddle);
     if (direct == 'mesh' && HuddleMediaService.requestedProvider == 'livekit') {
       return 'livekit';
     }
     if (direct != null) return direct;
-    return _providerFromProviderLock(huddle['providerSelection']) ??
-        _providerFromProviderLock(huddle['diagnostics']);
+    return null;
   }
 
   JsonMap _withAuthoritativeHuddleProvider(JsonMap huddle) {

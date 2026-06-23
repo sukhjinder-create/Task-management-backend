@@ -41,7 +41,7 @@ class AppConfig {
 
   static const huddleLiveKitMobileCanaryEnabled = bool.fromEnvironment(
     'HUDDLE_LIVEKIT_MOBILE_CANARY_ENABLED',
-    defaultValue: false,
+    defaultValue: true,
   );
 
   static const huddleLiveKitMobileForceMesh = bool.fromEnvironment(

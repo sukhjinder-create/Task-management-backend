@@ -77,6 +77,24 @@ function safeNumber(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function normalizeKbps(value, fallback = null) {
+  let number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return fallback;
+  if (number > 100000) number = number / 1000;
+  if (number > 20000) return fallback;
+  return Number(number.toFixed(1));
+}
+
+function normalizeEstimatedMegabytesPerHour(value, bitrateKbps = null) {
+  const normalizedBitrate = normalizeKbps(bitrateKbps);
+  const number = safeNumber(value);
+  if (normalizedBitrate !== null && (!Number.isFinite(number) || number > 20000)) {
+    return Number(((normalizedBitrate * 3600) / 8 / 1000).toFixed(1));
+  }
+  if (!Number.isFinite(number) || number < 0 || number > 20000) return null;
+  return Number(number.toFixed(1));
+}
+
 function safeBoolean(value, fallback = false) {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -793,6 +811,9 @@ function sanitizeQualityBrowser(raw = {}) {
 
 function sanitizeQualityAggregate(raw = {}) {
   const aggregate = objectOrEmpty(raw);
+  const totalBitrateKbps = normalizeKbps(aggregate.totalBitrateKbps);
+  const sendBitrateKbps = normalizeKbps(aggregate.sendBitrateKbps);
+  const receiveBitrateKbps = normalizeKbps(aggregate.receiveBitrateKbps);
   return {
     participantCount: safeNumber(aggregate.participantCount, 0),
     trackCount: safeNumber(aggregate.trackCount, 0),
@@ -801,10 +822,13 @@ function sanitizeQualityAggregate(raw = {}) {
     screenShareTrackCount: safeNumber(aggregate.screenShareTrackCount, 0),
     averageRttMs: safeNumber(aggregate.averageRttMs),
     averagePacketLoss: safeNumber(aggregate.averagePacketLoss),
-    totalBitrateKbps: safeNumber(aggregate.totalBitrateKbps),
-    sendBitrateKbps: safeNumber(aggregate.sendBitrateKbps),
-    receiveBitrateKbps: safeNumber(aggregate.receiveBitrateKbps),
-    estimatedMegabytesPerHour: safeNumber(aggregate.estimatedMegabytesPerHour),
+    totalBitrateKbps,
+    sendBitrateKbps,
+    receiveBitrateKbps,
+    estimatedMegabytesPerHour: normalizeEstimatedMegabytesPerHour(
+      aggregate.estimatedMegabytesPerHour,
+      totalBitrateKbps
+    ),
     maxSendWidth: safeNumber(aggregate.maxSendWidth),
     maxSendHeight: safeNumber(aggregate.maxSendHeight),
     maxReceiveWidth: safeNumber(aggregate.maxReceiveWidth),
@@ -819,8 +843,8 @@ function sanitizeQualityAggregate(raw = {}) {
     maxRequestedContentReceiveHeight: safeNumber(aggregate.maxRequestedContentReceiveHeight),
     renderTargetTrackCount: safeNumber(aggregate.renderTargetTrackCount, 0),
     renderTargetMismatchCount: safeNumber(aggregate.renderTargetMismatchCount, 0),
-    screenShareSendBitrateKbps: safeNumber(aggregate.screenShareSendBitrateKbps),
-    screenShareReceiveBitrateKbps: safeNumber(aggregate.screenShareReceiveBitrateKbps),
+    screenShareSendBitrateKbps: normalizeKbps(aggregate.screenShareSendBitrateKbps),
+    screenShareReceiveBitrateKbps: normalizeKbps(aggregate.screenShareReceiveBitrateKbps),
     adaptiveStreamAttachedTrackCount: safeNumber(aggregate.adaptiveStreamAttachedTrackCount, 0),
     selectedLowLayerCount: safeNumber(aggregate.selectedLowLayerCount, 0),
     selectedMediumLayerCount: safeNumber(aggregate.selectedMediumLayerCount, 0),
@@ -918,7 +942,7 @@ function sanitizeQualityParticipant(raw = {}) {
     screenShareTrackCount: safeNumber(participant.screenShareTrackCount, 0),
     rttMs: safeNumber(participant.rttMs),
     packetLoss: safeNumber(participant.packetLoss),
-    bitrateKbps: safeNumber(participant.bitrateKbps),
+    bitrateKbps: normalizeKbps(participant.bitrateKbps),
   };
 }
 
@@ -958,9 +982,9 @@ function sanitizeQualityTrack(raw = {}) {
     mediaSourceResizeMode: boundedString(track.mediaSourceResizeMode, 40),
     mediaSourceDisplaySurface: boundedString(track.mediaSourceDisplaySurface, 40),
     mediaTrackContentHint: boundedString(track.mediaTrackContentHint, 80),
-    bitrateKbps: safeNumber(track.bitrateKbps),
-    availableOutgoingBitrateKbps: safeNumber(track.availableOutgoingBitrateKbps),
-    availableIncomingBitrateKbps: safeNumber(track.availableIncomingBitrateKbps),
+    bitrateKbps: normalizeKbps(track.bitrateKbps),
+    availableOutgoingBitrateKbps: normalizeKbps(track.availableOutgoingBitrateKbps),
+    availableIncomingBitrateKbps: normalizeKbps(track.availableIncomingBitrateKbps),
     rttMs: safeNumber(track.rttMs),
     packetLoss: safeNumber(track.packetLoss),
     packetsLost: safeNumber(track.packetsLost),
