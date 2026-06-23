@@ -1317,12 +1317,14 @@ export async function recordLegacyHuddleEnd({
         role: "admin",
         reason,
       });
+      const intelligenceActorUserId =
+        userId || stateResult.session.ended_by || stateResult.session.host_user_id || null;
       if (transcriptFinalization?.artifact?.id) {
         try {
           intelligenceJob = await enqueueIntelligenceJob({
             workspaceId,
             sessionId: stateResult.session.id,
-            actorUserId: userId || stateResult.session.ended_by || stateResult.session.host_user_id || null,
+            actorUserId: intelligenceActorUserId,
             role: "admin",
             jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.TRANSCRIPT_FINALIZATION,
             artifactId: transcriptFinalization.artifact.id,
@@ -1346,6 +1348,35 @@ export async function recordLegacyHuddleEnd({
             reason: jobError?.reason || jobError?.message || "intelligence_job_enqueue_failed",
           };
           console.warn("[huddle:intelligence] workflow enqueue skipped:", intelligenceJob.reason);
+        }
+      } else if (transcriptFinalization?.reason === "no_final_segments") {
+        try {
+          intelligenceJob = await enqueueIntelligenceJob({
+            workspaceId,
+            sessionId: stateResult.session.id,
+            actorUserId: intelligenceActorUserId,
+            role: "admin",
+            jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.MEETING_DIGEST_GENERATION,
+            idempotencyKey: `digest:no-transcript:${stateResult.session.id}:v1`,
+            input: {
+              trigger: "huddle_ended",
+              transcriptUnavailableReason: "no_final_segments",
+            },
+            provenance: {
+              source: "huddle:end",
+              transcriptUnavailableReason: "no_final_segments",
+            },
+            metadata: {
+              deliveryOnly: true,
+              transcriptUnavailable: true,
+            },
+          });
+        } catch (jobError) {
+          intelligenceJob = {
+            ok: false,
+            reason: jobError?.reason || jobError?.message || "intelligence_digest_enqueue_failed",
+          };
+          console.warn("[huddle:intelligence] digest enqueue skipped:", intelligenceJob.reason);
         }
       }
     } catch (transcriptErr) {

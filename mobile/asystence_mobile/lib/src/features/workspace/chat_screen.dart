@@ -1208,6 +1208,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _providerFromProviderLock(huddle['providerLockDiagnostics']);
     if (lockedProvider != null) return lockedProvider;
     final direct = _providerFromMap(huddle);
+    if (direct == 'mesh' && HuddleMediaService.requestedProvider == 'livekit') {
+      return 'livekit';
+    }
     if (direct != null) return direct;
     return _providerFromProviderLock(huddle['providerSelection']) ??
         _providerFromProviderLock(huddle['diagnostics']);

@@ -91,6 +91,10 @@ assert.match(worker, /runHuddleIntelligenceWorkerCycle/, "worker batch runner re
 assert.match(cron, /HUDDLE_INTELLIGENCE_WORKER_ENABLED/, "worker startup must be feature flagged");
 assert.match(cron, /runHuddleIntelligenceWorkerCycle/, "cron must execute worker cycles");
 assert.match(compatibility, /transcript-workflow:/, "Huddle end must enqueue the transcript workflow");
+assert.match(compatibility, /no_final_segments/, "Huddle end must not silently skip intelligence delivery when no transcript segments exist");
+assert.match(compatibility, /digest:no-transcript:/, "No-transcript huddle ends must enqueue an idempotent meeting digest delivery job");
+assert.match(worker, /transcript not captured/, "Meeting digest notifications must explain unavailable transcripts instead of implying a transcript exists");
+assert.match(worker, /transcriptUnavailableReason/, "Meeting digest provenance must preserve why transcript evidence is unavailable");
 assert.match(route, /jobs\/:jobId\/attempts/, "attempt audit API required");
 assert.match(route, /jobs\/:jobId\/dependencies/, "dependency diagnostics API required");
 assert.match(workflow, /HUDDLE_INTELLIGENCE_WORKER_ENABLED=true/, "production worker flag required");

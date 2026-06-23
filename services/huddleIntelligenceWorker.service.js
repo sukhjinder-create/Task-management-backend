@@ -278,6 +278,7 @@ async function processMeetingDigest(job, client = null) {
     artifacts.find(
       (artifact) => artifact.artifactType === type && artifact.status === "ready"
     ) || null;
+  const transcript = latestReady("transcript");
   const summary = latestReady("summary");
   const decisions = latestReady("decision");
   const actions = latestReady("action_item");
@@ -289,7 +290,11 @@ async function processMeetingDigest(job, client = null) {
     ? actions.contentJson.actionItems.length
     : 0;
   const reviewPath = `/huddles/${job.sessionId}/intelligence`;
-  const summaryLabel = summary ? "summary available" : "transcript available";
+  const summaryLabel = summary
+    ? "summary available"
+    : transcript
+      ? "transcript available"
+      : "transcript not captured";
   const result = await upsertMeetingDigest({
     workspaceId: job.workspaceId,
     sessionId: job.sessionId,
@@ -306,14 +311,24 @@ async function processMeetingDigest(job, client = null) {
         schemaVersion: 1,
         generationState: "ready_for_review",
         summaryAvailable: Boolean(summary),
+        transcriptAvailable: Boolean(transcript),
         decisionCount,
         actionItemCount,
         reviewPath,
+        transcriptUnavailableReason:
+          job.input?.transcriptUnavailableReason ||
+          job.provenance?.transcriptUnavailableReason ||
+          null,
       },
       provenance: {
         source: "huddle_intelligence_worker",
         sourceJobId: job.id,
         transcriptArtifactId: job.artifactId || null,
+        transcriptAvailable: Boolean(transcript),
+        transcriptUnavailableReason:
+          job.input?.transcriptUnavailableReason ||
+          job.provenance?.transcriptUnavailableReason ||
+          null,
         summaryArtifactId: summary?.id || null,
         decisionsArtifactId: decisions?.id || null,
         actionsArtifactId: actions?.id || null,
@@ -341,6 +356,11 @@ async function processMeetingDigest(job, client = null) {
           sessionId: job.sessionId,
           meetingTitle: delivery.title,
           summaryAvailable: Boolean(summary),
+          transcriptAvailable: Boolean(transcript),
+          transcriptUnavailableReason:
+            job.input?.transcriptUnavailableReason ||
+            job.provenance?.transcriptUnavailableReason ||
+            null,
           decisionCount,
           actionItemCount,
           meetingDigestId: result.meetingDigest.id,
@@ -358,6 +378,7 @@ async function processMeetingDigest(job, client = null) {
     notificationCount: delivery.participantUserIds.length,
     reviewPath,
     summaryAvailable: Boolean(summary),
+    transcriptAvailable: Boolean(transcript),
     decisionCount,
     actionItemCount,
   };
