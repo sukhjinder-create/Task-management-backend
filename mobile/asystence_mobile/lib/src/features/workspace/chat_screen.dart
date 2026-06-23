@@ -49,6 +49,7 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<JsonMap>? _huddleParticipantSub;
   final Map<String, JsonMap> _activeHuddles = {};
   final Map<String, List<JsonMap>> _huddleParticipants = {};
+  final Map<String, String> _authoritativeHuddleProviders = {};
   Map<String, int> _unreadByChannel = const {};
   String? _pendingInitialChannelKey;
   String? _pendingInitialHuddleId;
@@ -1204,14 +1205,26 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String? _providerForHuddle(JsonMap? huddle) {
     if (huddle == null) return null;
+    final huddleId = readString(huddle, ['huddleId', 'huddle_id']);
+    final inheritedProvider =
+        huddleId == null ? null : _authoritativeHuddleProviders[huddleId];
+    if (inheritedProvider != null) return inheritedProvider;
     final lockedProvider = _providerFromProviderLock(huddle['providerLock']) ??
         _providerFromProviderLock(huddle['providerLockDiagnostics']) ??
         _providerFromProviderLock(huddle['providerSelection']) ??
         _providerFromProviderLock(huddle['diagnostics']);
-    if (lockedProvider != null) return lockedProvider;
+    if (lockedProvider != null) {
+      if (huddleId != null) {
+        _authoritativeHuddleProviders.putIfAbsent(
+          huddleId,
+          () => lockedProvider,
+        );
+      }
+      return lockedProvider;
+    }
     final direct = _providerFromMap(huddle);
-    if (direct == 'mesh' && HuddleMediaService.requestedProvider == 'livekit') {
-      return 'livekit';
+    if (direct != null && huddleId != null) {
+      _authoritativeHuddleProviders.putIfAbsent(huddleId, () => direct);
     }
     if (direct != null) return direct;
     return null;
@@ -1296,6 +1309,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _joinedHuddles.remove(huddleId);
           _locallyStartedHuddles.remove(huddleId);
           _huddleParticipants.remove(huddleId);
+          _authoritativeHuddleProviders.remove(huddleId);
         }
       });
       if (_call?.huddleId == huddleId || _call?.channelId == channelId) {
@@ -1313,6 +1327,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _joinedHuddles.remove(huddleId);
         _locallyStartedHuddles.remove(huddleId);
         _huddleParticipants.remove(huddleId);
+        _authoritativeHuddleProviders.remove(huddleId);
       } else {
         _activeHuddles[channelId] =
             _mergeHuddleState(channelId, huddleId, event);

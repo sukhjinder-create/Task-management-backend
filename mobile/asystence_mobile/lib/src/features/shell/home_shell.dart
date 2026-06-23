@@ -725,6 +725,19 @@ class _HomeShellState extends State<HomeShell> {
       );
       if (!mounted) return;
       if (accepted == true) {
+        final authoritativeHuddleData = {
+          ...data,
+          if (incomingProvider != null) 'provider': incomingProvider,
+          if (incomingProvider != null) 'selectedProvider': incomingProvider,
+          if (incomingProvider != null)
+            'providerLock': {
+              'locked': true,
+              'immutable': true,
+              'providerType': incomingProvider,
+              'lockedProvider': incomingProvider,
+              'effectiveProvider': incomingProvider,
+            },
+        };
         unawaited(
           AppScope.of(context).api.recordHuddleCallTrace(
             step: 'answer_pressed',
@@ -743,7 +756,7 @@ class _HomeShellState extends State<HomeShell> {
         _openChat(
           channelId,
           huddleId: huddleId,
-          huddleData: data,
+          huddleData: authoritativeHuddleData,
         );
         return;
       }
