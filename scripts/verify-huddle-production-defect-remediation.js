@@ -89,10 +89,11 @@ assert.match(liveKitProvider, /prewarmInitialLiveKitTracks/);
 assert.match(liveKitProvider, /publishPrewarmedLiveKitMedia/);
 assert.match(liveKitProvider, /cameraPublishOptions\(mode, sdk\)/);
 assert.match(liveKitProvider, /mediaPrewarmLatencyMs/);
-assert.match(liveKitProvider, /maxFramerate: 24/);
+assert.match(liveKitProvider, /maxFramerate: 30/);
 assert.match(huddleContext, /requestIdleCallback\(preload, \{ timeout: 1500 \}\)/);
-assert.doesNotMatch(liveKitProvider, /aspectRatio:\s*3\s*\/\s*4/);
-assert.doesNotMatch(liveKitConnection, /aspectRatio:\s*3\s*\/\s*4/);
+assert.match(liveKitProvider, /aspectRatio:\s*3\s*\/\s*4/);
+assert.match(liveKitConnection, /aspectRatio:\s*3\s*\/\s*4/);
+assert.match(liveKitProvider, /normalizeKbps\(track\.currentBitrateKbps\)/);
 assert.match(liveKitProvider, /estimatedMegabytesPerHour/);
 assert.match(media, /Estimated media data usage is unusually high/);
 assert.equal(
@@ -109,14 +110,13 @@ assert.match(liveKitProvider, /freezeTrackCount/);
 assert.match(liveKitProvider, /markExistingSubscribedTracks/);
 assert.match(liveKitProvider, /screenShareSendBitrateKbps/);
 assert.match(liveKitRenderTarget, /setVideoDimensions/);
+assert.match(liveKitRenderTarget, /screenShare \? 15 : 30/);
 assert.match(liveKitRenderTarget, /contentCssWidth/);
 assert.match(liveKitRenderTarget, /sourcePortrait/);
 assert.match(liveKitRenderTarget, /minimumCameraWidth/);
 assert.match(huddleWindow, /presentingParticipant/);
-assert.match(
-  huddleWindow,
-  /screenShare \|\| portraitVideo \|\| mobileViewport[\s\S]*"object-contain bg-black"[\s\S]*"object-cover"/
-);
+assert.match(huddleWindow, /composedRemoteCamera/);
+assert.match(huddleWindow, /objectFit: "contain"/);
 
 assert.doesNotMatch(meetingIntelligence, /downloadJsonExport/);
 assert.doesNotMatch(meetingIntelligence, /> JSON</);
@@ -147,11 +147,18 @@ assert.match(huddleWindow, /!isMaximized && !isMobileDevice/);
 assert.match(mobileChat, /_mobileHuddleControlsVisible/);
 assert.match(mobileChat, /Widget _fullscreenHuddle/);
 assert.match(mobileChat, /AnimatedPositioned/);
-assert.match(mobileChat, /RTCVideoViewObjectFitContain/);
+assert.match(mobileChat, /RTCVideoViewObjectFitCover/);
 assert.match(mobileLiveKit, /adaptiveStream: true/);
 assert.match(mobileLiveKit, /dynacast: true/);
-assert.match(mobileLiveKit, /VideoParametersPresets\.h540_43/);
-assert.match(mobileLiveKit, /maxBitrate: 750000/);
+assert.match(mobileLiveKit, /VideoParametersPresets\.h720_169/);
+assert.match(mobileLiveKit, /maxBitrate: 1100000/);
+assert.match(mobileLiveKit, /VideoViewFit\.cover/);
+assert.match(
+  mobileLiveKit,
+  /await room\.connect\(liveKitUrl, token\);[\s\S]*joined = true;[\s\S]*notifyListeners\(\);[\s\S]*_setMicrophoneEnabled\(true\)/
+);
+assert.match(mobileLiveKit, /'appVersion': AppConfig\.version/);
+assert.match(mobileLiveKit, /if \(_sessionId != null\) 'sessionId': _sessionId/);
 assert.doesNotMatch(mobileLiveKit, /\/huddle\/media\/livekit\/room/);
 assert.match(mobileLiveKit, /Duration\(milliseconds: 200\)/);
 assert.match(media, /averageSendFps/);

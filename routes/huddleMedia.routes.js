@@ -713,6 +713,7 @@ router.post("/livekit/room", async (req, res) => {
     return res.json({
       ok: true,
       provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+      sessionId: authz.sessionId,
       liveKit: {
         url: liveKitUrl,
         roomName: providerRoomId,
@@ -949,6 +950,7 @@ router.post("/livekit/token", async (req, res) => {
     return res.json({
       ok: true,
       provider: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
+      sessionId: authz.sessionId,
       liveKit: {
         url: tokenResult.liveKitUrl,
         roomName: providerRoomId,

@@ -146,6 +146,18 @@ assert.equal(sanitized.startup.firstVideoMs, 1430);
 assert.equal(sanitized.startup.firstRemoteParticipantMs, 980);
 assert.equal(sanitized.startup.firstVideoAfterParticipantMs, 450);
 assert.equal("backgroundEffect" in sanitized, false);
+const nullTelemetry = sanitizeLiveKitQualityDiagnostics({
+  aggregate: {
+    totalBitrateKbps: null,
+    sendBitrateKbps: null,
+    receiveBitrateKbps: null,
+    estimatedMegabytesPerHour: null,
+  },
+});
+assert.equal(nullTelemetry.aggregate.totalBitrateKbps, null);
+assert.equal(nullTelemetry.aggregate.sendBitrateKbps, null);
+assert.equal(nullTelemetry.aggregate.receiveBitrateKbps, null);
+assert.equal(nullTelemetry.aggregate.estimatedMegabytesPerHour, null);
 const qualitySummary = summarizeLiveKitQualitySamples([{
   observedAt: sanitized.observedAt,
   aggregate: sanitized.aggregate,

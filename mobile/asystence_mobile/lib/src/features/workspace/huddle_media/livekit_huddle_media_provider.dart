@@ -50,6 +50,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
   Timer? _roomNotifyTimer;
   int _fallbackCount = 0;
   String? _lastFallbackReason;
+  String? _sessionId;
 
   @override
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
@@ -179,6 +180,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
         huddleId: huddleId,
       );
       _providerLockEstablished = true;
+      _sessionId = readString(tokenPayload, ['sessionId', 'session_id']);
       final liveKitUrl =
           _readNestedString(tokenPayload, const ['liveKit', 'url']);
       final token = _readNestedString(tokenPayload, const ['liveKit', 'token']);
@@ -194,17 +196,17 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           adaptiveStream: true,
           dynacast: true,
           defaultCameraCaptureOptions: const lk.CameraCaptureOptions(
-            params: lk.VideoParametersPresets.h540_43,
-            maxFrameRate: 24,
+            params: lk.VideoParametersPresets.h720_169,
+            maxFrameRate: 30,
           ),
           defaultVideoPublishOptions: const lk.VideoPublishOptions(
             videoEncoding: lk.VideoEncoding(
-              maxBitrate: 750000,
-              maxFramerate: 24,
+              maxBitrate: 1100000,
+              maxFramerate: 30,
             ),
             videoSimulcastLayers: [
-              lk.VideoParametersPresets.h180_43,
-              lk.VideoParametersPresets.h360_43,
+              lk.VideoParametersPresets.h180_169,
+              lk.VideoParametersPresets.h360_169,
             ],
           ),
         ),
@@ -224,6 +226,9 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
         ),
       );
       await room.connect(liveKitUrl, token);
+      joined = true;
+      starting = false;
+      notifyListeners();
       unawaited(
         _recordCallTrace(
           step: 'room_connect_success',
@@ -259,8 +264,6 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
         provider: huddleMediaProviderLiveKit,
         clientCapabilities: _clientCapabilities,
       );
-      joined = true;
-      starting = false;
       muted = false;
       cameraOn = true;
       _seedRemoteNames(participants);
@@ -322,6 +325,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     remoteNames.clear();
     error = null;
     _providerLockEstablished = false;
+    _sessionId = null;
     notifyListeners();
   }
 
@@ -346,7 +350,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     if (track == null) return null;
     final view = lk.VideoTrackRenderer(
       track,
-      fit: lk.VideoViewFit.contain,
+      fit: lk.VideoViewFit.cover,
     );
     if (!mirror) return view;
     return Transform(
@@ -365,7 +369,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
       if (track != null) {
         return lk.VideoTrackRenderer(
           track,
-          fit: lk.VideoViewFit.contain,
+          fit: lk.VideoViewFit.cover,
         );
       }
     }
@@ -440,7 +444,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           'provider': 'livekit',
           'channelId': channelId,
           'huddleId': huddleId,
-          'sessionId': huddleId,
+          if (_sessionId != null) 'sessionId': _sessionId,
           if (providerRoomId != null) 'providerRoomId': providerRoomId,
           'platform': _platformName,
           'clientCapabilities': _clientCapabilities,
@@ -500,12 +504,16 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           'step': step,
           'channelId': channelId,
           'huddleId': huddleId,
-          'sessionId': huddleId,
+          if (_sessionId != null) 'sessionId': _sessionId,
           'platform': _platformName,
           'clientSurface': 'android_app',
           'status': status,
           if (reason != null) 'reason': reason,
-          'metadata': metadata,
+          'metadata': {
+            ...metadata,
+            'appVersion': AppConfig.version,
+            'appVersionCode': AppConfig.versionCode,
+          },
         }),
       );
     } catch (_) {

@@ -73,11 +73,13 @@ function json(value) {
 }
 
 function safeNumber(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
 
 function normalizeKbps(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
   let number = Number(value);
   if (!Number.isFinite(number) || number < 0) return fallback;
   if (number > 100000) number = number / 1000;

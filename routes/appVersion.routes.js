@@ -3,17 +3,17 @@ import express from "express";
 
 const router = express.Router();
 
-const DEFAULT_ANDROID_VERSION = "1.0.22";
-const DEFAULT_ANDROID_VERSION_CODE = 23;
+const DEFAULT_ANDROID_VERSION = "1.0.23";
+const DEFAULT_ANDROID_VERSION_CODE = 24;
 const DEFAULT_ANDROID_APK_URL =
-  "https://pub-5e8d0742f1224c3dbf01efc7851e96f5.r2.dev/asystence-android-1.0.22.apk";
+  "https://pub-5e8d0742f1224c3dbf01efc7851e96f5.r2.dev/asystence-android-1.0.23.apk";
 
 // GET /app-version
 // Returns latest Android app version + APK download URL
 // Set these env vars in Cloud Run when you upload a new APK:
-//   APP_VERSION=1.0.22
-//   APP_VERSION_CODE=23
-//   APP_APK_URL=https://<your-public-cdn>/asystence-android-1.0.22.apk
+//   APP_VERSION=1.0.23
+//   APP_VERSION_CODE=24
+//   APP_APK_URL=https://<your-public-cdn>/asystence-android-1.0.23.apk
 //   APP_APK_SHA256=<optional checksum>
 router.get("/", (req, res) => {
   const version = process.env.APP_VERSION || DEFAULT_ANDROID_VERSION;

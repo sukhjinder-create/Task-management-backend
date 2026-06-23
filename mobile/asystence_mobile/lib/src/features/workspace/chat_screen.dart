@@ -2350,7 +2350,7 @@ class _ChatScreenState extends State<ChatScreen> {
         mediaView: call.buildLocalVideoView(mirror: true),
         renderer: call.localRenderer,
         mirror: true,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
       );
     }
 
@@ -2363,7 +2363,7 @@ class _ChatScreenState extends State<ChatScreen> {
             renderer: call.remoteRenderers[remoteIds.first],
             emptyIcon: Icons.videocam_off_outlined,
             helper: 'Connecting video...',
-            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
           )
         : GridView.builder(
             padding: EdgeInsets.zero,
@@ -2382,7 +2382,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 renderer: call.remoteRenderers[id],
                 emptyIcon: Icons.videocam_off_outlined,
                 helper: 'Connecting video...',
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
               );
             },
           );
@@ -2417,7 +2417,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 renderer: call.localRenderer,
                 mirror: true,
                 compact: true,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
               ),
             ),
           ),
@@ -2438,7 +2438,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   mediaView: call.buildLocalVideoView(mirror: true),
                   renderer: call.localRenderer,
                   mirror: true,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                 )
               : GridView.builder(
                   itemCount: remoteIds.length,
@@ -2459,7 +2459,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       emptyIcon: Icons.videocam_off_outlined,
                       helper: 'Connecting video...',
                       objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                     );
                   },
                 ),
@@ -2474,7 +2474,7 @@ class _ChatScreenState extends State<ChatScreen> {
               renderer: call.localRenderer,
               mirror: true,
               compact: true,
-              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
             ),
           ),
         ],
