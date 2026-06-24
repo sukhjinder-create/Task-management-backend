@@ -19,7 +19,13 @@ const MATERIALIZATION_VERSION = "dashboard_history_materialization_v2";
 
 function dateKey(value) {
   if (!value) return null;
-  return String(value).slice(0, 10);
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  }
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
 }
 
 function utcDate(key) {
