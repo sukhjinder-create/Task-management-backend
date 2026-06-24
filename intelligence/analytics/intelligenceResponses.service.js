@@ -147,6 +147,7 @@ export async function buildAdminInsightsResponse({ workspaceId, userId, role }) 
   const trend = buildTrendAnalytics(scoreHistory);
 
   return {
+    source: "enterprise_intelligence",
     orgScore: summarizeUsers(scopedUsers),
     coachingEffectiveness: {},
     riskDistribution: riskDistribution(scopedUsers),
