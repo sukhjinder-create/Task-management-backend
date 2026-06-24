@@ -86,6 +86,7 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
 
   const dimensions = user.dimensions || {};
   return {
+    source: "enterprise_intelligence",
     requestedMonth: month || monthKey(),
     effectiveMonth: monthKey(),
     scoreSource: "enterprise_intelligence",
