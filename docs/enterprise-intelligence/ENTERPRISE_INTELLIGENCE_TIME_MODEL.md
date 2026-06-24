@@ -49,12 +49,14 @@ Repository mapping:
 
 Supported ranges:
 
-- `7d`
 - `30d`
 - `90d`
 - `6m`
 - `1y`
+- `all`
 - `custom`
+
+`all` reads the full available snapshot history and relies on dashboard chart bucketing to keep long-range visualizations readable.
 
 Historical APIs read snapshots without recalculation.
 

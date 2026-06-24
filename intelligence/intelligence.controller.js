@@ -86,7 +86,7 @@ export async function getUserPerformance(req, res) {
  */
 export async function getAdminInsights(req, res) {
   try {
-    const { month } = req.query;
+    const { month, range } = req.query;
 
     if (!month) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
@@ -100,6 +100,7 @@ export async function getAdminInsights(req, res) {
         workspaceId: req.workspaceId,
         userId: req.user.id,
         role: req.user.role,
+        range,
       }),
       legacy: () => getLegacyAdminInsightsResponse({
         workspaceId: req.workspaceId,
@@ -136,6 +137,7 @@ export async function getExecutiveSummary(req, res) {
   try {
     const workspaceId = req.workspaceId;
     const month = req.query.month;
+    const range = req.query.range || "30d";
 
     if (!month) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
@@ -146,6 +148,7 @@ export async function getExecutiveSummary(req, res) {
       userId: req.user.id,
       role: req.user.role,
       month,
+      range,
     });
 
     // ===== Check existing summary =====
@@ -159,25 +162,31 @@ export async function getExecutiveSummary(req, res) {
 
     if (existing.rows.length > 0) {
   const row = existing.rows[0];
+  const cachedRange = row.source_data?.dashboardRange?.value || "30d";
+  const cacheMatchesRange = cachedRange === data.dashboardRange?.value;
 
   // ✅ Already generated
   if (
   row.summary &&
   row.summary !== "GENERATING" &&
-  row.summary.length > 20
+  row.summary.length > 20 &&
+  cacheMatchesRange
 ) {
     return res.json({
       month,
+      dashboardRange: data.dashboardRange,
       status: "ready",
       text: row.summary,
-      reasoning: row.source_data?.reasoning || null
+      reasoning: row.source_data?.reasoning || null,
+      outlook: row.source_data?.outlook || null
     });
   }
 
   // ✅ Generation already running
-  if (row.source_data?.processing === true) {
+  if (row.source_data?.processing === true && cacheMatchesRange) {
     return res.json({
       month,
+      dashboardRange: data.dashboardRange,
       status: "processing",
       text: null
     });
@@ -188,12 +197,17 @@ export async function getExecutiveSummary(req, res) {
   // 🔒 mark processing true
   await pool.query(`
     UPDATE workspace_executive_summaries
-    SET source_data = jsonb_set(source_data, '{processing}', 'true')
+    SET source_data = jsonb_set(
+      jsonb_set(COALESCE(source_data, '{}'::jsonb), '{processing}', 'true'),
+      '{dashboardRange}',
+      $3::jsonb
+    )
     WHERE workspace_id = $1 AND period = $2
-  `, [workspaceId, month]);
+  `, [workspaceId, month, JSON.stringify(data.dashboardRange || null)]);
 
   res.json({
     month,
+    dashboardRange: data.dashboardRange,
     status: "processing",
     text: null
   });
@@ -209,6 +223,7 @@ export async function getExecutiveSummary(req, res) {
         sourceData: {
           reasoning: result.reasoning,
           outlook: result.outlook,
+          dashboardRange: data.dashboardRange,
           processing: false,
           isFallback: result.isFallback
         }
@@ -232,14 +247,15 @@ VALUES (
   $1,
   $2,
   'GENERATING',
-  '{"processing": true}'::jsonb
+  $3::jsonb
 )
 ON CONFLICT (workspace_id, period) DO NOTHING
-`, [workspaceId, month]);
+`, [workspaceId, month, JSON.stringify({ processing: true, dashboardRange: data.dashboardRange })]);
 
     // ===== Respond immediately =====
     res.json({
       month,
+      dashboardRange: data.dashboardRange,
       status: "processing",
       text: null
     });
@@ -257,6 +273,7 @@ ON CONFLICT (workspace_id, period) DO NOTHING
       sourceData: {
         reasoning: result.reasoning,
         outlook: result.outlook,
+        dashboardRange: data.dashboardRange,
         processing: false,
         isFallback: result.isFallback
       }

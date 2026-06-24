@@ -5,6 +5,7 @@ import {
   dashboardRangeMeta,
 } from "./dashboardChartContract.service.js";
 import { buildTrendAnalytics, getHistoricalSeries } from "./historicalAnalytics.service.js";
+import { advancedForecast } from "../forecast/forecast.engine.js";
 
 function normalizeTrend(direction) {
   if (direction === "up") return "improving";
@@ -170,13 +171,95 @@ function projectHealthFromIntelligence(projects = [], projectIds = []) {
     .slice(0, 10);
 }
 
-function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOverdue }) {
+function avg(values = []) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  if (!nums.length) return null;
+  return Math.round((nums.reduce((sum, value) => sum + value, 0) / nums.length) * 100) / 100;
+}
+
+function rangeLabel(rangeMeta) {
+  if (rangeMeta?.value === "all") return "full available history";
+  return rangeMeta?.label || "30D";
+}
+
+function directionLabel(direction) {
+  if (direction === "up") return "improving";
+  if (direction === "down") return "declining";
+  return "stable";
+}
+
+function latestSeriesScore(series = [], fallback = null) {
+  const scores = series.map((point) => Number(point.score)).filter(Number.isFinite);
+  if (scores.length) return scores[scores.length - 1];
+  return Number.isFinite(Number(fallback)) ? Number(fallback) : null;
+}
+
+function chartAverage(visualizations, key) {
+  const chart = (visualizations?.charts || []).find((item) => item.key === key);
+  const values = (chart?.data || []).map((point) => Number(point.value)).filter(Number.isFinite);
+  return avg(values);
+}
+
+function buildDashboardForecast({ trendSeries, subject, counts, rangeMeta }) {
+  const scores = (trendSeries || []).map((point) => Number(point.score)).filter(Number.isFinite);
+  const trend = buildTrendAnalytics(trendSeries);
+  const currentScore = latestSeriesScore(trendSeries, subject?.score);
+  const completionRate = Number(subject?.indexes?.deliveryConfidenceIndex ?? 0) / 100;
+
+  if (scores.length >= 3) {
+    const forecast = advancedForecast(scores, { completionRate });
+    return {
+      ...forecast,
+      direction: trend.direction,
+      delta: trend.delta,
+      currentScore,
+      confidenceScore: subject?.confidence ?? null,
+      range: rangeMeta,
+      source: "enterprise_intelligence_snapshots",
+      reasoning:
+        forecast.reasoning ||
+        `Outlook is based on ${scores.length} enterprise intelligence snapshot(s) in the selected ${rangeLabel(rangeMeta)} period.`,
+    };
+  }
+
+  const riskLevel = String(subject?.risk?.level || "unknown").toLowerCase();
+  const riskProjection = riskLevel === "high" ? "high" : riskLevel === "low" ? "low" : riskLevel === "medium" ? "moderate" : "unknown";
+  return {
+    predictedAverage: currentScore,
+    trend: directionLabel(trend.direction),
+    direction: trend.direction,
+    delta: trend.delta,
+    riskProjection,
+    confidence: "low",
+    momentum: 0,
+    currentScore,
+    confidenceScore: subject?.confidence ?? null,
+    range: rangeMeta,
+    source: "enterprise_intelligence_current_snapshot",
+    reasoning:
+      `Only ${scores.length} historical intelligence snapshot(s) are available for the selected ${rangeLabel(rangeMeta)} period. ` +
+      `The outlook therefore uses the current authoritative intelligence posture (${currentScore ?? "unavailable"}/100), ` +
+      `${counts?.overdueTasks || 0} overdue scoped task(s), and current risk level ${subject?.risk?.level || "unknown"} until more snapshot history is available.`,
+  };
+}
+
+function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOverdue, trendSeries, rangeMeta, visualizations, forecast }) {
   const subject = intelligence || {};
   const topRiskTask = topOverdue?.[0];
-  const score = subject.score || 0;
+  const trendAnalytics = buildTrendAnalytics(trendSeries);
+  const score = latestSeriesScore(trendSeries, subject.score) ?? 0;
   const band = subject.band || "Unavailable";
   const strengths = subject.strengths || [];
   const concerns = subject.concerns || [];
+  const period = rangeLabel(rangeMeta);
+  const delta = Number(trendAnalytics.delta) || 0;
+  const direction = directionLabel(trendAnalytics.direction);
+  const healthAverage = chartAverage(visualizations, "workspace_health_trends");
+  const productivityAverage = chartAverage(visualizations, "productivity_trends");
+  const riskAverage = chartAverage(visualizations, "risk_trends");
+  const dataQualifier = trendSeries.length > 1
+    ? `${trendSeries.length} historical intelligence snapshot(s)`
+    : "the current authoritative intelligence snapshot";
   const priorities = [
     ...(concerns.slice(0, 3)),
     "Keep intelligence snapshots current through event-driven recalculation.",
@@ -184,24 +267,46 @@ function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOver
 
   if (role === "user") {
     return {
-      headline: `${scopeLabel}: ${band} personal intelligence (${score}/100)`,
-      narrative: `Your current intelligence score is ${score}/100 with ${counts.overdueTasks || 0} overdue task(s). ${concerns[0] || strengths[0] || "Keep delivery, collaboration, and sustainability signals balanced."}`,
+      headline: `${scopeLabel}: ${period} ${direction} personal intelligence (${score}/100)`,
+      narrative:
+        `For ${period}, personal intelligence is ${band} at ${score}/100 and ${direction} by ${Math.abs(delta)} point(s). ` +
+        `This view is grounded in ${dataQualifier}, ${counts.overdueTasks || 0} overdue task(s), and current delivery/workload evidence. ` +
+        `${concerns[0] || strengths[0] || "Keep delivery, collaboration, and sustainability signals balanced."}`,
+      outlook: forecast?.reasoning || null,
       strengths,
       risks: concerns,
       priorities,
+      drivers: subject.drivers || [],
+      period: rangeMeta,
+      metrics: { score, delta, direction, snapshotCount: trendSeries.length },
     };
   }
 
   return {
-    headline: `${scopeLabel}: ${band} intelligence posture (${score}/100)`,
+    headline: `${scopeLabel}: ${period} ${direction} intelligence posture (${score}/100)`,
     narrative:
-      `Current intelligence posture is ${subject.trend || "stable"}. ` +
-      `The score is backed by confidence ${subject.confidence || 0}/100, ` +
-      `${counts.totalTasks || 0} scoped task(s), and ${counts.overdueTasks || 0} overdue item(s). ` +
+      `Across ${period}, the intelligence posture is ${band} at ${score}/100 and ${direction} by ${Math.abs(delta)} point(s). ` +
+      `The summary is backed by ${dataQualifier}, confidence ${subject.confidence || 0}/100, ` +
+      `${counts.totalTasks || 0} scoped task(s), ${counts.overdueTasks || 0} overdue item(s), ` +
+      `average health ${healthAverage ?? "n/a"}, productivity ${productivityAverage ?? "n/a"}, and risk ${riskAverage ?? "n/a"}. ` +
       `${topRiskTask ? `Highest urgency: "${topRiskTask.task}" (${topRiskTask.overdue_days} day(s) overdue).` : concerns[0] || strengths[0] || "No concentrated risk is currently visible."}`,
+    outlook: forecast?.reasoning || null,
     strengths,
     risks: concerns,
     priorities,
+    drivers: subject.drivers || [],
+    period: rangeMeta,
+    metrics: {
+      score,
+      delta,
+      direction,
+      snapshotCount: trendSeries.length,
+      healthAverage,
+      productivityAverage,
+      riskAverage,
+      scopedTasks: counts.totalTasks || 0,
+      overdueTasks: counts.overdueTasks || 0,
+    },
   };
 }
 
@@ -252,12 +357,29 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
   });
   const trendAnalytics = buildTrendAnalytics(trendSeries);
 
+  const visualizations = buildDashboardVisualizations({
+    role,
+    trendSeries,
+    snapshot,
+    scopedProjects,
+    rangeMeta,
+  });
+  const forecast = buildDashboardForecast({
+    trendSeries,
+    subject,
+    counts: scoped.counts,
+    rangeMeta,
+  });
   const executiveSummary = buildExecutiveSummary({
     role,
     scopeLabel: scope.label,
     intelligence: subject,
     counts: scoped.counts,
     topOverdue: scoped.topOverdue,
+    trendSeries,
+    rangeMeta,
+    visualizations,
+    forecast,
   });
 
   return {
@@ -298,31 +420,28 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
       projects: snapshot.projects,
       trend: trendAnalytics,
     },
-    visualizations: buildDashboardVisualizations({
-      role,
-      trendSeries,
-      snapshot,
-      scopedProjects,
-      rangeMeta,
-    }),
+    visualizations,
     topOverdue: scoped.topOverdue,
     projectHealth: scopedProjects,
     healthScore: snapshot.workspace?.score ?? null,
     executiveSummary,
+    forecast,
   };
 }
 
-export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId, userId, role }) {
-  const overview = await getDashboardOverviewFromIntelligence({ workspaceId, userId, role });
+export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId, userId, role, range = "30d" }) {
+  const overview = await getDashboardOverviewFromIntelligence({ workspaceId, userId, role, range });
   const subject = overview.analytics?.intelligence || overview.analytics?.workspace || {};
 
   return {
     month: overview.month,
+    dashboardRange: overview.dashboardRange,
     role,
     scope: overview.scope,
     reflectiveSummary: {
       headline: overview.executiveSummary?.headline || "Executive intelligence update",
       narrative: overview.executiveSummary?.narrative || "",
+      outlook: overview.executiveSummary?.outlook || null,
     },
     fullSummary: [
       overview.executiveSummary?.headline || "Executive intelligence update",
@@ -330,6 +449,7 @@ export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId,
       `Score ${subject.score || 0}/100, band ${subject.band || "N/A"}, confidence ${subject.confidence || 0}/100.`,
       `Primary strengths: ${(subject.strengths || []).slice(0, 3).join(" ") || "No dominant strength detected yet."}`,
       `Primary concerns: ${(subject.concerns || []).slice(0, 3).join(" ") || "No concentrated concern detected yet."}`,
+      `Outlook: ${overview.forecast?.reasoning || "Outlook context is unavailable."}`,
     ].join(" "),
     reasoning: [
       `Source: enterprise intelligence repositories, calculation version ${subject.calculationVersion || "unknown"}.`,
@@ -340,6 +460,7 @@ export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId,
     recommendations: overview.executiveSummary?.priorities || [],
     strengths: subject.strengths || [],
     risks: subject.concerns || [],
+    forecast: overview.forecast,
     metrics: {
       counts: overview.counts,
       scoreCard: overview.scoreCard,

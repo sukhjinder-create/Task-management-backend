@@ -334,31 +334,46 @@ export async function collectWorkspaceScope({ workspaceId }) {
   };
 }
 
-export async function collectWorkspaceEvidence({ workspaceId }) {
+export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, now = new Date() }) {
+  const range = getRangeFromWindow(windowDays, now);
   const [internal, external, externalSignals] = await Promise.all([
     pool.query(
       `SELECT
          COUNT(*)::int AS total,
-         COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) = ANY($2::text[]))::int AS completed
+         COUNT(*) FILTER (
+           WHERE LOWER(COALESCE(status, '')) = ANY($2::text[])
+             AND completed_at IS NOT NULL
+             AND completed_at <= $4::timestamptz
+         )::int AS completed
        FROM tasks
-       WHERE workspace_id = $1`,
-      [workspaceId, COMPLETED_STATUSES]
+       WHERE workspace_id = $1
+         AND created_at <= $4::timestamptz
+         AND (
+           created_at >= $3::timestamptz
+           OR updated_at >= $3::timestamptz
+           OR status NOT IN ('completed', 'done', 'closed', 'cancelled')
+           OR completed_at BETWEEN $3::timestamptz AND $4::timestamptz
+         )`,
+      [workspaceId, COMPLETED_STATUSES, range.start, range.end]
     ).then((r) => r.rows[0]).catch(() => ({ total: 0, completed: 0 })),
     pool.query(
       `SELECT
          COUNT(*)::int AS total,
          COUNT(DISTINCT provider)::int AS provider_count
        FROM integration_entity_state
-       WHERE workspace_id = $1`,
-      [workspaceId]
+       WHERE workspace_id = $1
+         AND updated_at <= $2::timestamptz`,
+      [workspaceId, range.end]
     ).then((r) => r.rows[0]).catch(() => ({ total: 0, provider_count: 0 })),
     pool.query(
       `SELECT
          COUNT(*)::int AS signal_count,
          COUNT(DISTINCT external_id) FILTER (WHERE signal_type = 'INTEGRATION_TASK_COMPLETED')::int AS completed
        FROM workspace_execution_signals
-       WHERE workspace_id = $1`,
-      [workspaceId]
+       WHERE workspace_id = $1
+         AND created_at >= $2::timestamptz
+         AND created_at <= $3::timestamptz`,
+      [workspaceId, range.start, range.end]
     ).then((r) => r.rows[0]).catch(() => ({ signal_count: 0, completed: 0 })),
   ]);
 
@@ -379,6 +394,11 @@ export async function collectWorkspaceEvidence({ workspaceId }) {
       completedWork,
       externalProviderCount: Number(external?.provider_count) || 0,
       externalSignalCount: Number(externalSignals?.signal_count) || 0,
+    },
+    sourceWindow: {
+      startDate: range.startDate,
+      endDate: range.endDate,
+      windowDays: range.windowDays,
     },
   };
 }

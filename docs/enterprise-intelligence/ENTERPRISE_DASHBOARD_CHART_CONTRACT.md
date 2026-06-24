@@ -59,6 +59,16 @@ All dashboard charts are returned under:
 
 `value` may be `null` when the exact intelligence dimension is absent from the repository snapshot. The backend does not fall back to an alternate score for dimension-specific charts.
 
+## Supported Dashboard Ranges
+
+- `30d`
+- `90d`
+- `6m`
+- `1y`
+- `all`
+
+`all` means the full available intelligence snapshot history. The backend still returns the same `visualizations.charts` schema and uses month-level bucketing for readability.
+
 ## Required Chart Keys
 
 Admin:

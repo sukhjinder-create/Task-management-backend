@@ -1,6 +1,7 @@
 import pool from "../../db.js";
 import { getUnifiedIntelligenceSnapshot } from "../engine/unifiedIntelligence.engine.js";
 import { buildTrendAnalytics, getHistoricalSeries } from "./historicalAnalytics.service.js";
+import { dashboardRangeMeta } from "./dashboardChartContract.service.js";
 import {
   listProjectIntelligence,
   listTeamIntelligence,
@@ -49,20 +50,42 @@ function riskDistribution(users = [], style = "camel") {
   };
 }
 
-function buildForecastContract({ scoreHistory = [], workspace = null, executionContext = {} }) {
+function buildForecastContract({ scoreHistory = [], workspace = null, executionContext = {}, rangeMeta = dashboardRangeMeta("30d") }) {
   const scores = (scoreHistory || [])
     .map((point) => Number(point.score))
     .filter(Number.isFinite);
+  const trend = buildTrendAnalytics(scoreHistory);
+  const currentScore = workspace?.score ?? scores[scores.length - 1] ?? null;
+  if (scores.length < 3) {
+    return {
+      predictedAverage: currentScore,
+      trend: trend.direction === "up" ? "improving" : trend.direction === "down" ? "declining" : "stable",
+      direction: trend.direction,
+      delta: trend.delta,
+      riskProjection: String(workspace?.risk?.level || "unknown").toLowerCase(),
+      confidence: "low",
+      momentum: 0,
+      currentScore,
+      confidenceScore: workspace?.confidence ?? null,
+      range: rangeMeta,
+      source: "enterprise_intelligence_current_snapshot",
+      reasoning:
+        `Only ${scores.length} historical intelligence snapshot(s) are available for ${rangeMeta.label}. ` +
+        `Outlook uses the current authoritative workspace intelligence posture until additional snapshot history is available.`,
+    };
+  }
+
   const forecast = advancedForecast(scores, {
     completionRate: Number(executionContext.completionRate || 0) / 100,
   });
-  const trend = buildTrendAnalytics(scoreHistory);
   return {
     ...forecast,
     direction: trend.direction,
     delta: trend.delta,
-    currentScore: workspace?.score ?? scores[scores.length - 1] ?? null,
+    currentScore,
     confidenceScore: workspace?.confidence ?? null,
+    range: rangeMeta,
+    source: "enterprise_intelligence_snapshots",
     reasoning: forecast.reasoning || "Forecast is derived from enterprise intelligence snapshots, not recalculated from legacy score tables.",
   };
 }
@@ -154,14 +177,15 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
   };
 }
 
-export async function buildAdminInsightsResponse({ workspaceId, userId, role }) {
+export async function buildAdminInsightsResponse({ workspaceId, userId, role, range = "30d" }) {
+  const rangeMeta = dashboardRangeMeta(range);
   const snapshot = await getUnifiedIntelligenceSnapshot({ workspaceId, userId, role });
   const { scopedUsers, scopedProjects } = await scopedAdminUsersAndProjects({ workspaceId, userId, role, snapshot });
   const scoreHistory = await getHistoricalSeries({
     workspaceId,
     scopeType: "workspace",
     subjectKey: String(workspaceId),
-    range: "6m",
+    range: rangeMeta.value,
   });
   const trend = buildTrendAnalytics(scoreHistory);
   const executionContext = {
@@ -173,10 +197,11 @@ export async function buildAdminInsightsResponse({ workspaceId, userId, role }) 
 
   return {
     source: "enterprise_intelligence",
+    dashboardRange: rangeMeta,
     orgScore: summarizeUsers(scopedUsers),
     coachingEffectiveness: {},
     riskDistribution: riskDistribution(scopedUsers),
-    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext }),
+    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext, rangeMeta }),
     leaderboard: scopedUsers.slice(0, 5).map((user) => ({
       userId: user.userId,
       username: user.username,
@@ -270,14 +295,15 @@ export async function computeGoalWorkspaceHealth(workspaceId) {
   };
 }
 
-export async function buildExecutiveSummaryData({ workspaceId, userId, role, month }) {
+export async function buildExecutiveSummaryData({ workspaceId, userId, role, month, range = "30d" }) {
+  const rangeMeta = dashboardRangeMeta(range);
   const [snapshot, scoreHistory, rawGoalsHealth] = await Promise.all([
     getUnifiedIntelligenceSnapshot({ workspaceId, userId, role }),
     getHistoricalSeries({
       workspaceId,
       scopeType: "workspace",
       subjectKey: String(workspaceId),
-      range: "6m",
+      range: rangeMeta.value,
     }),
     computeGoalWorkspaceHealth(workspaceId),
   ]);
@@ -297,6 +323,7 @@ export async function buildExecutiveSummaryData({ workspaceId, userId, role, mon
   return {
     month,
     source: "enterprise_intelligence",
+    dashboardRange: rangeMeta,
     execution: {
       workspaceHealthIndex: snapshot.workspace?.score ?? null,
       deliveryConfidenceIndex: snapshot.workspace?.indexes?.deliveryConfidenceIndex ?? null,
@@ -313,7 +340,7 @@ export async function buildExecutiveSummaryData({ workspaceId, userId, role, mon
       confidence: user.confidence,
       risk: user.risk,
     })),
-    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext }),
+    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext, rangeMeta }),
     okrHealth: null,
     legacyContext: {
       okrHealth: goalsHealth,
@@ -357,7 +384,7 @@ export async function buildUserTrendResponse({ workspaceId, userId, role, range 
     workspaceId,
     scopeType: "user",
     subjectKey: String(userId),
-    range: range || "6m",
+    range: range || "30d",
   });
   const series = rows.map((row) => ({
     month: String(row.date).slice(0, 7),
@@ -373,7 +400,7 @@ export async function buildUserTrendResponse({ workspaceId, userId, role, range 
     source: "enterprise_intelligence",
     scopeType: "user",
     subjectKey: String(userId),
-    range: range || "6m",
+    range: range || "30d",
     trend: buildTrendAnalytics(series),
     series,
     rows: series,

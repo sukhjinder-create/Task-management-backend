@@ -8,11 +8,11 @@ import {
 } from "../intelligence/analytics/dashboardChartContract.service.js";
 
 const REQUIRED_RANGES = {
-  "7d": "day",
   "30d": "day",
   "90d": "week",
   "6m": "week",
   "1y": "month",
+  all: "month",
 };
 
 function read(relativePath) {
@@ -137,7 +137,12 @@ assert.ok(adapterSource.includes("range: rangeMeta.value"), "Dashboard adapter m
 
 for (const range of Object.keys(REQUIRED_RANGES)) {
   assert.ok(DASHBOARD_RANGES[range], `${range} must be a supported dashboard range`);
-  assert.ok(repositorySource.includes(`"${range}": ${DASHBOARD_RANGES[range].days}`), `${range} must map to repository history window`);
+  if (range === "all") {
+    assert.equal(DASHBOARD_RANGES[range].days, null, "ALL must not use a fixed day limit");
+    assert.ok(repositorySource.includes('range !== "all"'), "Repository history query must omit date limit for ALL");
+  } else {
+    assert.ok(repositorySource.includes(`"${range}": ${DASHBOARD_RANGES[range].days}`), `${range} must map to repository history window`);
+  }
   results.push(assertRange("admin", range, rangeSeries()));
   results.push(assertRange("manager", range, rangeSeries()));
   results.push(assertRange("user", range, rangeSeries()));

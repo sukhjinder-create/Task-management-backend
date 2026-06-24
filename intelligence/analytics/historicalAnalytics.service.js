@@ -1,7 +1,7 @@
 import { getSnapshotSeries } from "../repositories/unifiedIntelligence.repository.js";
 
 function normalizeRange(range = "30d") {
-  return ["7d", "30d", "90d", "6m", "1y", "custom"].includes(range) ? range : "30d";
+  return ["30d", "90d", "6m", "1y", "all", "custom"].includes(range) ? range : "30d";
 }
 
 export async function getHistoricalSeries({

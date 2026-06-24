@@ -399,13 +399,13 @@ export async function saveWorkspaceIntelligence(result) {
   return mapWorkspaceRow(rows[0]);
 }
 
-export async function writeSnapshot({ scopeType, subjectKey, result, periodKey = "rolling_30d" }) {
+export async function writeSnapshot({ scopeType, subjectKey, result, periodKey = "rolling_30d", capturedForDate = null }) {
   await pool.query(
     `INSERT INTO intelligence_snapshots
       (workspace_id, scope_type, subject_key, period_key, captured_for_date,
        score, band, trend, confidence, payload, indicators, calculation_version)
      VALUES
-      ($1,$2,$3,$4,CURRENT_DATE,$5,$6,$7,$8,$9,$10,$11)
+      ($1,$2,$3,$4,COALESCE($5::date, CURRENT_DATE),$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (workspace_id, scope_type, subject_key, period_key, captured_for_date)
      DO UPDATE SET
        score = EXCLUDED.score,
@@ -421,6 +421,7 @@ export async function writeSnapshot({ scopeType, subjectKey, result, periodKey =
       scopeType,
       subjectKey,
       periodKey,
+      capturedForDate,
       result.score,
       result.band,
       result.trend,
@@ -559,22 +560,24 @@ export async function getSnapshotSeries({
   startDate = null,
   endDate = null,
 }) {
-  const days = {
-    "7d": 7,
+  const daysByRange = {
     "30d": 30,
     "90d": 90,
     "6m": 183,
     "1y": 366,
-  }[range] || 30;
+  };
 
   const params = [workspaceId, scopeType, subjectKey, periodKey];
-  let dateClause = "AND captured_for_date >= CURRENT_DATE - ($5::int * INTERVAL '1 day')";
-  params.push(days);
+  let dateClause = "";
 
   if (range === "custom" && startDate && endDate) {
     dateClause = "AND captured_for_date BETWEEN $5::date AND $6::date";
-    params[4] = startDate;
+    params.push(startDate);
     params.push(endDate);
+  } else if (range !== "all") {
+    const days = daysByRange[range] || daysByRange["30d"];
+    dateClause = "AND captured_for_date >= CURRENT_DATE - ($5::int * INTERVAL '1 day')";
+    params.push(days);
   }
 
   const { rows } = await pool.query(

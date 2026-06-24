@@ -24,6 +24,7 @@
     "verify:enterprise-intelligence": "node scripts/verify-enterprise-intelligence-architecture.js",
     "verify:enterprise-intelligence:real-data": "node scripts/enterprise-intelligence-real-data-shadow-validation.js",
     "verify:dashboard-range-charts": "node scripts/verify-dashboard-range-chart-contract.js",
+    "backfill:dashboard-intelligence-history": "node scripts/backfill-dashboard-intelligence-history.js",
     "migrate:username-scope": "node --import ./scripts/database-safety-guard.js run-username-scope-migration.js",
     "migrate:trial-signup-checkout": "node --import ./scripts/database-safety-guard.js run-trial-signup-checkout-migration.js",
     "migrate:razorpay-trial-signup": "node --import ./scripts/database-safety-guard.js run-razorpay-trial-signup-migration.js",

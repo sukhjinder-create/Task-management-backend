@@ -37,6 +37,7 @@ router.get("/executive-detail", async (req, res) => {
       workspaceId: req.workspaceId,
       userId: req.user.id,
       role: req.user.role,
+      range: req.query.range,
       res,
     });
     res.json(data);

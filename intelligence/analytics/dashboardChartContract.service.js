@@ -1,9 +1,9 @@
 export const DASHBOARD_RANGES = {
-  "7d": { value: "7d", label: "7D", days: 7, granularity: "day" },
   "30d": { value: "30d", label: "30D", days: 30, granularity: "day" },
   "90d": { value: "90d", label: "90D", days: 90, granularity: "week" },
   "6m": { value: "6m", label: "6M", days: 183, granularity: "week" },
   "1y": { value: "1y", label: "1Y", days: 366, granularity: "month" },
+  all: { value: "all", label: "ALL", days: null, granularity: "month" },
 };
 
 function normalizeDashboardRange(range = "30d") {

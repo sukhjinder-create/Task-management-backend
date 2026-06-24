@@ -25,12 +25,12 @@ export async function getDashboardOverview({ workspaceId, userId, role, range = 
   });
 }
 
-export async function getDashboardExecutiveDetail({ workspaceId, userId, role, res = null }) {
+export async function getDashboardExecutiveDetail({ workspaceId, userId, role, range = "30d", res = null }) {
   return resolveCutoverResponse({
     workspaceId,
     surface: "dashboard_executive_detail",
     res,
-    unified: () => getDashboardExecutiveDetailFromIntelligence({ workspaceId, userId, role }),
+    unified: () => getDashboardExecutiveDetailFromIntelligence({ workspaceId, userId, role, range }),
     legacy: () => getLegacyDashboardExecutiveDetail({ workspaceId, userId, role }),
   });
 }
