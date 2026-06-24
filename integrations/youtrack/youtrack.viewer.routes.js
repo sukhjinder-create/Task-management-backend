@@ -1,4 +1,5 @@
 import express from "express";
+import { allowRoles } from "../../middleware/role.middleware.js";
 import {
   fetchYouTrackProjects,
   fetchYouTrackProjectTasks
@@ -6,6 +7,8 @@ import {
 import youtrackAdapter from "./youtrack.adapter.js";
 
 const router = express.Router();
+
+router.use(allowRoles("admin"));
 
 router.get("/projects", async (req, res) => {
 

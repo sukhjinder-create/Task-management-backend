@@ -46,7 +46,7 @@ import {
 import workspaceService from "../services/workspace.service.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
 import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
-import { recomputeWorkspaceHealth } from "../services/workspaceHealth.service.js";
+import { getWorkspaceHealthScore } from "../services/workspaceHealth.service.js";
 
 let io;
 let socketRealtimeDiagnostics = {
@@ -2806,14 +2806,16 @@ export function getSocketRealtimeDiagnostics() {
 export async function emitWorkspaceIntelligenceUpdate(workspaceId, payload) {
   const room = `workspace:${workspaceId}`;
 
-  const newHealth = await recomputeWorkspaceHealth(workspaceId);
+  const newHealth = await getWorkspaceHealthScore(workspaceId);
 
   io.to(room).emit("workspace:intelligence-updated", payload);
 
-  io.to(room).emit("workspace:health-pulse", {
-    health: newHealth,
-    at: new Date().toISOString(),
-  });
+  if (newHealth !== null) {
+    io.to(room).emit("workspace:health-pulse", {
+      health: newHealth,
+      at: new Date().toISOString(),
+    });
+  }
 }
 
 /**

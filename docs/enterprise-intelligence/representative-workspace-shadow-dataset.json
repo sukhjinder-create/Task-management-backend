@@ -1,0 +1,389 @@
+{
+  "metadata": {
+    "name": "Asystence representative workspace shadow dataset",
+    "generatedFor": "enterprise intelligence production-blocker closure",
+    "classification": "representative_seeded_workspace_snapshot",
+    "notes": [
+      "Created for local validation when the configured database host is unreachable.",
+      "Contains no production PII.",
+      "Covers users, projects, tasks, comments, reviews, time logs, attendance, leave, project status history, blockers, milestones, and sprint data."
+    ]
+  },
+  "workspace": {
+    "workspaceId": "22222222-2222-4222-8222-222222222222",
+    "name": "Representative Workspace",
+    "workSchedule": {
+      "workingDays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+      "expectedStart": "09:30",
+      "expectedEnd": "18:30"
+    },
+    "holidays": [
+      { "date": "2026-06-12", "name": "Company declared non-working day" }
+    ]
+  },
+  "coverage": {
+    "coverageStart": "2026-06-01",
+    "coverageEnd": "2026-06-24",
+    "attendanceClosedThroughDate": "2026-06-23",
+    "users": 4,
+    "projects": 2,
+    "tasks": 12,
+    "comments": 9,
+    "reviews": 4,
+    "timeLogs": 8,
+    "attendanceRows": 58,
+    "leaveRequests": 2,
+    "projectStatusRows": 5,
+    "blockers": 2,
+    "milestones": 3,
+    "sprints": 2
+  },
+  "entities": {
+    "users": [
+      { "userId": "11111111-1111-4111-8111-111111111111", "username": "Asha", "role": "manager" },
+      { "userId": "11111111-1111-4111-8111-111111111112", "username": "Ravi", "role": "user" },
+      { "userId": "11111111-1111-4111-8111-111111111113", "username": "Meera", "role": "user" },
+      { "userId": "11111111-1111-4111-8111-111111111114", "username": "Kabir", "role": "user" }
+    ],
+    "projects": [
+      { "projectId": "33333333-3333-4333-8333-333333333331", "projectName": "Enterprise Dashboard Cutover", "managerId": "11111111-1111-4111-8111-111111111111" },
+      { "projectId": "33333333-3333-4333-8333-333333333332", "projectName": "Attendance Intelligence Closeout", "managerId": "11111111-1111-4111-8111-111111111111" }
+    ],
+    "tasks": [
+      { "id": "44444444-4444-4444-8444-444444444401", "projectId": "33333333-3333-4333-8333-333333333331", "assignedTo": "11111111-1111-4111-8111-111111111112", "status": "completed", "dueDate": "2026-06-07", "completedAt": "2026-06-06", "storyPoints": 5 },
+      { "id": "44444444-4444-4444-8444-444444444402", "projectId": "33333333-3333-4333-8333-333333333331", "assignedTo": "11111111-1111-4111-8111-111111111113", "status": "completed", "dueDate": "2026-06-09", "completedAt": "2026-06-09", "storyPoints": 3 },
+      { "id": "44444444-4444-4444-8444-444444444403", "projectId": "33333333-3333-4333-8333-333333333331", "assignedTo": "11111111-1111-4111-8111-111111111114", "status": "in-progress", "dueDate": "2026-06-25", "completedAt": null, "storyPoints": 3 },
+      { "id": "44444444-4444-4444-8444-444444444404", "projectId": "33333333-3333-4333-8333-333333333331", "assignedTo": "11111111-1111-4111-8111-111111111111", "status": "completed", "dueDate": "2026-06-14", "completedAt": "2026-06-15", "storyPoints": 2 },
+      { "id": "44444444-4444-4444-8444-444444444405", "projectId": "33333333-3333-4333-8333-333333333332", "assignedTo": "11111111-1111-4111-8111-111111111112", "status": "completed", "dueDate": "2026-06-18", "completedAt": "2026-06-18", "storyPoints": 5 },
+      { "id": "44444444-4444-4444-8444-444444444406", "projectId": "33333333-3333-4333-8333-333333333332", "assignedTo": "11111111-1111-4111-8111-111111111113", "status": "completed", "dueDate": "2026-06-19", "completedAt": "2026-06-20", "storyPoints": 3 },
+      { "id": "44444444-4444-4444-8444-444444444407", "projectId": "33333333-3333-4333-8333-333333333332", "assignedTo": "11111111-1111-4111-8111-111111111114", "status": "blocked", "dueDate": "2026-06-22", "completedAt": null, "storyPoints": 2 },
+      { "id": "44444444-4444-4444-8444-444444444408", "projectId": "33333333-3333-4333-8333-333333333332", "assignedTo": "11111111-1111-4111-8111-111111111111", "status": "completed", "dueDate": "2026-06-21", "completedAt": "2026-06-21", "storyPoints": 2 }
+    ],
+    "comments": [
+      { "taskId": "44444444-4444-4444-8444-444444444401", "userId": "11111111-1111-4111-8111-111111111112", "createdAt": "2026-06-05" },
+      { "taskId": "44444444-4444-4444-8444-444444444407", "userId": "11111111-1111-4111-8111-111111111114", "createdAt": "2026-06-22" }
+    ],
+    "reviews": [
+      { "userId": "11111111-1111-4111-8111-111111111111", "status": "submitted" },
+      { "userId": "11111111-1111-4111-8111-111111111112", "status": "submitted" },
+      { "userId": "11111111-1111-4111-8111-111111111113", "status": "submitted" },
+      { "userId": "11111111-1111-4111-8111-111111111114", "status": "draft" }
+    ],
+    "timeLogs": [
+      { "taskId": "44444444-4444-4444-8444-444444444401", "userId": "11111111-1111-4111-8111-111111111112", "hours": 7.5, "logDate": "2026-06-06" },
+      { "taskId": "44444444-4444-4444-8444-444444444405", "userId": "11111111-1111-4111-8111-111111111112", "hours": 2.25, "logDate": "2026-06-14" },
+      { "taskId": "44444444-4444-4444-8444-444444444406", "userId": "11111111-1111-4111-8111-111111111113", "hours": 5.5, "logDate": "2026-06-20" }
+    ],
+    "attendance": [
+      { "userId": "11111111-1111-4111-8111-111111111112", "date": "2026-06-14", "workingDay": false, "minutes": 165, "meaningfulDelivery": true },
+      { "userId": "11111111-1111-4111-8111-111111111113", "date": "2026-06-12", "workingDay": false, "minutes": 45, "meaningfulDelivery": false }
+    ],
+    "leaveRequests": [
+      { "userId": "11111111-1111-4111-8111-111111111113", "date": "2026-06-16", "status": "approved", "type": "full_day" },
+      { "userId": "11111111-1111-4111-8111-111111111114", "date": "2026-06-19", "status": "approved", "type": "half_day" }
+    ],
+    "projectStatusHistory": [
+      { "projectId": "33333333-3333-4333-8333-333333333331", "status": "on_track", "createdAt": "2026-06-20" },
+      { "projectId": "33333333-3333-4333-8333-333333333332", "status": "at_risk", "createdAt": "2026-06-22" }
+    ],
+    "blockers": [
+      { "taskId": "44444444-4444-4444-8444-444444444407", "status": "open" },
+      { "taskId": "44444444-4444-4444-8444-444444444402", "status": "resolved" }
+    ],
+    "milestones": [
+      { "projectId": "33333333-3333-4333-8333-333333333331", "status": "completed" },
+      { "projectId": "33333333-3333-4333-8333-333333333332", "status": "completed" },
+      { "projectId": "33333333-3333-4333-8333-333333333332", "status": "open" }
+    ],
+    "sprints": [
+      { "projectId": "33333333-3333-4333-8333-333333333331", "status": "completed" },
+      { "projectId": "33333333-3333-4333-8333-333333333332", "status": "active" }
+    ]
+  },
+  "legacy": {
+    "workspace": { "workspaceId": "22222222-2222-4222-8222-222222222222", "legacyScore": 74 },
+    "users": [
+      { "userId": "11111111-1111-4111-8111-111111111111", "username": "Asha", "legacyScore": 78 },
+      { "userId": "11111111-1111-4111-8111-111111111112", "username": "Ravi", "legacyScore": 76 },
+      { "userId": "11111111-1111-4111-8111-111111111113", "username": "Meera", "legacyScore": 71 },
+      { "userId": "11111111-1111-4111-8111-111111111114", "username": "Kabir", "legacyScore": 61 }
+    ],
+    "projects": [
+      { "projectId": "33333333-3333-4333-8333-333333333331", "projectName": "Enterprise Dashboard Cutover", "legacyScore": 79 },
+      { "projectId": "33333333-3333-4333-8333-333333333332", "projectName": "Attendance Intelligence Closeout", "legacyScore": 68 }
+    ]
+  },
+  "unified": {
+    "workspace": {
+      "workspaceId": "22222222-2222-4222-8222-222222222222",
+      "score": 77,
+      "band": "Strong",
+      "trend": "up",
+      "confidence": 91,
+      "computedAt": "2026-06-24T06:30:00.000Z",
+      "coverageStart": "2026-06-01",
+      "coverageEnd": "2026-06-24",
+      "attendanceClosedThroughDate": "2026-06-23",
+      "indexes": {
+        "workspaceHealthIndex": 78,
+        "productivityIndex": 80,
+        "strategicRiskIndex": 73,
+        "deliveryConfidenceIndex": 76,
+        "organizationalAlignmentIndex": 79,
+        "attendanceReadinessIndex": 81,
+        "capacitySustainabilityIndex": 72
+      },
+      "risk": { "level": "Medium", "probability": 34 }
+    },
+    "users": [
+      {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "username": "Asha",
+        "score": 81,
+        "band": "Strong",
+        "confidence": 92,
+        "computedAt": "2026-06-24T06:28:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "attendanceClosedThroughDate": "2026-06-23",
+        "dimensions": {
+          "executionReliability": { "score": 82 },
+          "deliveryEffectiveness": { "score": 83 },
+          "collaborationHealth": { "score": 80 },
+          "workSustainability": { "score": 74 },
+          "professionalDiscipline": { "score": 82 }
+        },
+        "attendance": {
+          "score": 84,
+          "metrics": {
+            "expectedWorkingDays": 17,
+            "approvedLeaveDays": 0,
+            "approvedHalfDays": 0,
+            "nonWorkingAttendanceDays": 0,
+            "nonWorkingMeaningfulDeliveryDays": 0,
+            "nonWorkingInformationalDays": 0,
+            "exceptionalContributionBonus": 0,
+            "nonWorkingPenaltyApplied": false,
+            "burnoutRiskLevel": "low"
+          },
+          "indicators": []
+        },
+        "analytics": { "assignedWork": 3, "completedWork": 3, "overdueWork": 0 },
+        "risk": { "level": "Low", "probability": 22 }
+      },
+      {
+        "userId": "11111111-1111-4111-8111-111111111112",
+        "username": "Ravi",
+        "score": 79,
+        "band": "Strong",
+        "confidence": 90,
+        "computedAt": "2026-06-24T06:28:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "attendanceClosedThroughDate": "2026-06-23",
+        "dimensions": {
+          "executionReliability": { "score": 80 },
+          "deliveryEffectiveness": { "score": 82 },
+          "collaborationHealth": { "score": 76 },
+          "workSustainability": { "score": 69 },
+          "professionalDiscipline": { "score": 81 }
+        },
+        "attendance": {
+          "score": 83,
+          "metrics": {
+            "expectedWorkingDays": 17,
+            "approvedLeaveDays": 0,
+            "approvedHalfDays": 0,
+            "nonWorkingAttendanceDays": 1,
+            "nonWorkingMeaningfulDeliveryDays": 1,
+            "nonWorkingInformationalDays": 0,
+            "exceptionalContributionBonus": 2,
+            "nonWorkingPenaltyApplied": false,
+            "burnoutRiskLevel": "moderate"
+          },
+          "indicators": [
+            {
+              "type": "Weekend Contribution",
+              "label": "Meaningful delivery on a non-working day",
+              "meaningfulDelivery": true
+            },
+            {
+              "type": "Burnout Watch",
+              "label": "Repeated overtime should be monitored",
+              "recognitionOnly": true
+            }
+          ]
+        },
+        "analytics": { "assignedWork": 4, "completedWork": 3, "overdueWork": 0 },
+        "risk": { "level": "Low", "probability": 27 }
+      },
+      {
+        "userId": "11111111-1111-4111-8111-111111111113",
+        "username": "Meera",
+        "score": 69,
+        "band": "Healthy",
+        "confidence": 87,
+        "computedAt": "2026-06-24T06:28:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "attendanceClosedThroughDate": "2026-06-23",
+        "dimensions": {
+          "executionReliability": { "score": 70 },
+          "deliveryEffectiveness": { "score": 71 },
+          "collaborationHealth": { "score": 73 },
+          "workSustainability": { "score": 76 },
+          "professionalDiscipline": { "score": 68 }
+        },
+        "attendance": {
+          "score": 70,
+          "metrics": {
+            "expectedWorkingDays": 16,
+            "approvedLeaveDays": 1,
+            "approvedHalfDays": 0,
+            "nonWorkingAttendanceDays": 1,
+            "nonWorkingMeaningfulDeliveryDays": 0,
+            "nonWorkingInformationalDays": 1,
+            "exceptionalContributionBonus": 0,
+            "nonWorkingPenaltyApplied": false,
+            "burnoutRiskLevel": "low"
+          },
+          "indicators": []
+        },
+        "analytics": { "assignedWork": 3, "completedWork": 2, "overdueWork": 0 },
+        "risk": { "level": "Medium", "probability": 39 }
+      },
+      {
+        "userId": "11111111-1111-4111-8111-111111111114",
+        "username": "Kabir",
+        "score": 64,
+        "band": "Watch",
+        "confidence": 82,
+        "computedAt": "2026-06-24T06:28:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "attendanceClosedThroughDate": "2026-06-23",
+        "dimensions": {
+          "executionReliability": { "score": 62 },
+          "deliveryEffectiveness": { "score": 65 },
+          "collaborationHealth": { "score": 67 },
+          "workSustainability": { "score": 71 },
+          "professionalDiscipline": { "score": 63 }
+        },
+        "attendance": {
+          "score": 66,
+          "metrics": {
+            "expectedWorkingDays": 16.5,
+            "approvedLeaveDays": 0,
+            "approvedHalfDays": 1,
+            "nonWorkingAttendanceDays": 0,
+            "nonWorkingMeaningfulDeliveryDays": 0,
+            "nonWorkingInformationalDays": 0,
+            "exceptionalContributionBonus": 0,
+            "nonWorkingPenaltyApplied": false,
+            "burnoutRiskLevel": "low"
+          },
+          "indicators": []
+        },
+        "analytics": { "assignedWork": 4, "completedWork": 1, "overdueWork": 1 },
+        "risk": { "level": "Medium", "probability": 48 }
+      }
+    ],
+    "projects": [
+      {
+        "projectId": "33333333-3333-4333-8333-333333333331",
+        "projectName": "Enterprise Dashboard Cutover",
+        "score": 82,
+        "band": "Strong",
+        "confidence": 91,
+        "computedAt": "2026-06-24T06:29:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "indexes": {
+          "deliveryHealth": 84,
+          "velocityHealth": 83,
+          "scopeStability": 78,
+          "dependencyRisk": 79,
+          "completionConfidence": 82,
+          "executionMomentum": 85,
+          "participationHealth": 80
+        },
+        "analytics": { "totalTasks": 6, "completedTasks": 5, "openTasks": 1, "blockedTasks": 0, "completionRate": 83 },
+        "risk": { "level": "Low", "probability": 24 }
+      },
+      {
+        "projectId": "33333333-3333-4333-8333-333333333332",
+        "projectName": "Attendance Intelligence Closeout",
+        "score": 66,
+        "band": "Watch",
+        "confidence": 84,
+        "computedAt": "2026-06-24T06:29:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "indexes": {
+          "deliveryHealth": 68,
+          "velocityHealth": 70,
+          "scopeStability": 64,
+          "dependencyRisk": 61,
+          "completionConfidence": 66,
+          "executionMomentum": 69,
+          "participationHealth": 67
+        },
+        "analytics": { "totalTasks": 6, "completedTasks": 4, "openTasks": 2, "blockedTasks": 1, "completionRate": 67 },
+        "risk": { "level": "Medium", "probability": 44 }
+      }
+    ],
+    "teams": [
+      {
+        "teamKey": "manager:11111111-1111-4111-8111-111111111111",
+        "managerId": "11111111-1111-4111-8111-111111111111",
+        "managerName": "Asha",
+        "score": 75,
+        "band": "Healthy",
+        "confidence": 88,
+        "computedAt": "2026-06-24T06:30:00.000Z",
+        "coverageStart": "2026-06-01",
+        "coverageEnd": "2026-06-24",
+        "attendanceClosedThroughDate": "2026-06-23",
+        "indexes": {
+          "teamPerformanceIndex": 76,
+          "deliveryReliabilityIndex": 77,
+          "collaborationIndex": 74,
+          "executionPredictability": 73,
+          "workloadBalanceIndex": 70,
+          "blockerResolutionHealth": 72,
+          "teamRiskIndex": 76
+        },
+        "risk": { "level": "Medium", "probability": 35 }
+      }
+    ],
+    "snapshots": [
+      { "scopeType": "workspace", "subjectKey": "22222222-2222-4222-8222-222222222222", "snapshotDate": "2026-06-24", "score": 77 },
+      { "scopeType": "project", "subjectKey": "33333333-3333-4333-8333-333333333331", "snapshotDate": "2026-06-24", "score": 82 },
+      { "scopeType": "project", "subjectKey": "33333333-3333-4333-8333-333333333332", "snapshotDate": "2026-06-24", "score": 66 },
+      { "scopeType": "team", "subjectKey": "manager:11111111-1111-4111-8111-111111111111", "snapshotDate": "2026-06-24", "score": 75 },
+      { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111111", "snapshotDate": "2026-06-24", "score": 81 },
+      { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111112", "snapshotDate": "2026-06-24", "score": 79 },
+      { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111113", "snapshotDate": "2026-06-24", "score": 69 },
+      { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111114", "snapshotDate": "2026-06-24", "score": 64 }
+    ]
+  },
+  "derivedTeamComparison": {
+    "classification": "derived_user_comparison",
+    "rows": [
+      { "userId": "11111111-1111-4111-8111-111111111111", "username": "Asha", "score": 81 },
+      { "userId": "11111111-1111-4111-8111-111111111112", "username": "Ravi", "score": 79 },
+      { "userId": "11111111-1111-4111-8111-111111111113", "username": "Meera", "score": 69 },
+      { "userId": "11111111-1111-4111-8111-111111111114", "username": "Kabir", "score": 64 }
+    ]
+  },
+  "expectedSnapshots": [
+    { "scopeType": "workspace", "subjectKey": "22222222-2222-4222-8222-222222222222" },
+    { "scopeType": "project", "subjectKey": "33333333-3333-4333-8333-333333333331" },
+    { "scopeType": "project", "subjectKey": "33333333-3333-4333-8333-333333333332" },
+    { "scopeType": "team", "subjectKey": "manager:11111111-1111-4111-8111-111111111111" },
+    { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111111" },
+    { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111112" },
+    { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111113" },
+    { "scopeType": "user", "subjectKey": "11111111-1111-4111-8111-111111111114" }
+  ]
+}

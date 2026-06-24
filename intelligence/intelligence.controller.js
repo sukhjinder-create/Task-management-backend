@@ -1,38 +1,82 @@
 import pool from "../db.js";
-import intelligenceService from "./intelligence.service.js";
-import { runManualMonthlyScoring } from "./manualScoring.service.js";
-import { advancedForecast } from "./forecast/forecast.engine.js";
 import { generateExecutiveSummary } from "./executiveSummary.generator.js";
 import { saveExecutiveSummary } from "../events/executive/executiveSummary.store.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
-import { getExecutionSnapshot } from "./executionSnapshot.service.js";
-import { detectSignals } from "./signal.detector.js";
 import {
   getProfitabilityOracle,
   getResignationRadar,
   getGhostWorkDetection,
   getOrgTruthMap,
 } from "./enterpriseIntelligence.service.js";
+import {
+  bootstrapWorkspaceIntelligence,
+  getUnifiedIntelligenceSnapshot,
+} from "./engine/unifiedIntelligence.engine.js";
+import { resolveCutoverResponse } from "./cutover/sourceSwitch.service.js";
+import {
+  CORE_CUTOVER_SURFACES,
+  CUTOVER_MODES,
+  listEnterpriseIntelligenceCutoverControls,
+  resolveEnterpriseIntelligenceCutoverPolicy,
+  upsertEnterpriseIntelligenceCutoverControl,
+} from "./cutover/enterpriseIntelligenceCutover.policy.js";
+import { getEnterpriseIntelligenceCutoverDiagnostics } from "./cutover/cutoverDiagnostics.service.js";
+import {
+  getLegacyAdminInsightsResponse,
+  getLegacyCoachingEffectivenessResponse,
+  getLegacyProjectsHealthResponse,
+  getLegacyTeamComparisonResponse,
+  getLegacyUserPerformanceResponse,
+  getLegacyUserProjectPerformanceResponse,
+  getLegacyUserTrendResponse,
+  getLegacyWorkspaceDashboardResponse,
+  getLegacyWorkspaceHealthResponse,
+} from "./legacy/legacyIntelligence.adapter.js";
+import {
+  buildAdminInsightsResponse,
+  buildCoachingEffectivenessResponse,
+  buildExecutiveSummaryData,
+  buildProjectsHealthResponse,
+  buildTeamComparisonResponse,
+  buildUnifiedHistoryResponse,
+  buildUserPerformanceResponse,
+  buildUserProjectPerformanceResponse,
+  buildUserTrendResponse,
+  buildWorkspaceDashboardResponse,
+  buildWorkspaceHealthResponse,
+  computeGoalWorkspaceHealth,
+} from "./analytics/intelligenceResponses.service.js";
+import { withLegacyIsolation } from "./analytics/cutoverIsolation.service.js";
 
 /**
  * USER — Monthly performance
  */
 export async function getUserPerformance(req, res) {
   try {
-    const { workspaceId } = req;
-    const userId = req.user.id;
-    const { month } = req.query;
-
-    const data = await intelligenceService.getUserPerformance({
-      workspaceId,
-      userId,
-      month,
+    const data = await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "user_performance",
+      res,
+      unified: () => buildUserPerformanceResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+        month: req.query.month,
+      }),
+      legacy: () => getLegacyUserPerformanceResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        month: req.query.month,
+      }),
     });
-
+    if (!data) {
+      return res.status(404).json({ error: "No intelligence profile available for user" });
+    }
     return res.json(data);
   } catch (err) {
     console.error("getUserPerformance error:", err);
-    res.status(500).json({ error: "Failed to fetch user performance" });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to fetch user performance" });
   }
 }
 
@@ -42,244 +86,31 @@ export async function getUserPerformance(req, res) {
  */
 export async function getAdminInsights(req, res) {
   try {
-    const role = req.user.role;
-    const userId = req.user.id;
-    const { workspaceId } = req;
     const { month } = req.query;
 
     if (!month) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
     }
-    let projectFilter = "";
-    let projectParams = [];
 
-    // 🔥 unified execution reality + goal portfolio health (parallel)
-const [executionSnapshot, goalsHealth] = await Promise.all([
-  getExecutionSnapshot(workspaceId),
-  computeGoalWorkspaceHealth(workspaceId),
-]);
-
-// ROLE-BASED DATA SCOPE
-
-if (role !== "admin") {
-  const { rows: projects } = await pool.query(
-    `
-    SELECT DISTINCT project_id
-    FROM tasks
-    WHERE workspace_id = $1
-      AND assigned_to = $2
-    `,
-    [workspaceId, userId]
-  );
-
-  const projectIds = projects.map(p => p.project_id);
-
-  if (!projectIds.length) {
-    return res.json({
-      orgScore: null,
-      leaderboard: [],
-      forecast: null,
-      riskDistribution: null
-    });
+    return res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "admin_insights",
+      res,
+      unified: () => buildAdminInsightsResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+      legacy: () => getLegacyAdminInsightsResponse({
+        workspaceId: req.workspaceId,
+        month,
+      }),
+    }));
+  } catch (err) {
+    console.error("getAdminInsights error:", err);
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to fetch admin insights" });
   }
-
-  projectFilter = ` AND project_id = ANY($3) `;
-  projectParams = [projectIds];
-}
-   const statsParams = [workspaceId, month, ...projectParams];
-
-const [{ rows }, { rows: memberRows }] = await Promise.all([
-  pool.query(
-  `
-  SELECT
-    COUNT(*) AS user_count,
-    AVG(score)::numeric(5,2) AS average_score,
-    COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
-    COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
-    COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
-    COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
-    COUNT(*) FILTER (WHERE score < 50) AS high_risk
-  FROM workspace_monthly_scores
-  WHERE workspace_id = $1
-    AND month = $2
-    ${projectFilter}
-  `,
-  statsParams
-  ),
-  pool.query(
-    `SELECT COUNT(*)::int AS total FROM users
-     WHERE workspace_id = $1
-       AND (is_system IS NULL OR is_system = false)
-       AND role != 'system'`,
-    [workspaceId]
-  ),
-]);
-
-    let stats = rows[0];
-    let effectiveMonth = month;
-
-    // If no scores computed for the requested month yet, fall back to most
-    // recent month that has data, and fire background scoring for current month.
-    if (Number(stats.user_count) === 0) {
-      const { rows: recentMonthRows } = await pool.query(
-        `SELECT month FROM workspace_monthly_scores
-         WHERE workspace_id = $1
-         GROUP BY month
-         ORDER BY month DESC
-         LIMIT 1`,
-        [workspaceId]
-      );
-      if (recentMonthRows.length > 0) {
-        effectiveMonth = recentMonthRows[0].month;
-        const fallbackParams = [workspaceId, effectiveMonth, ...projectParams];
-        const { rows: fallbackRows } = await pool.query(
-          `SELECT
-            COUNT(*) AS user_count,
-            AVG(score)::numeric(5,2) AS average_score,
-            COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
-            COUNT(*) FILTER (WHERE score < 50) AS at_risk_users,
-            COUNT(*) FILTER (WHERE score >= 80) AS low_risk,
-            COUNT(*) FILTER (WHERE score BETWEEN 50 AND 79) AS medium_risk,
-            COUNT(*) FILTER (WHERE score < 50) AS high_risk
-          FROM workspace_monthly_scores
-          WHERE workspace_id = $1 AND month = $2 ${projectFilter}`,
-          fallbackParams
-        );
-        if (Number(fallbackRows[0]?.user_count) > 0) {
-          stats = fallbackRows[0];
-        }
-      }
-      // Kick off background scoring for the requested month (non-blocking)
-      runManualMonthlyScoring({ workspaceId, month, triggeredBy: 'auto' })
-        .catch(err => console.warn('[intelligence] Background auto-scoring:', err.message));
-    }
-
-    // 🔥 Fetch last 6 months org scores for forecasting
-    const historyParams =
-  role === "admin"
-    ? [workspaceId]
-    : [workspaceId, projectParams[0]];
-
-const historyQuery =
-  role === "admin"
-    ? `
-      SELECT month, AVG(score) AS avg_score
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-      GROUP BY month
-      ORDER BY month ASC
-      LIMIT 6
-    `
-    : `
-      SELECT month, AVG(score) AS avg_score
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-        AND project_id = ANY($2)
-      GROUP BY month
-      ORDER BY month ASC
-      LIMIT 6
-    `;
-
-const history = await pool.query(historyQuery, historyParams);
-
-const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
-
-const forecast =
-  advancedForecast(scoreHistory, executionSnapshot);
-
-// use deterministic reasoning from engine
-let forecastReasoning = forecast.reasoning || null;
-
-    // 🔥 Leaderboard (Top performers)
-
-    const leaderboardParams = [workspaceId, effectiveMonth, ...projectParams];
-
-const leaderboardResult = await pool.query(
-`
-SELECT
-  u.id AS userId,
-  u.username,
-  wms.score
-FROM workspace_monthly_scores wms
-JOIN users u ON u.id = wms.user_id
-WHERE wms.workspace_id = $1
-  AND wms.month = $2
-  AND (u.is_system IS NULL OR u.is_system = false)
-  AND u.role != 'system'
-  ${projectFilter}
-ORDER BY wms.score DESC
-LIMIT 5
-`,
-leaderboardParams
-);
-
-  // -----------------------------
-// REAL EXECUTION INTELLIGENCE
-// -----------------------------
-const completionRate =
-  executionSnapshot.completionRate * 100;
-
-let executionPressure = "Stable";
-let executionRisk = "Low";
-
-if (completionRate < 40) {
-  executionPressure = "High";
-  executionRisk = "High";
-}
-else if (completionRate < 65) {
-  executionPressure = "Moderate";
-  executionRisk = "Medium";
-}
-
-// ── Org-level signals (execution + goals portfolio) ──────────────────────
-const orgSignals = detectSignals(
-  { executionDiscipline: completionRate },
-  scoreHistory,
-  executionSnapshot,
-  goalsHealth
-);
-
-    return res.json({
-  orgScore: {
-    averageScore: stats.average_score
-      ? Number(stats.average_score)
-      : null,
-    userCount: Number(memberRows[0]?.total ?? stats.user_count),
-    highPerformers: Number(stats.high_performers),
-    atRiskUsers: Number(stats.at_risk_users),
-  },
-
-  coachingEffectiveness: {},
-
-  riskDistribution: {
-    lowRisk: Number(stats.low_risk),
-    mediumRisk: Number(stats.medium_risk),
-    highRisk: Number(stats.high_risk),
-  },
-
-  forecast: {
-    ...forecast,
-    reasoning: forecastReasoning
-  },
-
-  leaderboard: leaderboardResult.rows,
-
-  // ⭐ REAL CONTROL CENTER DATA
-  execution: {
-    completionRate: Math.round(completionRate),
-    backlog:
-      executionSnapshot.totalWork -
-      executionSnapshot.completedWork,
-    pressure: executionPressure,
-    risk: executionRisk
-  },
-
-  signals: orgSignals,
-});
-} catch (err) {
-  console.error("getAdminInsights error:", err);
-  res.status(500).json({ error: "Failed to fetch admin insights" });
-}
 }
 
 // ─── GOAL WORKSPACE HEALTH (used by intelligence layer & executive summary) ────
@@ -287,93 +118,15 @@ export async function getGoalWorkspaceHealth(req, res) {
   try {
     const { workspaceId } = req;
     const goalsHealth = await computeGoalWorkspaceHealth(workspaceId);
-    return res.json(goalsHealth);
+    return res.json(withLegacyIsolation(goalsHealth, {
+      surface: "okr_goal_health",
+      reason: "OKR pace health is a goal-module signal and is excluded from core enterprise intelligence cutover authority.",
+      replacement: "enterprise workspace/project/user intelligence for dashboard performance scoring",
+    }));
   } catch (err) {
     console.error("getGoalWorkspaceHealth error:", err);
     res.status(500).json({ error: "Failed to fetch goals health" });
   }
-}
-
-/*
-  Internal helper — computes OKR portfolio health for a workspace.
-  Mirrors the logic in GET /objectives/workspace/health so the intelligence
-  layer can call it directly without an HTTP round-trip.
-*/
-/*
-  Internal helper — computes goal portfolio health for a workspace.
-  Mirrors the logic in GET /goals/workspace/health so the intelligence
-  layer can call it directly without an HTTP round-trip.
-*/
-async function computeGoalWorkspaceHealth(workspaceId) {
-  const { rows: objectives } = await pool.query(
-    `SELECT id, title, status, progress, time_period, created_at
-     FROM okr_objectives WHERE workspace_id = $1`,
-    [workspaceId]
-  );
-
-  if (objectives.length === 0) {
-    return {
-      totalGoals: 0, byStatus: {}, atRiskCount: 0,
-      stalledCount: 0, avgProgress: 0, avgHealthScore: null,
-      behindCount: 0, completedCount: 0
-    };
-  }
-
-  const now = new Date();
-
-  const summaries = objectives.map(obj => {
-    const tp = (obj.time_period || "").toUpperCase();
-    const yearStr = tp.match(/(\d{4})/);
-    const year = yearStr ? parseInt(yearStr[1]) : now.getFullYear();
-    let startDate, endDate;
-
-    if      (tp.includes("Q1")) { startDate = new Date(year, 0, 1);  endDate = new Date(year, 2, 31); }
-    else if (tp.includes("Q2")) { startDate = new Date(year, 3, 1);  endDate = new Date(year, 5, 30); }
-    else if (tp.includes("Q3")) { startDate = new Date(year, 6, 1);  endDate = new Date(year, 8, 30); }
-    else if (tp.includes("Q4")) { startDate = new Date(year, 9, 1);  endDate = new Date(year, 11, 31); }
-    else if (tp.includes("H1")) { startDate = new Date(year, 0, 1);  endDate = new Date(year, 5, 30); }
-    else if (tp.includes("H2")) { startDate = new Date(year, 6, 1);  endDate = new Date(year, 11, 31); }
-    else                         { startDate = new Date(year, 0, 1);  endDate = new Date(year, 11, 31); }
-
-    const totalDays       = Math.max(1, (endDate - startDate) / 86400000);
-    const daysElapsed     = Math.max(0, Math.min(totalDays, (now - startDate) / 86400000));
-    const expectedProgress = Math.min(100, (daysElapsed / totalDays) * 100);
-    const actualProgress   = Number(obj.progress) || 0;
-    const progressGap      = actualProgress - expectedProgress;
-
-    let healthScore = 50;
-    if      (progressGap >= 15)  healthScore += 25;
-    else if (progressGap >= 5)   healthScore += 15;
-    else if (progressGap >= -10) healthScore += 0;
-    else if (progressGap >= -20) healthScore -= 15;
-    else                         healthScore -= 30;
-    healthScore = Math.max(0, Math.min(100, Math.round(healthScore)));
-
-    return {
-      status:        obj.status,
-      actualProgress,
-      expectedProgress,
-      progressGap,
-      healthScore,
-      isStalled:  actualProgress === 0 && daysElapsed > 14,
-      isBehind:   progressGap < -10,
-      isComplete: actualProgress >= 100,
-    };
-  });
-
-  const byStatus = {};
-  for (const s of summaries) { byStatus[s.status] = (byStatus[s.status] || 0) + 1; }
-
-  return {
-    totalGoals: objectives.length,
-    byStatus,
-    atRiskCount:    summaries.filter(s => s.status === "at_risk" || s.status === "off_track").length,
-    stalledCount:   summaries.filter(s => s.isStalled).length,
-    behindCount:    summaries.filter(s => s.isBehind).length,
-    completedCount: summaries.filter(s => s.isComplete).length,
-    avgProgress:    Math.round(summaries.reduce((a, s) => a + s.actualProgress, 0) / summaries.length),
-    avgHealthScore: Math.round(summaries.reduce((a, s) => a + s.healthScore, 0) / summaries.length),
-  };
 }
 
 /**
@@ -388,87 +141,12 @@ export async function getExecutiveSummary(req, res) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
     }
 
-    // ===== Collect structured data =====
-    const { rows } = await pool.query(`
-      SELECT
-        COUNT(*) AS user_count,
-        AVG(score) AS avg_score,
-        COUNT(*) FILTER (WHERE score >= 75) AS high_performers,
-        COUNT(*) FILTER (WHERE score <= 40) AS at_risk
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-        AND month = $2
-    `, [workspaceId, month]);
-
-    const risk = await pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE score > 70) AS low_risk,
-        COUNT(*) FILTER (WHERE score BETWEEN 41 AND 70) AS medium_risk,
-        COUNT(*) FILTER (WHERE score <= 40) AS high_risk
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-        AND month = $2
-    `, [workspaceId, month]);
-
-    const leaderboard = await pool.query(`
-      SELECT user_id, score
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-        AND month = $2
-      ORDER BY score DESC
-      LIMIT 5
-    `, [workspaceId, month]);
-
-    // ===== Forecast calculation =====
-const history = await pool.query(`
-  SELECT month, AVG(score) AS avg_score
-  FROM workspace_monthly_scores
-  WHERE workspace_id = $1
-  GROUP BY month
-  ORDER BY month ASC
-  LIMIT 6
-`, [workspaceId]);
-
-const scoreHistory = history.rows.map(r => Number(r.avg_score) || 0);
-
-    const stats = rows[0];
-
-  // unified execution reality + goal portfolio health (run in parallel)
-  const [executionSnapshot, goalsHealth] = await Promise.all([
-    getExecutionSnapshot(workspaceId),
-    computeGoalWorkspaceHealth(workspaceId),
-  ]);
-
-    const data = {
-  month,
-
-  execution: executionSnapshot,
-
-  executionContext: {
-    completionRate: Math.round(executionSnapshot.completionRate * 100),
-    backlog: executionSnapshot.totalWork - executionSnapshot.completedWork,
-  },
-
-  orgScore: {
-    averageScore: Number(stats.avg_score) || 0,
-    userCount: Number(stats.user_count) || 0,
-    highPerformers: Number(stats.high_performers) || 0,
-    atRiskUsers: Number(stats.at_risk) || 0,
-  },
-
-  riskDistribution: {
-    low_risk: Number(risk.rows[0].low_risk) || 0,
-    medium_risk: Number(risk.rows[0].medium_risk) || 0,
-    high_risk: Number(risk.rows[0].high_risk) || 0,
-  },
-
-  leaderboard: leaderboard.rows,
-
-  forecast: advancedForecast(scoreHistory, executionSnapshot),
-
-  // Goal portfolio context — injected into the LLM prompt
-  okrHealth: goalsHealth,
-};
+    const data = await buildExecutiveSummaryData({
+      workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      month,
+    });
 
     // ===== Check existing summary =====
     const existing = await pool.query(`
@@ -606,18 +284,25 @@ export async function getCoachingEffectiveness(req, res) {
       return res.status(403).json({ error: "Admin access required" });
     }
 
-    const { workspaceId } = req;
-    const { month } = req.query;
-
-    const data = await intelligenceService.getCoachingEffectiveness({
-      workspaceId,
-      month,
-    });
-
-    return res.json(data);
+    return res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "coaching_effectiveness",
+      res,
+      unified: () => buildCoachingEffectivenessResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+        month: req.query.month,
+      }),
+      legacy: () => getLegacyCoachingEffectivenessResponse({
+        workspaceId: req.workspaceId,
+        month: req.query.month,
+      }),
+    }));
   } catch (err) {
     console.error("getCoachingEffectiveness error:", err);
-    res.status(500).json({ error: "Failed to fetch coaching effectiveness" });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to fetch coaching effectiveness" });
   }
 }
 
@@ -637,79 +322,228 @@ export async function runMonthlyScoring(req, res) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
     }
 
-    const result = await runManualMonthlyScoring({
+    const result = await bootstrapWorkspaceIntelligence({
       workspaceId,
-      month,
-      triggeredBy: req.user.id,
+      windowDays: 30,
     });
 
     emitWorkspaceIntelligenceUpdate(workspaceId, {
-  type: "monthly-scoring-updated",
-  month,
-});
+      type: "enterprise-intelligence-refreshed",
+      month,
+    });
 
     return res.json({
-      message: "Monthly scoring executed",
-      result,
+      message: "Enterprise intelligence refreshed",
+      result: {
+        workspace: result.workspace,
+        users: result.users.length,
+        projects: result.projects.length,
+        teams: result.teams.length,
+      },
     });
   } catch (err) {
     console.error("Manual scoring error:", err);
-    res.status(500).json({ error: "Failed to run monthly scoring" });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to refresh enterprise intelligence" });
+  }
+}
+
+export async function getUnifiedSnapshot(req, res) {
+  try {
+    const snapshot = await getUnifiedIntelligenceSnapshot({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+    });
+
+    return res.json({
+      source: "enterprise_intelligence",
+      ...snapshot,
+    });
+  } catch (err) {
+    console.error("getUnifiedSnapshot error:", err);
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to fetch unified intelligence snapshot" });
+  }
+}
+
+export async function getUnifiedHistory(req, res) {
+  try {
+    const scopeType = String(req.query.scopeType || (req.user.role === "admin" ? "workspace" : "user"));
+    const subjectKey = String(
+      req.query.subjectKey ||
+      (scopeType === "workspace" ? req.workspaceId : req.user.id)
+    );
+
+    if (scopeType === "user" && req.user.role !== "admin" && subjectKey !== String(req.user.id)) {
+      return res.status(403).json({ error: "Not allowed to view this user history" });
+    }
+    if (scopeType === "workspace" && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Workspace history requires admin access" });
+    }
+
+    return res.json(await buildUnifiedHistoryResponse({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      scopeType,
+      subjectKey,
+      range: req.query.range || "30d",
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+    }));
+  } catch (err) {
+    console.error("getUnifiedHistory error:", err);
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to fetch unified intelligence history" });
+  }
+}
+
+export async function getCutoverStatus(req, res) {
+  try {
+    if (!["admin", "super_admin", "platform_admin"].includes(req.user.role)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    const controls = await listEnterpriseIntelligenceCutoverControls({
+      workspaceId: req.workspaceId,
+    });
+    const policies = await Promise.all(
+      CORE_CUTOVER_SURFACES.map(async (surface) => resolveEnterpriseIntelligenceCutoverPolicy({
+        workspaceId: req.workspaceId,
+        surface,
+      }))
+    );
+
+    return res.json({
+      source: "enterprise_intelligence_cutover_controls",
+      workspaceId: req.workspaceId,
+      modes: [
+        CUTOVER_MODES.LEGACY,
+        CUTOVER_MODES.SHADOW,
+        CUTOVER_MODES.UNIFIED,
+      ],
+      defaultMode: controls.defaultMode,
+      controls: controls.controls,
+      policies,
+      rollback: {
+        supported: true,
+        action: "Set the affected surface or all_core to legacy.",
+      },
+    });
+  } catch (err) {
+    console.error("getCutoverStatus error:", err);
+    const status = err?.code === "INTELLIGENCE_CUTOVER_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to fetch intelligence cutover status" });
+  }
+}
+
+export async function getCutoverHealth(req, res) {
+  try {
+    if (!["admin", "super_admin", "platform_admin"].includes(req.user.role)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    return res.json(await getEnterpriseIntelligenceCutoverDiagnostics({
+      workspaceId: req.workspaceId,
+    }));
+  } catch (err) {
+    console.error("getCutoverHealth error:", err);
+    res.status(500).json({ error: err.message || "Failed to fetch intelligence cutover health" });
+  }
+}
+
+export async function updateCutoverControl(req, res) {
+  try {
+    if (!["admin", "super_admin", "platform_admin"].includes(req.user.role)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    const { surface, mode, reason, metadata, global } = req.body || {};
+    if (!surface || !mode) {
+      return res.status(400).json({ error: "surface and mode are required" });
+    }
+
+    const globalAllowed = ["super_admin", "platform_admin"].includes(req.user.role);
+    if (global === true && !globalAllowed) {
+      return res.status(403).json({ error: "Global cutover controls require platform admin access" });
+    }
+
+    const control = await upsertEnterpriseIntelligenceCutoverControl({
+      workspaceId: req.workspaceId,
+      surface,
+      mode,
+      reason: reason || null,
+      metadata: metadata && typeof metadata === "object" ? metadata : {},
+      updatedBy: req.user.id,
+      global: global === true,
+    });
+
+    const policy = await resolveEnterpriseIntelligenceCutoverPolicy({
+      workspaceId: req.workspaceId,
+      surface: surface === "all_core" ? "dashboard_overview" : surface,
+    });
+
+    return res.json({
+      source: "enterprise_intelligence_cutover_controls",
+      control,
+      effectivePolicy: policy,
+    });
+  } catch (err) {
+    console.error("updateCutoverControl error:", err);
+    const status = err?.code === "INVALID_CUTOVER_SURFACE" || err?.code === "INVALID_CUTOVER_MODE"
+      ? 400
+      : err?.code === "INTELLIGENCE_CUTOVER_SCHEMA_MISSING"
+        ? 503
+        : 500;
+    res.status(status).json({ error: err.message || "Failed to update intelligence cutover control" });
   }
 }
 
 export async function getUserTrend(req, res) {
   try {
-    const workspaceId = req.workspaceId;
-    const userId = req.user.id;
-
-    const { rows } = await pool.query(`
-      SELECT month, score
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-        AND user_id = $2
-      ORDER BY month ASC
-      LIMIT 6
-    `, [workspaceId, userId]);
-
-    const scores = rows.map(r => r.score);
-
-    const forecast = advancedForecast(scores);
-
-    res.json({
-      history: rows,
-      forecast
-    });
-
+    res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "user_trend",
+      res,
+      unified: () => buildUserTrendResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+        range: req.query.range,
+      }),
+      legacy: () => getLegacyUserTrendResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+      }),
+    }));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to get trend" });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to get trend" });
   }
 }
 
 export async function getUserProjectPerformance(req, res) {
   try {
-    const workspaceId = req.workspaceId;
-    const userId = req.user.id;
-    const month = new Date().toISOString().slice(0, 7);
-    const { rows } = await pool.query(`
-      SELECT
-  w.project_id,
-  p.name AS project_name,
-  w.score
-FROM workspace_project_monthly_scores w
-JOIN projects p ON p.id = w.project_id
-WHERE w.workspace_id = $1
-  AND w.user_id = $2
-  AND w.month = $3
-ORDER BY w.score DESC
-    `, [workspaceId, userId, month]);
-
-    res.json(rows);
-
+    res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "user_project_performance",
+      res,
+      unified: () => buildUserProjectPerformanceResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+      legacy: () => getLegacyUserProjectPerformanceResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+      }),
+    }));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to get project performance" });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || "Failed to get project performance" });
   }
 }
 
@@ -718,60 +552,24 @@ ORDER BY w.score DESC
  */
 export async function getProjectsHealth(req, res) {
   try {
-    const { workspaceId } = req;
-
-    const { rows } = await pool.query(`
-      SELECT
-        p.id AS project_id,
-        p.name AS project_name,
-        COUNT(t.id) AS total_tasks,
-        COUNT(t.id) FILTER (WHERE t.status = 'completed') AS completed_tasks,
-        COUNT(t.id) FILTER (WHERE t.status NOT IN ('completed','cancelled') AND t.due_date < NOW()) AS overdue_tasks,
-        COUNT(t.id) FILTER (WHERE t.status NOT IN ('completed','cancelled')) AS active_tasks,
-        ROUND(
-          100.0 * COUNT(t.id) FILTER (WHERE t.status = 'completed') /
-          NULLIF(COUNT(t.id), 0)
-        ) AS completion_rate
-      FROM projects p
-      LEFT JOIN tasks t ON t.project_id = p.id AND t.workspace_id = $1
-      WHERE p.workspace_id = $1
-      GROUP BY p.id, p.name
-      ORDER BY completion_rate DESC NULLS LAST
-    `, [workspaceId]);
-
-    const projects = rows.map(r => {
-      const completionRate = Number(r.completion_rate) || 0;
-      const overdueTasks = Number(r.overdue_tasks) || 0;
-      const totalTasks = Number(r.total_tasks) || 0;
-      const overdueRatio = totalTasks > 0 ? overdueTasks / totalTasks : 0;
-
-      // Health score: start at 100, penalise overdue and low completion
-      const healthScore = Math.max(0, Math.round(
-        completionRate * 0.6 +
-        (1 - overdueRatio) * 100 * 0.4
-      ));
-
-      const status =
-        healthScore >= 75 ? 'healthy' :
-        healthScore >= 50 ? 'at_risk' : 'critical';
-
-      return {
-        projectId: r.project_id,
-        projectName: r.project_name,
-        totalTasks,
-        completedTasks: Number(r.completed_tasks) || 0,
-        activeTasks: Number(r.active_tasks) || 0,
-        overdueTasks,
-        completionRate,
-        healthScore,
-        status,
-      };
-    });
-
-    return res.json({ projects });
+    return res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "projects_health",
+      res,
+      unified: () => buildProjectsHealthResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+      legacy: () => getLegacyProjectsHealthResponse({
+        workspaceId: req.workspaceId,
+        month: req.query.month,
+      }),
+    }));
   } catch (err) {
     console.error('getProjectsHealth error:', err);
-    res.status(500).json({ error: 'Failed to fetch projects health' });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || 'Failed to fetch projects health' });
   }
 }
 
@@ -780,55 +578,31 @@ export async function getProjectsHealth(req, res) {
  */
 export async function getTeamComparison(req, res) {
   try {
-    const { workspaceId } = req;
     const { month } = req.query;
 
     if (!month) {
       return res.status(400).json({ error: 'month is required (YYYY-MM)' });
     }
 
-    const { rows } = await pool.query(`
-      SELECT
-        u.id AS user_id,
-        u.username,
-        u.avatar_url,
-        COALESCE(wms.score, 0) AS score,
-        COUNT(t.id) FILTER (WHERE t.status = 'completed') AS completed_tasks,
-        COUNT(t.id) FILTER (WHERE t.status NOT IN ('completed','cancelled') AND t.due_date < NOW()) AS overdue_tasks,
-        COUNT(t.id) AS total_tasks
-      FROM users u
-      LEFT JOIN workspace_monthly_scores wms
-        ON wms.user_id = u.id AND wms.workspace_id = $1 AND wms.month = $2
-      LEFT JOIN tasks t
-        ON t.assigned_to = u.id AND t.workspace_id = $1
-      WHERE u.workspace_id = $1
-        AND u.role IN ('user', 'manager', 'admin')
-        AND (u.is_system IS NULL OR u.is_system = false)
-      GROUP BY u.id, u.username, u.avatar_url, wms.score
-      ORDER BY score DESC
-    `, [workspaceId, month]);
-
-    const team = rows.map(r => {
-      const score = Number(r.score) || 0;
-      const riskLevel =
-        score >= 80 ? 'low' :
-        score >= 50 ? 'medium' : 'high';
-      return {
-        userId: r.user_id,
-        username: r.username,
-        avatarUrl: r.avatar_url || null,
-        score,
-        completedTasks: Number(r.completed_tasks) || 0,
-        overdueTasks: Number(r.overdue_tasks) || 0,
-        totalTasks: Number(r.total_tasks) || 0,
-        riskLevel,
-      };
-    });
-
-    return res.json({ month, team });
+    return res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "team_comparison",
+      res,
+      unified: () => buildTeamComparisonResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+        month,
+      }),
+      legacy: () => getLegacyTeamComparisonResponse({
+        workspaceId: req.workspaceId,
+        month,
+      }),
+    }));
   } catch (err) {
     console.error('getTeamComparison error:', err);
-    res.status(500).json({ error: 'Failed to fetch team comparison' });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || 'Failed to fetch team comparison' });
   }
 }
 
@@ -838,91 +612,23 @@ export async function getTeamComparison(req, res) {
  */
 export async function getWorkspaceDashboard(req, res) {
   try {
-    const { workspaceId } = req;
-    const month = new Date().toISOString().slice(0, 7);
-
-    const [tasksRes, autopilotRes, healthRes, scoresRes] = await Promise.all([
-      // Task stats
-      pool.query(`
-        SELECT
-          COUNT(*) AS total,
-          COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-          COUNT(*) FILTER (WHERE status = 'in-progress') AS in_progress,
-          COUNT(*) FILTER (WHERE status = 'pending') AS pending,
-          COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled') AND due_date < NOW()) AS overdue
-        FROM tasks WHERE workspace_id = $1
-      `, [workspaceId]),
-
-      // Autopilot pending actions
-      pool.query(`
-        SELECT
-          COUNT(*) FILTER (WHERE status = 'pending') AS pending_actions,
-          COUNT(*) FILTER (WHERE action_type = 'handle_overdue') AS overdue_actions,
-          COUNT(*) FILTER (WHERE action_type = 'escalate') AS escalated_actions
-        FROM autopilot_actions WHERE workspace_id = $1
-      `, [workspaceId]),
-
-      // Workspace health score
-      pool.query(`
-        SELECT health_score FROM workspace_health WHERE workspace_id = $1 LIMIT 1
-      `, [workspaceId]),
-
-      // Monthly score summary
-      pool.query(`
-        SELECT
-          ROUND(AVG(score)::numeric, 1) AS avg_score,
-          COUNT(*) FILTER (WHERE score >= 80) AS high_performers,
-          COUNT(*) FILTER (WHERE score < 50) AS at_risk
-        FROM workspace_monthly_scores
-        WHERE workspace_id = $1 AND month = $2
-      `, [workspaceId, month]),
-    ]);
-
-    const tasks = tasksRes.rows[0] || {};
-    const autopilot = autopilotRes.rows[0] || {};
-    const scores = scoresRes.rows[0] || {};
-
-    const completionRate = Number(tasks.total) > 0
-      ? Math.round(100 * Number(tasks.completed) / Number(tasks.total))
-      : 0;
-
-    // Compute health score from real task data when no workspace_health record exists
-    let healthScore = healthRes.rows[0]?.health_score != null
-      ? Number(healthRes.rows[0].health_score)
-      : null;
-    if (healthScore === null) {
-      const total = Number(tasks.total) || 0;
-      if (total > 0) {
-        const overdueRatio = Number(tasks.overdue) / total;
-        healthScore = Math.max(0, Math.round(completionRate * 0.6 + (1 - overdueRatio) * 40));
-      }
-    }
-
-    return res.json({
-      month,
-      healthScore,
-      tasks: {
-        total: Number(tasks.total) || 0,
-        completed: Number(tasks.completed) || 0,
-        inProgress: Number(tasks.in_progress) || 0,
-        pending: Number(tasks.pending) || 0,
-        overdue: Number(tasks.overdue) || 0,
-        completionRate,
-      },
-      performance: {
-        avgScore: Number(scores.avg_score) || null,
-        highPerformers: Number(scores.high_performers) || 0,
-        atRisk: Number(scores.at_risk) || 0,
-      },
-      autopilot: {
-        pendingActions: Number(autopilot.pending_actions) || 0,
-        overdueActions: Number(autopilot.overdue_actions) || 0,
-        escalatedActions: Number(autopilot.escalated_actions) || 0,
-      },
-    });
+    return res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "workspace_dashboard",
+      res,
+      unified: () => buildWorkspaceDashboardResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+      legacy: () => getLegacyWorkspaceDashboardResponse({
+        workspaceId: req.workspaceId,
+      }),
+    }));
   } catch (err) {
     console.error('getWorkspaceDashboard error:', err);
-    res.status(500).json({ error: 'Failed to fetch workspace dashboard' });
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({ error: err.message || 'Failed to fetch workspace dashboard' });
   }
 }
 
@@ -932,44 +638,24 @@ export async function getWorkspaceDashboard(req, res) {
  */
 export async function getWorkspaceHealth(req, res) {
   try {
-    const workspaceId = req.workspaceId;
-
-    const { rows } = await pool.query(
-      `
-      SELECT health_score
-      FROM workspace_health
-      WHERE workspace_id = $1
-      LIMIT 1
-      `,
-      [workspaceId]
-    );
-
-    if (rows.length > 0) {
-      return res.json({ healthScore: Number(rows[0].health_score) });
-    }
-
-    // No health record yet — compute from real task data
-    const { rows: taskRows } = await pool.query(`
-      SELECT
-        COUNT(*) AS total,
-        COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-        COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled') AND due_date < NOW()) AS overdue
-      FROM tasks WHERE workspace_id = $1
-    `, [workspaceId]);
-
-    const total = Number(taskRows[0]?.total || 0);
-    if (total === 0) {
-      return res.json({ healthScore: null });
-    }
-    const completionRate = Math.round(100 * Number(taskRows[0].completed) / total);
-    const overdueRatio = Number(taskRows[0].overdue) / total;
-    const computed = Math.max(0, Math.round(completionRate * 0.6 + (1 - overdueRatio) * 40));
-    return res.json({ healthScore: computed });
-
+    return res.json(await resolveCutoverResponse({
+      workspaceId: req.workspaceId,
+      surface: "workspace_health",
+      res,
+      unified: () => buildWorkspaceHealthResponse({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+      legacy: () => getLegacyWorkspaceHealthResponse({
+        workspaceId: req.workspaceId,
+      }),
+    }));
   } catch (err) {
     console.error("getWorkspaceHealth error:", err);
-    res.status(500).json({
-      error: "Failed to fetch workspace health"
+    const status = err?.code === "INTELLIGENCE_SCHEMA_MISSING" ? 503 : 500;
+    res.status(status).json({
+      error: err.message || "Failed to fetch workspace health"
     });
   }
 }
@@ -984,7 +670,11 @@ export async function getProfitabilityOracleController(req, res) {
       return res.status(403).json({ error: "Admin or manager access required" });
     }
     const data = await getProfitabilityOracle(req.workspaceId);
-    res.json(data);
+    res.json(withLegacyIsolation(data, {
+      surface: "enterprise_specialty_profitability_oracle",
+      reason: "Specialty profitability analytics use direct project/task heuristics and are not authoritative enterprise performance scores.",
+      replacement: "project_intelligence and workspace_intelligence",
+    }));
   } catch (err) {
     console.error("getProfitabilityOracle error:", err);
     res.status(500).json({ error: "Failed to compute profitability oracle" });
@@ -997,7 +687,11 @@ export async function getResignationRadarController(req, res) {
       return res.status(403).json({ error: "Admin access required" });
     }
     const data = await getResignationRadar(req.workspaceId);
-    res.json(data);
+    res.json(withLegacyIsolation(data, {
+      surface: "enterprise_specialty_resignation_radar",
+      reason: "Specialty retention analytics use direct attendance/task/comment heuristics and are not authoritative enterprise performance scores.",
+      replacement: "user_intelligence risk and work sustainability indicators",
+    }));
   } catch (err) {
     console.error("getResignationRadar error:", err);
     res.status(500).json({ error: "Failed to compute resignation radar" });
@@ -1010,7 +704,11 @@ export async function getGhostWorkController(req, res) {
       return res.status(403).json({ error: "Admin access required" });
     }
     const data = await getGhostWorkDetection(req.workspaceId);
-    res.json(data);
+    res.json(withLegacyIsolation(data, {
+      surface: "enterprise_specialty_ghost_work",
+      reason: "Specialty integrity analytics use direct attendance/output heuristics and are not authoritative enterprise performance scores.",
+      replacement: "user_intelligence delivery, attendance, and sustainability indicators",
+    }));
   } catch (err) {
     console.error("getGhostWorkDetection error:", err);
     res.status(500).json({ error: "Failed to run ghost work detection" });
@@ -1023,7 +721,11 @@ export async function getOrgTruthMapController(req, res) {
       return res.status(403).json({ error: "Admin or manager access required" });
     }
     const data = await getOrgTruthMap(req.workspaceId);
-    res.json(data);
+    res.json(withLegacyIsolation(data, {
+      surface: "enterprise_specialty_org_truth_map",
+      reason: "Specialty organizational archetype analytics use direct collaboration/output heuristics and are excluded from core dashboard scoring authority.",
+      replacement: "team_intelligence and workspace_intelligence",
+    }));
   } catch (err) {
     console.error("getOrgTruthMap error:", err);
     res.status(500).json({ error: "Failed to compute org truth map" });

@@ -152,6 +152,13 @@ export async function deleteMigrationImport(importId, workspaceId) {
     if (source === "asana" || source === "youtrack") {
       const projectId = metadata.projectId;
       if (projectId) {
+        await client.query(
+          `DELETE FROM integration_task_mappings
+           WHERE workspace_id = $1
+             AND provider = $2
+             AND internal_task_id IN (SELECT id FROM tasks WHERE project_id = $3)`,
+          [workspaceId, source, projectId]
+        );
         // Delete tasks first (comments, attachments cascade from tasks)
         await client.query(
           `DELETE FROM tasks WHERE project_id = $1`,

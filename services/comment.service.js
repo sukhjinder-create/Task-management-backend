@@ -4,6 +4,7 @@ import { notifyUser } from "./notification.service.js";
 import { getTaskById } from "./task.service.js";
 import { getUserByUsername } from "../repositories/user.repository.js";
 import { logAudit } from "./audit.service.js";
+import { queueTaskImpact } from "../intelligence/realtime/recalculation.service.js";
 
 export async function createComment({ task_id, comment_text, user, workspaceId }) {
   if (!task_id || !comment_text || !user?.id || !workspaceId) {
@@ -150,6 +151,22 @@ export async function createComment({ task_id, comment_text, user, workspaceId }
   } catch (err) {
     console.error("[notifications] createComment failed:", err.message);
   }
+
+  queueTaskImpact({
+    workspaceId,
+    taskId: task.id,
+    reason: "comment_added",
+    userIds: [user.id],
+    projectIds: [task.project_id],
+    metadata: {
+      commentId: comment.id,
+      commentLength: String(comment_text).length,
+    },
+  }).catch((err) => {
+    if (err?.code !== "INTELLIGENCE_SCHEMA_MISSING") {
+      console.warn("[enterprise-intelligence] comment impact queue failed:", err.message);
+    }
+  });
 
   return comment;
 }

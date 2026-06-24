@@ -9,6 +9,10 @@ import {
 } from "../repositories/task.repository.js";
 import projectRepository from "../repositories/project.repository.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
+import {
+  queueImpactedIntelligenceRecalculation,
+  queueTaskImpact,
+} from "../intelligence/realtime/recalculation.service.js";
 import { getWatchers } from "./watchers.service.js";
 import { logAudit } from "./audit.service.js";
 
@@ -58,6 +62,31 @@ async function assertProjectInWorkspace(projectId, workspaceId) {
   }
 
   return project;
+}
+
+function queueTaskIntelligence({ workspaceId, taskId, reason, userIds = [], projectIds = [], metadata = {} }) {
+  queueTaskImpact({
+    workspaceId,
+    taskId,
+    reason,
+    userIds,
+    projectIds,
+    metadata,
+  }).catch((err) => {
+    if (err?.code !== "INTELLIGENCE_SCHEMA_MISSING") {
+      console.warn("[enterprise-intelligence] task impact queue failed:", err.message);
+    }
+  });
+}
+
+async function queueTaskIntelligenceByTaskId(taskId, reason, metadata = {}) {
+  const { rows } = await pool.query(
+    `SELECT workspace_id FROM tasks WHERE id = $1 LIMIT 1`,
+    [taskId]
+  ).catch(() => ({ rows: [] }));
+  const workspaceId = rows[0]?.workspace_id;
+  if (!workspaceId) return;
+  queueTaskIntelligence({ workspaceId, taskId, reason, metadata });
 }
 
 async function logProjectHistory({
@@ -237,6 +266,18 @@ emitWorkspaceIntelligenceUpdate(workspaceId, {
   type: "task-created",
   projectId: created.project_id,
   taskId: created.id,
+});
+queueImpactedIntelligenceRecalculation({
+  workspaceId,
+  reason: "task_created",
+  userIds: [created.assigned_to, created.added_by],
+  projectIds: [created.project_id],
+  sourceType: "task",
+  sourceId: created.id,
+  metadata: {
+    status: created.status,
+    priority: created.priority,
+  },
 });
 
   await logProjectHistory({
@@ -743,6 +784,30 @@ export async function updateTaskAsAdminOrManager(id, data) {
   }
   // ─────────────────────────────────────────────────────────────────
 
+  const statusChanged = existing.status !== updatedTask.status;
+  const reassigned = existing.assigned_to !== updatedTask.assigned_to;
+  const blockerChanged = Boolean(existing.is_blocked) !== Boolean(updatedTask.is_blocked);
+  const intelligenceReason =
+    statusChanged && updatedTask.status === "completed" ? "task_completed" :
+    reassigned ? "task_reassigned" :
+    blockerChanged ? (updatedTask.is_blocked ? "blocker_added" : "blocker_resolved") :
+    "task_updated";
+
+  queueImpactedIntelligenceRecalculation({
+    workspaceId: data.workspaceId,
+    reason: intelligenceReason,
+    userIds: [existing.assigned_to, updatedTask.assigned_to, existing.added_by, updatedTask.added_by, actorId],
+    projectIds: [existing.project_id, updatedTask.project_id],
+    sourceType: "task",
+    sourceId: updatedTask.id,
+    metadata: {
+      statusChanged,
+      reassigned,
+      dueDateChanged: (existing.due_date || null) !== (updatedTask.due_date || null),
+      blockerChanged,
+    },
+  });
+
   return updatedTask;
 }
 
@@ -825,17 +890,18 @@ await pool.query(`
     newValue: { status: newStatus },
   });
   // 🧠 trigger intelligence recalculation (async, non-blocking)
-import("../intelligence/manualScoring.service.js")
-  .then(({ runManualMonthlyScoring }) => {
-    const month = new Date().toISOString().slice(0, 7);
-
-    runManualMonthlyScoring({
-      workspaceId,
-      month,
-      triggeredBy: userId || updatedTask.added_by,
-    }).catch(() => {});
-  })
-  .catch(() => {});
+queueImpactedIntelligenceRecalculation({
+  workspaceId,
+  reason: newStatus === "completed" ? "task_completed" : "task_status_changed",
+  userIds: [updatedTask.assigned_to, userId, updatedTask.added_by],
+  projectIds: [updatedTask.project_id],
+  sourceType: "task",
+  sourceId: updatedTask.id,
+  metadata: {
+    from: existing.status,
+    to: newStatus,
+  },
+});
 
 emitWorkspaceIntelligenceUpdate(workspaceId, {
   type: "task-status-changed",
@@ -930,6 +996,18 @@ await pool.query(`
     projectId: existing.project_id,
     taskId: existing.id,
   });
+  queueImpactedIntelligenceRecalculation({
+    workspaceId,
+    reason: "task_deleted",
+    userIds: [existing.assigned_to, existing.added_by, actorId],
+    projectIds: [existing.project_id],
+    sourceType: "task",
+    sourceId: existing.id,
+    metadata: {
+      status: existing.status,
+      priority: existing.priority,
+    },
+  });
 
   try {
     // Notify the assignee
@@ -982,6 +1060,9 @@ export async function createSubtask(data) {
   });
 
   await recomputeParentProgress(created.task_id);
+  queueTaskIntelligenceByTaskId(created.task_id, "subtask_created", {
+    subtaskId: created.id,
+  }).catch(() => {});
   return created;
 }
 
@@ -992,6 +1073,10 @@ export async function getSubtasks(taskId) {
 export async function updateSubtask(id, body) {
   const updated = await updateSubtaskRepo(id, body);
   await recomputeParentProgress(updated.task_id);
+  queueTaskIntelligenceByTaskId(updated.task_id, "subtask_updated", {
+    subtaskId: updated.id,
+    status: updated.status,
+  }).catch(() => {});
   return updated;
 }
 
@@ -999,6 +1084,9 @@ export async function deleteSubtask(id) {
   const deleted = await deleteSubtaskRepo(id);
   if (deleted?.task_id) {
     await recomputeParentProgress(deleted.task_id);
+    queueTaskIntelligenceByTaskId(deleted.task_id, "subtask_deleted", {
+      subtaskId: deleted.id,
+    }).catch(() => {});
   }
   return deleted;
 }

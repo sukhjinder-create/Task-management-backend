@@ -11,7 +11,7 @@ export async function generateExecutiveSummary(data) {
 
   // Build the Goals section for the prompt only when data is available
   let okrSection = "";
-  if (data.okrHealth && data.okrHealth.totalGoals > 0) {
+  if (data.okrHealth && data.okrHealth.cutover?.dashboardEligible !== false && data.okrHealth.totalGoals > 0) {
     const g = data.okrHealth;
     const riskRatio = Math.round((g.atRiskCount / g.totalGoals) * 100);
     okrSection = `

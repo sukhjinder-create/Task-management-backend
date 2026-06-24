@@ -20,6 +20,59 @@ function normalizeBaseUrl(url) {
   return String(url || "").replace(/\/+$/, "");
 }
 
+function normalizeProjectKey(value) {
+  return String(value || "").trim();
+}
+
+function normalizeProjectKeyForCompare(value) {
+  return normalizeProjectKey(value).toLowerCase();
+}
+
+function buildYouTrackProjectWebhookUrl(publicBaseUrl, workspaceId, webhookId) {
+  return (
+    `${normalizeBaseUrl(publicBaseUrl)}/integration-webhooks/youtrack/` +
+    `${workspaceId}/projects/${webhookId}`
+  );
+}
+
+function getYouTrackProjectWebhooks(config) {
+  const projects = config?.webhook?.projects;
+  return Array.isArray(projects) ? projects : [];
+}
+
+function findYouTrackProjectWebhook(config, webhookId) {
+  const id = String(webhookId || "").trim();
+  return getYouTrackProjectWebhooks(config).find(
+    (projectWebhook) => String(projectWebhook?.id || "") === id
+  );
+}
+
+function exposeYouTrackProjectWebhook(projectWebhook) {
+  if (!projectWebhook) return null;
+
+  return {
+    id: projectWebhook.id,
+    provider: "youtrack",
+    resourceType: "project",
+    projectId: projectWebhook.projectId || projectWebhook.projectKey || null,
+    projectKey: projectWebhook.projectKey || projectWebhook.projectId || null,
+    projectName:
+      projectWebhook.projectName ||
+      projectWebhook.projectKey ||
+      projectWebhook.projectId ||
+      null,
+    status: projectWebhook.status || "manual_setup",
+    targetUrl: projectWebhook.targetUrl || null,
+    headerName: projectWebhook.headerName || DEFAULT_YOUTRACK_HEADER,
+    token: projectWebhook.token || null,
+    tokenPreview: projectWebhook.tokenPreview || null,
+    createdAt: projectWebhook.createdAt || null,
+    updatedAt: projectWebhook.updatedAt || null,
+    lastEventAt: projectWebhook.lastEventAt || null,
+    lastError: projectWebhook.lastError || null,
+  };
+}
+
 export function resolveIntegrationWebhookBaseUrl(req) {
   const configured =
     process.env.INTEGRATION_WEBHOOK_BASE_URL ||
@@ -361,9 +414,16 @@ export async function setupAsanaWebhooks({
   workspaceId,
   publicBaseUrl,
   force = false,
+  resourceGids = null,
 }) {
   const baseUrl = normalizeBaseUrl(publicBaseUrl);
-  const projects = await fetchAsanaProjects(workspaceId);
+  const requestedResources = Array.isArray(resourceGids)
+    ? new Set(resourceGids.map((gid) => String(gid || "").trim()).filter(Boolean))
+    : null;
+  const allProjects = await fetchAsanaProjects(workspaceId);
+  const projects = requestedResources
+    ? allProjects.filter((project) => requestedResources.has(String(project.gid)))
+    : allProjects;
   const currentConfig = await getIntegrationConfig(workspaceId, "asana");
   const currentWebhook = asObject(currentConfig?.webhook);
   const existingSubscriptions = Array.isArray(currentWebhook.subscriptions)
@@ -728,6 +788,224 @@ export async function setupYouTrackWebhook({
   };
 }
 
+export async function setupYouTrackProjectWebhook({
+  workspaceId,
+  publicBaseUrl,
+  projectId = null,
+  projectKey = null,
+  projectName = null,
+  rotate = false,
+  headerName = DEFAULT_YOUTRACK_HEADER,
+}) {
+  const key = normalizeProjectKey(projectKey || projectId);
+
+  if (!key) {
+    const err = new Error("projectKey or projectId is required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const existingConfig = await getIntegrationConfig(workspaceId, "youtrack");
+
+  if (!existingConfig) {
+    throw new Error("YouTrack integration is not connected");
+  }
+
+  let savedWebhook = null;
+
+  await updateIntegrationConfig(workspaceId, "youtrack", (current) => {
+    const webhook = asObject(current.webhook);
+    const projects = getYouTrackProjectWebhooks(current).map((item) => ({
+      ...item,
+    }));
+    const existingIndex = projects.findIndex((item) => {
+      const existingKey = normalizeProjectKeyForCompare(
+        item.projectKey || item.projectId
+      );
+      return existingKey && existingKey === normalizeProjectKeyForCompare(key);
+    });
+    const previous = existingIndex >= 0 ? projects[existingIndex] : null;
+    const id = previous?.id || crypto.randomBytes(16).toString("hex");
+    const token =
+      !rotate && previous?.token
+        ? previous.token
+        : crypto.randomBytes(32).toString("hex");
+    const now = new Date().toISOString();
+    const targetUrl = buildYouTrackProjectWebhookUrl(
+      publicBaseUrl,
+      workspaceId,
+      id
+    );
+
+    savedWebhook = {
+      ...previous,
+      id,
+      provider: "youtrack",
+      resourceType: "project",
+      projectId: normalizeProjectKey(projectId) || previous?.projectId || key,
+      projectKey: key,
+      projectName:
+        normalizeProjectKey(projectName) ||
+        previous?.projectName ||
+        previous?.projectKey ||
+        key,
+      mode: "manual",
+      status: "manual_setup",
+      targetUrl,
+      headerName: headerName || previous?.headerName || DEFAULT_YOUTRACK_HEADER,
+      token,
+      tokenPreview: `${token.slice(0, 8)}...${token.slice(-4)}`,
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      lastError: null,
+    };
+
+    if (existingIndex >= 0) {
+      projects[existingIndex] = savedWebhook;
+    } else {
+      projects.push(savedWebhook);
+    }
+
+    return {
+      ...current,
+      webhook: {
+        ...webhook,
+        provider: "youtrack",
+        mode: "manual",
+        status: "manual_setup",
+        projects,
+        lastSetupAt: now,
+      },
+    };
+  });
+
+  return {
+    provider: "youtrack",
+    supported: true,
+    mode: "manual",
+    status: savedWebhook.status,
+    projectWebhook: exposeYouTrackProjectWebhook(savedWebhook),
+    instructions: [
+      "Create a YouTrack webhook trigger for this specific project.",
+      "Use this project's URL, header name, and token.",
+      "Repeat for each YouTrack project you want to integrate.",
+    ],
+  };
+}
+
+export async function rotateYouTrackProjectWebhook({
+  workspaceId,
+  publicBaseUrl,
+  webhookId,
+  headerName = null,
+}) {
+  const config = await getIntegrationConfig(workspaceId, "youtrack");
+  const existing = findYouTrackProjectWebhook(config, webhookId);
+
+  if (!existing) {
+    const err = new Error("YouTrack project webhook not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  let savedWebhook = null;
+
+  await updateIntegrationConfig(workspaceId, "youtrack", (current) => {
+    const webhook = asObject(current.webhook);
+    const projects = getYouTrackProjectWebhooks(current).map((item) => ({
+      ...item,
+    }));
+    const index = projects.findIndex(
+      (item) => String(item?.id || "") === String(webhookId)
+    );
+
+    if (index < 0) {
+      const err = new Error("YouTrack project webhook not found");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const now = new Date().toISOString();
+    savedWebhook = {
+      ...projects[index],
+      status: "manual_setup",
+      targetUrl: buildYouTrackProjectWebhookUrl(
+        publicBaseUrl,
+        workspaceId,
+        projects[index].id
+      ),
+      headerName:
+        headerName || projects[index].headerName || DEFAULT_YOUTRACK_HEADER,
+      token,
+      tokenPreview: `${token.slice(0, 8)}...${token.slice(-4)}`,
+      updatedAt: now,
+      lastError: null,
+    };
+    projects[index] = savedWebhook;
+
+    return {
+      ...current,
+      webhook: {
+        ...webhook,
+        provider: "youtrack",
+        mode: "manual",
+        status: "manual_setup",
+        projects,
+        lastSetupAt: now,
+      },
+    };
+  });
+
+  return {
+    provider: "youtrack",
+    supported: true,
+    mode: "manual",
+    status: savedWebhook.status,
+    projectWebhook: exposeYouTrackProjectWebhook(savedWebhook),
+  };
+}
+
+export async function deleteYouTrackProjectWebhook({
+  workspaceId,
+  webhookId,
+}) {
+  let removed = null;
+
+  await updateIntegrationConfig(workspaceId, "youtrack", (current) => {
+    const webhook = asObject(current.webhook);
+    const projects = getYouTrackProjectWebhooks(current);
+    const nextProjects = projects.filter((item) => {
+      const match = String(item?.id || "") === String(webhookId || "");
+      if (match) removed = item;
+      return !match;
+    });
+
+    if (!removed) {
+      const err = new Error("YouTrack project webhook not found");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    return {
+      ...current,
+      webhook: {
+        ...webhook,
+        provider: "youtrack",
+        mode: "manual",
+        projects: nextProjects,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  });
+
+  return {
+    deleted: true,
+    provider: "youtrack",
+    projectWebhook: exposeYouTrackProjectWebhook(removed),
+  };
+}
+
 function extractYouTrackIssueId(payload) {
   const projectShortName =
     payload?.project?.shortName ||
@@ -749,11 +1027,52 @@ function extractYouTrackIssueId(payload) {
   return null;
 }
 
-async function processYouTrackEvent({ workspaceId, payload }) {
+function extractYouTrackProjectKey(payload) {
+  const direct =
+    payload?.project?.shortName ||
+    payload?.issue?.project?.shortName ||
+    payload?.projectShortName ||
+    payload?.projectKey;
+
+  if (direct) return normalizeProjectKey(direct);
+
+  const readable = payload?.idReadable || payload?.issue?.idReadable;
+  if (readable && String(readable).includes("-")) {
+    return String(readable).split("-")[0];
+  }
+
+  return null;
+}
+
+function isDifferentYouTrackProject(left, right) {
+  const a = normalizeProjectKeyForCompare(left);
+  const b = normalizeProjectKeyForCompare(right);
+  return Boolean(a && b && a !== b);
+}
+
+async function processYouTrackEvent({
+  workspaceId,
+  payload,
+  projectWebhook = null,
+}) {
   const issueId = extractYouTrackIssueId(payload);
 
   if (!issueId) {
     return { ignored: true, reason: "issue_id_missing" };
+  }
+
+  const payloadProjectKey = extractYouTrackProjectKey(payload);
+  if (
+    projectWebhook?.projectKey &&
+    payloadProjectKey &&
+    isDifferentYouTrackProject(payloadProjectKey, projectWebhook.projectKey)
+  ) {
+    return {
+      ignored: true,
+      reason: "project_mismatch",
+      projectKey: payloadProjectKey,
+      expectedProjectKey: projectWebhook.projectKey,
+    };
   }
 
   const eventName = String(payload?.event || "").toLowerCase();
@@ -770,6 +1089,20 @@ async function processYouTrackEvent({ workspaceId, payload }) {
       }
       effectiveDeleted = true;
     }
+  }
+
+  const resolvedProjectKey = issue?.projectKey || payloadProjectKey;
+  if (
+    projectWebhook?.projectKey &&
+    resolvedProjectKey &&
+    isDifferentYouTrackProject(resolvedProjectKey, projectWebhook.projectKey)
+  ) {
+    return {
+      ignored: true,
+      reason: "project_mismatch",
+      projectKey: resolvedProjectKey,
+      expectedProjectKey: projectWebhook.projectKey,
+    };
   }
 
   const externalId = issue?.id || issueId;
@@ -806,6 +1139,8 @@ async function processYouTrackEvent({ workspaceId, payload }) {
         payload?.updated ||
         new Date().toISOString(),
       createdAt: issue?.created || payload?.created || null,
+      projectWebhookId: projectWebhook?.id || null,
+      projectKey: resolvedProjectKey || projectWebhook?.projectKey || null,
       webhookEvent: payload,
     },
   });
@@ -819,23 +1154,35 @@ async function processYouTrackEvent({ workspaceId, payload }) {
 
 export async function handleYouTrackWebhookEvent({
   workspaceId,
+  webhookId = null,
   body,
   headers,
 }) {
   const config = await getIntegrationConfig(workspaceId, "youtrack");
+  const projectWebhook = webhookId
+    ? findYouTrackProjectWebhook(config, webhookId)
+    : null;
 
-  if (!config?.webhook?.token) {
+  if (webhookId && !projectWebhook) {
+    const err = new Error("YouTrack project webhook not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const webhookConfig = projectWebhook || config?.webhook;
+
+  if (!webhookConfig?.token) {
     const err = new Error("YouTrack webhook is not configured");
     err.statusCode = 404;
     throw err;
   }
 
   const headerName = String(
-    config.webhook.headerName || DEFAULT_YOUTRACK_HEADER
+    webhookConfig.headerName || DEFAULT_YOUTRACK_HEADER
   ).toLowerCase();
   const receivedToken = headers[headerName];
 
-  if (!safeCompare(receivedToken, config.webhook.token)) {
+  if (!safeCompare(receivedToken, webhookConfig.token)) {
     const err = new Error("Invalid YouTrack webhook token");
     err.statusCode = 403;
     throw err;
@@ -845,25 +1192,59 @@ export async function handleYouTrackWebhookEvent({
   const results = [];
 
   for (const payload of payloads) {
-    results.push(await processYouTrackEvent({ workspaceId, payload }));
+    results.push(
+      await processYouTrackEvent({ workspaceId, payload, projectWebhook })
+    );
   }
 
-  await updateIntegrationConfig(workspaceId, "youtrack", (current) => ({
-    ...current,
-    webhook: {
-      ...asObject(current.webhook),
-      provider: "youtrack",
-      mode: "manual",
-      status: "active",
-      lastEventAt: new Date().toISOString(),
-      lastError: null,
-    },
-  }));
+  await updateIntegrationConfig(workspaceId, "youtrack", (current) => {
+    const webhook = asObject(current.webhook);
+    const now = new Date().toISOString();
+
+    if (!projectWebhook) {
+      return {
+        ...current,
+        webhook: {
+          ...webhook,
+          provider: "youtrack",
+          mode: "manual",
+          status: "active",
+          lastEventAt: now,
+          lastError: null,
+        },
+      };
+    }
+
+    const projects = getYouTrackProjectWebhooks(current).map((item) =>
+      String(item?.id || "") === String(projectWebhook.id)
+        ? {
+            ...item,
+            status: "active",
+            lastEventAt: now,
+            lastError: null,
+          }
+        : item
+    );
+
+    return {
+      ...current,
+      webhook: {
+        ...webhook,
+        provider: "youtrack",
+        mode: "manual",
+        status: "active",
+        projects,
+        lastEventAt: now,
+        lastError: null,
+      },
+    };
+  });
 
   return {
     received: payloads.length,
     processed: results.filter((result) => !result.ignored).length,
     emitted: results.filter((result) => result.emitted).length,
+    projectWebhookId: projectWebhook?.id || null,
     results,
   };
 }
@@ -884,23 +1265,37 @@ function safeWebhookStatus(config, provider, publicBaseUrl, workspaceId) {
     const targetUrl =
       webhook.targetUrl ||
       `${normalizeBaseUrl(publicBaseUrl)}/integration-webhooks/youtrack/${workspaceId}`;
+    const projectWebhooks = getYouTrackProjectWebhooks(config).map((item) => {
+      const target =
+        item.targetUrl ||
+        buildYouTrackProjectWebhookUrl(publicBaseUrl, workspaceId, item.id);
+
+      return exposeYouTrackProjectWebhook({
+        ...item,
+        targetUrl: target,
+      });
+    });
+    const status =
+      webhook.status ||
+      (webhook.token || projectWebhooks.length ? "manual_setup" : "not_setup");
 
     return {
       provider,
       supported: true,
       connected: true,
       mode: "manual",
-      status: webhook.status || (webhook.token ? "manual_setup" : "not_setup"),
+      status,
       targetUrl,
       headerName: webhook.headerName || DEFAULT_YOUTRACK_HEADER,
       token: webhook.token || null,
       tokenPreview: webhook.tokenPreview || null,
+      projectWebhooks,
       lastSetupAt: webhook.lastSetupAt || null,
       lastEventAt: webhook.lastEventAt || null,
       instructions: [
         "Install or enable the YouTrack Webhook Triggers app.",
-        "Attach it to the target projects.",
-        "Set this URL, header name, and token in the app settings.",
+        "Create one project webhook per YouTrack project you want to sync.",
+        "Set each project's URL, header name, and token in YouTrack.",
       ],
     };
   }

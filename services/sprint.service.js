@@ -1,4 +1,8 @@
 import pool from "../db.js";
+import {
+  queueImpactedIntelligenceRecalculation,
+  queueTaskImpact,
+} from "../intelligence/realtime/recalculation.service.js";
 
 /* -------------------------------------------------------
    HELPERS
@@ -11,6 +15,31 @@ async function assertSprintInWorkspace(sprintId, workspaceId) {
   );
   if (!rows[0]) throw new Error("Sprint not found in this workspace");
   return rows[0];
+}
+
+async function getSprintAssignees(sprintId, workspaceId) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT assigned_to
+     FROM tasks
+     WHERE sprint_id = $1
+       AND workspace_id = $2
+       AND assigned_to IS NOT NULL`,
+    [sprintId, workspaceId]
+  ).catch(() => ({ rows: [] }));
+
+  return rows.map((row) => row.assigned_to).filter(Boolean);
+}
+
+function queueSprintProjectIntelligence({ workspaceId, projectId, reason, userIds = [], sourceId = null, metadata = {} }) {
+  queueImpactedIntelligenceRecalculation({
+    workspaceId,
+    reason,
+    userIds,
+    projectIds: [projectId],
+    sourceType: "sprint",
+    sourceId,
+    metadata,
+  });
 }
 
 /* -------------------------------------------------------
@@ -110,6 +139,14 @@ export async function createSprint({ projectId, workspaceId, name, goal, startDa
     `,
     [projectId, workspaceId, name.trim(), goal || null, startDate || null, endDate || null, createdBy, isHidden]
   );
+  queueSprintProjectIntelligence({
+    workspaceId,
+    projectId,
+    reason: "sprint_created",
+    userIds: [createdBy],
+    sourceId: rows[0].id,
+    metadata: { sprintName: rows[0].name },
+  });
   return rows[0];
 }
 
@@ -138,6 +175,13 @@ export async function updateSprint({ id, workspaceId, name, goal, startDate, end
     [name?.trim() || null, goal || null, startDate || null, endDate || null,
      isHidden !== undefined ? isHidden : null, id, workspaceId]
   );
+  queueSprintProjectIntelligence({
+    workspaceId,
+    projectId: sprint.project_id,
+    reason: "sprint_updated",
+    sourceId: id,
+    metadata: { sprintName: rows[0]?.name },
+  });
   return rows[0];
 }
 
@@ -145,7 +189,8 @@ export async function updateSprint({ id, workspaceId, name, goal, startDate, end
    DELETE sprint — moves tasks back to backlog
 ------------------------------------------------------- */
 export async function deleteSprint({ id, workspaceId }) {
-  await assertSprintInWorkspace(id, workspaceId);
+  const sprint = await assertSprintInWorkspace(id, workspaceId);
+  const affectedUsers = await getSprintAssignees(id, workspaceId);
 
   // Move all tasks back to backlog
   await pool.query(
@@ -157,6 +202,14 @@ export async function deleteSprint({ id, workspaceId }) {
     `DELETE FROM sprints WHERE id = $1 AND workspace_id = $2`,
     [id, workspaceId]
   );
+
+  queueSprintProjectIntelligence({
+    workspaceId,
+    projectId: sprint.project_id,
+    reason: "sprint_deleted",
+    userIds: affectedUsers,
+    sourceId: id,
+  });
 
   return { deleted: true };
 }
@@ -190,6 +243,13 @@ export async function startSprint({ id, workspaceId }) {
     `,
     [id, workspaceId]
   );
+  queueSprintProjectIntelligence({
+    workspaceId,
+    projectId: sprint.project_id,
+    reason: "sprint_started",
+    sourceId: id,
+    metadata: { sprintName: rows[0]?.name },
+  });
   return rows[0];
 }
 
@@ -209,6 +269,7 @@ export async function completeSprint({ id, workspaceId }) {
     `SELECT COUNT(*)::int AS count FROM tasks WHERE sprint_id = $1 AND status != 'completed'`,
     [id]
   );
+  const affectedUsers = await getSprintAssignees(id, workspaceId);
 
   // Move incomplete tasks to backlog
   await pool.query(
@@ -238,6 +299,19 @@ export async function completeSprint({ id, workspaceId }) {
   }
   // ───────────────────────────────────────────────────────────────────────────
 
+  queueSprintProjectIntelligence({
+    workspaceId,
+    projectId: sprint.project_id,
+    reason: "milestone_completed",
+    userIds: affectedUsers,
+    sourceId: id,
+    metadata: {
+      sprintName: rows[0]?.name,
+      movedToBacklog: incomplete[0].count,
+      goalsUpdated: linkedGoals.length,
+    },
+  });
+
   return {
     sprint:        rows[0],
     movedToBacklog: incomplete[0].count,
@@ -262,6 +336,12 @@ export async function assignTaskToSprint({ taskId, sprintId, workspaceId }) {
   );
 
   if (!rows[0]) throw new Error("Task not found in this workspace");
+  queueTaskImpact({
+    workspaceId,
+    taskId,
+    reason: "sprint_assignment_changed",
+    metadata: { sprintId: sprintId || null },
+  }).catch(() => {});
   return rows[0];
 }
 

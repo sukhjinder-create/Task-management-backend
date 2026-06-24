@@ -125,6 +125,13 @@ export async function migrateYouTrackProject({
     if (prev.rows.length) {
       const prevProjectId = prev.rows[0].metadata?.projectId;
       if (prevProjectId) {
+        await pool.query(
+          `DELETE FROM integration_task_mappings
+           WHERE workspace_id=$1
+             AND provider='youtrack'
+             AND internal_task_id IN (SELECT id FROM tasks WHERE project_id=$2)`,
+          [workspaceId, prevProjectId]
+        );
         await pool.query(`DELETE FROM tasks WHERE project_id=$1`, [prevProjectId]);
         await pool.query(`DELETE FROM projects WHERE id=$1 AND workspace_id=$2`, [prevProjectId, workspaceId]);
         await pool.query(
@@ -147,6 +154,12 @@ export async function migrateYouTrackProject({
     workspaceId,
     projectId
   );
+  const projectWebhook = Array.isArray(ytConfig.webhook?.projects)
+    ? ytConfig.webhook.projects.find((item) => {
+        const key = String(item?.projectKey || item?.projectId || "").toLowerCase();
+        return key && key === String(projectKey || projectId).toLowerCase();
+      })
+    : null;
 
   const result = await youtrackAdapter.listTasks(workspaceId, projectKey);
   const sourceTasks = Array.isArray(result)
@@ -157,6 +170,55 @@ export async function migrateYouTrackProject({
 
   if (!sourceTasks.length) {
     throw new Error("No tasks found in YouTrack project");
+  }
+
+  let tasksToImport = sourceTasks;
+  if (mode === "skip") {
+    const externalIds = sourceTasks
+      .map((task) => String(task.externalId || task.id || "").trim())
+      .filter(Boolean);
+
+    if (externalIds.length) {
+      const existing = await pool.query(
+        `SELECT m.external_task_id
+         FROM integration_task_mappings m
+         JOIN tasks t ON t.id = m.internal_task_id
+         WHERE m.workspace_id=$1
+           AND m.provider='youtrack'
+           AND m.external_task_id = ANY($2::text[])`,
+        [workspaceId, externalIds]
+      );
+      const existingIds = new Set(existing.rows.map((row) => row.external_task_id));
+      tasksToImport = sourceTasks.filter((task) => {
+        const externalTaskId = String(task.externalId || task.id || "").trim();
+        return externalTaskId && !existingIds.has(externalTaskId);
+      });
+    }
+
+    if (!tasksToImport.length) {
+      const importRecord = await recordMigrationImport({
+        workspaceId,
+        source: "youtrack",
+        stats: { importedTasks: 0, skippedTasks: sourceTasks.length },
+        metadata: {
+          projectId: null,
+          youtrackProjectId: projectId,
+          youtrackProjectKey: projectKey,
+          projectWebhookId: projectWebhook?.id || null,
+        },
+        triggeredBy,
+      });
+
+      return {
+        success: true,
+        importedTasks: 0,
+        skippedTasks: sourceTasks.length,
+        projectId: null,
+        projectWebhookId: projectWebhook?.id || null,
+        importId: importRecord.id,
+        importNumber: importRecord.import_number,
+      };
+    }
   }
 
   const { rows: projectRows } = await pool.query(
@@ -173,14 +235,15 @@ export async function migrateYouTrackProject({
 
   let importedCount = 0;
 
-  for (const task of sourceTasks) {
+  for (const task of tasksToImport) {
     const externalTaskId = String(task.externalId || task.id || "").trim();
     if (!externalTaskId) continue;
 
     if (mode === "skip") {
       const existing = await pool.query(
-        `SELECT 1 FROM integration_task_mappings
-         WHERE workspace_id=$1 AND provider='youtrack' AND external_task_id=$2 LIMIT 1`,
+        `SELECT 1 FROM integration_task_mappings m
+         JOIN tasks t ON t.id = m.internal_task_id
+         WHERE m.workspace_id=$1 AND m.provider='youtrack' AND m.external_task_id=$2 LIMIT 1`,
         [workspaceId, externalTaskId]
       );
       if (existing.rows.length) continue;
@@ -235,7 +298,12 @@ export async function migrateYouTrackProject({
     workspaceId,
     source: "youtrack",
     stats: { importedTasks: importedCount },
-    metadata: { projectId: newProjectId, youtrackProjectId: projectId },
+    metadata: {
+      projectId: newProjectId,
+      youtrackProjectId: projectId,
+      youtrackProjectKey: projectKey,
+      projectWebhookId: projectWebhook?.id || null,
+    },
     triggeredBy,
   });
 
@@ -243,6 +311,7 @@ export async function migrateYouTrackProject({
     success: true,
     importedTasks: importedCount,
     projectId: newProjectId,
+    projectWebhookId: projectWebhook?.id || null,
     importId: importRecord.id,
     importNumber: importRecord.import_number,
   };

@@ -1,7 +1,10 @@
 import express from "express";
+import { allowRoles } from "../middleware/role.middleware.js";
 import { getMigrationHistory, deleteMigrationImport } from "../services/migrationHistory.service.js";
 
 const router = express.Router();
+
+router.use(allowRoles("admin"));
 
 // GET /migration-history?source=slack
 router.get("/", async (req, res) => {

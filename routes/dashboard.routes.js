@@ -17,6 +17,7 @@ router.get("/overview", async (req, res) => {
       workspaceId: req.workspaceId,
       userId: req.user.id,
       role: req.user.role,
+      res,
     });
     res.json(data);
   } catch (err) {
@@ -35,6 +36,7 @@ router.get("/executive-detail", async (req, res) => {
       workspaceId: req.workspaceId,
       userId: req.user.id,
       role: req.user.role,
+      res,
     });
     res.json(data);
   } catch (err) {

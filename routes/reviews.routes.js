@@ -5,6 +5,7 @@ import { logAudit } from "../services/audit.service.js";
 import { sendPerformanceReviewEmail } from "../services/email.service.js";
 import { autoAssignReviews, getQuarterInfo } from "../cron/reviews.cron.js";
 import { notifyUser } from "../services/notification.service.js";
+import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
 
 const router = express.Router();
 
@@ -323,15 +324,26 @@ router.get("/user-context/:userId", async (req, res) => {
   }
   try {
     const rows = await db.query(
-      `SELECT month, score, breakdown
-       FROM workspace_monthly_scores
+      `SELECT
+         to_char(last_evaluated_at, 'YYYY-MM') AS month,
+         score,
+         jsonb_build_object(
+           'executionReliability', dimensions->'executionReliability'->>'score',
+           'deliveryEffectiveness', dimensions->'deliveryEffectiveness'->>'score',
+           'collaborationHealth', dimensions->'collaborationHealth'->>'score',
+           'workSustainability', dimensions->'workSustainability'->>'score',
+           'professionalDiscipline', dimensions->'professionalDiscipline'->>'score',
+           'attendanceScore', attendance->>'score'
+         ) AS breakdown
+       FROM user_intelligence
        WHERE workspace_id = $1 AND user_id = $2
-       ORDER BY month DESC LIMIT 1`,
+       ORDER BY last_evaluated_at DESC LIMIT 1`,
       [req.workspaceId, req.params.userId]
     );
-    res.json(rows.rows[0] || null);
+    res.json(rows.rows[0] ? { ...rows.rows[0], scoreSource: "enterprise_intelligence" } : null);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const status = err?.code === "42P01" ? 503 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
@@ -485,6 +497,21 @@ router.put("/reviews/:reviewId", async (req, res) => {
       newStatus,
       workspaceId: req.workspaceId,
     }).catch((err) => console.error("[reviews] Side-effect error:", err.message));
+
+    if (newStatus === "submitted" && review.status !== "submitted") {
+      queueImpactedIntelligenceRecalculation({
+        workspaceId: req.workspaceId,
+        reason: "review_submitted",
+        userIds: [review.reviewee_id, review.reviewer_id],
+        sourceType: "performance_review",
+        sourceId: review.id,
+        metadata: {
+          reviewType: review.type,
+          cycleId: review.cycle_id,
+          overallScore: row.rows[0]?.overall_score ?? null,
+        },
+      });
+    }
 
     res.json(row.rows[0]);
   } catch (err) {

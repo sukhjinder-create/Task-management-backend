@@ -76,17 +76,15 @@ function buildScopeClause(column, value, values) {
  * Default: yesterday (safe for cron).
  */
 export async function aggregateDailyAttendance(targetDate = null, scope = {}) {
+  const date =
+    targetDate ||
+    new Date(Date.now() - 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
-
-    // default = yesterday
-    const date =
-      targetDate ||
-      new Date(Date.now() - 24 * 60 * 60 * 1000)
-        .toISOString()
-        .slice(0, 10);
 
     const dayStart = new Date(`${date}T00:00:00.000Z`);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
@@ -231,9 +229,19 @@ export async function aggregateDailyAttendance(targetDate = null, scope = {}) {
 
     await client.query("COMMIT");
     console.log(`[attendance] Aggregated daily attendance for ${date}`);
+    return {
+      ok: true,
+      date,
+      participantCount: participants.length,
+    };
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("[attendance] Aggregation failed:", err);
+    return {
+      ok: false,
+      date,
+      error: err.message,
+    };
   } finally {
     client.release();
   }

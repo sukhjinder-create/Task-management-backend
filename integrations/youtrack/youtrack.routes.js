@@ -1,8 +1,11 @@
 import express from "express";
+import { allowRoles } from "../../middleware/role.middleware.js";
 import { getIntegrationAdapter }
   from "../core/integration.adapter.js";
 
 const router = express.Router();
+
+router.use(allowRoles("admin"));
 
 /**
  * CONNECT YOU TRACK

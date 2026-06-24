@@ -1,4 +1,5 @@
 import pool from "../db.js";
+import { queueTaskImpact } from "../intelligence/realtime/recalculation.service.js";
 
 export async function logTime({ taskId, userId, workspaceId, hours, logDate, description }) {
   if (!hours || hours <= 0) throw new Error("Hours must be greater than 0");
@@ -7,6 +8,21 @@ export async function logTime({ taskId, userId, workspaceId, hours, logDate, des
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
     [taskId, userId, workspaceId, hours, logDate || new Date().toISOString().slice(0, 10), description || null]
   );
+  queueTaskImpact({
+    workspaceId,
+    taskId,
+    reason: "time_log_added",
+    userIds: [userId],
+    metadata: {
+      timeLogId: rows[0].id,
+      hours: Number(hours),
+      logDate: rows[0].log_date,
+    },
+  }).catch((err) => {
+    if (err?.code !== "INTELLIGENCE_SCHEMA_MISSING") {
+      console.warn("[enterprise-intelligence] time log impact queue failed:", err.message);
+    }
+  });
   return rows[0];
 }
 
@@ -42,10 +58,17 @@ export async function getTimeLogSummary({ taskId }) {
 
 export async function deleteTimeLog({ id, userId, workspaceId }) {
   const { rows } = await pool.query(
-    `DELETE FROM time_logs WHERE id = $1 AND user_id = $2 AND workspace_id = $3 RETURNING id`,
+    `DELETE FROM time_logs WHERE id = $1 AND user_id = $2 AND workspace_id = $3 RETURNING id, task_id`,
     [id, userId, workspaceId]
   );
   if (!rows[0]) throw new Error("Log not found or not yours");
+  queueTaskImpact({
+    workspaceId,
+    taskId: rows[0].task_id,
+    reason: "time_log_deleted",
+    userIds: [userId],
+    metadata: { timeLogId: rows[0].id },
+  }).catch(() => {});
 }
 
 export async function updateEstimation({ taskId, workspaceId, estimationHours }) {
@@ -54,6 +77,12 @@ export async function updateEstimation({ taskId, workspaceId, estimationHours })
     [estimationHours, taskId, workspaceId]
   );
   if (!rows[0]) throw new Error("Task not found");
+  queueTaskImpact({
+    workspaceId,
+    taskId,
+    reason: "task_estimation_updated",
+    metadata: { estimationHours: rows[0].estimation_hours },
+  }).catch(() => {});
   return rows[0];
 }
 

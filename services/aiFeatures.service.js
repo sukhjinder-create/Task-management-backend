@@ -6,6 +6,7 @@
 //   4. Natural-language reporting
 
 import db from "../db.js";
+import { withLegacyIsolation } from "../intelligence/analytics/cutoverIsolation.service.js";
 import { generateText } from "./llm.js";
 
 // ─── LLM call helper ──────────────────────────────────────────────────────────
@@ -219,14 +220,18 @@ Give 2-3 short concrete suggestions to get this task back on track. Return as a 
     aiSuggestions = parseJson(raw, []);
   }
 
-  return {
+  return withLegacyIsolation({
     riskLevel,
     riskScore: score,
     daysLeft,
     lateRate: Math.round(lateRate * 100),
     openSubtasks: parseInt(task.open_subtasks),
     suggestions: Array.isArray(aiSuggestions) ? aiSuggestions.slice(0, 3) : [],
-  };
+  }, {
+    surface: "ai_task_deadline_risk",
+    reason: "AI Hub deadline risk is a task-level helper heuristic and is excluded from enterprise intelligence cutover authority.",
+    replacement: "project_intelligence dependency risk and completion confidence",
+  });
 }
 
 // ─── 3. Smart Notification Digest ────────────────────────────────────────────

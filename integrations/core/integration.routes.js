@@ -35,6 +35,8 @@ router.post("/:provider/projects/:projectId/migrate", async (req, res) => {
       workspaceId: req.workspaceId,
       projectId,
       triggeredBy: req.user.id,
+      mode: req.body?.mode || "skip",
+      projectWebhookId: req.body?.projectWebhookId || null,
     });
 
     res.json(result);

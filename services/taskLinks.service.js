@@ -1,4 +1,5 @@
 import pool from "../db.js";
+import { queueTaskImpact } from "../intelligence/realtime/recalculation.service.js";
 
 const INVERSE = {
   blocks: "is_blocked_by",
@@ -76,6 +77,27 @@ export async function addTaskLink({ sourceTaskId, targetTaskId, linkType, worksp
     client.release();
   }
 
+  const metadata = {
+    sourceTaskId,
+    targetTaskId,
+    linkType,
+    createdBy,
+  };
+  queueTaskImpact({
+    workspaceId,
+    taskId: sourceTaskId,
+    reason: linkType === "blocks" || linkType === "is_blocked_by" ? "blocker_added" : "task_dependency_added",
+    userIds: [createdBy],
+    metadata,
+  }).catch(() => {});
+  queueTaskImpact({
+    workspaceId,
+    taskId: targetTaskId,
+    reason: linkType === "blocks" || linkType === "is_blocked_by" ? "blocker_added" : "task_dependency_added",
+    userIds: [createdBy],
+    metadata,
+  }).catch(() => {});
+
   return getTaskLinks({ taskId: sourceTaskId });
 }
 
@@ -106,6 +128,24 @@ export async function removeTaskLink({ linkId, workspaceId }) {
   } finally {
     client.release();
   }
+
+  const metadata = {
+    sourceTaskId: source_task_id,
+    targetTaskId: target_task_id,
+    linkType: link_type,
+  };
+  queueTaskImpact({
+    workspaceId,
+    taskId: source_task_id,
+    reason: link_type === "blocks" || link_type === "is_blocked_by" ? "blocker_resolved" : "task_dependency_removed",
+    metadata,
+  }).catch(() => {});
+  queueTaskImpact({
+    workspaceId,
+    taskId: target_task_id,
+    reason: link_type === "blocks" || link_type === "is_blocked_by" ? "blocker_resolved" : "task_dependency_removed",
+    metadata,
+  }).catch(() => {});
 }
 
 export async function searchTasksForLinking({ workspaceId, query, excludeTaskId }) {

@@ -43,6 +43,10 @@ router.get("/connect", async (req, res) => {
     return res.status(400).send("Workspace missing");
   }
 
+  if (decoded.role !== "admin") {
+    return res.status(403).send("Only workspace admins can connect Asana");
+  }
+
   const redirectUrl =
     "https://app.asana.com/-/oauth_authorize?" +
     new URLSearchParams({

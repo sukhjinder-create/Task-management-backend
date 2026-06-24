@@ -1,5 +1,6 @@
 import express from "express";
 import { authMiddleware } from "../../middleware/auth.middleware.js";
+import { allowRoles } from "../../middleware/role.middleware.js";
 import { requireWorkspaceForUser } from "../../middleware/workspace.middleware.js";
 import {
   fetchAsanaProjects,
@@ -14,7 +15,7 @@ router.options("*", (req, res) => {
   res.sendStatus(204);
 });
 
-router.use(authMiddleware, requireWorkspaceForUser);
+router.use(authMiddleware, requireWorkspaceForUser, allowRoles("admin"));
 
 /**
  * GET projects

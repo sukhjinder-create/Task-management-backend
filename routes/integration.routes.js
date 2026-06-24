@@ -1,5 +1,6 @@
 import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
+import { allowRoles } from "../middleware/role.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import {
   connectWorkspaceIntegration,
@@ -16,6 +17,7 @@ const router = express.Router();
 
 // 🔐 Workspace isolation (same pattern as other routes)
 router.use(authMiddleware, requireWorkspaceForUser);
+router.use(allowRoles("admin"));
 router.use(express.json({ limit: "50mb" }));
 router.use(express.urlencoded({ extended: true, limit: "50mb" }));
 

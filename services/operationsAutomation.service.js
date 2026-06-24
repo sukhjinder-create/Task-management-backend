@@ -2,7 +2,6 @@ import pool from "../db.js";
 import {
   addDays,
   getApprovedLeaveDateMap,
-  getCurrentMonthKey,
   getRecentExpectedWorkingDates,
   getWorkspaceUserMap,
   tableExists,
@@ -405,33 +404,33 @@ async function evaluateStaleBlockedTasks(workspaceId, rule, dryRun) {
 }
 
 async function evaluateReviewRiskSignals(workspaceId, rule, userMap, dryRun) {
-  if (!rule.enabled || !(await tableExists("workspace_monthly_scores"))) {
+  if (!rule.enabled || !(await tableExists("user_intelligence"))) {
     return [];
   }
 
-  const month = getCurrentMonthKey();
   const { rows } = await pool.query(
     `
     SELECT
-      wms.user_id,
-      wms.score,
+      ui.user_id,
+      ui.score,
+      ui.risk,
+      ui.confidence,
       COUNT(t.id)::int AS overdue_count,
       (ARRAY_AGG(t.project_id ORDER BY t.due_date ASC, t.id ASC) FILTER (WHERE t.project_id IS NOT NULL))[1] AS project_id,
       ARRAY_AGG(t.id ORDER BY t.due_date ASC, t.id ASC) FILTER (WHERE t.id IS NOT NULL) AS task_ids
-    FROM workspace_monthly_scores wms
+    FROM user_intelligence ui
     LEFT JOIN tasks t
-      ON t.workspace_id = wms.workspace_id
-     AND t.assigned_to = wms.user_id
+      ON t.workspace_id = ui.workspace_id
+     AND t.assigned_to = ui.user_id
      AND t.status NOT IN ('completed', 'cancelled')
      AND t.due_date IS NOT NULL
      AND t.due_date < NOW()::date
-    WHERE wms.workspace_id = $1
-      AND wms.month = $2
-      AND wms.score <= $3
-    GROUP BY wms.user_id, wms.score
-    HAVING COUNT(t.id) >= $4
+    WHERE ui.workspace_id = $1
+      AND ui.score <= $2
+    GROUP BY ui.user_id, ui.score, ui.risk, ui.confidence
+    HAVING COUNT(t.id) >= $3
     `,
-    [workspaceId, month, rule.config.scoreThreshold || 45, rule.config.minOverdueTasks || 1]
+    [workspaceId, rule.config.scoreThreshold || 45, rule.config.minOverdueTasks || 1]
   );
 
   const findings = [];
@@ -443,8 +442,8 @@ async function evaluateReviewRiskSignals(workspaceId, rule, userMap, dryRun) {
       workspaceId,
       ruleKey: rule.key,
       title: `Execution risk detected for ${user.username}`,
-      summary: `${user.username} scored ${row.score} this month and still carries ${row.overdue_count} overdue task(s).`,
-      explanation: "This joins score deterioration with active overdue work so managers can intervene with context, not just intuition.",
+      summary: `${user.username} has a current intelligence score of ${row.score} and still carries ${row.overdue_count} overdue task(s).`,
+      explanation: "This joins enterprise intelligence risk with active overdue work so managers can intervene with context, not just intuition.",
       confidence: rule.config.confidence,
       riskLevel: "high",
       actionType: "notify_supervisors",
@@ -452,10 +451,10 @@ async function evaluateReviewRiskSignals(workspaceId, rule, userMap, dryRun) {
       projectId: row.project_id,
       taskId: row.task_ids?.[0] || null,
       payload: {
-        message: `${user.username} shows combined scoring and delivery risk. Consider a coaching checkpoint this week.`,
+        message: `${user.username} shows combined intelligence and delivery risk. Consider a coaching checkpoint this week.`,
       },
       evidence: [
-        { type: "score", month, score: Number(row.score) || 0 },
+        { type: "enterprise_intelligence", score: Number(row.score) || 0, confidence: Number(row.confidence) || 0, risk: row.risk || {} },
         { type: "overdue_tasks", overdueCount: row.overdue_count, taskIds: row.task_ids || [] },
       ],
     }, dryRun);

@@ -1,8 +1,11 @@
 import express from "express";
+import { allowRoles } from "../../middleware/role.middleware.js";
 import { validateSlackToken, migrateSlackWorkspace } from "./slack.migration.service.js";
 import { createRunningMigrationImport } from "../../services/migrationHistory.service.js";
 
 const router = express.Router();
+
+router.use(allowRoles("admin"));
 
 /**
  * POST /integrations/slack/validate

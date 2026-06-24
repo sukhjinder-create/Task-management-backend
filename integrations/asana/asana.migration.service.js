@@ -110,6 +110,13 @@ export async function migrateAsanaProject({
     if (prev.rows.length) {
       const prevProjectId = prev.rows[0].metadata?.projectId;
       if (prevProjectId) {
+        await pool.query(
+          `DELETE FROM integration_task_mappings
+           WHERE workspace_id=$1
+             AND provider='asana'
+             AND internal_task_id IN (SELECT id FROM tasks WHERE project_id=$2)`,
+          [workspaceId, prevProjectId]
+        );
         await pool.query(`DELETE FROM tasks WHERE project_id=$1`, [prevProjectId]);
         await pool.query(`DELETE FROM projects WHERE id=$1 AND workspace_id=$2`, [prevProjectId, workspaceId]);
         await pool.query(
@@ -143,6 +150,44 @@ export async function migrateAsanaProject({
     throw new Error("No tasks found in Asana project");
   }
 
+  let tasksToImport = liteTasks;
+  if (mode === "skip") {
+    const externalIds = liteTasks.map((task) => String(task.gid || "")).filter(Boolean);
+
+    if (externalIds.length) {
+      const existing = await pool.query(
+        `SELECT m.external_task_id
+         FROM integration_task_mappings m
+         JOIN tasks t ON t.id = m.internal_task_id
+         WHERE m.workspace_id=$1
+           AND m.provider='asana'
+           AND m.external_task_id = ANY($2::text[])`,
+        [workspaceId, externalIds]
+      );
+      const existingIds = new Set(existing.rows.map((row) => row.external_task_id));
+      tasksToImport = liteTasks.filter((task) => !existingIds.has(String(task.gid)));
+    }
+
+    if (!tasksToImport.length) {
+      const importRecord = await recordMigrationImport({
+        workspaceId,
+        source: "asana",
+        stats: { importedTasks: 0, skippedTasks: liteTasks.length },
+        metadata: { projectId: null, asanaProjectId: projectId },
+        triggeredBy,
+      });
+
+      return {
+        success: true,
+        importedTasks: 0,
+        skippedTasks: liteTasks.length,
+        projectId: null,
+        importId: importRecord.id,
+        importNumber: importRecord.import_number,
+      };
+    }
+  }
+
   /* ---------- CREATE PROJECT ONCE ---------- */
   const projectInsert = await pool.query(
     `
@@ -161,7 +206,7 @@ export async function migrateAsanaProject({
   /* =====================================================
      IMPORT TASKS
   ===================================================== */
-  for (const liteTask of liteTasks) {
+  for (const liteTask of tasksToImport) {
 
     const asanaTask = await fetchFullAsanaTask(
       token,
@@ -171,8 +216,9 @@ export async function migrateAsanaProject({
     /* ---- skip already migrated (only in skip mode) ---- */
     if (mode === "skip") {
       const existing = await pool.query(
-        `SELECT 1 FROM integration_task_mappings
-         WHERE workspace_id=$1 AND provider='asana' AND external_task_id=$2`,
+        `SELECT 1 FROM integration_task_mappings m
+         JOIN tasks t ON t.id = m.internal_task_id
+         WHERE m.workspace_id=$1 AND m.provider='asana' AND m.external_task_id=$2`,
         [workspaceId, asanaTask.gid]
       );
       if (existing.rows.length) continue;

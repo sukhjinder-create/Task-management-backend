@@ -1,115 +1,161 @@
 import cron from "node-cron";
 import pool from "../db.js";
-import { generateMonthlyScore } from "../events/scoring/monthlyScoring.service.js";
-import { generateMonthlyCoaching } from "../events/coaching/coachingScheduler.service.js";
-import { generateAdminInsights } from "../events/admin/adminInsight.service.js";
-import { generateExecutiveSummary } from "../events/executive/executiveSummary.service.js";
+import { getUnifiedIntelligenceSnapshot } from "../intelligence/engine/unifiedIntelligence.engine.js";
+import {
+  recordRecalculationEvent,
+  writeSnapshot,
+} from "../intelligence/repositories/unifiedIntelligence.repository.js";
+
+async function writeAuthoritativeSnapshots({ workspaceId, snapshot, periodKeys }) {
+  let written = 0;
+
+  for (const periodKey of periodKeys) {
+    if (snapshot.workspace) {
+      await writeSnapshot({
+        scopeType: "workspace",
+        subjectKey: String(workspaceId),
+        result: { ...snapshot.workspace, workspaceId },
+        periodKey,
+      });
+      written += 1;
+    }
+
+    for (const user of snapshot.users || []) {
+      await writeSnapshot({
+        scopeType: "user",
+        subjectKey: String(user.userId),
+        result: { ...user, workspaceId },
+        periodKey,
+      });
+      written += 1;
+    }
+
+    for (const project of snapshot.projects || []) {
+      await writeSnapshot({
+        scopeType: "project",
+        subjectKey: String(project.projectId),
+        result: { ...project, workspaceId },
+        periodKey,
+      });
+      written += 1;
+    }
+
+    for (const team of snapshot.teams || []) {
+      await writeSnapshot({
+        scopeType: "team",
+        subjectKey: String(team.teamKey),
+        result: { ...team, workspaceId },
+        periodKey,
+      });
+      written += 1;
+    }
+  }
+
+  return written;
+}
 
 /**
- * Runs full monthly intelligence pipeline
- * Safe to re-run (idempotent by design)
+ * Cron-side intelligence is snapshot/audit only.
+ *
+ * Real-time recalculation owns live scores. This scheduled job captures the
+ * current authoritative repository rows into intelligence_snapshots so
+ * historical dashboards can read without recalculating.
  */
 export async function runMonthlyIntelligence({
-  month,          // e.g. "2026-02"
-  previousMonth,  // e.g. "2026-01"
+  month,
+  previousMonth,
+  mode = "scheduled_snapshot",
 }) {
-  console.log("🧠 Monthly Intelligence Cron started:", month);
+  console.log("[intelligence-cron] Authoritative snapshot run started:", month);
 
-  // 1️⃣ Fetch all active workspaces
   const { rows: workspaces } = await pool.query(
     `SELECT id FROM workspaces WHERE is_active = true`
   );
 
   for (const ws of workspaces) {
     const workspaceId = ws.id;
-    console.log("▶ Workspace:", workspaceId);
+    console.log("[intelligence-cron] Workspace snapshot:", workspaceId);
 
-    // 2️⃣ Fetch active users in workspace
-    const { rows: users } = await pool.query(
-      `
-      SELECT id
-      FROM users
-      WHERE workspace_id = $1
-        AND status = 'active'
-      `,
-      [workspaceId]
-    );
-
-    // ---- USER LEVEL ----
-    for (const user of users) {
-      const userId = user.id;
-
-      // Monthly scoring
-      await generateMonthlyScore({
+    try {
+      const snapshot = await getUnifiedIntelligenceSnapshot({
         workspaceId,
-        userId,
-        month,
+        role: "admin",
+      });
+      const periodKeys = mode === "month_close_snapshot"
+        ? ["rolling_30d", `month:${month}`]
+        : ["rolling_30d"];
+      const snapshotsWritten = await writeAuthoritativeSnapshots({
+        workspaceId,
+        snapshot,
+        periodKeys,
       });
 
-      // Coaching nudges
-      await generateMonthlyCoaching({
+      await recordRecalculationEvent({
         workspaceId,
-        userId,
-        month,
+        reason: "scheduled_intelligence_snapshot",
+        sourceType: "cron",
+        sourceId: month,
+        metadata: {
+          mode,
+          month,
+          previousMonth,
+          periodKeys,
+          snapshotsWritten,
+          scoreSource: "enterprise_intelligence_repositories",
+          legacyMonthlyScoringSkipped: true,
+        },
       });
+    } catch (err) {
+      if (err?.code === "INTELLIGENCE_SCHEMA_MISSING") {
+        console.warn(
+          "[intelligence-cron] Enterprise intelligence schema missing; snapshot skipped for",
+          workspaceId
+        );
+        continue;
+      }
+      throw err;
     }
-
-    // ---- WORKSPACE LEVEL ----
-    await generateAdminInsights({
-      workspaceId,
-      month,
-    });
-
-    await generateExecutiveSummary({
-      workspaceId,
-      month,
-      previousMonth,
-    });
   }
 
-  console.log("✅ Monthly Intelligence Cron completed:", month);
+  console.log("[intelligence-cron] Authoritative snapshot run completed:", month);
 }
 
-/**
- * Schedules two recurring intelligence runs:
- *
- *  1. 1st of every month @ 02:00 — official end-of-month score for the
- *     month that just closed (authoritative record).
- *
- *  2. Every Sunday @ 03:00 — mid-month refresh for the current month so
- *     scores never go more than 7 days stale. Idempotent UPSERT keeps this safe.
- */
 export function startMonthlyIntelligenceCron() {
-  // Helper: returns "YYYY-MM" for an offset of N months from today
   const monthStr = (offsetMonths = 0) => {
     const d = new Date();
     d.setMonth(d.getMonth() + offsetMonths);
     return d.toISOString().slice(0, 7);
   };
 
-  // Official end-of-month run — scores the month that just ended
   cron.schedule("0 2 1 * *", async () => {
-    const month         = monthStr(-1); // previous month
+    const month = monthStr(-1);
     const previousMonth = monthStr(-2);
-    console.log(`[intelligence-cron] End-of-month run for ${month}`);
+    console.log(`[intelligence-cron] End-of-month snapshot for ${month}`);
     try {
-      await runMonthlyIntelligence({ month, previousMonth });
+      await runMonthlyIntelligence({
+        month,
+        previousMonth,
+        mode: "month_close_snapshot",
+      });
     } catch (err) {
-      console.error("[intelligence-cron] End-of-month run failed:", err);
+      console.error("[intelligence-cron] End-of-month snapshot failed:", err);
     }
   });
 
-  // Weekly mid-month refresh — keeps current-month scores fresh
   cron.schedule("0 3 * * 0", async () => {
-    const month         = monthStr(0);  // current month
+    const month = monthStr(0);
     const previousMonth = monthStr(-1);
-    console.log(`[intelligence-cron] Weekly refresh for ${month}`);
+    console.log(`[intelligence-cron] Weekly snapshot for ${month}`);
     try {
-      await runMonthlyIntelligence({ month, previousMonth });
+      await runMonthlyIntelligence({
+        month,
+        previousMonth,
+        mode: "weekly_snapshot",
+      });
     } catch (err) {
-      console.error("[intelligence-cron] Weekly refresh failed:", err);
+      console.error("[intelligence-cron] Weekly snapshot failed:", err);
     }
   });
 
-  console.log("✅ Monthly Intelligence cron started (end-of-month + weekly refresh)");
+  console.log("[intelligence-cron] Snapshot cron started (month-close audit + weekly history)");
 }

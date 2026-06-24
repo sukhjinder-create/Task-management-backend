@@ -4,6 +4,7 @@ import db from "../db.js";
 import { logAudit } from "../services/audit.service.js";
 import { sendLeaveRequestEmail, sendLeaveStatusEmail } from "../services/email.service.js";
 import { notifyUser } from "../services/notification.service.js";
+import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
 
 const router = express.Router();
 
@@ -257,6 +258,20 @@ router.patch("/requests/:id/review", async (req, res) => {
     }
 
     await logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: `leave.request.${status}`, entityType: "leave_request", entityId: req.params.id });
+    if (status === "approved") {
+      queueImpactedIntelligenceRecalculation({
+        workspaceId: req.workspaceId,
+        reason: "leave_approved",
+        userIds: [req_.user_id],
+        sourceType: "leave_request",
+        sourceId: req_.id,
+        metadata: {
+          startDate: req_.start_date,
+          endDate: req_.end_date,
+          days: req_.days,
+        },
+      });
+    }
     res.json(row.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });

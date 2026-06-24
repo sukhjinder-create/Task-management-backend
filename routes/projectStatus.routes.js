@@ -2,6 +2,7 @@ import express from "express";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import pool from "../db.js";
 import { logAudit } from "../services/audit.service.js";
+import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
 
 const router = express.Router();
 
@@ -24,6 +25,18 @@ function historyMeta(projectId, extra = {}) {
 
 function canManage(user) {
   return user.role === "admin" || user.role === "manager";
+}
+
+function queueProjectStatusIntelligence({ workspaceId, projectId, reason, userId, metadata = {} }) {
+  queueImpactedIntelligenceRecalculation({
+    workspaceId,
+    reason,
+    userIds: [userId],
+    projectIds: [projectId],
+    sourceType: "project_status",
+    sourceId: metadata.statusColumnId || projectId,
+    metadata,
+  });
 }
 
 function normalizeKey(value = "") {
@@ -239,6 +252,18 @@ router.post("/:projectId", authMiddleware, async (req, res) => {
         statusKey: created.key,
       }),
     });
+    queueProjectStatusIntelligence({
+      workspaceId: req.workspaceId,
+      projectId,
+      reason: "project_status_changed",
+      userId: req.user.id,
+      metadata: {
+        action: "created",
+        statusColumnId: created.id,
+        statusKey: created.key,
+        label: created.label,
+      },
+    });
 
     res.status(201).json(created);
   } catch (err) {
@@ -370,6 +395,19 @@ router.put("/:id", authMiddleware, async (req, res) => {
             statusKey: current.key,
           }),
         });
+        queueProjectStatusIntelligence({
+          workspaceId: req.workspaceId,
+          projectId: current.project_id,
+          reason: "project_status_changed",
+          userId: req.user.id,
+          metadata: {
+            action: "updated",
+            statusColumnId: current.id,
+            statusKey: finalStatus?.key || current.key,
+            labelChanged: label != null,
+            orderChanged: sort_order != null,
+          },
+        });
       }
       res.json(finalStatus);
     } catch (err) {
@@ -445,6 +483,18 @@ router.delete("/:id", authMiddleware, async (req, res) => {
           statusColumnId: status.id,
           statusKey: status.key,
         }),
+      });
+      queueProjectStatusIntelligence({
+        workspaceId: req.workspaceId,
+        projectId: status.project_id,
+        reason: "project_status_changed",
+        userId: req.user.id,
+        metadata: {
+          action: "deleted",
+          statusColumnId: status.id,
+          statusKey: status.key,
+          label: status.label,
+        },
       });
 
       res.json({ success: true });
