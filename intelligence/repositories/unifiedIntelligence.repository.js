@@ -2,7 +2,7 @@ import pool from "../../db.js";
 import { INTELLIGENCE_VERSION, compactJson } from "../engine/scorePrimitives.js";
 
 function json(value, fallback) {
-  return compactJson(value ?? fallback);
+  return JSON.stringify(compactJson(value ?? fallback));
 }
 
 function sourceWindow(row) {
