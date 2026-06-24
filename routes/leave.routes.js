@@ -5,6 +5,7 @@ import { logAudit } from "../services/audit.service.js";
 import { sendLeaveRequestEmail, sendLeaveStatusEmail } from "../services/email.service.js";
 import { notifyUser } from "../services/notification.service.js";
 import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
+import { emitAttendanceUpdated } from "../realtime/socket.js";
 
 const router = express.Router();
 
@@ -272,6 +273,11 @@ router.patch("/requests/:id/review", async (req, res) => {
         },
       });
     }
+    emitAttendanceUpdated({
+      workspaceId: req.workspaceId,
+      userId: req_.user_id,
+      action: `leave_${status}`,
+    });
     res.json(row.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });

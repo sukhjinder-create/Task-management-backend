@@ -40,6 +40,50 @@ const attendanceSessionByUser = new Map();
 // userId -> { startedAt, plannedMinutes }
 const awsStateByUser = new Map();
 
+function toIso(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function minutesSince(value) {
+  if (!value) return 0;
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return 0;
+  return Math.floor(ms / 60000);
+}
+
+function mapLiveStatus(eventType) {
+  switch (eventType) {
+    case EVENT.AWS_START:
+      return "aws";
+    case EVENT.LUNCH_START:
+      return "lunch";
+    default:
+      return "available";
+  }
+}
+
+function statusLabel(status) {
+  switch (status) {
+    case "aws":
+      return "AWS";
+    case "lunch":
+      return "Lunch";
+    case "on_leave":
+      return "On leave";
+    case "offline":
+      return "Not signed in";
+    default:
+      return "Present";
+  }
+}
+
+function bucket(users, status) {
+  return users.filter((user) => user.status === status);
+}
+
 /* ------------------------------------------------------------
    🧠 ATTENDANCE SESSION DB HELPERS (ADD-ONLY)
 ------------------------------------------------------------ */
@@ -227,7 +271,7 @@ export async function markSignIn(userId, workspaceId) {
   const existingSessionId = await getOpenSessionId(userId, workspaceId);
   if (existingSessionId) {
     attendanceSessionByUser.set(String(userId), existingSessionId);
-    return; // 🚫 do NOTHING else
+    return false;
   }
 
   // 🔥 HARD RESET — close any orphaned session (safety net)
@@ -252,6 +296,8 @@ export async function markSignIn(userId, workspaceId) {
     userId,
     workspaceId
   );
+
+  return true;
 }
 
 /**
@@ -273,7 +319,7 @@ export async function markSignOff(userId, workspaceId) {
       userId,
       workspaceId,
     });
-    return;
+    return false;
   }
 
   await recordAttendanceEvent({
@@ -294,6 +340,8 @@ export async function markSignOff(userId, workspaceId) {
     userId,
     workspaceId
   );
+
+  return true;
 }
 
 /**
@@ -311,7 +359,7 @@ export async function markAws(userId, minutes, workspaceId) {
       userId,
       workspaceId,
     });
-    return;
+    return false;
   }
 
   const now = new Date();
@@ -334,6 +382,8 @@ export async function markAws(userId, minutes, workspaceId) {
     userId,
     workspaceId
   );
+
+  return true;
 }
 
 /**
@@ -350,7 +400,7 @@ export async function markLunch(userId, workspaceId) {
       userId,
       workspaceId,
     });
-    return;
+    return false;
   }
 
   awsStateByUser.delete(key);
@@ -367,6 +417,8 @@ export async function markLunch(userId, workspaceId) {
     userId,
     workspaceId
   );
+
+  return true;
 }
 
 /**
@@ -389,7 +441,7 @@ export async function markAvailableAfterAws(userId, workspaceId) {
       userId,
       workspaceId,
     });
-    return;
+    return false;
   }
 
   const state = awsStateByUser.get(key);
@@ -408,7 +460,7 @@ export async function markAvailableAfterAws(userId, workspaceId) {
       userId,
       workspaceId
     );
-    return;
+    return true;
   }
 
   const elapsed = Math.max(
@@ -428,6 +480,8 @@ export async function markAvailableAfterAws(userId, workspaceId) {
     userId,
     workspaceId
   );
+
+  return true;
 }
 
 /* ------------------------------------------------------------
@@ -453,6 +507,166 @@ export async function markAvailableAfterAwsLegacy(userId) {
   return markAvailableAfterAws(userId, WORKSPACE_GLOBAL);
 }
 
+export async function getLiveAttendanceDashboard({ workspaceId, userId, role }) {
+  const normalizedRole = String(role || "").toLowerCase();
+  const { rows: dateRows } = await pool.query("SELECT CURRENT_DATE::text AS today");
+  const today = dateRows[0]?.today || new Date().toISOString().slice(0, 10);
+
+  const baseParams = [workspaceId];
+  let userScopeSql = "";
+  if (normalizedRole === "manager") {
+    baseParams.push(userId);
+    userScopeSql = `
+      AND (
+        u.id = $2
+        OR u.id IN (
+          SELECT DISTINCT t.assigned_to
+          FROM tasks t
+          JOIN users manager_user ON manager_user.id = $2
+          WHERE t.workspace_id = $1
+            AND t.assigned_to IS NOT NULL
+            AND t.project_id = ANY(COALESCE(manager_user.projects, ARRAY[]::uuid[]))
+        )
+      )
+    `;
+  } else if (!["admin", "owner"].includes(normalizedRole)) {
+    baseParams.push(userId);
+    userScopeSql = "AND u.id = $2";
+  }
+
+  const { rows: visibleUsers } = await pool.query(
+    `
+    SELECT
+      u.id::text AS user_id,
+      u.username,
+      u.email,
+      u.role,
+      u.avatar_url
+    FROM users u
+    JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
+    WHERE COALESCE(wu.billing_status, 'active') <> 'pending'
+      AND COALESCE(u.role, '') NOT IN ('system', 'superadmin')
+      AND LOWER(COALESCE(u.username, '')) <> 'autopilot'
+      ${userScopeSql}
+    ORDER BY u.username ASC
+    `,
+    baseParams
+  );
+
+  const userIds = visibleUsers.map((user) => user.user_id);
+  if (!userIds.length) {
+    return {
+      source: "attendance_live",
+      generatedAt: new Date().toISOString(),
+      date: today,
+      scope: { role: normalizedRole || "user", userCount: 0 },
+      totals: { present: 0, available: 0, aws: 0, lunch: 0, onLeave: 0, notSignedIn: 0 },
+      buckets: { available: [], aws: [], lunch: [], onLeave: [], notSignedIn: [] },
+      users: [],
+    };
+  }
+
+  const [sessionResult, leaveResult] = await Promise.all([
+    pool.query(
+      `
+      SELECT
+        s.user_id::text AS user_id,
+        s.sign_in_at,
+        COALESCE(ev.event_type, 'SIGN_IN') AS latest_event_type,
+        COALESCE(ev.started_at, s.sign_in_at) AS latest_event_started_at
+      FROM attendance_sessions s
+      LEFT JOIN LATERAL (
+        SELECT e.event_type, e.started_at
+        FROM attendance_events e
+        WHERE e.session_id = s.id
+        ORDER BY e.started_at DESC
+        LIMIT 1
+      ) ev ON TRUE
+      WHERE s.workspace_id = $1
+        AND s.sign_off_at IS NULL
+        AND s.user_id = ANY($2::uuid[])
+      `,
+      [workspaceId, userIds]
+    ),
+    pool.query(
+      `
+      SELECT
+        lr.user_id::text AS user_id,
+        lr.start_date,
+        lr.end_date,
+        lt.name AS leave_type_name,
+        lt.color AS leave_type_color
+      FROM leave_requests lr
+      LEFT JOIN leave_types lt ON lt.id = lr.leave_type_id
+      WHERE lr.workspace_id = $1
+        AND lr.status = 'approved'
+        AND $2::date BETWEEN lr.start_date AND lr.end_date
+        AND lr.user_id = ANY($3::uuid[])
+      `,
+      [workspaceId, today, userIds]
+    ),
+  ]);
+
+  const liveByUser = new Map(sessionResult.rows.map((row) => [String(row.user_id), row]));
+  const leaveByUser = new Map(leaveResult.rows.map((row) => [String(row.user_id), row]));
+
+  const users = visibleUsers.map((user) => {
+    const live = liveByUser.get(String(user.user_id));
+    const leave = leaveByUser.get(String(user.user_id));
+    const status = live ? mapLiveStatus(live.latest_event_type) : leave ? "on_leave" : "offline";
+    const statusSince = live?.latest_event_started_at || leave?.start_date || null;
+    return {
+      userId: user.user_id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      avatarUrl: user.avatar_url || null,
+      status,
+      label: statusLabel(status),
+      signedInAt: toIso(live?.sign_in_at),
+      statusSince: toIso(statusSince),
+      statusMinutes: live ? minutesSince(statusSince) : null,
+      leave: leave
+        ? {
+            type: leave.leave_type_name || "Leave",
+            color: leave.leave_type_color || null,
+            startDate: leave.start_date,
+            endDate: leave.end_date,
+          }
+        : null,
+    };
+  });
+
+  const available = bucket(users, "available");
+  const aws = bucket(users, "aws");
+  const lunch = bucket(users, "lunch");
+  const onLeave = bucket(users, "on_leave");
+  const notSignedIn = bucket(users, "offline");
+
+  return {
+    source: "attendance_live",
+    generatedAt: new Date().toISOString(),
+    date: today,
+    scope: { role: normalizedRole || "user", userCount: users.length },
+    totals: {
+      present: available.length + aws.length + lunch.length,
+      available: available.length,
+      aws: aws.length,
+      lunch: lunch.length,
+      onLeave: onLeave.length,
+      notSignedIn: notSignedIn.length,
+    },
+    buckets: {
+      available,
+      aws,
+      lunch,
+      onLeave,
+      notSignedIn,
+    },
+    users,
+  };
+}
+
 /* ------------------------------------------------------------
    DEFAULT EXPORT (UNCHANGED)
 ------------------------------------------------------------ */
@@ -467,4 +681,5 @@ export default {
   markAwsLegacy,
   markLunchLegacy,
   markAvailableAfterAwsLegacy,
+  getLiveAttendanceDashboard,
 };

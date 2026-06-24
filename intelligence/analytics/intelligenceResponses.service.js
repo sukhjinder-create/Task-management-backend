@@ -7,6 +7,7 @@ import {
   listUserIntelligence,
 } from "../repositories/unifiedIntelligence.repository.js";
 import { withLegacyIsolation } from "./cutoverIsolation.service.js";
+import { advancedForecast } from "../forecast/forecast.engine.js";
 
 function monthKey() {
   return new Date().toISOString().slice(0, 7);
@@ -45,6 +46,24 @@ function riskDistribution(users = [], style = "camel") {
     lowRisk: counts.low,
     mediumRisk: counts.medium,
     highRisk: counts.high,
+  };
+}
+
+function buildForecastContract({ scoreHistory = [], workspace = null, executionContext = {} }) {
+  const scores = (scoreHistory || [])
+    .map((point) => Number(point.score))
+    .filter(Number.isFinite);
+  const forecast = advancedForecast(scores, {
+    completionRate: Number(executionContext.completionRate || 0) / 100,
+  });
+  const trend = buildTrendAnalytics(scoreHistory);
+  return {
+    ...forecast,
+    direction: trend.direction,
+    delta: trend.delta,
+    currentScore: workspace?.score ?? scores[scores.length - 1] ?? null,
+    confidenceScore: workspace?.confidence ?? null,
+    reasoning: forecast.reasoning || "Forecast is derived from enterprise intelligence snapshots, not recalculated from legacy score tables.",
   };
 }
 
@@ -145,30 +164,26 @@ export async function buildAdminInsightsResponse({ workspaceId, userId, role }) 
     range: "6m",
   });
   const trend = buildTrendAnalytics(scoreHistory);
+  const executionContext = {
+    completionRate: snapshot.workspace?.indexes?.deliveryConfidenceIndex || null,
+    backlog: scopedProjects.reduce((sum, project) => sum + (project.analytics?.openTasks || 0), 0),
+    pressure: snapshot.workspace?.risk?.level === "High" ? "High" : snapshot.workspace?.risk?.level === "Medium" ? "Moderate" : "Stable",
+    risk: snapshot.workspace?.risk?.level || "Low",
+  };
 
   return {
     source: "enterprise_intelligence",
     orgScore: summarizeUsers(scopedUsers),
     coachingEffectiveness: {},
     riskDistribution: riskDistribution(scopedUsers),
-    forecast: {
-      direction: trend.direction,
-      delta: trend.delta,
-      confidence: snapshot.workspace?.confidence || 0,
-      reasoning: "Forecast is derived from enterprise intelligence snapshots, not recalculated from legacy score tables.",
-    },
+    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext }),
     leaderboard: scopedUsers.slice(0, 5).map((user) => ({
       userId: user.userId,
       username: user.username,
       score: user.score,
       risk: user.risk,
     })),
-    execution: {
-      completionRate: snapshot.workspace?.indexes?.deliveryConfidenceIndex || null,
-      backlog: scopedProjects.reduce((sum, project) => sum + (project.analytics?.openTasks || 0), 0),
-      pressure: snapshot.workspace?.risk?.level === "High" ? "High" : snapshot.workspace?.risk?.level === "Medium" ? "Moderate" : "Stable",
-      risk: snapshot.workspace?.risk?.level || "Low",
-    },
+    execution: executionContext,
     signals: [
       ...(snapshot.workspace?.indicators || []),
       ...(snapshot.workspace?.concerns || []).map((concern) => ({ type: "concern", label: concern })),
@@ -274,7 +289,10 @@ export async function buildExecutiveSummaryData({ workspaceId, userId, role, mon
 
   const users = snapshot.users || [];
   const projects = snapshot.projects || [];
-  const trend = buildTrendAnalytics(scoreHistory);
+  const executionContext = {
+    completionRate: snapshot.workspace?.indexes?.deliveryConfidenceIndex ?? null,
+    backlog: projects.reduce((sum, project) => sum + (project.analytics?.openTasks || 0), 0),
+  };
 
   return {
     month,
@@ -285,10 +303,7 @@ export async function buildExecutiveSummaryData({ workspaceId, userId, role, mon
       productivityIndex: snapshot.workspace?.indexes?.productivityIndex ?? null,
       strategicRiskIndex: snapshot.workspace?.indexes?.strategicRiskIndex ?? null,
     },
-    executionContext: {
-      completionRate: snapshot.workspace?.indexes?.deliveryConfidenceIndex ?? null,
-      backlog: projects.reduce((sum, project) => sum + (project.analytics?.openTasks || 0), 0),
-    },
+    executionContext,
     orgScore: summarizeUsers(users),
     riskDistribution: riskDistribution(users, "snake"),
     leaderboard: users.slice(0, 5).map((user) => ({
@@ -298,12 +313,7 @@ export async function buildExecutiveSummaryData({ workspaceId, userId, role, mon
       confidence: user.confidence,
       risk: user.risk,
     })),
-    forecast: {
-      direction: trend.direction,
-      delta: trend.delta,
-      confidence: snapshot.workspace?.confidence || 0,
-      reasoning: "Executive summary forecast is derived from enterprise intelligence snapshots.",
-    },
+    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext }),
     okrHealth: null,
     legacyContext: {
       okrHealth: goalsHealth,

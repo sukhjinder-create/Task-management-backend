@@ -2818,6 +2818,16 @@ export async function emitWorkspaceIntelligenceUpdate(workspaceId, payload) {
   }
 }
 
+export function emitAttendanceUpdated({ workspaceId, userId = null, action = "updated" } = {}) {
+  if (!io || !workspaceId) return;
+  io.to(`workspace:${workspaceId}`).emit("attendance:updated", {
+    workspaceId,
+    userId,
+    action,
+    at: new Date().toISOString(),
+  });
+}
+
 /**
  * Emitted when a superadmin changes a workspace's billing plan.
  * All connected users in that workspace re-fetch their plan features.

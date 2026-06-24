@@ -7,9 +7,25 @@ import {
   markAws,
   markLunch,
   markAvailableAfterAws,
+  getLiveAttendanceDashboard,
 } from "../services/attendance.service.js";
+import { emitAttendanceUpdated } from "../realtime/socket.js";
 
 const router = express.Router();
+
+router.get("/live", authMiddleware, async (req, res) => {
+  try {
+    const data = await getLiveAttendanceDashboard({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+    });
+    res.json(data);
+  } catch (err) {
+    console.error("Error loading live attendance:", err);
+    res.status(500).json({ error: "Failed to load live attendance" });
+  }
+});
 
 /**
  * POST /attendance/sign-in
@@ -17,7 +33,14 @@ const router = express.Router();
  */
 router.post("/sign-in", authMiddleware, async (req, res) => {
   try {
-    await markSignIn(req.user.id, req.workspaceId);
+    const changed = await markSignIn(req.user.id, req.workspaceId);
+    if (changed) {
+      emitAttendanceUpdated({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "sign_in",
+      });
+    }
     res.json({ success: true });
   } catch (err) {
     console.error("Error sign-in attendance:", err);
@@ -31,7 +54,14 @@ router.post("/sign-in", authMiddleware, async (req, res) => {
  */
 router.post("/sign-off", authMiddleware, async (req, res) => {
   try {
-    await markSignOff(req.user.id, req.workspaceId);
+    const changed = await markSignOff(req.user.id, req.workspaceId);
+    if (changed) {
+      emitAttendanceUpdated({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "sign_off",
+      });
+    }
     res.json({ success: true });
   } catch (err) {
     console.error("Error sign-off attendance:", err);
@@ -58,7 +88,14 @@ router.post("/aws", authMiddleware, async (req, res) => {
     // Clamp to avoid crazy values (max 8 hours)
     const safeMinutes = Math.min(mins, 8 * 60);
 
-    await markAws(req.user.id, safeMinutes, req.workspaceId);
+    const changed = await markAws(req.user.id, safeMinutes, req.workspaceId);
+    if (changed) {
+      emitAttendanceUpdated({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "aws",
+      });
+    }
     res.json({ success: true, minutes: safeMinutes });
   } catch (err) {
     console.error("Error AWS attendance:", err);
@@ -72,7 +109,14 @@ router.post("/aws", authMiddleware, async (req, res) => {
  */
 router.post("/lunch", authMiddleware, async (req, res) => {
   try {
-    await markLunch(req.user.id, req.workspaceId);
+    const changed = await markLunch(req.user.id, req.workspaceId);
+    if (changed) {
+      emitAttendanceUpdated({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "lunch",
+      });
+    }
     res.json({ success: true });
   } catch (err) {
     console.error("Error lunch attendance:", err);
@@ -88,7 +132,14 @@ router.post("/lunch", authMiddleware, async (req, res) => {
  */
 router.post("/available", authMiddleware, async (req, res) => {
   try {
-    await markAvailableAfterAws(req.user.id, req.workspaceId);
+    const changed = await markAvailableAfterAws(req.user.id, req.workspaceId);
+    if (changed) {
+      emitAttendanceUpdated({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        action: "available",
+      });
+    }
     res.json({ success: true });
   } catch (err) {
     console.error("Error available attendance:", err);
