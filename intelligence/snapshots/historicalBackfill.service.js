@@ -11,10 +11,11 @@ import {
   writeSnapshot,
 } from "../repositories/unifiedIntelligence.repository.js";
 
-const DEFAULT_DAYS = 366;
+const DEFAULT_DAYS = 0;
 const DEFAULT_INTERVAL_DAYS = 7;
-const DEFAULT_MAX_ANCHORS = 64;
+const DEFAULT_MAX_ANCHORS = 96;
 const DEFAULT_WINDOW_DAYS = 30;
+const MATERIALIZATION_VERSION = "dashboard_history_materialization_v2";
 
 function dateKey(value) {
   if (!value) return null;
@@ -128,30 +129,80 @@ async function getOperationalDateBounds({ workspaceId }) {
 
 function buildAnchorDates({ minDate, days = DEFAULT_DAYS, intervalDays = DEFAULT_INTERVAL_DAYS, maxAnchors = DEFAULT_MAX_ANCHORS }) {
   const today = dateKey(new Date());
-  const latestStart = new Date();
-  latestStart.setUTCDate(latestStart.getUTCDate() - Math.max(1, Number(days) || DEFAULT_DAYS) + 1);
-  const startKey = maxDateKey(minDate, latestStart.toISOString().slice(0, 10)) || today;
-  const anchors = [];
-  let cursor = utcDate(startKey);
+  const dayLimit = Number(days) || 0;
+  let startKey = minDate || today;
+  if (dayLimit > 0) {
+    const latestStart = new Date();
+    latestStart.setUTCDate(latestStart.getUTCDate() - Math.max(1, dayLimit) + 1);
+    startKey = maxDateKey(startKey, latestStart.toISOString().slice(0, 10)) || today;
+  }
+
+  const anchors = new Set();
   const end = utcDate(today);
+  const dailyStart = maxDateKey(startKey, addDays(end, -29).toISOString().slice(0, 10));
+  const weeklyStart = maxDateKey(startKey, addDays(end, -182).toISOString().slice(0, 10));
   const step = Math.max(1, Number(intervalDays) || DEFAULT_INTERVAL_DAYS);
 
-  while (cursor <= end) {
-    anchors.push(cursor.toISOString().slice(0, 10));
+  let cursor = utcDate(startKey);
+  const weeklyBoundary = weeklyStart ? utcDate(weeklyStart) : end;
+  while (cursor < weeklyBoundary) {
+    anchors.add(cursor.toISOString().slice(0, 10));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+
+  cursor = utcDate(weeklyStart || startKey);
+  const dailyBoundary = dailyStart ? utcDate(dailyStart) : end;
+  while (cursor < dailyBoundary) {
+    anchors.add(cursor.toISOString().slice(0, 10));
     cursor = addDays(cursor, step);
   }
 
-  if (!anchors.includes(today)) anchors.push(today);
+  cursor = utcDate(dailyStart || startKey);
+  while (cursor <= end) {
+    anchors.add(cursor.toISOString().slice(0, 10));
+    cursor = addDays(cursor, 1);
+  }
+
+  anchors.add(today);
   const unique = [...new Set(anchors)].sort();
   const limit = Math.max(2, Number(maxAnchors) || DEFAULT_MAX_ANCHORS);
   if (unique.length <= limit) return unique;
 
-  const sampled = new Set([unique[0], unique[unique.length - 1]]);
-  const stride = (unique.length - 1) / (limit - 1);
-  for (let index = 1; index < limit - 1; index += 1) {
-    sampled.add(unique[Math.round(index * stride)]);
+  const dailyCutoff = addDays(end, -29).toISOString().slice(0, 10);
+  const protectedRecent = unique.filter((key) => key >= dailyCutoff);
+  const older = unique.filter((key) => key < dailyCutoff);
+  const sampled = new Set(protectedRecent);
+  const olderLimit = Math.max(0, limit - sampled.size);
+  if (olderLimit <= 0) return [...sampled].sort().slice(-limit);
+  if (older.length <= olderLimit) {
+    older.forEach((key) => sampled.add(key));
+    return [...sampled].sort();
+  }
+
+  sampled.add(older[0]);
+  const stride = (older.length - 1) / Math.max(1, olderLimit - 1);
+  for (let index = 1; index < olderLimit; index += 1) {
+    sampled.add(older[Math.round(index * stride)]);
   }
   return [...sampled].sort();
+}
+
+async function withWorkspaceBackfillLock(workspaceId, fn) {
+  const client = await pool.connect();
+  const lockKey = `dashboard_history:${workspaceId}`;
+  try {
+    const { rows } = await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS locked", [lockKey]);
+    if (!rows[0]?.locked) {
+      return { skipped: true, reason: "materialization_already_running" };
+    }
+    try {
+      return await fn();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]).catch(() => {});
+    }
+  } finally {
+    client.release();
+  }
 }
 
 async function getManagerProjectIds({ workspaceId, managerId }) {
@@ -296,23 +347,32 @@ export async function backfillDashboardIntelligenceHistory({
     };
 
     if (execute) {
-      for (const anchorDate of anchorDates) {
-        const evaluated = await evaluateWorkspaceAtAnchor({ workspaceId: id, anchorDate, windowDays });
-        if (evaluated.failures.length > 0) {
-          workspaceResult.failedAnchors.push({ anchorDate, failures: evaluated.failures });
-          await recordRecalculationEvent({
-            workspaceId: id,
-            reason: "dashboard_history_backfill",
-            status: "failed",
-            error: "historical_anchor_evaluation_failed",
-            metadata: compactJson({ anchorDate, failures: evaluated.failures, calculationVersion: INTELLIGENCE_VERSION }),
-          });
-          continue;
-        }
+      const lockResult = await withWorkspaceBackfillLock(id, async () => {
+        for (const anchorDate of anchorDates) {
+          const evaluated = await evaluateWorkspaceAtAnchor({ workspaceId: id, anchorDate, windowDays });
+          if (evaluated.failures.length > 0) {
+            workspaceResult.failedAnchors.push({ anchorDate, failures: evaluated.failures });
+            await recordRecalculationEvent({
+              workspaceId: id,
+              reason: "dashboard_history_backfill",
+              status: "failed",
+              error: "historical_anchor_evaluation_failed",
+              metadata: compactJson({
+                anchorDate,
+                failures: evaluated.failures,
+                calculationVersion: INTELLIGENCE_VERSION,
+                materializationVersion: MATERIALIZATION_VERSION,
+              }),
+            });
+            continue;
+          }
 
-        await writeHistoricalSnapshots({ workspaceId: id, anchorDate, evaluated });
-        workspaceResult.writtenAnchors += 1;
-      }
+          await writeHistoricalSnapshots({ workspaceId: id, anchorDate, evaluated });
+          workspaceResult.writtenAnchors += 1;
+        }
+        return { skipped: false };
+      });
+      workspaceResult.lock = lockResult;
 
       await recordRecalculationEvent({
         workspaceId: id,
@@ -327,6 +387,7 @@ export async function backfillDashboardIntelligenceHistory({
           writtenAnchors: workspaceResult.writtenAnchors,
           failedAnchors: workspaceResult.failedAnchors.length,
           calculationVersion: INTELLIGENCE_VERSION,
+          materializationVersion: MATERIALIZATION_VERSION,
           liveRowsMutated: false,
         }),
       });
@@ -346,6 +407,53 @@ export async function backfillDashboardIntelligenceHistory({
   };
 }
 
+export async function ensureDashboardHistoryMaterialized({
+  workspaceId,
+  scopeType = "workspace",
+  subjectKey = String(workspaceId),
+  range = "all",
+  minimumPoints = 2,
+  days = DEFAULT_DAYS,
+  maxAnchors = DEFAULT_MAX_ANCHORS,
+  windowDays = DEFAULT_WINDOW_DAYS,
+} = {}) {
+  const { getSnapshotSeries } = await import("../repositories/unifiedIntelligence.repository.js");
+  const current = await getSnapshotSeries({
+    workspaceId,
+    scopeType,
+    subjectKey,
+    range,
+  });
+  if (current.length >= minimumPoints) {
+    return {
+      materialized: false,
+      reason: "sufficient_history",
+      pointCount: current.length,
+    };
+  }
+
+  const result = await backfillDashboardIntelligenceHistory({
+    workspaceId,
+    days,
+    maxAnchors,
+    windowDays,
+    execute: true,
+  });
+  const refreshed = await getSnapshotSeries({
+    workspaceId,
+    scopeType,
+    subjectKey,
+    range,
+  });
+  return {
+    materialized: true,
+    beforePointCount: current.length,
+    afterPointCount: refreshed.length,
+    result,
+  };
+}
+
 export default {
   backfillDashboardIntelligenceHistory,
+  ensureDashboardHistoryMaterialized,
 };

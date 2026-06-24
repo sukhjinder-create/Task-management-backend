@@ -7,15 +7,17 @@ function readArg(name, fallback = null) {
 }
 
 function readNumber(name, fallback) {
-  const value = Number(readArg(name, fallback));
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  const raw = readArg(name, fallback);
+  if (String(raw).toLowerCase() === "all") return 0;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 const execute = process.argv.includes("--execute");
 const workspaceId = readArg("workspace-id", null);
-const days = readNumber("days", 366);
+const days = readNumber("days", 0);
 const intervalDays = readNumber("interval-days", 7);
-const maxAnchors = readNumber("max-anchors", 64);
+const maxAnchors = readNumber("max-anchors", 96);
 const windowDays = readNumber("window-days", 30);
 
 if (execute) {

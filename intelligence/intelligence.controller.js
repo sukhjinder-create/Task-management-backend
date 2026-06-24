@@ -1,6 +1,4 @@
 import pool from "../db.js";
-import { generateExecutiveSummary } from "./executiveSummary.generator.js";
-import { saveExecutiveSummary } from "../events/executive/executiveSummary.store.js";
 import { emitWorkspaceIntelligenceUpdate } from "../realtime/socket.js";
 import {
   getProfitabilityOracle,
@@ -47,6 +45,7 @@ import {
   computeGoalWorkspaceHealth,
 } from "./analytics/intelligenceResponses.service.js";
 import { withLegacyIsolation } from "./analytics/cutoverIsolation.service.js";
+import { getDashboardExecutiveDetailFromIntelligence } from "./analytics/unifiedDashboard.adapter.js";
 
 /**
  * USER — Monthly performance
@@ -142,6 +141,26 @@ export async function getExecutiveSummary(req, res) {
     if (!month) {
       return res.status(400).json({ error: "month is required (YYYY-MM)" });
     }
+
+    const detail = await getDashboardExecutiveDetailFromIntelligence({
+      workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      range,
+    });
+
+    return res.json({
+      month,
+      dashboardRange: detail.dashboardRange,
+      status: "ready",
+      text: detail.fullSummary,
+      reasoning: detail.reasoning,
+      outlook: detail.reflectiveSummary?.outlook || null,
+      reflectiveSummary: detail.reflectiveSummary,
+      forecast: detail.forecast,
+      summaryPersistence: detail.summaryPersistence,
+      summaryBucket: detail.summaryBucket,
+    });
 
     const data = await buildExecutiveSummaryData({
       workspaceId,

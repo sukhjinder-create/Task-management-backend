@@ -6,6 +6,8 @@ import {
 } from "./dashboardChartContract.service.js";
 import { buildTrendAnalytics, getHistoricalSeries } from "./historicalAnalytics.service.js";
 import { advancedForecast } from "../forecast/forecast.engine.js";
+import { ensureDashboardHistoryMaterialized } from "../snapshots/historicalBackfill.service.js";
+import { getOrCreateWorkspacePeriodExecutiveSummary } from "./periodExecutiveSummary.service.js";
 
 function normalizeTrend(direction) {
   if (direction === "up") return "improving";
@@ -349,12 +351,47 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     source: "enterprise_intelligence",
   };
 
-  const trendSeries = await getHistoricalSeries({
-    workspaceId,
+  const historyScope = {
     scopeType: role === "user" ? "user" : role === "manager" ? "team" : "workspace",
     subjectKey: role === "user" ? String(userId) : role === "manager" ? `manager:${userId}` : String(workspaceId),
+  };
+  let trendSeries = await getHistoricalSeries({
+    workspaceId,
+    scopeType: historyScope.scopeType,
+    subjectKey: historyScope.subjectKey,
     range: rangeMeta.value,
   });
+  let historyMaterialization = {
+    materialized: false,
+    reason: trendSeries.length >= 2 ? "sufficient_selected_range_history" : "not_attempted",
+    pointCount: trendSeries.length,
+  };
+
+  if (trendSeries.length < 2) {
+    try {
+      historyMaterialization = await ensureDashboardHistoryMaterialized({
+        workspaceId,
+        scopeType: historyScope.scopeType,
+        subjectKey: historyScope.subjectKey,
+        range: rangeMeta.value,
+      });
+      trendSeries = await getHistoricalSeries({
+        workspaceId,
+        scopeType: historyScope.scopeType,
+        subjectKey: historyScope.subjectKey,
+        range: rangeMeta.value,
+      });
+      historyMaterialization.selectedRangePointCount = trendSeries.length;
+    } catch (err) {
+      historyMaterialization = {
+        materialized: false,
+        failed: true,
+        reason: "selected_range_materialization_failed",
+        pointCount: trendSeries.length,
+        error: err?.message || "Dashboard history materialization failed",
+      };
+    }
+  }
   const trendAnalytics = buildTrendAnalytics(trendSeries);
 
   const visualizations = buildDashboardVisualizations({
@@ -370,17 +407,30 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     counts: scoped.counts,
     rangeMeta,
   });
-  const executiveSummary = buildExecutiveSummary({
-    role,
-    scopeLabel: scope.label,
-    intelligence: subject,
-    counts: scoped.counts,
-    topOverdue: scoped.topOverdue,
-    trendSeries,
-    rangeMeta,
-    visualizations,
-    forecast,
-  });
+  const executiveSummary = role === "admin"
+    ? await getOrCreateWorkspacePeriodExecutiveSummary({
+      workspaceId,
+      scopeLabel: scope.label,
+      intelligence: subject,
+      counts: scoped.counts,
+      topOverdue: scoped.topOverdue,
+      trendSeries,
+      rangeMeta,
+      visualizations,
+      forecast,
+      materialization: historyMaterialization,
+    })
+    : buildExecutiveSummary({
+      role,
+      scopeLabel: scope.label,
+      intelligence: subject,
+      counts: scoped.counts,
+      topOverdue: scoped.topOverdue,
+      trendSeries,
+      rangeMeta,
+      visualizations,
+      forecast,
+    });
 
   return {
     role,
@@ -419,6 +469,7 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
       teams: snapshot.teams,
       projects: snapshot.projects,
       trend: trendAnalytics,
+      historyMaterialization,
     },
     visualizations,
     topOverdue: scoped.topOverdue,
@@ -461,6 +512,8 @@ export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId,
     strengths: subject.strengths || [],
     risks: subject.concerns || [],
     forecast: overview.forecast,
+    summaryPersistence: overview.executiveSummary?.persistence || null,
+    summaryBucket: overview.executiveSummary?.summaryBucket || null,
     metrics: {
       counts: overview.counts,
       scoreCard: overview.scoreCard,
@@ -468,6 +521,7 @@ export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId,
       trend: overview.trend,
       healthScore: overview.healthScore,
       intelligence: subject,
+      historyMaterialization: overview.analytics?.historyMaterialization || null,
     },
   };
 }

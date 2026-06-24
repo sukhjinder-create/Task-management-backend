@@ -7,17 +7,20 @@ export async function saveExecutiveSummary({
   summary,
   sourceData,
 }) {
-  await pool.query(
+  const { rows } = await pool.query(
     `
     INSERT INTO workspace_executive_summaries
-      (id, workspace_id, period, summary, source_data)
+      (id, workspace_id, period, summary, source_data, status)
     VALUES
-      ($1, $2, $3, $4, $5)
+      ($1, $2, $3, $4, $5, 'ready')
     ON CONFLICT (workspace_id, period)
     DO UPDATE SET
       summary = EXCLUDED.summary,
-      source_data = EXCLUDED.source_data
+      source_data = EXCLUDED.source_data,
+      status = 'ready'
+    RETURNING *
     `,
     [uuid(), workspaceId, period, summary, sourceData]
   );
+  return rows[0] || null;
 }
