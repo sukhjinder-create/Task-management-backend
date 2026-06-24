@@ -15,12 +15,12 @@ import {
  * intelligence repositories; legacy/shadow modes route through explicit
  * rollback adapters for staged production safety.
  */
-export async function getDashboardOverview({ workspaceId, userId, role, res = null }) {
+export async function getDashboardOverview({ workspaceId, userId, role, range = "30d", res = null }) {
   return resolveCutoverResponse({
     workspaceId,
     surface: "dashboard_overview",
     res,
-    unified: () => getDashboardOverviewFromIntelligence({ workspaceId, userId, role }),
+    unified: () => getDashboardOverviewFromIntelligence({ workspaceId, userId, role, range }),
     legacy: () => getLegacyDashboardOverview({ workspaceId, userId, role }),
   });
 }

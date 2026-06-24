@@ -205,6 +205,7 @@ assertIncludes(unifiedRepository, "BETWEEN $5::date AND $6::date", "Snapshot rep
 
 const dashboardService = stripComments(read("services/dashboard.service.js"));
 const dashboardAdapter = stripComments(read("intelligence/analytics/unifiedDashboard.adapter.js"));
+const dashboardChartContract = stripComments(read("intelligence/analytics/dashboardChartContract.service.js"));
 const cutoverIsolation = stripComments(read("intelligence/analytics/cutoverIsolation.service.js"));
 const cutoverPolicy = stripComments(read("intelligence/cutover/enterpriseIntelligenceCutover.policy.js"));
 const cutoverSwitch = stripComments(read("intelligence/cutover/sourceSwitch.service.js"));
@@ -231,22 +232,23 @@ assertIncludes(cutoverDiagnostics, "recalculationFailures24h", "Cutover diagnost
 assertIncludes(legacyDashboardAdapter, "legacy_scoring_rollback", "Legacy dashboard adapter must identify rollback output");
 assertIncludes(legacyIntelligenceAdapter, "legacy_scoring_rollback", "Legacy intelligence adapter must identify rollback output");
 assertIncludes(dashboardAdapter, "visualizations", "Dashboard adapter must provide repository-backed visualization configs");
-assertIncludes(dashboardAdapter, "workspace_health_trends", "Admin dashboard must expose workspace health trends");
-assertIncludes(dashboardAdapter, "team_comparisons", "Admin dashboard must expose team comparison charts");
-assertIncludes(dashboardAdapter, "assigned_project_performance", "Manager dashboard must expose assigned project performance");
-assertIncludes(dashboardAdapter, "personal_performance_trends", "User dashboard must expose personal performance trends");
-assertIncludes(dashboardAdapter, "id: key", "Dashboard chart contract must expose a stable chart id");
-assertIncludes(dashboardAdapter, "scope: scope ||", "Dashboard chart contract must expose chart scope metadata");
-assertIncludes(dashboardAdapter, "axis: chartAxis()", "Dashboard chart contract must expose axis metadata");
-assertIncludes(dashboardAdapter, "series: chartSeries(metric)", "Dashboard chart contract must expose series metadata");
-assertIncludes(dashboardAdapter, "value: chartValue(point.value)", "Line chart values must use the canonical backend chart value shape");
-assertIncludes(dashboardAdapter, "value: chartValue(row.value)", "Bar chart values must use the canonical backend chart value shape");
-assertNotIncludes(dashboardAdapter, "scoreBand", "Dashboard adapter must not derive fallback score bands");
-assertNotIncludes(dashboardAdapter, "100 - point.score", "Dashboard adapter must not derive risk chart values from score");
-assertNotIncludes(dashboardAdapter, "100 - metricFromSnapshot", "Dashboard adapter must not synthesize risk values from alternate indexes");
-assertNotIncludes(dashboardAdapter, "metricFromSnapshot(point, \"indexes.productivityIndex\", point.score)", "Productivity chart must not fall back to overall score");
-assertNotIncludes(dashboardAdapter, "metricFromSnapshot(point, \"dimensions.workSustainability.score\", point.score)", "Workload chart must not fall back to overall score");
-assertNotIncludes(dashboardAdapter, "metricFromSnapshot(point, \"dimensions.deliveryEffectiveness.score\", point.score)", "Delivery chart must not fall back to overall score");
+assertIncludes(dashboardAdapter, "buildDashboardVisualizations", "Dashboard adapter must use canonical dashboard chart contract");
+assertIncludes(dashboardChartContract, "workspace_health_trends", "Admin dashboard must expose workspace health trends");
+assertIncludes(dashboardChartContract, "team_comparisons", "Admin dashboard must expose team comparison charts");
+assertIncludes(dashboardChartContract, "assigned_project_performance", "Manager dashboard must expose assigned project performance");
+assertIncludes(dashboardChartContract, "personal_performance_trends", "User dashboard must expose personal performance trends");
+assertIncludes(dashboardChartContract, "id: key", "Dashboard chart contract must expose a stable chart id");
+assertIncludes(dashboardChartContract, "scope: scope ||", "Dashboard chart contract must expose chart scope metadata");
+assertIncludes(dashboardChartContract, "axis: chartAxis()", "Dashboard chart contract must expose axis metadata");
+assertIncludes(dashboardChartContract, "series: chartSeries(metric)", "Dashboard chart contract must expose series metadata");
+assertIncludes(dashboardChartContract, "value: chartValue(point.value)", "Line chart values must use the canonical backend chart value shape");
+assertIncludes(dashboardChartContract, "value: chartValue(row.value)", "Bar chart values must use the canonical backend chart value shape");
+assertNotIncludes(dashboardChartContract, "scoreBand", "Dashboard chart contract must not derive fallback score bands");
+assertNotIncludes(dashboardChartContract, "100 - point.score", "Dashboard chart contract must not derive risk chart values from score");
+assertNotIncludes(dashboardChartContract, "100 - metricFromSnapshot", "Dashboard chart contract must not synthesize risk values from alternate indexes");
+assertNotIncludes(dashboardChartContract, "metricFromSnapshot(point, \"indexes.productivityIndex\", point.score)", "Productivity chart must not fall back to overall score");
+assertNotIncludes(dashboardChartContract, "metricFromSnapshot(point, \"dimensions.workSustainability.score\", point.score)", "Workload chart must not fall back to overall score");
+assertNotIncludes(dashboardChartContract, "metricFromSnapshot(point, \"dimensions.deliveryEffectiveness.score\", point.score)", "Delivery chart must not fall back to overall score");
 
 const controller = stripComments(read("intelligence/intelligence.controller.js"));
 const intelligenceRoutes = stripComments(read("intelligence/intelligence.routes.js"));

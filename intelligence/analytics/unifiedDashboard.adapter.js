@@ -1,5 +1,9 @@
 import pool from "../../db.js";
 import { getUnifiedIntelligenceSnapshot } from "../engine/unifiedIntelligence.engine.js";
+import {
+  buildDashboardVisualizations,
+  dashboardRangeMeta,
+} from "./dashboardChartContract.service.js";
 import { buildTrendAnalytics, getHistoricalSeries } from "./historicalAnalytics.service.js";
 
 function normalizeTrend(direction) {
@@ -166,207 +170,6 @@ function projectHealthFromIntelligence(projects = [], projectIds = []) {
     .slice(0, 10);
 }
 
-function chartLabel(point, index) {
-  if (point?.date) return String(point.date).slice(5, 10);
-  if (point?.month) return point.month;
-  return `P${index + 1}`;
-}
-
-function metricFromSnapshot(point, path, fallback = null) {
-  const parts = path.split(".");
-  let current = point?.payload || {};
-  for (const part of parts) {
-    current = current?.[part];
-    if (current == null) return fallback;
-  }
-  const value = Number(current);
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function chartValue(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
-function chartAxis() {
-  return {
-    x: { dataKey: "label", type: "category" },
-    y: { dataKey: "value", domain: [0, 100] },
-  };
-}
-
-function chartSeries(metric) {
-  return [
-    {
-      id: "value",
-      label: metric,
-      dataKey: "value",
-    },
-  ];
-}
-
-function lineChart({ key, title, metric, points, scope = null }) {
-  return {
-    id: key,
-    key,
-    title,
-    type: "line",
-    dataKey: "value",
-    metric,
-    source: "intelligence_snapshots",
-    scope: scope || { type: "dashboard_intelligence" },
-    axis: chartAxis(),
-    series: chartSeries(metric),
-    data: (points || []).map((point, index) => ({
-      label: chartLabel(point, index),
-      date: point.date,
-      value: chartValue(point.value),
-    })),
-  };
-}
-
-function barChart({ key, title, metric, source, rows, scope = null }) {
-  return {
-    id: key,
-    key,
-    title,
-    type: "bar",
-    dataKey: "value",
-    metric,
-    source,
-    scope: scope || { type: "dashboard_intelligence" },
-    axis: chartAxis(),
-    series: chartSeries(metric),
-    data: (rows || []).map((row) => ({
-      label: row.label,
-      value: chartValue(row.value),
-    })),
-  };
-}
-
-function historicalPoints(series = [], selector) {
-  return series.map((point, index) => ({
-    date: point.date,
-    label: chartLabel(point, index),
-    value: selector(point),
-  }));
-}
-
-function topRows(items = [], labelKey, valueSelector, limit = 8) {
-  return items
-    .map((item) => ({
-      label: item?.[labelKey] || item?.managerName || item?.projectName || item?.username || item?.teamKey || "Item",
-      value: valueSelector(item),
-    }))
-    .filter((row) => row.label)
-    .slice(0, limit);
-}
-
-function buildVisualizations({ role, trendSeries, snapshot, scopedProjects }) {
-  const scoreTrend = historicalPoints(trendSeries, (point) => Number(point.score) || 0);
-  const projectRows = topRows(scopedProjects, "projectName", (project) => project.score);
-  const allProjectRows = topRows(snapshot.projects, "projectName", (project) => project.score);
-  const teamRows = topRows(snapshot.teams, "managerName", (team) => team.score);
-  const scope = { type: "role_dashboard", role, range: "30d" };
-
-  if (role === "admin") {
-    return {
-      charts: [
-        lineChart({ key: "workspace_health_trends", title: "Workspace Health Trends", metric: "Workspace Health", points: scoreTrend, scope }),
-        lineChart({
-          key: "productivity_trends",
-          title: "Productivity Trends",
-          metric: "Productivity",
-          points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "indexes.productivityIndex")),
-          scope,
-        }),
-        lineChart({
-          key: "risk_trends",
-          title: "Risk Trends",
-          metric: "Risk Probability",
-          points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "risk.probability")),
-          scope,
-        }),
-        barChart({ key: "team_comparisons", title: "Team Comparisons", metric: "Team Score", source: "team_intelligence", rows: teamRows, scope }),
-        barChart({ key: "project_portfolio_comparisons", title: "Project Portfolio Comparisons", metric: "Project Score", source: "project_intelligence", rows: allProjectRows, scope }),
-        barChart({ key: "department_comparisons", title: "Department Comparisons", metric: "Team Scope Score", source: "team_intelligence", rows: teamRows, scope }),
-      ],
-    };
-  }
-
-  if (role === "manager") {
-    return {
-      charts: [
-        barChart({ key: "assigned_project_performance", title: "Assigned Project Performance", metric: "Project Score", source: "project_intelligence", rows: projectRows, scope }),
-        lineChart({
-          key: "team_delivery_trends",
-          title: "Team Delivery Trends",
-          metric: "Delivery Reliability",
-          points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "indexes.deliveryReliabilityIndex")),
-          scope,
-        }),
-        lineChart({
-          key: "team_risk_trends",
-          title: "Team Risk Trends",
-          metric: "Risk Probability",
-          points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "risk.probability")),
-          scope,
-        }),
-        barChart({
-          key: "sprint_progress_trends",
-          title: "Sprint Progress Trends",
-          metric: "Completion Rate",
-          source: "project_intelligence",
-          rows: topRows(scopedProjects, "projectName", (project) => project.completionRate),
-          scope,
-        }),
-        barChart({
-          key: "completion_forecasts",
-          title: "Completion Forecasts",
-          metric: "Completion Confidence",
-          source: "project_intelligence",
-          rows: topRows(scopedProjects, "projectName", (project) => project.completionConfidence),
-          scope,
-        }),
-      ],
-    };
-  }
-
-  return {
-    charts: [
-      lineChart({ key: "personal_performance_trends", title: "Personal Performance Trends", metric: "Personal Score", points: scoreTrend, scope }),
-      lineChart({
-        key: "workload_trends",
-        title: "Workload Trends",
-        metric: "Sustainability",
-        points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "dimensions.workSustainability.score")),
-        scope,
-      }),
-      lineChart({
-        key: "delivery_trends",
-        title: "Delivery Trends",
-        metric: "Delivery Effectiveness",
-        points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "dimensions.deliveryEffectiveness.score")),
-        scope,
-      }),
-      lineChart({
-        key: "task_completion_trends",
-        title: "Task Completion Trends",
-        metric: "Commitment Completion",
-        points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "dimensions.executionReliability.metrics.commitmentCompletion")),
-        scope,
-      }),
-      lineChart({
-        key: "personal_risk_trends",
-        title: "Personal Risk Trends",
-        metric: "Risk Probability",
-        points: historicalPoints(trendSeries, (point) => metricFromSnapshot(point, "risk.probability")),
-        scope,
-      }),
-    ],
-  };
-}
-
 function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOverdue }) {
   const subject = intelligence || {};
   const topRiskTask = topOverdue?.[0];
@@ -408,7 +211,8 @@ async function getManagerTeamSubject({ workspaceId, userId, teams }) {
   return teams.find((team) => team.managerId === userId) || null;
 }
 
-export async function getDashboardOverviewFromIntelligence({ workspaceId, userId, role }) {
+export async function getDashboardOverviewFromIntelligence({ workspaceId, userId, role, range = "30d" }) {
+  const rangeMeta = dashboardRangeMeta(range);
   const [scope, snapshot] = await Promise.all([
     resolveScope({ workspaceId, userId, role }),
     getUnifiedIntelligenceSnapshot({ workspaceId, userId, role }),
@@ -444,7 +248,7 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     workspaceId,
     scopeType: role === "user" ? "user" : role === "manager" ? "team" : "workspace",
     subjectKey: role === "user" ? String(userId) : role === "manager" ? `manager:${userId}` : String(workspaceId),
-    range: "30d",
+    range: rangeMeta.value,
   });
   const trendAnalytics = buildTrendAnalytics(trendSeries);
 
@@ -459,6 +263,7 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
   return {
     role,
     month: new Date().toISOString().slice(0, 7),
+    dashboardRange: rangeMeta,
     scope: {
       type: scope.type,
       label: scope.label,
@@ -493,11 +298,12 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
       projects: snapshot.projects,
       trend: trendAnalytics,
     },
-    visualizations: buildVisualizations({
+    visualizations: buildDashboardVisualizations({
       role,
       trendSeries,
       snapshot,
       scopedProjects,
+      rangeMeta,
     }),
     topOverdue: scoped.topOverdue,
     projectHealth: scopedProjects,
