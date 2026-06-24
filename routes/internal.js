@@ -2,10 +2,13 @@ import pool from "../db.js";
 import express from "express";
 import { createAIChatMessage } from "../services/chat.service.js";
 import { getProjectReport } from "../services/reports.service.js";
+import { materializeDashboardHistoryInternal } from "../intelligence/intelligence.controller.js";
 
 console.log("🔥 INTERNAL ROUTES LOADED");
 
 const router = express.Router();
+
+router.post("/dashboard-history/materialize", materializeDashboardHistoryInternal);
 
 /**
  * 🔒 Internal AI reply endpoint

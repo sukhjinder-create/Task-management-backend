@@ -52,7 +52,9 @@ import { backfillDashboardIntelligenceHistory } from "./snapshots/historicalBack
 function internalServiceAuthorized(req) {
   const expected = process.env.AI_SERVICE_SECRET || process.env.INTERNAL_SERVICE_SECRET || "";
   if (!expected) return false;
+  const authorization = req.get("authorization") || "";
   const provided =
+    authorization.replace(/^Bearer\s+/i, "") ||
     req.get("x-ai-service-secret") ||
     req.get("x-internal-service-secret") ||
     req.body?.secret ||

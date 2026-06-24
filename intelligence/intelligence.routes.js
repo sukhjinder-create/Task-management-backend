@@ -24,7 +24,6 @@ import {
   getResignationRadarController,
   getGhostWorkController,
   getOrgTruthMapController,
-  materializeDashboardHistoryInternal,
 } from "./intelligence.controller.js";
 
 console.log("🧠 Intelligence routes loaded");
@@ -34,8 +33,6 @@ const router = express.Router();
 // Feature gates
 const advIntel = requirePlanFeature("advanced_analytics");  // Strategic Intelligence page
 const wsIntel  = requirePlanFeature("workspace_intelligence"); // Enterprise Intelligence page
-
-router.post("/internal/dashboard-history/materialize", materializeDashboardHistoryInternal);
 
 /* =====================================================
    USER ROUTES — basic feature, no plan gate

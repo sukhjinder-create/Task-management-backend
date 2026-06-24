@@ -64,12 +64,12 @@ jobs:
             --project asystence-backend \
             --format='value(status.url)')"
           API_URL="$API_URL" node - <<'NODE'
-          const endpoint = `${process.env.API_URL}/intelligence/internal/dashboard-history/materialize`;
+          const endpoint = `${process.env.API_URL}/internal/dashboard-history/materialize`;
           const response = await fetch(endpoint, {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              "x-ai-service-secret": process.env.AI_SERVICE_SECRET,
+              "authorization": `Bearer ${process.env.AI_SERVICE_SECRET}`,
             },
             body: JSON.stringify({
               days: "all",
