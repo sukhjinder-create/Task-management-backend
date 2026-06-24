@@ -46,7 +46,7 @@ export async function getEnterpriseIntelligenceCutoverDiagnostics({ workspaceId 
        FROM workspace_users wu
        JOIN users u ON u.id = wu.user_id
        WHERE wu.workspace_id = $1
-         AND u.role != 'superadmin'`,
+         AND u.role NOT IN ('superadmin', 'system')`,
       [workspaceId]
     ),
     safeQuery(
