@@ -15,6 +15,10 @@ const REQUIRED_RANGES = {
   all: "month",
 };
 
+const RAW_DATE_LABEL_RE = /^(?:\d{4}-\d{2}(?:-\d{2})?|\d{2}-\d{2}(?:-\d{2}-\d{2})?)$/;
+const DAY_MONTH_LABEL_RE = /^\d{2} [A-Z][a-z]{2}$/;
+const MONTH_LABEL_RE = /^[A-Z][a-z]{2}(?: \d{4})?$/;
+
 function read(relativePath) {
   return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
@@ -83,6 +87,14 @@ function assertLineChart(chart, { range, granularity, sparseExpected }) {
 
   for (const datum of chart.data) {
     assert.ok(datum.label, `${chart.key} datum must include label`);
+    assert.doesNotMatch(datum.label, RAW_DATE_LABEL_RE, `${chart.key} datum label must not expose raw bucket key`);
+    if (range === "30d" || range === "90d") {
+      assert.match(datum.label, DAY_MONTH_LABEL_RE, `${chart.key} ${range} datum label must use day month format`);
+    } else {
+      assert.match(datum.label, MONTH_LABEL_RE, `${chart.key} ${range} datum label must use month format`);
+    }
+    assert.ok(datum.tooltipLabel, `${chart.key} datum must include tooltipLabel`);
+    assert.doesNotMatch(datum.tooltipLabel, RAW_DATE_LABEL_RE, `${chart.key} tooltipLabel must not expose raw bucket key`);
     assert.ok(datum.bucketStart, `${chart.key} datum must include bucketStart`);
     assert.ok(datum.bucketEnd, `${chart.key} datum must include bucketEnd`);
     assert.equal(typeof datum.value, "number", `${chart.key} datum value must be numeric`);

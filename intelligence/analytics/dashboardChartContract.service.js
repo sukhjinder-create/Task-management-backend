@@ -25,6 +25,36 @@ function isoDate(date) {
   return date ? date.toISOString().slice(0, 10) : null;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function dayMonth(date) {
+  return `${String(date.getUTCDate()).padStart(2, "0")} ${MONTHS[date.getUTCMonth()]}`;
+}
+
+function monthYear(date) {
+  return `${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+
+function formatBucketLabel(date, rangeMeta = {}, { detailed = false, bucketEnd = null } = {}) {
+  if (!date) return null;
+  const range = rangeMeta?.value || "30d";
+  const end = bucketEnd ? safeDate(bucketEnd) : null;
+
+  if (detailed) {
+    const startLabel = `${dayMonth(date)} ${date.getUTCFullYear()}`;
+    if (end && isoDate(end) !== isoDate(date)) {
+      return `${startLabel} - ${dayMonth(end)} ${end.getUTCFullYear()}`;
+    }
+    return range === "6m" || range === "1y" || range === "all"
+      ? monthYear(date)
+      : startLabel;
+  }
+
+  if (range === "30d" || range === "90d") return dayMonth(date);
+  if (range === "all") return monthYear(date);
+  return MONTHS[date.getUTCMonth()];
+}
+
 function startOfUtcWeek(date) {
   const copy = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   const day = copy.getUTCDay() || 7;
@@ -38,7 +68,7 @@ function endOfUtcWeek(start) {
   return copy;
 }
 
-function bucketInfo(value, granularity) {
+function bucketInfo(value, granularity, rangeMeta = dashboardRangeMeta()) {
   const date = safeDate(value);
   if (!date) return null;
 
@@ -48,7 +78,8 @@ function bucketInfo(value, granularity) {
     const key = isoDate(monthStart).slice(0, 7);
     return {
       key,
-      label: key,
+      label: formatBucketLabel(monthStart, rangeMeta),
+      tooltipLabel: formatBucketLabel(monthStart, rangeMeta, { detailed: true, bucketEnd: isoDate(monthEnd) }),
       bucketStart: isoDate(monthStart),
       bucketEnd: isoDate(monthEnd),
     };
@@ -59,7 +90,8 @@ function bucketInfo(value, granularity) {
     const weekEnd = endOfUtcWeek(weekStart);
     return {
       key: isoDate(weekStart),
-      label: `${isoDate(weekStart).slice(5)}-${isoDate(weekEnd).slice(5)}`,
+      label: formatBucketLabel(weekStart, rangeMeta),
+      tooltipLabel: formatBucketLabel(weekStart, rangeMeta, { detailed: true, bucketEnd: isoDate(weekEnd) }),
       bucketStart: isoDate(weekStart),
       bucketEnd: isoDate(weekEnd),
     };
@@ -67,18 +99,29 @@ function bucketInfo(value, granularity) {
 
   return {
     key: isoDate(date),
-    label: isoDate(date).slice(5),
+    label: formatBucketLabel(date, rangeMeta),
+    tooltipLabel: formatBucketLabel(date, rangeMeta, { detailed: true }),
     bucketStart: isoDate(date),
     bucketEnd: isoDate(date),
   };
 }
 
-function chartLabel(point, index, granularity = "day") {
+function chartLabel(point, index, rangeMeta = dashboardRangeMeta()) {
   if (point?.label) return point.label;
-  if (point?.bucketStart) return bucketInfo(point.bucketStart, granularity)?.label || String(point.bucketStart);
-  if (point?.date) return String(point.date).slice(5, 10);
+  if (point?.bucketStart) {
+    const start = safeDate(point.bucketStart);
+    return formatBucketLabel(start, rangeMeta, { bucketEnd: point.bucketEnd }) || String(point.bucketStart);
+  }
+  if (point?.date) return formatBucketLabel(safeDate(point.date), rangeMeta) || String(point.date);
   if (point?.month) return point.month;
   return `P${index + 1}`;
+}
+
+function chartTooltipLabel(point, rangeMeta = dashboardRangeMeta()) {
+  if (point?.tooltipLabel) return point.tooltipLabel;
+  const start = safeDate(point?.bucketStart || point?.date);
+  if (!start) return point?.label || null;
+  return formatBucketLabel(start, rangeMeta, { detailed: true, bucketEnd: point?.bucketEnd || point?.date });
 }
 
 function metricFromSnapshot(point, path, fallback = null) {
@@ -116,7 +159,8 @@ function chartSeries(metric) {
 
 function lineChart({ key, title, metric, points, scope = null, rangeMeta }) {
   const data = (points || []).map((point, index) => ({
-    label: chartLabel(point, index, rangeMeta?.granularity),
+    label: chartLabel(point, index, rangeMeta),
+    tooltipLabel: chartTooltipLabel(point, rangeMeta),
     date: point.date,
     bucketStart: point.bucketStart || point.date || null,
     bucketEnd: point.bucketEnd || point.date || null,
@@ -176,7 +220,8 @@ function historicalPoints(series = [], selector, rangeMeta = dashboardRangeMeta(
   if (rangeMeta.granularity === "day") {
     return rawPoints.map((point, index) => ({
       ...point,
-      label: chartLabel(point, index, "day"),
+      label: chartLabel(point, index, rangeMeta),
+      tooltipLabel: chartTooltipLabel(point, rangeMeta),
       bucketStart: point.date,
       bucketEnd: point.date,
       sampleCount: 1,
@@ -185,7 +230,7 @@ function historicalPoints(series = [], selector, rangeMeta = dashboardRangeMeta(
 
   const buckets = new Map();
   for (const point of rawPoints) {
-    const info = bucketInfo(point.date, rangeMeta.granularity);
+    const info = bucketInfo(point.date, rangeMeta.granularity, rangeMeta);
     if (!info) continue;
     const existing = buckets.get(info.key) || {
       ...info,
@@ -201,6 +246,7 @@ function historicalPoints(series = [], selector, rangeMeta = dashboardRangeMeta(
     return {
       date: bucket.date,
       label: bucket.label,
+      tooltipLabel: bucket.tooltipLabel,
       bucketStart: bucket.bucketStart,
       bucketEnd: bucket.bucketEnd,
       value: Math.round(average * 100) / 100,
