@@ -59,28 +59,10 @@ jobs:
       - name: Install Node dependencies for dashboard materialization
         run: npm ci --omit=dev
 
-      - name: Resolve production DB confirmation token
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_HOST: db.jygpfnpdphbnmysnyyww.supabase.co
-          DB_NAME: postgres
-        run: |
-          node - <<'NODE'
-          const fs = require("fs");
-          let host = process.env.DB_HOST || "";
-          let database = process.env.DB_NAME || "";
-          try {
-            const parsed = new URL(process.env.DATABASE_URL || "");
-            host = parsed.hostname || host;
-            database = decodeURIComponent(parsed.pathname.replace(/^\/+/, "")) || database;
-          } catch {}
-          fs.appendFileSync(process.env.GITHUB_ENV, `CONFIRM_PRODUCTION_MIGRATION=${host}/${database}\n`);
-          NODE
-
       - name: Materialize dashboard intelligence history
         env:
           NODE_ENV: production
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ""
           DB_HOST: db.jygpfnpdphbnmysnyyww.supabase.co
           DB_USER: postgres
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
@@ -88,12 +70,13 @@ jobs:
           DB_PORT: 5432
           DB_SSL: true
           ALLOW_PRODUCTION_MIGRATION: "true"
+          CONFIRM_PRODUCTION_MIGRATION: db.jygpfnpdphbnmysnyyww.supabase.co/postgres
         run: npm run backfill:dashboard-intelligence-history -- --execute --days=all --max-anchors=96 --window-days=30
 
       - name: Verify dashboard history materialization
         env:
           NODE_ENV: production
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ""
           DB_HOST: db.jygpfnpdphbnmysnyyww.supabase.co
           DB_USER: postgres
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
@@ -101,4 +84,5 @@ jobs:
           DB_PORT: 5432
           DB_SSL: true
           ALLOW_PRODUCTION_MIGRATION: "true"
+          CONFIRM_PRODUCTION_MIGRATION: db.jygpfnpdphbnmysnyyww.supabase.co/postgres
         run: npm run verify:dashboard-history-materialization

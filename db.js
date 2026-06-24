@@ -8,6 +8,9 @@ dotenv.config();
 
 const { Pool, types } = pkg;
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
+const DB_SSL_ENABLED = ["true", "1", "require"].includes(
+  String(process.env.DB_SSL || "").trim().toLowerCase()
+);
 
 // Prevent node-postgres from converting DATE columns to JS Date objects.
 // Without this, "2026-03-26" becomes "2026-03-25T18:30:00.000Z" in IST (UTC+5:30),
@@ -23,6 +26,7 @@ const pool = new Pool({
         password: process.env.DB_PASSWORD,
         database: process.env.DB_NAME?.trim(),
         port: process.env.DB_PORT?.trim(),
+        ...(DB_SSL_ENABLED ? { ssl: { rejectUnauthorized: false } } : {}),
       }),
 
   // Production-grade pool — sized for high concurrency via a connection pooler
