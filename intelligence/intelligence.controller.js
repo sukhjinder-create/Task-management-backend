@@ -46,6 +46,70 @@ import {
 } from "./analytics/intelligenceResponses.service.js";
 import { withLegacyIsolation } from "./analytics/cutoverIsolation.service.js";
 import { getDashboardExecutiveDetailFromIntelligence } from "./analytics/unifiedDashboard.adapter.js";
+import { verifyDashboardHistoryMaterialization } from "./analytics/dashboardHistoryVerification.service.js";
+import { backfillDashboardIntelligenceHistory } from "./snapshots/historicalBackfill.service.js";
+
+function internalServiceAuthorized(req) {
+  const expected = process.env.AI_SERVICE_SECRET || process.env.INTERNAL_SERVICE_SECRET || "";
+  if (!expected) return false;
+  const provided =
+    req.get("x-ai-service-secret") ||
+    req.get("x-internal-service-secret") ||
+    req.body?.secret ||
+    "";
+  return provided === expected;
+}
+
+function readPositiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function readDays(value) {
+  if (String(value || "").toLowerCase() === "all") return 0;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+export async function materializeDashboardHistoryInternal(req, res) {
+  try {
+    if (!internalServiceAuthorized(req)) {
+      return res.status(403).json({ error: "Internal service authorization required" });
+    }
+
+    const body = req.body || {};
+    const workspaceId = body.workspaceId || null;
+    const result = await backfillDashboardIntelligenceHistory({
+      workspaceId,
+      days: readDays(body.days ?? "all"),
+      intervalDays: readPositiveNumber(body.intervalDays, 7),
+      maxAnchors: readPositiveNumber(body.maxAnchors, 96),
+      windowDays: readPositiveNumber(body.windowDays, 30),
+      execute: true,
+    });
+
+    const verification = body.verify === false
+      ? null
+      : await verifyDashboardHistoryMaterialization({
+        workspaceId,
+        limit: readPositiveNumber(body.verifyLimit, 3),
+      });
+    const failed = verification?.status === "failed";
+
+    return res.status(failed && body.strict !== false ? 500 : 200).json({
+      source: "enterprise_intelligence_dashboard_history_materialization",
+      status: failed ? "verification_failed" : "executed",
+      result,
+      verification,
+    });
+  } catch (err) {
+    console.error("materializeDashboardHistoryInternal error:", err);
+    return res.status(500).json({
+      error: err.message || "Failed to materialize dashboard intelligence history",
+      code: err.code || null,
+    });
+  }
+}
 
 /**
  * USER — Monthly performance

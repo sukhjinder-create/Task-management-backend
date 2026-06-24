@@ -54,35 +54,48 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install Node dependencies for dashboard materialization
-        run: npm ci --omit=dev
-
-      - name: Materialize dashboard intelligence history
+      - name: Materialize and verify dashboard intelligence history
         env:
-          NODE_ENV: production
-          DATABASE_URL: ""
-          DB_HOST: db.jygpfnpdphbnmysnyyww.supabase.co
-          DB_USER: postgres
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: postgres
-          DB_PORT: 5432
-          DB_SSL: true
-          ALLOW_PRODUCTION_MIGRATION: "true"
-          CONFIRM_PRODUCTION_MIGRATION: db.jygpfnpdphbnmysnyyww.supabase.co/postgres
-        run: npm run backfill:dashboard-intelligence-history -- --execute --days=all --max-anchors=96 --window-days=30
-
-      - name: Verify dashboard history materialization
-        env:
-          NODE_ENV: production
-          DATABASE_URL: ""
-          DB_HOST: db.jygpfnpdphbnmysnyyww.supabase.co
-          DB_USER: postgres
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: postgres
-          DB_PORT: 5432
-          DB_SSL: true
-          ALLOW_PRODUCTION_MIGRATION: "true"
-          CONFIRM_PRODUCTION_MIGRATION: db.jygpfnpdphbnmysnyyww.supabase.co/postgres
-        run: npm run verify:dashboard-history-materialization
+          AI_SERVICE_SECRET: super-secret-token
+        run: |
+          API_URL="$(gcloud run services describe asystence-api \
+            --region asia-south1 \
+            --project asystence-backend \
+            --format='value(status.url)')"
+          API_URL="$API_URL" node - <<'NODE'
+          const endpoint = `${process.env.API_URL}/intelligence/internal/dashboard-history/materialize`;
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-ai-service-secret": process.env.AI_SERVICE_SECRET,
+            },
+            body: JSON.stringify({
+              days: "all",
+              maxAnchors: 96,
+              windowDays: 30,
+              verify: true,
+              strict: true,
+            }),
+          });
+          const text = await response.text();
+          let payload = null;
+          try {
+            payload = JSON.parse(text);
+          } catch {
+            console.error(text.slice(0, 4000));
+            process.exit(1);
+          }
+          const summary = {
+            status: payload.status,
+            workspaceCount: payload.result?.workspaceCount || 0,
+            verificationStatus: payload.verification?.status || null,
+            checkedWorkspaceCount: payload.verification?.checkedWorkspaceCount || 0,
+            failures: (payload.verification?.failures || []).slice(0, 10),
+          };
+          console.log(JSON.stringify(summary, null, 2));
+          if (!response.ok || summary.failures.length > 0) {
+            process.exit(1);
+          }
+          NODE
