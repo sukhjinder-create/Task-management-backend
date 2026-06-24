@@ -348,7 +348,7 @@ export async function buildUserTrendResponse({ workspaceId, userId, role, range 
     subjectKey: String(userId),
     range: range || "6m",
   });
-  return rows.map((row) => ({
+  const series = rows.map((row) => ({
     month: String(row.date).slice(0, 7),
     date: row.date,
     score: row.score,
@@ -358,6 +358,15 @@ export async function buildUserTrendResponse({ workspaceId, userId, role, range 
     attendanceClosedThroughDate: row.attendanceClosedThroughDate,
     snapshotDate: row.snapshotDate,
   }));
+  return {
+    source: "enterprise_intelligence",
+    scopeType: "user",
+    subjectKey: String(userId),
+    range: range || "6m",
+    trend: buildTrendAnalytics(series),
+    series,
+    rows: series,
+  };
 }
 
 export async function buildUnifiedHistoryResponse({
@@ -400,10 +409,16 @@ export async function buildUserProjectPerformanceResponse({ workspaceId, userId,
     [workspaceId, userId]
   );
   const projectIds = assignedProjects.map((row) => row.project_id);
-  if (projectIds.length === 0) return [];
+  if (projectIds.length === 0) {
+    return {
+      source: "enterprise_intelligence",
+      projects: [],
+      rows: [],
+    };
+  }
   const projects = await listProjectIntelligence({ workspaceId, projectIds });
 
-  return projects.map((project) => ({
+  const rows = projects.map((project) => ({
     project_id: project.projectId,
     project_name: project.projectName,
     score: project.score,
@@ -414,12 +429,18 @@ export async function buildUserProjectPerformanceResponse({ workspaceId, userId,
     coverageStart: project.coverageStart,
     coverageEnd: project.coverageEnd,
   }));
+  return {
+    source: "enterprise_intelligence",
+    projects: rows,
+    rows,
+  };
 }
 
 export async function buildProjectsHealthResponse({ workspaceId, userId, role }) {
   await getUnifiedIntelligenceSnapshot({ workspaceId, userId, role });
   const intelligenceProjects = await listProjectIntelligence({ workspaceId });
   return {
+    source: "enterprise_intelligence",
     projects: intelligenceProjects.map((project) => ({
       projectId: project.projectId,
       projectName: project.projectName,
