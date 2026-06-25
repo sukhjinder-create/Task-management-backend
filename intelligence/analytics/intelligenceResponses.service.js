@@ -9,6 +9,7 @@ import {
 } from "../repositories/unifiedIntelligence.repository.js";
 import { withLegacyIsolation } from "./cutoverIsolation.service.js";
 import { advancedForecast } from "../forecast/forecast.engine.js";
+import { adaptiveScore, roundScore } from "../engine/scorePrimitives.js";
 
 function monthKey() {
   return new Date().toISOString().slice(0, 7);
@@ -55,6 +56,94 @@ function scoreOrNull(value) {
   return Number.isFinite(number) ? Math.round(number) : null;
 }
 
+function avgScore(values = []) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  if (!nums.length) return 0;
+  return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+}
+
+function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
+  const attendanceScore = scoreOrNull(user.attendance?.score);
+  const professional = domainRows.find((row) => row.key === "professionalDiscipline");
+  const primaryRows = domainRows.filter((row) => row.key !== "professionalDiscipline" && row.score != null);
+  const professionalMetrics = professional?.metrics || {};
+
+  if (attendanceScore == null || !professional || !primaryRows.length) {
+    return {
+      score: attendanceScore,
+      parentDomain: "Professional Discipline",
+      contributionType: "supporting_evidence",
+      effectiveFinalLiftVsNoAttendanceSignal: null,
+      effectiveFinalLiftVsNeutralAttendance: null,
+      materiallyAffectsScore: false,
+      summary: "Attendance is supporting evidence for Professional Discipline when closed attendance data is available.",
+    };
+  }
+
+  const confidenceAverage = avgScore(domainRows.map((row) => row.confidence));
+  const coreScore = adaptiveScore(primaryRows.map((row) => ({ value: row.score })), {
+    confidence: confidenceAverage,
+  });
+  const attendanceDrag = attendanceScore < 45 && coreScore > 70
+    ? Math.min(8, (45 - attendanceScore) / 2)
+    : 0;
+  const attendanceLift = attendanceScore > 82 && coreScore < 62 ? 2 : 0;
+  const finalWithAttendance = roundScore(
+    (coreScore * 0.82) + ((professional.score || 0) * 0.18) - attendanceDrag + attendanceLift
+  );
+  const professionalWithoutAttendanceSignal = adaptiveScore([
+    { value: professionalMetrics.reviewCompletion },
+    { value: professionalMetrics.updateHygiene },
+    { value: professionalMetrics.workflowScore },
+  ], { confidence: professional?.confidence ?? 75 });
+  const professionalWithNeutralAttendance = adaptiveScore([
+    { value: 60 },
+    { value: professionalMetrics.reviewCompletion },
+    { value: professionalMetrics.updateHygiene },
+    { value: professionalMetrics.workflowScore },
+  ], { confidence: professional?.confidence ?? 75 });
+  const finalWithoutAttendanceSignal = roundScore((coreScore * 0.82) + (professionalWithoutAttendanceSignal * 0.18));
+  const finalWithNeutralAttendance = roundScore((coreScore * 0.82) + (professionalWithNeutralAttendance * 0.18));
+  const liftVsNoSignal = finalWithAttendance - finalWithoutAttendanceSignal;
+  const liftVsNeutral = finalWithAttendance - finalWithNeutralAttendance;
+
+  return {
+    score: attendanceScore,
+    parentDomain: "Professional Discipline",
+    contributionType: "supporting_evidence",
+    effectiveFinalLiftVsNoAttendanceSignal: liftVsNoSignal,
+    effectiveFinalLiftVsNeutralAttendance: liftVsNeutral,
+    directLiftOrDrag: scoreOrNull(attendanceLift - attendanceDrag),
+    materiallyAffectsScore: Math.abs(liftVsNoSignal) > 0,
+    summary: Math.abs(liftVsNoSignal) > 0
+      ? `Attendance feeds Professional Discipline and changes the final score by about ${liftVsNoSignal > 0 ? "+" : ""}${liftVsNoSignal} point(s) versus removing attendance evidence.`
+      : "Attendance feeds Professional Discipline; in this window it does not create a separate final-score lift or drag.",
+  };
+}
+
+function evidenceInput({ key, label, score, parentDomain, source, note, materiality = "supporting" }) {
+  return {
+    key,
+    label,
+    score: scoreOrNull(score),
+    parentDomain,
+    source,
+    materiality,
+    note,
+  };
+}
+
+function diagnosticDriver({ key, label, value, parentDomain, direction = "higher_is_better", note }) {
+  return {
+    key,
+    label,
+    value: scoreOrNull(value),
+    parentDomain,
+    direction,
+    note,
+  };
+}
+
 function buildUserScoreExplanation(user = {}) {
   const dimensions = user.dimensions || {};
   const attendance = user.attendance || {};
@@ -66,8 +155,11 @@ function buildUserScoreExplanation(user = {}) {
       source: "user_intelligence.dimensions.executionReliability.score",
       role: "core_execution_domain",
       note: "Commitment completion, due-date discipline, carry-over behavior, ownership, and blocker responsiveness.",
+      metrics: dimensions.executionReliability?.metrics || {},
+      strengths: dimensions.executionReliability?.strengths || [],
       drivers: dimensions.executionReliability?.drivers || [],
       concerns: dimensions.executionReliability?.concerns || [],
+      confidence: scoreOrNull(dimensions.executionReliability?.confidence),
     },
     {
       key: "deliveryEffectiveness",
@@ -76,8 +168,11 @@ function buildUserScoreExplanation(user = {}) {
       source: "user_intelligence.dimensions.deliveryEffectiveness.score",
       role: "core_delivery_domain",
       note: "Throughput, velocity, estimation quality, completion quality, and output consistency.",
+      metrics: dimensions.deliveryEffectiveness?.metrics || {},
+      strengths: dimensions.deliveryEffectiveness?.strengths || [],
       drivers: dimensions.deliveryEffectiveness?.drivers || [],
       concerns: dimensions.deliveryEffectiveness?.concerns || [],
+      confidence: scoreOrNull(dimensions.deliveryEffectiveness?.confidence),
     },
     {
       key: "collaborationHealth",
@@ -86,8 +181,11 @@ function buildUserScoreExplanation(user = {}) {
       source: "user_intelligence.dimensions.collaborationHealth.score",
       role: "core_collaboration_domain",
       note: "Participation, reviews, comments, stakeholder engagement, and cross-team signals.",
+      metrics: dimensions.collaborationHealth?.metrics || {},
+      strengths: dimensions.collaborationHealth?.strengths || [],
       drivers: dimensions.collaborationHealth?.drivers || [],
       concerns: dimensions.collaborationHealth?.concerns || [],
+      confidence: scoreOrNull(dimensions.collaborationHealth?.confidence),
     },
     {
       key: "workSustainability",
@@ -96,8 +194,11 @@ function buildUserScoreExplanation(user = {}) {
       source: "user_intelligence.dimensions.workSustainability.score",
       role: "core_sustainability_domain",
       note: "Workload balance, carry-over health, focus fragmentation, overtime risk, and productivity under load.",
+      metrics: dimensions.workSustainability?.metrics || {},
+      strengths: dimensions.workSustainability?.strengths || [],
       drivers: dimensions.workSustainability?.drivers || [],
       concerns: dimensions.workSustainability?.concerns || [],
+      confidence: scoreOrNull(dimensions.workSustainability?.confidence),
     },
     {
       key: "professionalDiscipline",
@@ -106,8 +207,11 @@ function buildUserScoreExplanation(user = {}) {
       source: "user_intelligence.dimensions.professionalDiscipline.score",
       role: "discipline_balancing_domain",
       note: "Attendance, review completion, update hygiene, and workflow compliance.",
+      metrics: dimensions.professionalDiscipline?.metrics || {},
+      strengths: dimensions.professionalDiscipline?.strengths || [],
       drivers: dimensions.professionalDiscipline?.drivers || [],
       concerns: dimensions.professionalDiscipline?.concerns || [],
+      confidence: scoreOrNull(dimensions.professionalDiscipline?.confidence),
     },
   ];
 
@@ -115,8 +219,121 @@ function buildUserScoreExplanation(user = {}) {
     .filter((row) => row.score != null)
     .sort((a, b) => a.score - b.score)
     .slice(0, 2);
+  const strongestDomains = [...domainRows]
+    .filter((row) => row.score != null)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 2);
   const attendanceScore = scoreOrNull(attendance.score);
   const deliveryScore = scoreOrNull(dimensions.deliveryEffectiveness?.score);
+  const attendanceContribution = buildAttendanceContribution({ user, domainRows });
+  const professionalMetrics = dimensions.professionalDiscipline?.metrics || {};
+  const executionMetrics = dimensions.executionReliability?.metrics || {};
+  const deliveryMetrics = dimensions.deliveryEffectiveness?.metrics || {};
+  const collaborationMetrics = dimensions.collaborationHealth?.metrics || {};
+  const sustainabilityMetrics = dimensions.workSustainability?.metrics || {};
+  const evidenceInputs = [
+    evidenceInput({
+      key: "attendanceEvidence",
+      label: "Attendance Evidence",
+      score: attendanceScore,
+      parentDomain: "Professional Discipline",
+      source: "user_intelligence.attendance.score",
+      materiality: attendanceContribution.materiallyAffectsScore ? "material" : "supporting",
+      note: attendanceContribution.summary,
+    }),
+    evidenceInput({
+      key: "reviewCompletion",
+      label: "Review Completion",
+      score: professionalMetrics.reviewCompletion,
+      parentDomain: "Professional Discipline",
+      source: "user_intelligence.dimensions.professionalDiscipline.metrics.reviewCompletion",
+      note: "Review completion supports the discipline domain alongside attendance, update hygiene, and workflow compliance.",
+    }),
+    evidenceInput({
+      key: "updateHygiene",
+      label: "Update Hygiene",
+      score: professionalMetrics.updateHygiene,
+      parentDomain: "Professional Discipline",
+      source: "user_intelligence.dimensions.professionalDiscipline.metrics.updateHygiene",
+      note: "Visible activity and comments help prove work is being kept current.",
+    }),
+    evidenceInput({
+      key: "workflowCompliance",
+      label: "Workflow Compliance",
+      score: professionalMetrics.workflowScore,
+      parentDomain: "Professional Discipline",
+      source: "user_intelligence.dimensions.professionalDiscipline.metrics.workflowScore",
+      note: "Workflow actions such as status and priority updates support operating discipline.",
+    }),
+    evidenceInput({
+      key: "deliveryEvidence",
+      label: "Delivery Evidence",
+      score: deliveryScore,
+      parentDomain: "Delivery Effectiveness",
+      source: "user_intelligence.dimensions.deliveryEffectiveness.score",
+      note: "Delivery Effectiveness is a final score domain; this evidence row explains the delivery signal behind it.",
+    }),
+  ].filter((item) => item.score != null);
+
+  const diagnosticDrivers = [
+    diagnosticDriver({
+      key: "commitmentCompletion",
+      label: "Commitment Completion",
+      value: executionMetrics.commitmentCompletion,
+      parentDomain: "Execution Reliability",
+      note: "Completed assigned work in the active evidence window.",
+    }),
+    diagnosticDriver({
+      key: "timeliness",
+      label: "Timeliness",
+      value: executionMetrics.dueDateDiscipline,
+      parentDomain: "Execution Reliability",
+      note: "On-time delivery for due-date tracked work.",
+    }),
+    diagnosticDriver({
+      key: "blockerResponsiveness",
+      label: "Blocker Responsiveness",
+      value: executionMetrics.blockerResponsiveness,
+      parentDomain: "Execution Reliability",
+      note: "Responsiveness to blocked or blocking work.",
+    }),
+    diagnosticDriver({
+      key: "taskVelocity",
+      label: "Task Velocity",
+      value: deliveryMetrics.velocity,
+      parentDomain: "Delivery Effectiveness",
+      note: "Completion pace within the delivery domain.",
+    }),
+    diagnosticDriver({
+      key: "estimationQuality",
+      label: "Estimation Quality",
+      value: deliveryMetrics.estimationQuality,
+      parentDomain: "Delivery Effectiveness",
+      note: "Alignment between estimated and logged effort.",
+    }),
+    diagnosticDriver({
+      key: "collaborationParticipation",
+      label: "Collaboration Participation",
+      value: collaborationMetrics.participation,
+      parentDomain: "Collaboration Health",
+      note: "Visible collaboration through comments, watched work, and related activity.",
+    }),
+    diagnosticDriver({
+      key: "workloadBalance",
+      label: "Workload Balance",
+      value: sustainabilityMetrics.workloadBalance,
+      parentDomain: "Work Sustainability",
+      note: "Whether open work stays within a manageable range.",
+    }),
+    diagnosticDriver({
+      key: "workloadStress",
+      label: "Workload Stress",
+      value: 100 - Number(dimensions.workSustainability?.score ?? 0),
+      parentDomain: "Work Sustainability",
+      direction: "lower_is_better",
+      note: "Diagnostic inverse of sustainability posture; lower is healthier.",
+    }),
+  ].filter((item) => item.value != null);
 
   return {
     source: "enterprise_intelligence",
@@ -128,6 +345,23 @@ function buildUserScoreExplanation(user = {}) {
     summary: lowestDomains.length
       ? `Overall score is the canonical user intelligence result, not an average of the visible evidence bars. The strongest downward pressure is currently ${lowestDomains.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`
       : "Overall score is the canonical user intelligence result, not an average of the visible evidence bars.",
+    scoreNarrative: {
+      title: "Final Performance Score",
+      summary: lowestDomains.length
+        ? `The final score is ${scoreOrNull(user.score)}/100 from user_intelligence.score. It is being pulled down most by ${lowestDomains.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`
+        : `The final score is ${scoreOrNull(user.score)}/100 from user_intelligence.score.`,
+      liftSummary: strongestDomains.length
+        ? `Strongest supporting domains: ${strongestDomains.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`
+        : null,
+      scoreAuthority: "user_intelligence.score",
+      confidence: scoreOrNull(user.confidence),
+      risk: user.risk || {},
+      finalScoreIsNotAverageOfEvidenceBars: true,
+    },
+    scoreComposition: domainRows,
+    evidenceInputs,
+    diagnosticDrivers,
+    attendanceContribution,
     evidenceBars: [
       {
         key: "attendanceScore",
