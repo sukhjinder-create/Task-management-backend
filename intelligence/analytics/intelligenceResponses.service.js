@@ -56,10 +56,77 @@ function scoreOrNull(value) {
   return Number.isFinite(number) ? Math.round(number) : null;
 }
 
+function round2(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
+}
+
 function avgScore(values = []) {
   const nums = values.map(Number).filter(Number.isFinite);
   if (!nums.length) return 0;
   return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+}
+
+function effectFromScore(score, { lowerIsBetter = false } = {}) {
+  const value = Number(score);
+  if (!Number.isFinite(value)) {
+    return {
+      effect: "unknown",
+      label: "No closed evidence",
+      tone: "neutral",
+    };
+  }
+  const helpful = lowerIsBetter ? value <= 40 : value >= 76;
+  const hurting = lowerIsBetter ? value >= 70 : value < 55;
+  if (helpful) {
+    return {
+      effect: "positive_support",
+      label: "Positive support",
+      tone: "positive",
+    };
+  }
+  if (hurting) {
+    return {
+      effect: "downward_pressure",
+      label: "Downward pressure",
+      tone: "negative",
+    };
+  }
+  return {
+    effect: "neutral_or_moderate",
+    label: "Neutral / moderate",
+    tone: "neutral",
+  };
+}
+
+function computeScoreMath({ domainRows = [], attendanceScore = null } = {}) {
+  const primaryRows = domainRows.filter((row) => row.key !== "professionalDiscipline" && row.score != null);
+  const professional = domainRows.find((row) => row.key === "professionalDiscipline");
+  const confidenceAverage = avgScore(domainRows.map((row) => row.confidence));
+  const coreScore = adaptiveScore(primaryRows.map((row) => ({ value: row.score })), {
+    confidence: confidenceAverage,
+  });
+  const professionalScore = Number(professional?.score || 0);
+  const attendanceValue = Number(attendanceScore);
+  const attendanceDrag = Number.isFinite(attendanceValue) && attendanceValue < 45 && coreScore > 70
+    ? Math.min(8, (45 - attendanceValue) / 2)
+    : 0;
+  const attendanceLift = Number.isFinite(attendanceValue) && attendanceValue > 82 && coreScore < 62 ? 2 : 0;
+  const coreContributionPoints = coreScore * 0.82;
+  const professionalContributionPoints = professionalScore * 0.18;
+  const rawScore = coreContributionPoints + professionalContributionPoints - attendanceDrag + attendanceLift;
+
+  return {
+    coreScore,
+    professionalScore,
+    attendanceDrag,
+    attendanceLift,
+    coreContributionPoints,
+    professionalContributionPoints,
+    rawScore,
+    finalScore: roundScore(rawScore),
+    confidenceAverage,
+  };
 }
 
 function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
@@ -75,6 +142,10 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
       contributionType: "supporting_evidence",
       effectiveFinalLiftVsNoAttendanceSignal: null,
       effectiveFinalLiftVsNeutralAttendance: null,
+      professionalWithoutAttendanceSignal: null,
+      professionalWithNeutralAttendance: null,
+      finalWithoutAttendanceSignal: null,
+      finalWithNeutralAttendance: null,
       materiallyAffectsScore: false,
       summary: "Attendance is supporting evidence for Professional Discipline when closed attendance data is available.",
     };
@@ -113,6 +184,10 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
     contributionType: "supporting_evidence",
     effectiveFinalLiftVsNoAttendanceSignal: liftVsNoSignal,
     effectiveFinalLiftVsNeutralAttendance: liftVsNeutral,
+    professionalWithoutAttendanceSignal,
+    professionalWithNeutralAttendance,
+    finalWithoutAttendanceSignal,
+    finalWithNeutralAttendance,
     directLiftOrDrag: scoreOrNull(attendanceLift - attendanceDrag),
     materiallyAffectsScore: Math.abs(liftVsNoSignal) > 0,
     summary: Math.abs(liftVsNoSignal) > 0
@@ -121,14 +196,131 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
   };
 }
 
-function evidenceInput({ key, label, score, parentDomain, source, note, materiality = "supporting" }) {
+function buildScoreCalculation({ user = {}, domainRows = [], attendanceContribution = {} } = {}) {
+  const attendanceScore = scoreOrNull(user.attendance?.score);
+  const calculation = computeScoreMath({ domainRows, attendanceScore });
+  const professional = domainRows.find((row) => row.key === "professionalDiscipline") || {};
+  const professionalMetrics = professional.metrics || {};
+  const neutralDomainScore = 60;
+
+  const domainContributions = domainRows
+    .filter((row) => row.score != null)
+    .map((row) => {
+      const neutralRows = domainRows.map((candidate) =>
+        candidate.key === row.key ? { ...candidate, score: neutralDomainScore } : candidate
+      );
+      const neutralCalculation = computeScoreMath({ domainRows: neutralRows, attendanceScore });
+      const impact = calculation.finalScore - neutralCalculation.finalScore;
+      const isProfessional = row.key === "professionalDiscipline";
+      return {
+        key: row.key,
+        label: row.label,
+        score: row.score,
+        block: isProfessional ? "professional_discipline_block" : "core_score_block",
+        multiplier: isProfessional ? 0.18 : 0.82,
+        contributionType: isProfessional ? "direct_weighted_contribution" : "nonlinear_core_marginal_effect",
+        weightedContributionPoints: isProfessional ? round2(row.score * 0.18) : null,
+        finalScoreImpactVsNeutral: impact,
+        neutralCounterfactualScore: neutralCalculation.finalScore,
+        effect: effectFromScore(row.score),
+        explanation: isProfessional
+          ? "Professional Discipline contributes through the explicit 18% discipline block and is formed from attendance, reviews, hygiene, and workflow evidence."
+          : "This domain participates in the nonlinear core block. Impact is shown as the final-score change versus a neutral 60/100 domain value.",
+      };
+    });
+
+  const professionalFormationInputs = [
+    {
+      key: "attendanceEvidence",
+      label: "Attendance Evidence",
+      value: scoreOrNull(professionalMetrics.attendanceScore ?? attendanceScore),
+      feedsDomains: ["Professional Discipline"],
+      effect: effectFromScore(professionalMetrics.attendanceScore ?? attendanceScore),
+      note: "Closed attendance evidence feeds Professional Discipline.",
+    },
+    {
+      key: "reviewCompletion",
+      label: "Review Completion",
+      value: scoreOrNull(professionalMetrics.reviewCompletion),
+      feedsDomains: ["Professional Discipline", "Collaboration Health"],
+      effect: effectFromScore(professionalMetrics.reviewCompletion),
+      note: "Review completion is used in Professional Discipline and Collaboration Health.",
+    },
+    {
+      key: "updateHygiene",
+      label: "Update Hygiene",
+      value: scoreOrNull(professionalMetrics.updateHygiene),
+      feedsDomains: ["Professional Discipline"],
+      effect: effectFromScore(professionalMetrics.updateHygiene),
+      note: "Task activity and update visibility feed Professional Discipline.",
+    },
+    {
+      key: "workflowCompliance",
+      label: "Workflow Compliance",
+      value: scoreOrNull(professionalMetrics.workflowScore),
+      feedsDomains: ["Professional Discipline"],
+      effect: effectFromScore(professionalMetrics.workflowScore),
+      note: "Workflow actions such as status or priority changes feed Professional Discipline.",
+    },
+  ].filter((item) => item.value != null);
+
+  return {
+    source: "enterprise_intelligence",
+    scoreAuthority: "user_intelligence.score",
+    formulaLabel: "Core domains + Professional Discipline + bounded attendance lift/drag",
+    formulaReadable:
+      "final score = round((core score x 0.82) + (professional discipline x 0.18) - attendance drag + attendance lift)",
+    finalScore: scoreOrNull(user.score),
+    reconstructedFinalScore: calculation.finalScore,
+    rawScoreBeforeRounding: round2(calculation.rawScore),
+    coreScore: calculation.coreScore,
+    coreMultiplier: 0.82,
+    coreContributionPoints: round2(calculation.coreContributionPoints),
+    professionalDisciplineScore: calculation.professionalScore,
+    professionalDisciplineMultiplier: 0.18,
+    professionalDisciplineContributionPoints: round2(calculation.professionalContributionPoints),
+    attendanceDrag: round2(calculation.attendanceDrag),
+    attendanceLift: round2(calculation.attendanceLift),
+    directAttendanceAdjustment: round2(calculation.attendanceLift - calculation.attendanceDrag),
+    confidenceAverage: round2(calculation.confidenceAverage),
+    confidenceNote: "Confidence participates inside the deterministic enterprise intelligence normalization; the UI renders this backend-owned result.",
+    domainContributions,
+    attendanceEffect: {
+      score: attendanceScore,
+      feedsDomain: "Professional Discipline",
+      professionalWithAttendance: professional.score ?? null,
+      professionalWithoutAttendanceSignal: attendanceContribution.professionalWithoutAttendanceSignal ?? null,
+      professionalWithNeutralAttendance: attendanceContribution.professionalWithNeutralAttendance ?? null,
+      finalWithoutAttendanceSignal: attendanceContribution.finalWithoutAttendanceSignal ?? null,
+      finalWithNeutralAttendance: attendanceContribution.finalWithNeutralAttendance ?? null,
+      effectiveFinalLiftVsNoAttendanceSignal: attendanceContribution.effectiveFinalLiftVsNoAttendanceSignal ?? null,
+      effectiveFinalLiftVsNeutralAttendance: attendanceContribution.effectiveFinalLiftVsNeutralAttendance ?? null,
+      materiallyAffectsScore: attendanceContribution.materiallyAffectsScore === true,
+      summary: attendanceContribution.summary,
+    },
+    professionalDisciplineFormation: {
+      score: professional.score ?? null,
+      source: "user_intelligence.dimensions.professionalDiscipline",
+      inputs: professionalFormationInputs,
+      summary: "Professional Discipline is formed from attendance, review completion, update hygiene, and workflow compliance evidence.",
+    },
+  };
+}
+
+function evidenceInput({ key, label, score, parentDomain, feedsDomains = null, source, note, materiality = "supporting" }) {
+  const value = scoreOrNull(score);
+  const effect = effectFromScore(value);
   return {
     key,
     label,
-    score: scoreOrNull(score),
+    score: value,
     parentDomain,
+    feedsDomains: feedsDomains || (parentDomain ? [parentDomain] : []),
     source,
     materiality,
+    effect: effect.effect,
+    effectLabel: effect.label,
+    effectTone: effect.tone,
     note,
   };
 }
@@ -237,6 +429,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Attendance Evidence",
       score: attendanceScore,
       parentDomain: "Professional Discipline",
+      feedsDomains: ["Professional Discipline"],
       source: "user_intelligence.attendance.score",
       materiality: attendanceContribution.materiallyAffectsScore ? "material" : "supporting",
       note: attendanceContribution.summary,
@@ -245,15 +438,17 @@ function buildUserScoreExplanation(user = {}) {
       key: "reviewCompletion",
       label: "Review Completion",
       score: professionalMetrics.reviewCompletion,
-      parentDomain: "Professional Discipline",
+      parentDomain: "Professional Discipline / Collaboration Health",
+      feedsDomains: ["Professional Discipline", "Collaboration Health"],
       source: "user_intelligence.dimensions.professionalDiscipline.metrics.reviewCompletion",
-      note: "Review completion supports the discipline domain alongside attendance, update hygiene, and workflow compliance.",
+      note: "Review completion supports Professional Discipline and also participates in Collaboration Health.",
     }),
     evidenceInput({
       key: "updateHygiene",
       label: "Update Hygiene",
       score: professionalMetrics.updateHygiene,
       parentDomain: "Professional Discipline",
+      feedsDomains: ["Professional Discipline"],
       source: "user_intelligence.dimensions.professionalDiscipline.metrics.updateHygiene",
       note: "Visible activity and comments help prove work is being kept current.",
     }),
@@ -262,6 +457,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Workflow Compliance",
       score: professionalMetrics.workflowScore,
       parentDomain: "Professional Discipline",
+      feedsDomains: ["Professional Discipline"],
       source: "user_intelligence.dimensions.professionalDiscipline.metrics.workflowScore",
       note: "Workflow actions such as status and priority updates support operating discipline.",
     }),
@@ -270,6 +466,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Delivery Evidence",
       score: deliveryScore,
       parentDomain: "Delivery Effectiveness",
+      feedsDomains: ["Delivery Effectiveness"],
       source: "user_intelligence.dimensions.deliveryEffectiveness.score",
       note: "Delivery Effectiveness is a final score domain; this evidence row explains the delivery signal behind it.",
     }),
@@ -334,6 +531,7 @@ function buildUserScoreExplanation(user = {}) {
       note: "Diagnostic inverse of sustainability posture; lower is healthier.",
     }),
   ].filter((item) => item.value != null);
+  const scoreCalculation = buildScoreCalculation({ user, domainRows, attendanceContribution });
 
   return {
     source: "enterprise_intelligence",
@@ -359,6 +557,7 @@ function buildUserScoreExplanation(user = {}) {
       finalScoreIsNotAverageOfEvidenceBars: true,
     },
     scoreComposition: domainRows,
+    scoreCalculation,
     evidenceInputs,
     diagnosticDrivers,
     attendanceContribution,
