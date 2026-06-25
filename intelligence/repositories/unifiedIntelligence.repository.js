@@ -71,6 +71,7 @@ export async function hasEnterpriseIntelligenceSchema() {
 function mapUserRow(row) {
   if (!row) return null;
   const time = liveTimeModel(row);
+  const scoreModel = row.analytics?.scoreModel || row.payload?.scoreModel || null;
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -88,6 +89,7 @@ function mapUserRow(row) {
     indicators: row.indicators || [],
     risk: row.risk || {},
     analytics: row.analytics || {},
+    scoreModel,
     sourceWindow: row.source_window || {},
     evidenceHash: row.evidence_hash,
     calculationVersion: row.calculation_version,
@@ -105,6 +107,7 @@ function mapUserRow(row) {
 function mapProjectRow(row) {
   if (!row) return null;
   const time = liveTimeModel(row);
+  const scoreModel = row.analytics?.scoreModel || row.payload?.scoreModel || null;
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -121,6 +124,7 @@ function mapProjectRow(row) {
     indicators: row.indicators || [],
     risk: row.risk || {},
     analytics: row.analytics || {},
+    scoreModel,
     sourceWindow: row.source_window || {},
     evidenceHash: row.evidence_hash,
     calculationVersion: row.calculation_version,
@@ -138,6 +142,7 @@ function mapProjectRow(row) {
 function mapTeamRow(row) {
   if (!row) return null;
   const time = liveTimeModel(row);
+  const scoreModel = row.analytics?.scoreModel || row.payload?.scoreModel || null;
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -155,6 +160,7 @@ function mapTeamRow(row) {
     indicators: row.indicators || [],
     risk: row.risk || {},
     analytics: row.analytics || {},
+    scoreModel,
     sourceWindow: row.source_window || {},
     evidenceHash: row.evidence_hash,
     calculationVersion: row.calculation_version,
@@ -172,6 +178,7 @@ function mapTeamRow(row) {
 function mapWorkspaceRow(row) {
   if (!row) return null;
   const time = liveTimeModel(row);
+  const scoreModel = row.analytics?.scoreModel || row.payload?.scoreModel || null;
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -186,6 +193,7 @@ function mapWorkspaceRow(row) {
     indicators: row.indicators || [],
     risk: row.risk || {},
     analytics: row.analytics || {},
+    scoreModel,
     sourceWindow: row.source_window || {},
     evidenceHash: row.evidence_hash,
     calculationVersion: row.calculation_version,

@@ -5,6 +5,10 @@ import { evaluateProjectIntelligence } from "../intelligence/evaluators/projectE
 import { evaluateTeamIntelligence } from "../intelligence/evaluators/teamEvaluator.js";
 import { evaluateUserIntelligence } from "../intelligence/evaluators/userEvaluator.js";
 import { evaluateWorkspaceIntelligence } from "../intelligence/evaluators/workspaceEvaluator.js";
+import {
+  getScoringGroupWeights,
+  normalizeScoringConfig,
+} from "../intelligence/config/scoringConfig.model.js";
 
 const root = process.cwd();
 const frontendRoot = path.resolve(root, "..", "Task-management");
@@ -176,6 +180,7 @@ function buildSyntheticEvidence() {
 
 const migration = read("migrations/20260624_enterprise_intelligence_rearchitecture.sql");
 const cutoverMigration = read("migrations/20260624_enterprise_intelligence_cutover_controls.sql");
+const scoringConfigMigration = read("migrations/20260625_enterprise_intelligence_scoring_configs.sql");
 [
   "user_intelligence",
   "project_intelligence",
@@ -189,6 +194,44 @@ assertIncludes(cutoverMigration, "enterprise_intelligence_cutover_controls", "Cu
 assertIncludes(cutoverMigration, "'legacy'", "Cutover controls must support legacy mode");
 assertIncludes(cutoverMigration, "'shadow'", "Cutover controls must support shadow mode");
 assertIncludes(cutoverMigration, "'unified'", "Cutover controls must support unified mode");
+assertIncludes(scoringConfigMigration, "enterprise_intelligence_scoring_configs", "Scoring config migration must create the workspace scoring table");
+assertIncludes(scoringConfigMigration, "normalized_config JSONB", "Scoring config migration must persist normalized backend-owned config");
+assertIncludes(scoringConfigMigration, "UNIQUE (workspace_id)", "Scoring config must be scoped one-to-one by workspace");
+
+const normalizedPairConfig = normalizeScoringConfig({
+  groups: {
+    userFinalBalance: {
+      changedKey: "core",
+      weights: { core: 0.91 },
+    },
+  },
+});
+const pairWeights = getScoringGroupWeights(normalizedPairConfig, "userFinalBalance");
+assert.equal(pairWeights.core, 0.91, "Pair scoring config must preserve changed side");
+assert.equal(pairWeights.professionalDiscipline, 0.09, "Pair scoring config must auto-complement the other side");
+
+const normalizedMultiConfig = normalizeScoringConfig({
+  groups: {
+    workspaceIndexes: {
+      weights: {
+        workspaceHealthIndex: 0.99,
+        productivityIndex: 0.77,
+        strategicRiskIndex: 0.61,
+        deliveryConfidenceIndex: 0.44,
+        organizationalAlignmentIndex: 0.33,
+        executionRealityIndex: 0.22,
+        attendanceReadinessIndex: 0.11,
+        capacitySustainabilityIndex: 0.01,
+      },
+    },
+  },
+});
+const workspaceWeights = getScoringGroupWeights(normalizedMultiConfig, "workspaceIndexes");
+const workspaceWeightTotal = Object.values(workspaceWeights).reduce((sum, value) => sum + value, 0);
+assert.ok(Math.abs(workspaceWeightTotal - 1) < 0.0001, "Workspace scoring weights must normalize to 100%");
+Object.values(workspaceWeights).forEach((value) => {
+  assert.ok(value >= 0.01 && value <= 0.99, "Workspace scoring weights must respect min/max bounds");
+});
 
 const historicalAnalytics = read("intelligence/analytics/historicalAnalytics.service.js");
 const unifiedRepository = read("intelligence/repositories/unifiedIntelligence.repository.js");
@@ -252,6 +295,7 @@ assertNotIncludes(dashboardChartContract, "metricFromSnapshot(point, \"dimension
 
 const controller = stripComments(read("intelligence/intelligence.controller.js"));
 const intelligenceRoutes = stripComments(read("intelligence/intelligence.routes.js"));
+const scoringConfigRepository = stripComments(read("intelligence/repositories/scoringConfig.repository.js"));
 const executiveSummaryGenerator = stripComments(read("intelligence/executiveSummary.generator.js"));
 const aiFeaturesService = stripComments(read("services/aiFeatures.service.js"));
 const aiContextBuilder = stripComments(read("ai/ai.context.builder.js"));
@@ -263,10 +307,17 @@ assertIncludes(controller, "source: \"enterprise_intelligence\"", "Controller re
 assertIncludes(controller, "getCutoverStatus", "Controller must expose cutover status");
 assertIncludes(controller, "getCutoverHealth", "Controller must expose cutover health");
 assertIncludes(controller, "updateCutoverControl", "Controller must expose cutover control updates");
+assertIncludes(controller, "getScoringConfig", "Controller must expose workspace scoring config");
+assertIncludes(controller, "updateScoringConfig", "Controller must expose workspace scoring config updates");
+assertIncludes(controller, "canManageWorkspaceScoring", "Scoring config endpoints must enforce workspace-admin control");
+assertIncludes(controller, "bootstrapWorkspaceIntelligence", "Scoring config updates must trigger canonical recalculation");
 assertIncludes(controller, "resolveCutoverResponse", "Controller must route core surfaces through cutover controls");
 assertIncludes(intelligenceRoutes, "/cutover/status", "Routes must expose cutover status endpoint");
 assertIncludes(intelligenceRoutes, "/cutover/health", "Routes must expose cutover health endpoint");
 assertIncludes(intelligenceRoutes, "/cutover/controls", "Routes must expose cutover controls endpoint");
+assertIncludes(intelligenceRoutes, "/scoring-config", "Routes must expose workspace scoring config endpoints");
+assertIncludes(scoringConfigRepository, "normalizeScoringConfig", "Scoring config repository must normalize before persistence");
+assertIncludes(scoringConfigRepository, "enterprise_intelligence_scoring_configs", "Scoring config repository must persist to authoritative config table");
 assertNotIncludes(controller, "runManualMonthlyScoring", "Active controller path must not trigger manual monthly scoring");
 assertNotIncludes(controller, "Math.round", "Intelligence controller must not calculate scores inline");
 assertNotIncludes(controller, ".reduce(", "Intelligence controller must not aggregate score math inline");
@@ -403,6 +454,11 @@ const triggerSources = [
 const dashboard = read("src/pages/Dashboard.jsx", frontendRoot);
 assertIncludes(dashboard, "ResponsiveContainer", "Dashboard must render integrated charts");
 assertIncludes(dashboard, "dashboardOverview?.visualizations?.charts", "Dashboard charts must consume backend visualization configs");
+assertIncludes(dashboard, "/intelligence/scoring-config", "Dashboard must consume backend-owned scoring config");
+assertIncludes(dashboard, "saveScoringConfiguration", "Dashboard must provide workspace-admin scoring config save flow");
+assertIncludes(dashboard, "workspaceScoreExplanation", "Dashboard must render backend-owned workspace score explainability");
+assertIncludes(dashboard, "driver.impactType", "Dashboard diagnostic drivers must expose canonical impact type");
+assertIncludes(dashboard, "Feeds {", "Dashboard diagnostic drivers must show canonical domain feed linkage");
 assertNotIncludes(dashboard, "30% of score", "Dashboard must not expose old score weighting copy");
 assertNotIncludes(dashboard, "70% of score", "Dashboard must not expose old score weighting copy");
 assertNotIncludes(dashboard, "Weighted from attendance and productivity", "Dashboard must not describe a static formula");

@@ -10,6 +10,11 @@ import {
 import { withLegacyIsolation } from "./cutoverIsolation.service.js";
 import { advancedForecast } from "../forecast/forecast.engine.js";
 import { adaptiveScore, roundScore } from "../engine/scorePrimitives.js";
+import {
+  getScoringGroupWeights,
+  scoreObjectWithScoringConfig,
+  scoreWithScoringConfig,
+} from "../config/scoringConfig.model.js";
 
 function monthKey() {
   return new Date().toISOString().slice(0, 7);
@@ -99,11 +104,12 @@ function effectFromScore(score, { lowerIsBetter = false } = {}) {
   };
 }
 
-function computeScoreMath({ domainRows = [], attendanceScore = null } = {}) {
+function computeScoreMath({ domainRows = [], attendanceScore = null, scoreModel = null } = {}) {
   const primaryRows = domainRows.filter((row) => row.key !== "professionalDiscipline" && row.score != null);
   const professional = domainRows.find((row) => row.key === "professionalDiscipline");
   const confidenceAverage = avgScore(domainRows.map((row) => row.confidence));
-  const coreScore = adaptiveScore(primaryRows.map((row) => ({ value: row.score })), {
+  const finalWeights = getScoringGroupWeights(scoreModel, "userFinalBalance");
+  const coreScore = scoreWithScoringConfig(primaryRows.map((row) => ({ key: row.key, value: row.score })), scoreModel, "userCoreDomains", {
     confidence: confidenceAverage,
   });
   const professionalScore = Number(professional?.score || 0);
@@ -112,8 +118,10 @@ function computeScoreMath({ domainRows = [], attendanceScore = null } = {}) {
     ? Math.min(8, (45 - attendanceValue) / 2)
     : 0;
   const attendanceLift = Number.isFinite(attendanceValue) && attendanceValue > 82 && coreScore < 62 ? 2 : 0;
-  const coreContributionPoints = coreScore * 0.82;
-  const professionalContributionPoints = professionalScore * 0.18;
+  const coreWeight = finalWeights.core ?? 0.82;
+  const professionalWeight = finalWeights.professionalDiscipline ?? 0.18;
+  const coreContributionPoints = coreScore * coreWeight;
+  const professionalContributionPoints = professionalScore * professionalWeight;
   const rawScore = coreContributionPoints + professionalContributionPoints - attendanceDrag + attendanceLift;
 
   return {
@@ -126,6 +134,8 @@ function computeScoreMath({ domainRows = [], attendanceScore = null } = {}) {
     rawScore,
     finalScore: roundScore(rawScore),
     confidenceAverage,
+    coreWeight,
+    professionalWeight,
   };
 }
 
@@ -134,6 +144,10 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
   const professional = domainRows.find((row) => row.key === "professionalDiscipline");
   const primaryRows = domainRows.filter((row) => row.key !== "professionalDiscipline" && row.score != null);
   const professionalMetrics = professional?.metrics || {};
+  const scoreModel = user.scoreModel || user.analytics?.scoreModel || null;
+  const finalWeights = getScoringGroupWeights(scoreModel, "userFinalBalance");
+  const coreWeight = finalWeights.core ?? 0.82;
+  const professionalWeight = finalWeights.professionalDiscipline ?? 0.18;
 
   if (attendanceScore == null || !professional || !primaryRows.length) {
     return {
@@ -152,7 +166,7 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
   }
 
   const confidenceAverage = avgScore(domainRows.map((row) => row.confidence));
-  const coreScore = adaptiveScore(primaryRows.map((row) => ({ value: row.score })), {
+  const coreScore = scoreWithScoringConfig(primaryRows.map((row) => ({ key: row.key, value: row.score })), scoreModel, "userCoreDomains", {
     confidence: confidenceAverage,
   });
   const attendanceDrag = attendanceScore < 45 && coreScore > 70
@@ -160,7 +174,7 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
     : 0;
   const attendanceLift = attendanceScore > 82 && coreScore < 62 ? 2 : 0;
   const finalWithAttendance = roundScore(
-    (coreScore * 0.82) + ((professional.score || 0) * 0.18) - attendanceDrag + attendanceLift
+    (coreScore * coreWeight) + ((professional.score || 0) * professionalWeight) - attendanceDrag + attendanceLift
   );
   const professionalWithoutAttendanceSignal = adaptiveScore([
     { value: professionalMetrics.reviewCompletion },
@@ -173,8 +187,8 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
     { value: professionalMetrics.updateHygiene },
     { value: professionalMetrics.workflowScore },
   ], { confidence: professional?.confidence ?? 75 });
-  const finalWithoutAttendanceSignal = roundScore((coreScore * 0.82) + (professionalWithoutAttendanceSignal * 0.18));
-  const finalWithNeutralAttendance = roundScore((coreScore * 0.82) + (professionalWithNeutralAttendance * 0.18));
+  const finalWithoutAttendanceSignal = roundScore((coreScore * coreWeight) + (professionalWithoutAttendanceSignal * professionalWeight));
+  const finalWithNeutralAttendance = roundScore((coreScore * coreWeight) + (professionalWithNeutralAttendance * professionalWeight));
   const liftVsNoSignal = finalWithAttendance - finalWithoutAttendanceSignal;
   const liftVsNeutral = finalWithAttendance - finalWithNeutralAttendance;
 
@@ -198,7 +212,9 @@ function buildAttendanceContribution({ user = {}, domainRows = [] } = {}) {
 
 function buildScoreCalculation({ user = {}, domainRows = [], attendanceContribution = {} } = {}) {
   const attendanceScore = scoreOrNull(user.attendance?.score);
-  const calculation = computeScoreMath({ domainRows, attendanceScore });
+  const scoreModel = user.scoreModel || user.analytics?.scoreModel || null;
+  const userCoreWeights = getScoringGroupWeights(scoreModel, "userCoreDomains");
+  const calculation = computeScoreMath({ domainRows, attendanceScore, scoreModel });
   const professional = domainRows.find((row) => row.key === "professionalDiscipline") || {};
   const professionalMetrics = professional.metrics || {};
   const neutralDomainScore = 60;
@@ -209,22 +225,25 @@ function buildScoreCalculation({ user = {}, domainRows = [], attendanceContribut
       const neutralRows = domainRows.map((candidate) =>
         candidate.key === row.key ? { ...candidate, score: neutralDomainScore } : candidate
       );
-      const neutralCalculation = computeScoreMath({ domainRows: neutralRows, attendanceScore });
+      const neutralCalculation = computeScoreMath({ domainRows: neutralRows, attendanceScore, scoreModel });
       const impact = calculation.finalScore - neutralCalculation.finalScore;
       const isProfessional = row.key === "professionalDiscipline";
+      const coreDomainWeight = userCoreWeights[row.key] ?? null;
       return {
         key: row.key,
         label: row.label,
         score: row.score,
         block: isProfessional ? "professional_discipline_block" : "core_score_block",
-        multiplier: isProfessional ? 0.18 : 0.82,
+        multiplier: isProfessional ? calculation.professionalWeight : calculation.coreWeight,
+        domainWeight: isProfessional ? calculation.professionalWeight : coreDomainWeight,
+        effectiveWeight: isProfessional ? calculation.professionalWeight : round2((calculation.coreWeight || 0) * (coreDomainWeight || 0)),
         contributionType: isProfessional ? "direct_weighted_contribution" : "nonlinear_core_marginal_effect",
-        weightedContributionPoints: isProfessional ? round2(row.score * 0.18) : null,
+        weightedContributionPoints: isProfessional ? round2(row.score * calculation.professionalWeight) : null,
         finalScoreImpactVsNeutral: impact,
         neutralCounterfactualScore: neutralCalculation.finalScore,
         effect: effectFromScore(row.score),
         explanation: isProfessional
-          ? "Professional Discipline contributes through the explicit 18% discipline block and is formed from attendance, reviews, hygiene, and workflow evidence."
+          ? `Professional Discipline contributes through the configured ${Math.round((calculation.professionalWeight || 0) * 100)}% discipline block and is formed from attendance, reviews, hygiene, and workflow evidence.`
           : "This domain participates in the nonlinear core block. Impact is shown as the final-score change versus a neutral 60/100 domain value.",
       };
     });
@@ -269,21 +288,22 @@ function buildScoreCalculation({ user = {}, domainRows = [], attendanceContribut
     scoreAuthority: "user_intelligence.score",
     formulaLabel: "Core domains + Professional Discipline + bounded attendance lift/drag",
     formulaReadable:
-      "final score = round((core score x 0.82) + (professional discipline x 0.18) - attendance drag + attendance lift)",
+      `final score = round((core score x ${round2(calculation.coreWeight)}) + (professional discipline x ${round2(calculation.professionalWeight)}) - attendance drag + attendance lift)`,
     finalScore: scoreOrNull(user.score),
     reconstructedFinalScore: calculation.finalScore,
     rawScoreBeforeRounding: round2(calculation.rawScore),
     coreScore: calculation.coreScore,
-    coreMultiplier: 0.82,
+    coreMultiplier: round2(calculation.coreWeight),
     coreContributionPoints: round2(calculation.coreContributionPoints),
     professionalDisciplineScore: calculation.professionalScore,
-    professionalDisciplineMultiplier: 0.18,
+    professionalDisciplineMultiplier: round2(calculation.professionalWeight),
     professionalDisciplineContributionPoints: round2(calculation.professionalContributionPoints),
     attendanceDrag: round2(calculation.attendanceDrag),
     attendanceLift: round2(calculation.attendanceLift),
     directAttendanceAdjustment: round2(calculation.attendanceLift - calculation.attendanceDrag),
     confidenceAverage: round2(calculation.confidenceAverage),
     confidenceNote: "Confidence participates inside the deterministic enterprise intelligence normalization; the UI renders this backend-owned result.",
+    scoreModel,
     domainContributions,
     attendanceEffect: {
       score: attendanceScore,
@@ -325,13 +345,35 @@ function evidenceInput({ key, label, score, parentDomain, feedsDomains = null, s
   };
 }
 
-function diagnosticDriver({ key, label, value, parentDomain, direction = "higher_is_better", note }) {
+function diagnosticDriver({
+  key,
+  label,
+  value,
+  parentDomain,
+  feedsDomains = null,
+  direction = "higher_is_better",
+  note,
+  impactType = "direct_domain_input",
+  scoreAffecting = true,
+}) {
+  const normalizedValue = scoreOrNull(value);
+  const effect = effectFromScore(normalizedValue, { lowerIsBetter: direction === "lower_is_better" });
   return {
     key,
     label,
-    value: scoreOrNull(value),
+    value: normalizedValue,
     parentDomain,
+    feedsDomains: feedsDomains || (parentDomain ? [parentDomain] : []),
     direction,
+    impactType,
+    scoreAffecting,
+    materiality: scoreAffecting ? "domain_shaping" : "context_only",
+    effect: effect.effect,
+    effectLabel: effect.label,
+    effectTone: effect.tone,
+    contributionPath: scoreAffecting
+      ? `${label} -> ${parentDomain} -> final score`
+      : `${label} supports interpretation of ${parentDomain}; it is not directly weighted into the final score.`,
     note,
   };
 }
@@ -478,6 +520,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Commitment Completion",
       value: executionMetrics.commitmentCompletion,
       parentDomain: "Execution Reliability",
+      feedsDomains: ["Execution Reliability"],
       note: "Completed assigned work in the active evidence window.",
     }),
     diagnosticDriver({
@@ -485,6 +528,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Timeliness",
       value: executionMetrics.dueDateDiscipline,
       parentDomain: "Execution Reliability",
+      feedsDomains: ["Execution Reliability"],
       note: "On-time delivery for due-date tracked work.",
     }),
     diagnosticDriver({
@@ -492,6 +536,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Blocker Responsiveness",
       value: executionMetrics.blockerResponsiveness,
       parentDomain: "Execution Reliability",
+      feedsDomains: ["Execution Reliability"],
       note: "Responsiveness to blocked or blocking work.",
     }),
     diagnosticDriver({
@@ -499,6 +544,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Task Velocity",
       value: deliveryMetrics.velocity,
       parentDomain: "Delivery Effectiveness",
+      feedsDomains: ["Delivery Effectiveness"],
       note: "Completion pace within the delivery domain.",
     }),
     diagnosticDriver({
@@ -506,6 +552,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Estimation Quality",
       value: deliveryMetrics.estimationQuality,
       parentDomain: "Delivery Effectiveness",
+      feedsDomains: ["Delivery Effectiveness"],
       note: "Alignment between estimated and logged effort.",
     }),
     diagnosticDriver({
@@ -513,6 +560,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Collaboration Participation",
       value: collaborationMetrics.participation,
       parentDomain: "Collaboration Health",
+      feedsDomains: ["Collaboration Health"],
       note: "Visible collaboration through comments, watched work, and related activity.",
     }),
     diagnosticDriver({
@@ -520,6 +568,7 @@ function buildUserScoreExplanation(user = {}) {
       label: "Workload Balance",
       value: sustainabilityMetrics.workloadBalance,
       parentDomain: "Work Sustainability",
+      feedsDomains: ["Work Sustainability"],
       note: "Whether open work stays within a manageable range.",
     }),
     diagnosticDriver({
@@ -527,7 +576,10 @@ function buildUserScoreExplanation(user = {}) {
       label: "Workload Stress",
       value: 100 - Number(dimensions.workSustainability?.score ?? 0),
       parentDomain: "Work Sustainability",
+      feedsDomains: ["Work Sustainability"],
       direction: "lower_is_better",
+      impactType: "diagnostic_context",
+      scoreAffecting: false,
       note: "Diagnostic inverse of sustainability posture; lower is healthier.",
     }),
   ].filter((item) => item.value != null);
@@ -586,6 +638,111 @@ function buildUserScoreExplanation(user = {}) {
       coverageEnd: user.coverageEnd,
       attendanceClosedThroughDate: user.attendanceClosedThroughDate,
       intelligenceMode: user.intelligenceMode,
+    },
+  };
+}
+
+const WORKSPACE_INDEX_EXPLANATIONS = {
+  workspaceHealthIndex: "Composite workspace health from user, project, team, and execution reality evidence.",
+  productivityIndex: "Delivery effectiveness, velocity health, and high-performer distribution.",
+  strategicRiskIndex: "Inverse risk posture from at-risk employees, critical projects, and score drag.",
+  deliveryConfidenceIndex: "Project completion confidence and team delivery reliability.",
+  organizationalAlignmentIndex: "Team predictability, collaboration, and project alignment signals.",
+  executionRealityIndex: "Tracked internal and integration work completion evidence.",
+  attendanceReadinessIndex: "Closed attendance readiness and Professional Discipline across users.",
+  capacitySustainabilityIndex: "Work sustainability and team workload balance signals.",
+};
+
+function workspaceIndexLabel(key) {
+  return String(key || "")
+    .replace(/Index$/, "")
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, (char) => char.toUpperCase())
+    .trim();
+}
+
+function buildWorkspaceScoreExplanation(workspace = {}) {
+  const indexes = workspace.indexes || {};
+  const scoreModel = workspace.scoreModel || workspace.analytics?.scoreModel || null;
+  const weights = getScoringGroupWeights(scoreModel, "workspaceIndexes");
+  const indexRows = Object.keys(weights).map((key) => ({
+    key,
+    label: scoreModel?.groups?.workspaceIndexes?.slots?.[key]?.label || workspaceIndexLabel(key),
+    score: scoreOrNull(indexes[key]),
+    weight: round2(weights[key]),
+    source: `workspace_intelligence.indexes.${key}`,
+    note: WORKSPACE_INDEX_EXPLANATIONS[key] || "Workspace intelligence index.",
+    effect: effectFromScore(indexes[key]),
+  })).filter((row) => row.score != null);
+
+  const indexValues = Object.fromEntries(indexRows.map((row) => [row.key, row.score]));
+  const reconstructedFinalScore = scoreObjectWithScoringConfig(indexValues, scoreModel, "workspaceIndexes", {
+    confidence: workspace.confidence ?? 75,
+  });
+  const rawWeightedScore = indexRows.reduce((sum, row) => sum + (row.score * (row.weight || 0)), 0);
+  const domainContributions = indexRows.map((row) => {
+    const neutralValues = {
+      ...indexValues,
+      [row.key]: 60,
+    };
+    const neutralScore = scoreObjectWithScoringConfig(neutralValues, scoreModel, "workspaceIndexes", {
+      confidence: workspace.confidence ?? 75,
+    });
+    return {
+      ...row,
+      weightedContributionPoints: round2(row.score * row.weight),
+      finalScoreImpactVsNeutral: reconstructedFinalScore - neutralScore,
+      neutralCounterfactualScore: neutralScore,
+      contributionType: "weighted_workspace_index",
+    };
+  });
+  const downward = [...domainContributions].sort((a, b) => a.score - b.score).slice(0, 2);
+  const upward = [...domainContributions].sort((a, b) => b.score - a.score).slice(0, 2);
+  const attendanceRow = domainContributions.find((row) => row.key === "attendanceReadinessIndex");
+  const capacityRow = domainContributions.find((row) => row.key === "capacitySustainabilityIndex");
+
+  return {
+    source: "enterprise_intelligence",
+    scoreAuthority: "workspace_intelligence.score",
+    formulaLabel: "Weighted workspace intelligence indexes",
+    formulaReadable: "workspace score = normalized weighted blend of workspace health, productivity, strategic risk, delivery confidence, alignment, execution reality, attendance readiness, and capacity sustainability",
+    finalScore: scoreOrNull(workspace.score),
+    reconstructedFinalScore,
+    rawScoreBeforeRounding: round2(rawWeightedScore),
+    confidence: scoreOrNull(workspace.confidence),
+    scoreModel,
+    domainContributions,
+    upwardPressures: upward,
+    downwardPressures: downward,
+    attendanceEffect: attendanceRow ? {
+      score: attendanceRow.score,
+      feedsDomain: "Workspace Health",
+      index: "attendanceReadinessIndex",
+      weight: attendanceRow.weight,
+      weightedContributionPoints: attendanceRow.weightedContributionPoints,
+      finalScoreImpactVsNeutral: attendanceRow.finalScoreImpactVsNeutral,
+      materiallyAffectsScore: Math.abs(attendanceRow.finalScoreImpactVsNeutral) > 0,
+      summary: `Attendance Readiness contributes to workspace intelligence through a ${Math.round((attendanceRow.weight || 0) * 100)}% workspace-index emphasis.`,
+    } : null,
+    workforceSustainabilityEffect: capacityRow ? {
+      score: capacityRow.score,
+      index: "capacitySustainabilityIndex",
+      weight: capacityRow.weight,
+      weightedContributionPoints: capacityRow.weightedContributionPoints,
+      finalScoreImpactVsNeutral: capacityRow.finalScoreImpactVsNeutral,
+    } : null,
+    summary: downward.length
+      ? `Workspace Health is ${scoreOrNull(workspace.score)}/100 from workspace_intelligence.score. Main downward pressure: ${downward.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`
+      : `Workspace Health is ${scoreOrNull(workspace.score)}/100 from workspace_intelligence.score.`,
+    strengths: workspace.strengths || [],
+    concerns: workspace.concerns || [],
+    drivers: workspace.drivers || [],
+    time: {
+      computedAt: workspace.computedAt,
+      coverageStart: workspace.coverageStart,
+      coverageEnd: workspace.coverageEnd,
+      attendanceClosedThroughDate: workspace.attendanceClosedThroughDate,
+      intelligenceMode: workspace.intelligenceMode,
     },
   };
 }
@@ -1147,6 +1304,7 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
       escalatedActions: Number(autopilot.escalated_actions) || 0,
     },
     intelligence: workspaceIntel,
+    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}),
     computedAt: workspaceIntel?.computedAt || null,
     coverageStart: workspaceIntel?.coverageStart || null,
     coverageEnd: workspaceIntel?.coverageEnd || null,
@@ -1167,6 +1325,7 @@ export async function buildWorkspaceHealthResponse({ workspaceId, userId, role }
     concerns: workspaceIntel?.concerns || [],
     drivers: workspaceIntel?.drivers || [],
     indexes: workspaceIntel?.indexes || {},
+    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}),
     risk: workspaceIntel?.risk || null,
     computedAt: workspaceIntel?.computedAt || null,
     coverageStart: workspaceIntel?.coverageStart || null,

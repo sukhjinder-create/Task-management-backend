@@ -48,6 +48,10 @@ import { withLegacyIsolation } from "./analytics/cutoverIsolation.service.js";
 import { getDashboardExecutiveDetailFromIntelligence } from "./analytics/unifiedDashboard.adapter.js";
 import { verifyDashboardHistoryMaterialization } from "./analytics/dashboardHistoryVerification.service.js";
 import { backfillDashboardIntelligenceHistory } from "./snapshots/historicalBackfill.service.js";
+import {
+  getWorkspaceScoringConfig,
+  upsertWorkspaceScoringConfig,
+} from "./repositories/scoringConfig.repository.js";
 
 function internalServiceAuthorized(req) {
   const expected = process.env.AI_SERVICE_SECRET || process.env.INTERNAL_SERVICE_SECRET || "";
@@ -71,6 +75,31 @@ function readDays(value) {
   if (String(value || "").toLowerCase() === "all") return 0;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function isWorkspaceAdminRole(role) {
+  return [
+    "admin",
+    "owner",
+    "workspace_admin",
+    "super_admin",
+    "platform_admin",
+    "superadmin",
+  ].includes(String(role || "").toLowerCase());
+}
+
+async function canManageWorkspaceScoring(req) {
+  if (isWorkspaceAdminRole(req.user?.role)) return true;
+  if (isWorkspaceAdminRole(req.workspaceRole)) return true;
+
+  const { rows } = await pool.query(
+    `SELECT role
+     FROM workspace_users
+     WHERE workspace_id = $1 AND user_id = $2
+     LIMIT 1`,
+    [req.workspaceId, req.user?.id]
+  );
+  return isWorkspaceAdminRole(rows[0]?.role);
 }
 
 export async function materializeDashboardHistoryInternal(req, res) {
@@ -599,6 +628,62 @@ export async function updateCutoverControl(req, res) {
         ? 503
         : 500;
     res.status(status).json({ error: err.message || "Failed to update intelligence cutover control" });
+  }
+}
+
+export async function getScoringConfig(req, res) {
+  try {
+    if (!(await canManageWorkspaceScoring(req))) {
+      return res.status(403).json({ error: "Workspace admin access required" });
+    }
+
+    const config = await getWorkspaceScoringConfig({ workspaceId: req.workspaceId });
+    return res.json({
+      source: "enterprise_intelligence_scoring_config",
+      config,
+    });
+  } catch (err) {
+    console.error("getScoringConfig error:", err);
+    res.status(500).json({ error: err.message || "Failed to fetch scoring configuration" });
+  }
+}
+
+export async function updateScoringConfig(req, res) {
+  try {
+    if (!(await canManageWorkspaceScoring(req))) {
+      return res.status(403).json({ error: "Workspace admin access required" });
+    }
+
+    const patch = req.body && typeof req.body === "object" ? req.body : {};
+    const config = await upsertWorkspaceScoringConfig({
+      workspaceId: req.workspaceId,
+      patch,
+      updatedBy: req.user.id,
+    });
+    const recalculation = await bootstrapWorkspaceIntelligence({
+      workspaceId: req.workspaceId,
+      windowDays: 30,
+    });
+
+    emitWorkspaceIntelligenceUpdate(req.workspaceId, {
+      type: "enterprise-intelligence-scoring-config-updated",
+      reason: "workspace_scoring_config_updated",
+      configVersion: config.version,
+    });
+
+    return res.json({
+      source: "enterprise_intelligence_scoring_config",
+      config,
+      recalculation: {
+        workspaceScore: recalculation.workspace?.score ?? null,
+        users: recalculation.users.length,
+        projects: recalculation.projects.length,
+        teams: recalculation.teams.length,
+      },
+    });
+  } catch (err) {
+    console.error("updateScoringConfig error:", err);
+    res.status(500).json({ error: err.message || "Failed to update scoring configuration" });
   }
 }
 

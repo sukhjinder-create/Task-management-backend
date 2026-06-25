@@ -29,6 +29,7 @@ import {
   saveWorkspaceIntelligence,
   writeSnapshot,
 } from "../repositories/unifiedIntelligence.repository.js";
+import { getWorkspaceScoringConfig } from "../repositories/scoringConfig.repository.js";
 
 const DEFAULT_WINDOW_DAYS = 30;
 
@@ -47,10 +48,11 @@ function withVersion(result) {
   };
 }
 
-export async function evaluateAndPersistUser({ workspaceId, userId, windowDays = DEFAULT_WINDOW_DAYS }) {
+export async function evaluateAndPersistUser({ workspaceId, userId, windowDays = DEFAULT_WINDOW_DAYS, scoringConfig = null }) {
   await assertSchema();
+  const config = scoringConfig || await getWorkspaceScoringConfig({ workspaceId });
   const evidence = await collectUserEvidence({ workspaceId, userId, windowDays });
-  const result = withVersion(evaluateUserIntelligence(evidence));
+  const result = withVersion(evaluateUserIntelligence(evidence, { scoringConfig: config }));
   const saved = await saveUserIntelligence(result);
   await writeSnapshot({
     scopeType: "user",
@@ -60,10 +62,11 @@ export async function evaluateAndPersistUser({ workspaceId, userId, windowDays =
   return saved;
 }
 
-export async function evaluateAndPersistProject({ workspaceId, projectId, windowDays = DEFAULT_WINDOW_DAYS }) {
+export async function evaluateAndPersistProject({ workspaceId, projectId, windowDays = DEFAULT_WINDOW_DAYS, scoringConfig = null }) {
   await assertSchema();
+  const config = scoringConfig || await getWorkspaceScoringConfig({ workspaceId });
   const evidence = await collectProjectEvidence({ workspaceId, projectId, windowDays });
-  const result = withVersion(evaluateProjectIntelligence(evidence));
+  const result = withVersion(evaluateProjectIntelligence(evidence, { scoringConfig: config }));
   const saved = await saveProjectIntelligence(result);
   await writeSnapshot({
     scopeType: "project",
@@ -96,8 +99,9 @@ async function getManagerProjectIds({ workspaceId, managerId }) {
   return rows.map((row) => row.id).filter(Boolean);
 }
 
-export async function evaluateAndPersistTeam({ workspaceId, managerId, teamKey = null }) {
+export async function evaluateAndPersistTeam({ workspaceId, managerId, teamKey = null, scoringConfig = null }) {
   await assertSchema();
+  const config = scoringConfig || await getWorkspaceScoringConfig({ workspaceId });
   const resolvedTeamKey = teamKey || `manager:${managerId}`;
   const memberIds = managerId ? await getTeamMemberIds({ workspaceId, managerId }) : [];
   const projectIds = managerId ? await getManagerProjectIds({ workspaceId, managerId }) : [];
@@ -114,6 +118,7 @@ export async function evaluateAndPersistTeam({ workspaceId, managerId, teamKey =
     managerId,
     users,
     projects,
+    scoringConfig: config,
   }));
   const saved = await saveTeamIntelligence(result);
   await writeSnapshot({
@@ -124,8 +129,9 @@ export async function evaluateAndPersistTeam({ workspaceId, managerId, teamKey =
   return saved;
 }
 
-export async function evaluateAndPersistWorkspace({ workspaceId }) {
+export async function evaluateAndPersistWorkspace({ workspaceId, scoringConfig = null }) {
   await assertSchema();
+  const config = scoringConfig || await getWorkspaceScoringConfig({ workspaceId });
   const [users, projects, teams, evidence] = await Promise.all([
     listUserIntelligence({ workspaceId }),
     listProjectIntelligence({ workspaceId }),
@@ -138,6 +144,7 @@ export async function evaluateAndPersistWorkspace({ workspaceId }) {
     projects,
     teams,
     evidence,
+    scoringConfig: config,
   }));
   const saved = await saveWorkspaceIntelligence(result);
   await writeSnapshot({
@@ -151,23 +158,24 @@ export async function evaluateAndPersistWorkspace({ workspaceId }) {
 export async function bootstrapWorkspaceIntelligence({ workspaceId, windowDays = DEFAULT_WINDOW_DAYS }) {
   await assertSchema();
   const scope = await collectWorkspaceScope({ workspaceId });
+  const scoringConfig = await getWorkspaceScoringConfig({ workspaceId });
 
   const userResults = [];
   for (const user of scope.users) {
-    userResults.push(await evaluateAndPersistUser({ workspaceId, userId: user.id, windowDays }));
+    userResults.push(await evaluateAndPersistUser({ workspaceId, userId: user.id, windowDays, scoringConfig }));
   }
 
   const projectResults = [];
   for (const project of scope.projects) {
-    projectResults.push(await evaluateAndPersistProject({ workspaceId, projectId: project.id, windowDays }));
+    projectResults.push(await evaluateAndPersistProject({ workspaceId, projectId: project.id, windowDays, scoringConfig }));
   }
 
   const teamResults = [];
   for (const managerId of scope.managers) {
-    teamResults.push(await evaluateAndPersistTeam({ workspaceId, managerId }));
+    teamResults.push(await evaluateAndPersistTeam({ workspaceId, managerId, scoringConfig }));
   }
 
-  const workspaceResult = await evaluateAndPersistWorkspace({ workspaceId });
+  const workspaceResult = await evaluateAndPersistWorkspace({ workspaceId, scoringConfig });
 
   await recordRecalculationEvent({
     workspaceId,
@@ -203,6 +211,7 @@ export async function recalculateImpactedIntelligence({
   windowDays = DEFAULT_WINDOW_DAYS,
 }) {
   await assertSchema();
+  const scoringConfig = await getWorkspaceScoringConfig({ workspaceId });
 
   const uniqueUsers = [...new Set(userIds.filter(Boolean).map(String))];
   const uniqueProjects = [...new Set(projectIds.filter(Boolean).map(String))];
@@ -212,7 +221,7 @@ export async function recalculateImpactedIntelligence({
   const failures = [];
   for (const userId of uniqueUsers) {
     try {
-      users.push(await evaluateAndPersistUser({ workspaceId, userId, windowDays }));
+      users.push(await evaluateAndPersistUser({ workspaceId, userId, windowDays, scoringConfig }));
     } catch (err) {
       failures.push({ scope: "user", id: userId, error: err.message });
     }
@@ -221,7 +230,7 @@ export async function recalculateImpactedIntelligence({
   const projects = [];
   for (const projectId of uniqueProjects) {
     try {
-      projects.push(await evaluateAndPersistProject({ workspaceId, projectId, windowDays }));
+      projects.push(await evaluateAndPersistProject({ workspaceId, projectId, windowDays, scoringConfig }));
     } catch (err) {
       failures.push({ scope: "project", id: projectId, error: err.message });
     }
@@ -254,7 +263,7 @@ export async function recalculateImpactedIntelligence({
   const teams = [];
   for (const managerId of affectedManagers) {
     try {
-      teams.push(await evaluateAndPersistTeam({ workspaceId, managerId }));
+      teams.push(await evaluateAndPersistTeam({ workspaceId, managerId, scoringConfig }));
     } catch (err) {
       failures.push({ scope: "team", id: managerId, error: err.message });
     }
@@ -285,7 +294,7 @@ export async function recalculateImpactedIntelligence({
     throw err;
   }
 
-  const workspace = await evaluateAndPersistWorkspace({ workspaceId });
+  const workspace = await evaluateAndPersistWorkspace({ workspaceId, scoringConfig });
   await recordRecalculationEvent({
     workspaceId,
     reason,
@@ -338,6 +347,7 @@ export async function getUnifiedIntelligenceSnapshot({ workspaceId, userId = nul
     listTeamIntelligence({ workspaceId }),
     userId ? getUserIntelligence({ workspaceId, userId }) : Promise.resolve(null),
   ]);
+  const scoringConfig = await getWorkspaceScoringConfig({ workspaceId });
 
   return {
     workspace,
@@ -345,6 +355,7 @@ export async function getUnifiedIntelligenceSnapshot({ workspaceId, userId = nul
     projects,
     teams,
     currentUser,
+    scoringConfig,
     calculationVersion: INTELLIGENCE_VERSION,
   };
 }

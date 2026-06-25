@@ -111,6 +111,59 @@ export function adaptiveScore(signals = [], options = {}) {
   return roundScore(raw);
 }
 
+export function weightedAdaptiveScore(signals = [], options = {}) {
+  const observed = signals
+    .filter((signal) => signal && Number.isFinite(Number(signal.value)));
+
+  if (!observed.length) return options.neutral ?? 60;
+
+  const rawWeights = observed.map((signal) => {
+    const weight = Number(signal.weight);
+    return Number.isFinite(weight) && weight > 0 ? weight : 1;
+  });
+  const firstWeight = rawWeights[0];
+  const equalWeights = rawWeights.every((weight) => Math.abs(weight - firstWeight) < 0.000001);
+  if (equalWeights) {
+    return adaptiveScore(observed, options);
+  }
+
+  const totalWeight = rawWeights.reduce((sum, weight) => sum + weight, 0) || observed.length;
+  const weights = rawWeights.map((weight) => weight / totalWeight);
+  const weighted = observed.map((signal, index) => ({
+    value: clamp(Number(signal.value)),
+    weight: weights[index],
+  }));
+  const values = weighted.map((signal) => signal.value);
+  const weightedMean = weighted.reduce((sum, signal) => sum + (signal.value * signal.weight), 0);
+  const sorted = [...weighted].sort((a, b) => a.value - b.value);
+  let cumulative = 0;
+  let weightedMedian = sorted[sorted.length - 1].value;
+  for (const signal of sorted) {
+    cumulative += signal.weight;
+    if (cumulative >= 0.5) {
+      weightedMedian = signal.value;
+      break;
+    }
+  }
+  const low = values.reduce((min, value) => Math.min(min, value), values[0]);
+  const high = values.reduce((max, value) => Math.max(max, value), values[0]);
+  const spread = high - low;
+  const balance = clamp(100 - spread * 0.35);
+  const confidence = options.confidence == null ? 75 : clamp(options.confidence);
+  const weightedHarmonic = 1 / weighted.reduce(
+    (sum, signal) => sum + (signal.weight / Math.max(8, signal.value)),
+    0
+  );
+  const raw =
+    (weightedMean * 0.32) +
+    (weightedMedian * 0.30) +
+    (weightedHarmonic * 0.22) +
+    (balance * 0.10) +
+    (confidence * 0.06);
+
+  return roundScore(raw);
+}
+
 export function domainSummary({ name, score, confidence, strengths = [], concerns = [], drivers = [], metrics = {}, indicators = [] }) {
   return {
     name,

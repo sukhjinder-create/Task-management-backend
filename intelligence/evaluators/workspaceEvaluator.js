@@ -9,6 +9,10 @@ import {
   trendFromSeries,
   uniqueStrings,
 } from "../engine/scorePrimitives.js";
+import {
+  appliedScoreModel,
+  scoreObjectWithScoringConfig,
+} from "../config/scoringConfig.model.js";
 
 function avg(values = []) {
   const nums = values.map(Number).filter(Number.isFinite);
@@ -31,7 +35,7 @@ function aggregateSourceWindow(items = []) {
   };
 }
 
-export function evaluateWorkspaceIntelligence({ workspaceId, users = [], projects = [], teams = [], evidence = {} }) {
+export function evaluateWorkspaceIntelligence({ workspaceId, users = [], projects = [], teams = [], evidence = {}, scoringConfig = null }) {
   const userScores = users.map((row) => Number(row.score)).filter(Number.isFinite);
   const projectScores = projects.map((row) => Number(row.score)).filter(Number.isFinite);
   const teamScores = teams.map((row) => Number(row.score)).filter(Number.isFinite);
@@ -114,7 +118,8 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
     expected: 10,
     breadth: teams.length && projects.length ? 1 : 0.82,
   });
-  const score = adaptiveScore(Object.values(indexes).map((value) => ({ value })), { confidence });
+  const scoreModel = appliedScoreModel(scoringConfig, ["workspaceIndexes"]);
+  const score = scoreObjectWithScoringConfig(indexes, scoringConfig, "workspaceIndexes", { confidence });
   const riskProbability = Math.max(0, 100 - strategicRiskIndex + atRiskUsers * 3 + criticalProjects * 5);
 
   const output = {
@@ -176,13 +181,15 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
         externalProviderCount: Number(execution.externalProviderCount) || 0,
         externalSignalCount: Number(execution.externalSignalCount) || 0,
       },
+      scoreModel,
     },
+    scoreModel,
     sourceWindow: aggregateSourceWindow([...users, ...projects, ...teams]),
   };
 
   return {
     ...output,
-    evidenceHash: hashEvidence({ indexes, analytics: output.analytics }),
+    evidenceHash: hashEvidence({ indexes, analytics: output.analytics, scoreModel }),
   };
 }
 

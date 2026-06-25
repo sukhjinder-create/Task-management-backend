@@ -14,6 +14,11 @@ import {
   uniqueStrings,
 } from "../engine/scorePrimitives.js";
 import { evaluateAttendance } from "./attendanceEvaluator.js";
+import {
+  appliedScoreModel,
+  getScoringGroupWeights,
+  scoreWithScoringConfig,
+} from "../config/scoringConfig.model.js";
 
 function isCompleted(task) {
   const status = String(task?.status || "").toLowerCase();
@@ -331,7 +336,8 @@ function evaluateProfessionalDiscipline(evidence, attendance) {
   });
 }
 
-export function evaluateUserIntelligence(evidence) {
+export function evaluateUserIntelligence(evidence, options = {}) {
+  const scoringConfig = options.scoringConfig || null;
   const attendance = evaluateAttendance(evidence);
   const task = buildTaskMetrics(evidence);
 
@@ -344,19 +350,26 @@ export function evaluateUserIntelligence(evidence) {
   };
 
   const primaryDomains = [
-    domains.executionReliability.score,
-    domains.deliveryEffectiveness.score,
-    domains.collaborationHealth.score,
-    domains.workSustainability.score,
+    { key: "executionReliability", value: domains.executionReliability.score },
+    { key: "deliveryEffectiveness", value: domains.deliveryEffectiveness.score },
+    { key: "collaborationHealth", value: domains.collaborationHealth.score },
+    { key: "workSustainability", value: domains.workSustainability.score },
   ];
   const professional = domains.professionalDiscipline.score;
-  const coreScore = adaptiveScore(primaryDomains.map((value) => ({ value })), {
+  const scoreModel = appliedScoreModel(scoringConfig, ["userFinalBalance", "userCoreDomains"]);
+  const finalWeights = getScoringGroupWeights(scoringConfig, "userFinalBalance");
+  const coreScore = scoreWithScoringConfig(primaryDomains, scoringConfig, "userCoreDomains", {
     confidence: avg(Object.values(domains).map((domain) => domain.confidence)),
   });
 
   const attendanceDrag = attendance.score < 45 && coreScore > 70 ? Math.min(8, (45 - attendance.score) / 2) : 0;
   const attendanceLift = attendance.score > 82 && coreScore < 62 ? 2 : 0;
-  const score = roundScore((coreScore * 0.82) + (professional * 0.18) - attendanceDrag + attendanceLift);
+  const score = roundScore(
+    (coreScore * (finalWeights.core ?? 0.82)) +
+    (professional * (finalWeights.professionalDiscipline ?? 0.18)) -
+    attendanceDrag +
+    attendanceLift
+  );
   const confidence = roundScore(avg(Object.values(domains).map((domain) => domain.confidence)));
   const trend = trendFromSeries([
     task.priorCompleted ? bounded(task.priorCompleted, task.completed || 1, 0) * 100 : score,
@@ -415,7 +428,9 @@ export function evaluateUserIntelligence(evidence) {
       completionTrend: trend,
       deliveryTrend: domains.deliveryEffectiveness.band,
       workloadTrend: domains.workSustainability.band,
+      scoreModel,
     },
+    scoreModel,
     sourceWindow: {
       startDate: evidence.range.startDate,
       endDate: evidence.range.endDate,
@@ -432,6 +447,7 @@ export function evaluateUserIntelligence(evidence) {
       task,
       domains,
       attendance,
+      scoreModel,
       sourceWindow: output.sourceWindow,
     }),
   };

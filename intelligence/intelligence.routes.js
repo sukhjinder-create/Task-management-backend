@@ -19,6 +19,8 @@ import {
   getCutoverStatus,
   getCutoverHealth,
   updateCutoverControl,
+  getScoringConfig,
+  updateScoringConfig,
   getGoalWorkspaceHealth,
   getProfitabilityOracleController,
   getResignationRadarController,
@@ -61,6 +63,8 @@ router.get("/unified/history",             authMiddleware, requireWorkspaceForUs
 router.get("/cutover/status",              authMiddleware, requireWorkspaceForUser, advIntel, getCutoverStatus);
 router.get("/cutover/health",              authMiddleware, requireWorkspaceForUser, advIntel, getCutoverHealth);
 router.post("/cutover/controls",           authMiddleware, requireWorkspaceForUser, advIntel, updateCutoverControl);
+router.get("/scoring-config",              authMiddleware, requireWorkspaceForUser, advIntel, getScoringConfig);
+router.put("/scoring-config",              authMiddleware, requireWorkspaceForUser, advIntel, updateScoringConfig);
 
 /* =====================================================
    GOALS HEALTH — gated by okr_goals (Goals module)

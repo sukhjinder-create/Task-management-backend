@@ -1,8 +1,10 @@
 import pool from "../../db.js";
 import { buildUserPerformanceResponse, buildUserTrendResponse } from "../analytics/intelligenceResponses.service.js";
+import { getScoringGroupWeights, scoreWithScoringConfig } from "../config/scoringConfig.model.js";
 import { collectUserEvidence } from "../engine/evidenceCollector.js";
 import { adaptiveScore, roundScore } from "../engine/scorePrimitives.js";
 import { evaluateUserIntelligence } from "../evaluators/userEvaluator.js";
+import { getWorkspaceScoringConfig } from "../repositories/scoringConfig.repository.js";
 import { getUserIntelligence } from "../repositories/unifiedIntelligence.repository.js";
 
 const DEFAULT_WORKSPACE_NAME = "Apyhub";
@@ -122,6 +124,10 @@ function domainRow(dimensions, key, label) {
 function scoreCompositionFromPersistedUser(user) {
   const dimensions = user?.dimensions || {};
   const attendance = user?.attendance || {};
+  const scoreModel = user?.scoreModel || user?.analytics?.scoreModel || null;
+  const finalWeights = getScoringGroupWeights(scoreModel, "userFinalBalance");
+  const coreWeight = finalWeights.core ?? 0.82;
+  const professionalWeight = finalWeights.professionalDiscipline ?? 0.18;
   const rows = [
     domainRow(dimensions, "executionReliability", "Execution Reliability"),
     domainRow(dimensions, "deliveryEffectiveness", "Delivery Effectiveness"),
@@ -133,7 +139,7 @@ function scoreCompositionFromPersistedUser(user) {
   const primaryRows = rows.filter((row) => row.key !== "professionalDiscipline");
   const professional = rows.find((row) => row.key === "professionalDiscipline");
   const confidenceAverage = avg(rows.map((row) => row.confidence));
-  const coreScore = adaptiveScore(primaryRows.map((row) => ({ value: row.score })), {
+  const coreScore = scoreWithScoringConfig(primaryRows.map((row) => ({ key: row.key, value: row.score })), scoreModel, "userCoreDomains", {
     confidence: confidenceAverage,
   });
   const attendanceScore = score(attendance.score);
@@ -141,7 +147,7 @@ function scoreCompositionFromPersistedUser(user) {
     ? Math.min(8, (45 - attendanceScore) / 2)
     : 0;
   const attendanceLift = attendanceScore > 82 && coreScore < 62 ? 2 : 0;
-  const finalRaw = (coreScore * 0.82) + ((professional?.score || 0) * 0.18) - attendanceDrag + attendanceLift;
+  const finalRaw = (coreScore * coreWeight) + ((professional?.score || 0) * professionalWeight) - attendanceDrag + attendanceLift;
   const finalScore = roundScore(finalRaw);
 
   const professionalMetrics = professional?.metrics || {};
@@ -150,7 +156,7 @@ function scoreCompositionFromPersistedUser(user) {
     { value: professionalMetrics.updateHygiene },
     { value: professionalMetrics.workflowScore },
   ], { confidence: professional?.confidence ?? 75 });
-  const finalWithoutAttendanceSignalRaw = (coreScore * 0.82) + (professionalWithoutAttendance * 0.18);
+  const finalWithoutAttendanceSignalRaw = (coreScore * coreWeight) + (professionalWithoutAttendance * professionalWeight);
   const finalWithoutAttendanceSignal = roundScore(finalWithoutAttendanceSignalRaw);
 
   const professionalWithNeutralAttendance = adaptiveScore([
@@ -159,12 +165,17 @@ function scoreCompositionFromPersistedUser(user) {
     { value: professionalMetrics.updateHygiene },
     { value: professionalMetrics.workflowScore },
   ], { confidence: professional?.confidence ?? 75 });
-  const finalWithNeutralAttendanceRaw = (coreScore * 0.82) + (professionalWithNeutralAttendance * 0.18);
+  const finalWithNeutralAttendanceRaw = (coreScore * coreWeight) + (professionalWithNeutralAttendance * professionalWeight);
   const finalWithNeutralAttendance = roundScore(finalWithNeutralAttendanceRaw);
 
   return {
-    formulaPath:
-      "roundScore((coreScore * 0.82) + (professionalDiscipline * 0.18) - attendanceDrag + attendanceLift)",
+    formulaPath: `roundScore((coreScore * ${coreWeight}) + (professionalDiscipline * ${professionalWeight}) - attendanceDrag + attendanceLift)`,
+    scoreModel,
+    activeWeights: {
+      core: coreWeight,
+      professionalDiscipline: professionalWeight,
+      userCoreDomains: getScoringGroupWeights(scoreModel, "userCoreDomains"),
+    },
     persistedFinalScore: score(user.score),
     reconstructedFinalScore: finalScore,
     reconstructedRawScore: round(finalRaw),
@@ -194,7 +205,7 @@ function scoreCompositionFromPersistedUser(user) {
       directAttendanceAdjustment: round(attendanceLift - attendanceDrag),
       materiallyAffectsScore: Math.abs(finalScore - finalWithoutAttendanceSignal) > 0,
       explanation:
-        "Attendance is not cosmetic. It enters the Professional Discipline domain and may also add a bounded lift/drag. It does not override weak execution domains.",
+        "Attendance is not cosmetic. It enters the Professional Discipline domain and may also add a bounded lift/drag. Admin-managed scoring weightages are applied by the canonical engine and do not let attendance override weak execution domains.",
     },
   };
 }
@@ -203,7 +214,7 @@ async function loadSourceRow({ workspaceId, userId }) {
   const { rows } = await pool.query(
     `SELECT ui.id, ui.workspace_id, ui.user_id, ui.score, ui.band, ui.confidence,
             ui.evidence_hash, ui.calculation_version, ui.last_evaluated_at,
-            ui.source_window, ui.created_at, ui.updated_at
+            ui.analytics, ui.source_window, ui.created_at, ui.updated_at
      FROM user_intelligence ui
      WHERE ui.workspace_id = $1 AND ui.user_id = $2
      LIMIT 1`,
@@ -351,17 +362,19 @@ export async function traceUserScoreForWorkspace({
   let recomputed = null;
   if (includeRecomputed) {
     try {
+      const scoringConfig = await getWorkspaceScoringConfig({ workspaceId: workspace.id });
       const evidence = await collectUserEvidence({
         workspaceId: workspace.id,
         userId: user.id,
         windowDays: 30,
       });
-      const evaluated = evaluateUserIntelligence(evidence);
+      const evaluated = evaluateUserIntelligence(evidence, { scoringConfig });
       recomputed = {
         score: evaluated.score,
         attendanceScore: evaluated.attendance?.score ?? null,
         deliveryEffectiveness: evaluated.dimensions?.deliveryEffectiveness?.score ?? null,
         executionReliability: evaluated.dimensions?.executionReliability?.score ?? null,
+        scoreModel: evaluated.scoreModel || evaluated.analytics?.scoreModel || null,
         evidenceHash: evaluated.evidenceHash,
         matchesPersistedScore: evaluated.score === userIntelligence.score,
         source: "non_persisted_recalculation_from_live_evidence",

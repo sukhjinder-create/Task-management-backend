@@ -11,6 +11,10 @@ import {
   trendFromSeries,
   uniqueStrings,
 } from "../engine/scorePrimitives.js";
+import {
+  appliedScoreModel,
+  scoreObjectWithScoringConfig,
+} from "../config/scoringConfig.model.js";
 
 function isCompleted(task) {
   return ["completed", "done", "closed"].includes(String(task?.status || "").toLowerCase());
@@ -34,7 +38,8 @@ function completionDays(task) {
   return Math.max(0, (end - start) / 86400000);
 }
 
-export function evaluateProjectIntelligence(evidence) {
+export function evaluateProjectIntelligence(evidence, options = {}) {
+  const scoringConfig = options.scoringConfig || null;
   const tasks = evidence.tasks || [];
   const total = tasks.length;
   const completed = tasks.filter(isCompleted);
@@ -126,7 +131,8 @@ export function evaluateProjectIntelligence(evidence) {
     expected: 10,
     breadth: sprintTotal ? 1 : 0.82,
   });
-  const score = adaptiveScore(Object.values(indexes).map((value) => ({ value })), { confidence });
+  const scoreModel = appliedScoreModel(scoringConfig, ["projectIndexes"]);
+  const score = scoreObjectWithScoringConfig(indexes, scoringConfig, "projectIndexes", { confidence });
   const riskProbability = Math.max(0, 100 - score + overdue.length * 4 + blocked.length * 5);
 
   const strengths = uniqueStrings([
@@ -183,7 +189,9 @@ export function evaluateProjectIntelligence(evidence) {
       executionMomentum,
       participationHealth,
       participantCount: assignedUsers.size,
+      scoreModel,
     },
+    scoreModel,
     sourceWindow: {
       startDate: evidence.range.startDate,
       endDate: evidence.range.endDate,
@@ -193,7 +201,7 @@ export function evaluateProjectIntelligence(evidence) {
 
   return {
     ...output,
-    evidenceHash: hashEvidence({ indexes, analytics: output.analytics, sourceWindow: output.sourceWindow }),
+    evidenceHash: hashEvidence({ indexes, analytics: output.analytics, scoreModel, sourceWindow: output.sourceWindow }),
   };
 }
 

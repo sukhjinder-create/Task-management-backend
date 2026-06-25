@@ -9,6 +9,10 @@ import {
   trendFromSeries,
   uniqueStrings,
 } from "../engine/scorePrimitives.js";
+import {
+  appliedScoreModel,
+  scoreObjectWithScoringConfig,
+} from "../config/scoringConfig.model.js";
 
 function avg(values = []) {
   const nums = values.map(Number).filter(Number.isFinite);
@@ -40,7 +44,7 @@ function aggregateSourceWindow(items = []) {
   };
 }
 
-export function evaluateTeamIntelligence({ workspaceId, teamKey, managerId = null, users = [], projects = [] }) {
+export function evaluateTeamIntelligence({ workspaceId, teamKey, managerId = null, users = [], projects = [], scoringConfig = null }) {
   const memberScores = users.map((row) => Number(row.score)).filter(Number.isFinite);
   const projectScores = projects.map((row) => Number(row.score)).filter(Number.isFinite);
   const atRisk = users.filter((row) => row.risk?.level === "High" || Number(row.score) < 48).length;
@@ -98,7 +102,8 @@ export function evaluateTeamIntelligence({ workspaceId, teamKey, managerId = nul
     teamRiskIndex,
   };
   const confidence = evidenceConfidence({ observed: users.length + projects.length, expected: 4, breadth: projects.length ? 1 : 0.8 });
-  const score = adaptiveScore(Object.values(indexes).map((value) => ({ value })), { confidence });
+  const scoreModel = appliedScoreModel(scoringConfig, ["teamIndexes"]);
+  const score = scoreObjectWithScoringConfig(indexes, scoringConfig, "teamIndexes", { confidence });
   const riskProbability = Math.max(0, 100 - teamRiskIndex + atRisk * 6);
 
   const strengths = uniqueStrings([
@@ -146,13 +151,15 @@ export function evaluateTeamIntelligence({ workspaceId, teamKey, managerId = nul
       averageProjectScore: roundScore(avgProject),
       workloadBalanceIndex,
       blockerResolutionHealth,
+      scoreModel,
     },
+    scoreModel,
     sourceWindow: aggregateSourceWindow([...users, ...projects]),
   };
 
   return {
     ...output,
-    evidenceHash: hashEvidence({ indexes, analytics: output.analytics }),
+    evidenceHash: hashEvidence({ indexes, analytics: output.analytics, scoreModel }),
   };
 }
 
