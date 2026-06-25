@@ -1,7 +1,8 @@
 import pool from "../db.js";
 import { advancedForecast } from "../intelligence/forecast/forecast.engine.js";
-import { getExecutionSnapshot }
-  from "../intelligence/executionSnapshot.service.js";
+import { getUnifiedIntelligenceSnapshot } from "../intelligence/engine/unifiedIntelligence.engine.js";
+import { buildTrendAnalytics, getHistoricalSeries } from "../intelligence/analytics/historicalAnalytics.service.js";
+import { dashboardRangeMeta } from "../intelligence/analytics/dashboardChartContract.service.js";
 
 function toIso(value) {
   if (!value) return null;
@@ -70,6 +71,197 @@ function summarizeTaskRows(taskRows = []) {
   }
 
   return status;
+}
+
+function round(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
+}
+
+function rangeLabel(rangeMeta) {
+  return rangeMeta?.label || rangeMeta?.value || "90D";
+}
+
+function forecastFromEnterpriseHistory({ series = [], workspace = null, rangeMeta = dashboardRangeMeta("90d") }) {
+  const scores = (series || []).map((point) => Number(point.score)).filter(Number.isFinite);
+  const trend = buildTrendAnalytics(series);
+  const currentScore = workspace?.score ?? scores[scores.length - 1] ?? null;
+
+  if (scores.length < 3) {
+    return {
+      predictedAverage: currentScore,
+      trend: trend.direction === "up" ? "improving" : trend.direction === "down" ? "declining" : "stable",
+      direction: trend.direction,
+      delta: trend.delta,
+      riskProjection: String(workspace?.risk?.level || "unknown").toLowerCase(),
+      confidence: "low",
+      momentum: 0,
+      currentScore,
+      confidenceScore: workspace?.confidence ?? null,
+      range: rangeMeta,
+      source: "enterprise_intelligence_current_snapshot",
+      reasoning:
+        `Only ${scores.length} enterprise intelligence snapshot(s) are available for ${rangeLabel(rangeMeta)}. ` +
+        "The workspace answer uses the current canonical workspace intelligence posture until more persisted history is available.",
+    };
+  }
+
+  const forecast = advancedForecast(scores, {
+    completionRate: Number(workspace?.indexes?.deliveryConfidenceIndex || 0) / 100,
+  });
+
+  return {
+    ...forecast,
+    direction: trend.direction,
+    delta: trend.delta,
+    currentScore,
+    confidenceScore: workspace?.confidence ?? null,
+    range: rangeMeta,
+    source: "enterprise_intelligence_snapshots",
+    reasoning:
+      forecast.reasoning ||
+      `Forecast is derived from ${scores.length} persisted enterprise intelligence snapshot(s) for ${rangeLabel(rangeMeta)}.`,
+  };
+}
+
+function summarizeSeries(series = []) {
+  const trend = buildTrendAnalytics(series);
+  const first = series[0] || null;
+  const last = series[series.length - 1] || null;
+  return {
+    pointCount: series.length,
+    coverageStart: first?.date || first?.snapshotDate || null,
+    coverageEnd: last?.date || last?.snapshotDate || null,
+    firstScore: first ? round(first.score) : null,
+    lastScore: last ? round(last.score) : null,
+    direction: trend.direction,
+    delta: trend.delta,
+    points: series.slice(-12).map((point) => ({
+      date: point.date,
+      score: round(point.score),
+      confidence: round(point.confidence),
+      snapshotDate: point.snapshotDate,
+      computedAt: point.computedAt,
+    })),
+  };
+}
+
+async function getLatestEnterpriseSummaries({ workspaceId, limit = 5 }) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT period, summary, source_data, created_at, status
+       FROM workspace_executive_summaries
+       WHERE workspace_id = $1
+         AND COALESCE(source_data->>'summaryKind', '') = 'dashboard_period_executive_summary'
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [workspaceId, limit]
+    );
+
+    return rows.map((row) => ({
+      period: row.period,
+      status: row.status,
+      createdAt: toIso(row.created_at),
+      summaryVersion: row.source_data?.summaryVersion || null,
+      dashboardRange: row.source_data?.dashboardRange || null,
+      bucket: row.source_data?.bucket || null,
+      metrics: row.source_data?.payload?.metrics || row.source_data?.analysis?.score || null,
+      headline: row.source_data?.payload?.headline || null,
+      text: row.summary || null,
+      source: "workspace_executive_summaries",
+    }));
+  } catch (error) {
+    console.warn("Enterprise executive summaries unavailable:", error.message);
+    return [];
+  }
+}
+
+async function getCanonicalWorkspaceIntelligenceContext({ workspaceId }) {
+  const snapshot = await getUnifiedIntelligenceSnapshot({
+    workspaceId,
+    role: "admin",
+  });
+
+  const ranges = ["30d", "90d", "6m", "1y", "all"];
+  const rangeSeries = {};
+  await Promise.all(ranges.map(async (range) => {
+    const series = await getHistoricalSeries({
+      workspaceId,
+      scopeType: "workspace",
+      subjectKey: String(workspaceId),
+      range,
+    });
+    rangeSeries[range] = {
+      range: dashboardRangeMeta(range),
+      ...summarizeSeries(series),
+    };
+  }));
+
+  const primaryRange = rangeSeries["90d"]?.pointCount >= 3 ? "90d" : "all";
+  const primarySeries = await getHistoricalSeries({
+    workspaceId,
+    scopeType: "workspace",
+    subjectKey: String(workspaceId),
+    range: primaryRange,
+  });
+  const primaryRangeMeta = dashboardRangeMeta(primaryRange);
+
+  return {
+    source: "enterprise_intelligence",
+    sourceOfTruth: {
+      scoreHistory: "intelligence_snapshots",
+      trendContext: "intelligence_snapshots",
+      riskContext: "workspace_intelligence",
+      forecastContext: "intelligence_snapshots + workspace_intelligence",
+      summaryContext: "workspace_executive_summaries",
+    },
+    workspace: snapshot.workspace,
+    users: (snapshot.users || []).slice(0, 20).map((user) => ({
+      username: user.username,
+      score: user.score,
+      band: user.band,
+      risk: user.risk,
+      strengths: (user.strengths || []).slice(0, 3),
+      concerns: (user.concerns || []).slice(0, 3),
+      attendance: user.attendance ? {
+        score: user.attendance.score,
+        trend: user.attendance.metrics?.trend,
+        reliability: user.attendance.metrics?.reliability,
+        attendanceClosedThroughDate: user.attendanceClosedThroughDate,
+      } : null,
+    })),
+    projects: (snapshot.projects || []).slice(0, 20).map((project) => ({
+      projectName: project.projectName,
+      score: project.score,
+      band: project.band,
+      indexes: project.indexes,
+      risk: project.risk,
+      analytics: project.analytics,
+      strengths: (project.strengths || []).slice(0, 3),
+      concerns: (project.concerns || []).slice(0, 3),
+    })),
+    teams: (snapshot.teams || []).slice(0, 20).map((team) => ({
+      teamKey: team.teamKey,
+      managerName: team.managerName,
+      score: team.score,
+      band: team.band,
+      indexes: team.indexes,
+      risk: team.risk,
+      analytics: team.analytics,
+      strengths: (team.strengths || []).slice(0, 3),
+      concerns: (team.concerns || []).slice(0, 3),
+    })),
+    historyByRange: rangeSeries,
+    scoreHistory: summarizeSeries(primarySeries).points.map((point) => point.score).filter(Number.isFinite),
+    trend: buildTrendAnalytics(primarySeries),
+    forecast: forecastFromEnterpriseHistory({
+      series: primarySeries,
+      workspace: snapshot.workspace,
+      rangeMeta: primaryRangeMeta,
+    }),
+    executiveSummaries: await getLatestEnterpriseSummaries({ workspaceId }),
+    calculationVersion: snapshot.calculationVersion,
+  };
 }
 
 async function getLiveAttendanceSnapshot({
@@ -514,29 +706,16 @@ export async function buildAIContext({
   // WORKSPACE CONTEXT
   // ==========================
   if (scope === "workspace") {
+    const enterprise = await getCanonicalWorkspaceIntelligenceContext({ workspaceId });
 
-    const history = await pool.query(`
-      SELECT month, AVG(score) as avg_score
-      FROM workspace_monthly_scores
-      WHERE workspace_id = $1
-      GROUP BY month
-      ORDER BY month ASC
-      LIMIT 6
-    `, [workspaceId]);
+    context.enterpriseIntelligence = enterprise;
+    context.scoreHistory = enterprise.scoreHistory;
+    context.trend = enterprise.trend;
+    context.forecast = enterprise.forecast;
+    context.workspaceRisk = enterprise.workspace?.risk || null;
+    context.executiveSummaries = enterprise.executiveSummaries;
 
-    const scoreHistory =
-      history.rows.map(r => Number(r.avg_score) || 0);
-
-    const executionSnapshot =
-      await getExecutionSnapshot(workspaceId);
-
-    const forecast =
-      advancedForecast(scoreHistory, executionSnapshot);
-
-    context.scoreHistory = scoreHistory;
-    context.execution = executionSnapshot;
-    context.forecast = forecast;
-    const [workspaceTasksRes, projectHealthRes, membersRes, recentActivityRes] = await Promise.all([
+    const [workspaceTasksRes, membersRes, recentActivityRes] = await Promise.all([
       pool.query(
         `
         SELECT
@@ -552,27 +731,6 @@ export async function buildAIContext({
         LEFT JOIN projects p ON p.id = t.project_id
         LEFT JOIN users u ON u.id = t.assigned_to
         WHERE t.workspace_id = $1
-        `,
-        [workspaceId]
-      ),
-      pool.query(
-        `
-        SELECT
-          p.id AS project_id,
-          p.name AS project_name,
-          COUNT(t.id)::int AS total_tasks,
-          COUNT(t.id) FILTER (WHERE t.status = 'completed')::int AS completed_tasks,
-          COUNT(t.id) FILTER (
-            WHERE t.status NOT IN ('completed', 'cancelled')
-              AND t.due_date IS NOT NULL
-              AND t.due_date < NOW()::date
-          )::int AS overdue_tasks
-        FROM projects p
-        LEFT JOIN tasks t ON t.project_id = p.id
-        WHERE p.workspace_id = $1
-        GROUP BY p.id, p.name
-        ORDER BY overdue_tasks DESC, total_tasks DESC
-        LIMIT 15
         `,
         [workspaceId]
       ),
@@ -623,17 +781,7 @@ export async function buildAIContext({
         overdueDays: daysOverdue(t.due_date),
         dueDate: toIso(t.due_date),
       }));
-    context.projectHealth = (projectHealthRes.rows || []).map((p) => ({
-      projectId: p.project_id,
-      projectName: p.project_name,
-      totalTasks: Number(p.total_tasks || 0),
-      completedTasks: Number(p.completed_tasks || 0),
-      overdueTasks: Number(p.overdue_tasks || 0),
-      completionRate:
-        Number(p.total_tasks || 0) > 0
-          ? Number((((Number(p.completed_tasks || 0) / Number(p.total_tasks || 0)) * 100)).toFixed(1))
-          : 0,
-    }));
+    context.projectHealth = enterprise.projects;
     context.members = (membersRes.rows || []).map((m) => ({
       username: m.username,
       role: m.role,

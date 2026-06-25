@@ -1,0 +1,823 @@
+{
+  "source": "enterprise_intelligence_core_certification",
+  "generatedAt": "2026-06-25T07:04:19.180Z",
+  "workspaceId": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+  "executeCutover": true,
+  "certificationUser": {
+    "userId": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+    "username": "Sukhjinder",
+    "role": "member"
+  },
+  "cutover": {
+    "execute": true,
+    "updated": [
+      {
+        "id": "11e03049-fa79-4da4-b023-8c76a4e4a25a",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "dashboard_overview",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.270Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.001Z",
+        "updated_at": "2026-06-25T07:04:08.431Z"
+      },
+      {
+        "id": "cda8235d-8e03-431c-b586-69e7f3cd70e3",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "dashboard_executive_detail",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.473Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.137Z",
+        "updated_at": "2026-06-25T07:04:08.565Z"
+      },
+      {
+        "id": "0af2fa22-20ad-4ba5-a6ce-8dc8b6f887a6",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "user_performance",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.601Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.265Z",
+        "updated_at": "2026-06-25T07:04:08.694Z"
+      },
+      {
+        "id": "e5c7dee1-d60a-477a-812b-a9dd10850292",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "admin_insights",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.730Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.392Z",
+        "updated_at": "2026-06-25T07:04:08.823Z"
+      },
+      {
+        "id": "fa9052b3-1028-4aa6-96df-5996ba9a267a",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "coaching_effectiveness",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.860Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.520Z",
+        "updated_at": "2026-06-25T07:04:08.952Z"
+      },
+      {
+        "id": "35d83313-f344-475d-94bf-1e89648946a2",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "user_trend",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.988Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.648Z",
+        "updated_at": "2026-06-25T07:04:09.081Z"
+      },
+      {
+        "id": "127b8582-83c8-482a-b7dc-a39ec473ff0a",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "user_project_performance",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.117Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.776Z",
+        "updated_at": "2026-06-25T07:04:09.209Z"
+      },
+      {
+        "id": "eb11dc57-eb9c-4760-a391-3935f344fad7",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "projects_health",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.245Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:14.904Z",
+        "updated_at": "2026-06-25T07:04:09.337Z"
+      },
+      {
+        "id": "9e47a33b-8a93-4d44-a514-4251f071eea8",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "team_comparison",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.373Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:15.031Z",
+        "updated_at": "2026-06-25T07:04:09.466Z"
+      },
+      {
+        "id": "9134fc8d-aec7-4871-82ab-65413d21f639",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "workspace_dashboard",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.502Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:15.159Z",
+        "updated_at": "2026-06-25T07:04:09.594Z"
+      },
+      {
+        "id": "3b41f867-913e-4877-be11-bb3f7baa8eb4",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "surface": "workspace_health",
+        "mode": "unified",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.630Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updated_by": null,
+        "created_at": "2026-06-25T06:58:15.287Z",
+        "updated_at": "2026-06-25T07:04:09.723Z"
+      }
+    ],
+    "policies": [
+      {
+        "surface": "dashboard_overview",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.270Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:08.431Z",
+        "evaluatedAt": "2026-06-25T07:04:09.823Z"
+      },
+      {
+        "surface": "dashboard_executive_detail",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.473Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:08.565Z",
+        "evaluatedAt": "2026-06-25T07:04:09.823Z"
+      },
+      {
+        "surface": "user_performance",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.601Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:08.694Z",
+        "evaluatedAt": "2026-06-25T07:04:09.826Z"
+      },
+      {
+        "surface": "admin_insights",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.730Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:08.823Z",
+        "evaluatedAt": "2026-06-25T07:04:09.824Z"
+      },
+      {
+        "surface": "coaching_effectiveness",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.860Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:08.952Z",
+        "evaluatedAt": "2026-06-25T07:04:09.828Z"
+      },
+      {
+        "surface": "user_trend",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:08.988Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:09.081Z",
+        "evaluatedAt": "2026-06-25T07:04:09.826Z"
+      },
+      {
+        "surface": "user_project_performance",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.117Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:09.209Z",
+        "evaluatedAt": "2026-06-25T07:04:09.829Z"
+      },
+      {
+        "surface": "projects_health",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.245Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:09.337Z",
+        "evaluatedAt": "2026-06-25T07:04:09.827Z"
+      },
+      {
+        "surface": "team_comparison",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.373Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:09.466Z",
+        "evaluatedAt": "2026-06-25T07:04:09.827Z"
+      },
+      {
+        "surface": "workspace_dashboard",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.502Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:09.594Z",
+        "evaluatedAt": "2026-06-25T07:04:09.829Z"
+      },
+      {
+        "surface": "workspace_health",
+        "mode": "unified",
+        "selectedSource": "enterprise_intelligence",
+        "rolloutEligible": true,
+        "rollbackSupported": true,
+        "shadowSupported": true,
+        "policySource": "workspace_surface_control",
+        "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+        "metadata": {
+          "certifiedAt": "2026-06-25T07:04:09.630Z",
+          "certificationPass": "final_p0_closure"
+        },
+        "updatedAt": "2026-06-25T07:04:09.723Z",
+        "evaluatedAt": "2026-06-25T07:04:09.830Z"
+      }
+    ],
+    "allUnified": true
+  },
+  "rowLevelProof": {
+    "before": {
+      "cutoverControls": [
+        {
+          "surface": "admin_insights",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.392Z"
+        },
+        {
+          "surface": "all_core",
+          "mode": "unified",
+          "reason": "First production canary unified activation after healthy bootstrap diagnostics",
+          "updated_at": "2026-06-24T09:38:32.631Z"
+        },
+        {
+          "surface": "coaching_effectiveness",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.520Z"
+        },
+        {
+          "surface": "dashboard_executive_detail",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.137Z"
+        },
+        {
+          "surface": "dashboard_overview",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.001Z"
+        },
+        {
+          "surface": "projects_health",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.904Z"
+        },
+        {
+          "surface": "team_comparison",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:15.031Z"
+        },
+        {
+          "surface": "user_performance",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.265Z"
+        },
+        {
+          "surface": "user_project_performance",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.776Z"
+        },
+        {
+          "surface": "user_trend",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:14.648Z"
+        },
+        {
+          "surface": "workspace_dashboard",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:15.159Z"
+        },
+        {
+          "surface": "workspace_health",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T06:58:15.287Z"
+        }
+      ],
+      "workspaceIntelligence": {
+        "count": 1,
+        "latest": "2026-06-24T09:21:29.790Z"
+      },
+      "teamIntelligence": {
+        "count": 0,
+        "latest": null
+      },
+      "projectIntelligence": {
+        "count": 3,
+        "latest": "2026-06-24T09:21:29.468Z"
+      },
+      "userIntelligence": {
+        "count": 3,
+        "latest": "2026-06-24T09:21:28.028Z"
+      },
+      "workspaceSnapshots": {
+        "count": 35,
+        "distinct_dates": 35,
+        "first_snapshot_date": "2026-04-21",
+        "latest_snapshot_date": "2026-06-24",
+        "latest_captured_at": "2026-06-24T14:02:54.779Z"
+      },
+      "executiveSummaries": {
+        "count": 5,
+        "latest_created_at": "2026-06-24T13:57:49.806Z",
+        "periods": [
+          "1Y-2026",
+          "6M-2026H1",
+          "ALL",
+          "90-2026Q2",
+          "30-202606"
+        ]
+      }
+    },
+    "after": {
+      "cutoverControls": [
+        {
+          "surface": "admin_insights",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:08.823Z"
+        },
+        {
+          "surface": "all_core",
+          "mode": "unified",
+          "reason": "First production canary unified activation after healthy bootstrap diagnostics",
+          "updated_at": "2026-06-24T09:38:32.631Z"
+        },
+        {
+          "surface": "coaching_effectiveness",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:08.952Z"
+        },
+        {
+          "surface": "dashboard_executive_detail",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:08.565Z"
+        },
+        {
+          "surface": "dashboard_overview",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:08.431Z"
+        },
+        {
+          "surface": "projects_health",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:09.337Z"
+        },
+        {
+          "surface": "team_comparison",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:09.466Z"
+        },
+        {
+          "surface": "user_performance",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:08.694Z"
+        },
+        {
+          "surface": "user_project_performance",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:09.209Z"
+        },
+        {
+          "surface": "user_trend",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:09.081Z"
+        },
+        {
+          "surface": "workspace_dashboard",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:09.594Z"
+        },
+        {
+          "surface": "workspace_health",
+          "mode": "unified",
+          "reason": "Final enterprise intelligence certification: core visible surface unified for certified workspace scope.",
+          "updated_at": "2026-06-25T07:04:09.723Z"
+        }
+      ],
+      "workspaceIntelligence": {
+        "count": 1,
+        "latest": "2026-06-24T09:21:29.790Z"
+      },
+      "teamIntelligence": {
+        "count": 0,
+        "latest": null
+      },
+      "projectIntelligence": {
+        "count": 3,
+        "latest": "2026-06-24T09:21:29.468Z"
+      },
+      "userIntelligence": {
+        "count": 3,
+        "latest": "2026-06-24T09:21:28.028Z"
+      },
+      "workspaceSnapshots": {
+        "count": 35,
+        "distinct_dates": 35,
+        "first_snapshot_date": "2026-04-21",
+        "latest_snapshot_date": "2026-06-24",
+        "latest_captured_at": "2026-06-24T14:02:54.779Z"
+      },
+      "executiveSummaries": {
+        "count": 5,
+        "latest_created_at": "2026-06-24T13:57:49.806Z",
+        "periods": [
+          "1Y-2026",
+          "6M-2026H1",
+          "ALL",
+          "90-2026Q2",
+          "30-202606"
+        ]
+      }
+    }
+  },
+  "summaries": {
+    "ranges": [
+      {
+        "range": "30d",
+        "dashboardRange": {
+          "value": "30d",
+          "label": "30D",
+          "days": 30,
+          "granularity": "day"
+        },
+        "periodKey": "30-202606",
+        "summaryId": "c82fa79c-ed60-4166-bb87-6742828cc22e",
+        "firstReadReused": false,
+        "secondReadReused": true,
+        "version": "dashboard_period_summary_v4",
+        "quality": {
+          "checks": {
+            "hasOutlook": true,
+            "hasSubstance": true,
+            "conciseEnough": true,
+            "hasPriorities": true,
+            "lowRepetition": true,
+            "referencesPeriod": true,
+            "referencesEvidence": true
+          },
+          "passed": true,
+          "wordCount": 305,
+          "uniquenessRatio": 0.55
+        },
+        "snapshotCount": 30,
+        "materialization": {
+          "materialized": false,
+          "reason": "sufficient_selected_range_history",
+          "pointCount": 30
+        },
+        "executiveDetailSummaryId": "c82fa79c-ed60-4166-bb87-6742828cc22e",
+        "executiveDetailReused": true,
+        "textLength": 1998
+      },
+      {
+        "range": "90d",
+        "dashboardRange": {
+          "value": "90d",
+          "label": "90D",
+          "days": 90,
+          "granularity": "week"
+        },
+        "periodKey": "90-2026Q2",
+        "summaryId": "e1653bb8-20b6-42eb-a8e5-5534f7a79c72",
+        "firstReadReused": false,
+        "secondReadReused": true,
+        "version": "dashboard_period_summary_v4",
+        "quality": {
+          "checks": {
+            "hasOutlook": true,
+            "hasSubstance": true,
+            "conciseEnough": true,
+            "hasPriorities": true,
+            "lowRepetition": true,
+            "referencesPeriod": true,
+            "referencesEvidence": true
+          },
+          "passed": true,
+          "wordCount": 324,
+          "uniquenessRatio": 0.56
+        },
+        "snapshotCount": 35,
+        "materialization": {
+          "materialized": false,
+          "reason": "sufficient_selected_range_history",
+          "pointCount": 35
+        },
+        "executiveDetailSummaryId": "e1653bb8-20b6-42eb-a8e5-5534f7a79c72",
+        "executiveDetailReused": true,
+        "textLength": 2001
+      },
+      {
+        "range": "6m",
+        "dashboardRange": {
+          "value": "6m",
+          "label": "6M",
+          "days": 183,
+          "granularity": "week"
+        },
+        "periodKey": "6M-2026H1",
+        "summaryId": "675c13aa-32cc-472a-8de4-365c5ff07dc9",
+        "firstReadReused": false,
+        "secondReadReused": true,
+        "version": "dashboard_period_summary_v4",
+        "quality": {
+          "checks": {
+            "hasOutlook": true,
+            "hasSubstance": true,
+            "conciseEnough": true,
+            "hasPriorities": true,
+            "lowRepetition": true,
+            "referencesPeriod": true,
+            "referencesEvidence": true
+          },
+          "passed": true,
+          "wordCount": 323,
+          "uniquenessRatio": 0.57
+        },
+        "snapshotCount": 35,
+        "materialization": {
+          "materialized": false,
+          "reason": "sufficient_selected_range_history",
+          "pointCount": 35
+        },
+        "executiveDetailSummaryId": "675c13aa-32cc-472a-8de4-365c5ff07dc9",
+        "executiveDetailReused": true,
+        "textLength": 2004
+      },
+      {
+        "range": "1y",
+        "dashboardRange": {
+          "value": "1y",
+          "label": "1Y",
+          "days": 366,
+          "granularity": "month"
+        },
+        "periodKey": "1Y-2026",
+        "summaryId": "35b1cdd1-110b-49e3-aba2-d329421f8eea",
+        "firstReadReused": false,
+        "secondReadReused": true,
+        "version": "dashboard_period_summary_v4",
+        "quality": {
+          "checks": {
+            "hasOutlook": true,
+            "hasSubstance": true,
+            "conciseEnough": true,
+            "hasPriorities": true,
+            "lowRepetition": true,
+            "referencesPeriod": true,
+            "referencesEvidence": true
+          },
+          "passed": true,
+          "wordCount": 322,
+          "uniquenessRatio": 0.57
+        },
+        "snapshotCount": 35,
+        "materialization": {
+          "materialized": false,
+          "reason": "sufficient_selected_range_history",
+          "pointCount": 35
+        },
+        "executiveDetailSummaryId": "35b1cdd1-110b-49e3-aba2-d329421f8eea",
+        "executiveDetailReused": true,
+        "textLength": 2006
+      },
+      {
+        "range": "all",
+        "dashboardRange": {
+          "value": "all",
+          "label": "ALL",
+          "days": null,
+          "granularity": "month"
+        },
+        "periodKey": "ALL",
+        "summaryId": "698199d8-753a-4775-ba08-d1ad9f1157e5",
+        "firstReadReused": false,
+        "secondReadReused": true,
+        "version": "dashboard_period_summary_v4",
+        "quality": {
+          "checks": {
+            "hasOutlook": true,
+            "hasSubstance": true,
+            "conciseEnough": true,
+            "hasPriorities": true,
+            "lowRepetition": true,
+            "referencesPeriod": true,
+            "referencesEvidence": true
+          },
+          "passed": true,
+          "wordCount": 324,
+          "uniquenessRatio": 0.58
+        },
+        "snapshotCount": 35,
+        "materialization": {
+          "materialized": false,
+          "reason": "sufficient_selected_range_history",
+          "pointCount": 35
+        },
+        "executiveDetailSummaryId": "698199d8-753a-4775-ba08-d1ad9f1157e5",
+        "executiveDetailReused": true,
+        "textLength": 2033
+      }
+    ],
+    "similarity": {
+      "maxSimilarity": 0.87,
+      "pairs": [
+        {
+          "a": "30d",
+          "b": "90d",
+          "similarity": 0.77
+        },
+        {
+          "a": "30d",
+          "b": "6m",
+          "similarity": 0.75
+        },
+        {
+          "a": "30d",
+          "b": "1y",
+          "similarity": 0.74
+        },
+        {
+          "a": "30d",
+          "b": "all",
+          "similarity": 0.72
+        },
+        {
+          "a": "90d",
+          "b": "6m",
+          "similarity": 0.87
+        },
+        {
+          "a": "90d",
+          "b": "1y",
+          "similarity": 0.82
+        },
+        {
+          "a": "90d",
+          "b": "all",
+          "similarity": 0.81
+        },
+        {
+          "a": "6m",
+          "b": "1y",
+          "similarity": 0.82
+        },
+        {
+          "a": "6m",
+          "b": "all",
+          "similarity": 0.81
+        },
+        {
+          "a": "1y",
+          "b": "all",
+          "similarity": 0.85
+        }
+      ]
+    }
+  },
+  "verdicts": {
+    "singleSourceOfTruth": "CERTIFIED_FOR_CORE_SCOPE_ONLY",
+    "attendanceContribution": "CERTIFIED",
+    "executiveSummary": "CERTIFIED",
+    "enterpriseGradePlatform": "CERTIFIED_FOR_CORE_SCOPE"
+  },
+  "blockers": [],
+  "certified": true
+}

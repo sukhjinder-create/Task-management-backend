@@ -23,6 +23,7 @@
     "migrate:enterprise-intelligence-cutover-controls": "node --import ./scripts/database-safety-guard.js run-enterprise-intelligence-cutover-controls-migration.js",
     "verify:enterprise-intelligence": "node scripts/verify-enterprise-intelligence-architecture.js",
     "verify:enterprise-intelligence:real-data": "node scripts/enterprise-intelligence-real-data-shadow-validation.js",
+    "certify:enterprise-intelligence-core": "node scripts/run-enterprise-intelligence-core-certification.js",
     "verify:dashboard-range-charts": "node scripts/verify-dashboard-range-chart-contract.js",
     "backfill:dashboard-intelligence-history": "node scripts/backfill-dashboard-intelligence-history.js",
     "verify:dashboard-history-materialization": "node scripts/verify-dashboard-history-materialization.js",

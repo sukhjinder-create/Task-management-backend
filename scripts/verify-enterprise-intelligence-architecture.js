@@ -254,6 +254,10 @@ const controller = stripComments(read("intelligence/intelligence.controller.js")
 const intelligenceRoutes = stripComments(read("intelligence/intelligence.routes.js"));
 const executiveSummaryGenerator = stripComments(read("intelligence/executiveSummary.generator.js"));
 const aiFeaturesService = stripComments(read("services/aiFeatures.service.js"));
+const aiContextBuilder = stripComments(read("ai/ai.context.builder.js"));
+const periodExecutiveSummary = stripComments(read("intelligence/analytics/periodExecutiveSummary.service.js"));
+const coreCertificationService = stripComments(read("intelligence/certification/coreCertification.service.js"));
+const internalRoutes = stripComments(read("routes/internal.js"));
 assertIncludes(controller, "getUnifiedIntelligenceSnapshot", "Controller must expose unified intelligence snapshots");
 assertIncludes(controller, "source: \"enterprise_intelligence\"", "Controller responses must mark enterprise source");
 assertIncludes(controller, "getCutoverStatus", "Controller must expose cutover status");
@@ -283,6 +287,18 @@ assertIncludes(intelligenceResponses, "legacyContext", "Executive summary data m
 assertIncludes(intelligenceResponses, "okrHealth: null", "Core executive summary prompt must not silently consume isolated OKR health");
 assertIncludes(executiveSummaryGenerator, "dashboardEligible !== false", "Executive summary generator must skip isolated OKR health");
 assertIncludes(aiFeaturesService, "ai_task_deadline_risk", "AI task risk must be explicitly isolated");
+assertIncludes(aiContextBuilder, "getCanonicalWorkspaceIntelligenceContext", "AI intelligence query must build canonical workspace intelligence context");
+assertIncludes(aiContextBuilder, "intelligence_snapshots", "AI intelligence query must use canonical snapshot history");
+assertIncludes(aiContextBuilder, "workspace_intelligence", "AI intelligence query must use canonical workspace intelligence risk context");
+assertIncludes(aiContextBuilder, "workspace_executive_summaries", "AI intelligence query must use canonical persisted summary context");
+assertNotIncludes(aiContextBuilder, "workspace_monthly_scores", "AI intelligence query must not read legacy monthly scores");
+assertNotIncludes(aiContextBuilder, "workspace_project_monthly_scores", "AI intelligence query must not read legacy project monthly scores");
+assertIncludes(periodExecutiveSummary, "dashboard_period_summary_v4", "Executive summaries must use the enterprise-grade v4 summary artifact");
+assertIncludes(periodExecutiveSummary, "assessExecutiveSummaryQuality", "Executive summaries must persist quality assessment metadata");
+assertIncludes(coreCertificationService, "certifyEnterpriseIntelligenceCoreWorkspace", "Core certification service must provide row-level proof entrypoint");
+assertIncludes(coreCertificationService, "executeCutover", "Core certification service must require explicit cutover execution intent");
+assertIncludes(coreCertificationService, "CORE_CUTOVER_SURFACES", "Core certification service must verify every core cutover surface");
+assertIncludes(internalRoutes, "/enterprise-intelligence/certify-core", "Internal routes must expose locked core certification endpoint");
 
 const workspaceHealthService = stripComments(read("services/workspaceHealth.service.js"));
 assertIncludes(workspaceHealthService, "getWorkspaceIntelligence", "Workspace health compatibility service must read enterprise intelligence");

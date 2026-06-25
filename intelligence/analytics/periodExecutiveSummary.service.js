@@ -2,7 +2,7 @@ import pool from "../../db.js";
 import { saveExecutiveSummary } from "../../events/executive/executiveSummary.store.js";
 import { buildTrendAnalytics } from "./historicalAnalytics.service.js";
 
-export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "dashboard_period_summary_v2";
+export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "dashboard_period_summary_v4";
 const SUMMARY_KIND = "dashboard_period_executive_summary";
 
 function dateKey(value) {
@@ -36,12 +36,72 @@ function directionLabel(direction) {
   return "stable";
 }
 
+function movementVerb(direction) {
+  if (direction === "up") return "strengthened";
+  if (direction === "down") return "softened";
+  return "held steady";
+}
+
+function riskMovementLabel(direction) {
+  if (direction === "up") return "risk pressure increased";
+  if (direction === "down") return "risk pressure eased";
+  return "risk pressure stayed broadly stable";
+}
+
+function scoreSpan(score = {}) {
+  const first = score.first ?? "n/a";
+  const last = score.last ?? "n/a";
+  const delta = Number(score.delta || 0);
+  const sign = delta > 0 ? "+" : "";
+  return `${first} -> ${last} (${sign}${delta})`;
+}
+
+function compactSentence(parts = []) {
+  return parts.filter(Boolean).join(" ");
+}
+
+function topOrFallback(items = [], fallback) {
+  return compactList(items, 1)[0] || fallback;
+}
+
+function operatingSignal(label, stat) {
+  if (!stat || stat.pointCount === 0) {
+    return `${label}: insufficient period history`;
+  }
+  const delta = Number(stat.delta || 0);
+  const sign = delta > 0 ? "+" : "";
+  return `${label}: avg ${stat.average ?? "n/a"}, ${directionLabel(stat.direction)}, ${sign}${delta} pt movement`;
+}
+
 function rangeNarrative(rangeValue) {
   if (rangeValue === "90d") return "quarter-style operating period";
   if (rangeValue === "6m") return "half-year operating horizon";
   if (rangeValue === "1y") return "annual performance window";
   if (rangeValue === "all") return "full-history workspace narrative";
   return "recent monthly operating period";
+}
+
+function rangeInterpretation(analysis) {
+  const rangeValue = analysis.range?.value || "30d";
+  const points = analysis.snapshotPointCount || 0;
+  const coverage = compactSentence([
+    analysis.coverageStart && `from ${analysis.coverageStart}`,
+    analysis.coverageEnd && `through ${analysis.coverageEnd}`,
+  ]) || "from the available snapshot window";
+
+  if (rangeValue === "90d") {
+    return `Quarter lens: ${points} snapshot point(s) ${coverage} are used as an in-quarter execution read, emphasizing quarter ramp, delivery cadence, and near-term recovery pressure.`;
+  }
+  if (rangeValue === "6m") {
+    return `Half-year lens: ${points} snapshot point(s) ${coverage} are treated as a semester baseline, emphasizing capacity endurance, mid-horizon stability, and repeated operating patterns.`;
+  }
+  if (rangeValue === "1y") {
+    return `Annual lens: ${points} snapshot point(s) ${coverage} represent the current year-to-date evidence, emphasizing strategic durability, seasonal exposure, and sustained governance risk.`;
+  }
+  if (rangeValue === "all") {
+    return `Full-history lens: ${points} snapshot point(s) ${coverage} define the complete retained intelligence record, emphasizing lifetime baseline, archive coverage, and institutional memory.`;
+  }
+  return `Monthly lens: ${points} snapshot point(s) ${coverage} are used as the recent operating read, emphasizing immediate movement, current blockers, and short-cycle execution focus.`;
 }
 
 function compactList(items = [], limit = 4) {
@@ -230,6 +290,8 @@ function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {
     drivers: topFrequency(driverCounts, intelligence?.drivers, 5),
     indicators: topFrequency(indicatorCounts, [], 5),
     currentRisk: intelligence?.risk || {},
+    indexes: intelligence?.indexes || {},
+    analytics: intelligence?.analytics || {},
     confidence: intelligence?.confidence ?? null,
     band: intelligence?.band || null,
     taskContext: {
@@ -243,6 +305,46 @@ function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {
         priority: task.priority,
       })),
     },
+  };
+}
+
+export function assessExecutiveSummaryQuality(summary = {}) {
+  const text = [
+    summary.headline,
+    summary.narrative,
+    summary.outlook,
+    ...(summary.priorities || []),
+  ].filter(Boolean).join(" ");
+  const words = text.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const uniqueWords = new Set(words);
+  const evidenceTerms = [
+    "period",
+    "trend",
+    "risk",
+    "productivity",
+    "health",
+    "concern",
+    "driver",
+    "outlook",
+    "snapshot",
+    "confidence",
+    "delivery",
+    "workspace",
+  ];
+  const checks = {
+    hasSubstance: words.length >= 95,
+    conciseEnough: words.length <= 360,
+    referencesPeriod: /30d|90d|6m|1y|all|period|quarter|half-year|annual|history/i.test(text),
+    referencesEvidence: evidenceTerms.filter((term) => text.toLowerCase().includes(term)).length >= 5,
+    hasPriorities: Array.isArray(summary.priorities) && summary.priorities.length > 0,
+    lowRepetition: words.length === 0 ? false : uniqueWords.size / words.length >= 0.42,
+    hasOutlook: Boolean(summary.outlook && String(summary.outlook).length >= 80),
+  };
+  return {
+    passed: Object.values(checks).every(Boolean),
+    checks,
+    wordCount: words.length,
+    uniquenessRatio: words.length === 0 ? 0 : Math.round((uniqueWords.size / words.length) * 100) / 100,
   };
 }
 
@@ -265,14 +367,15 @@ function buildPriorities(analysis) {
 function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
   const periodName = rangeNarrative(analysis.range?.value);
   const direction = directionLabel(analysis.score.direction);
+  const movement = movementVerb(analysis.score.direction);
   const score = analysis.score.last ?? 0;
-  const delta = Math.abs(analysis.score.delta || 0);
   const pointCount = analysis.snapshotPointCount;
   const productivity = analysis.chartSignals.productivity;
   const risk = analysis.chartSignals.risk;
-  const topConcern = analysis.concerns[0] || "No dominant concern repeated across the selected period.";
-  const topStrength = analysis.strengths[0] || "No dominant strength repeated across the selected period.";
-  const topDriver = analysis.drivers[0] || "The period was shaped by the combined execution, delivery, collaboration, and risk evidence.";
+  const health = analysis.chartSignals.workspaceHealth;
+  const topConcern = topOrFallback(analysis.concerns, "no single recurring concern dominated the period");
+  const topStrength = topOrFallback(analysis.strengths, "no single recurring strength dominated the period");
+  const topDriver = topOrFallback(analysis.drivers, "combined execution, delivery, collaboration, and risk evidence shaped the period");
   const dataDepth = pointCount >= 3
     ? `${pointCount} historical intelligence points`
     : pointCount === 2
@@ -282,24 +385,46 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
     ? `Historical materialization expanded this view from ${materialization.beforePointCount || 0} to ${materialization.afterPointCount || pointCount} point(s).`
     : null;
 
+  const readiness = analysis.indexes?.attendanceReadinessIndex;
+  const sustainability = analysis.indexes?.capacitySustainabilityIndex;
+  const deliveryConfidence = analysis.indexes?.deliveryConfidenceIndex;
+  const operatingIndexes = compactSentence([
+    deliveryConfidence != null && `Delivery confidence is ${Math.round(deliveryConfidence)}/100.`,
+    readiness != null && `Attendance readiness is ${Math.round(readiness)}/100.`,
+    sustainability != null && `Capacity sustainability is ${Math.round(sustainability)}/100.`,
+  ]);
+  const taskPressure = (analysis.taskContext.overdueTasks || 0) > 0
+    ? `${analysis.taskContext.overdueTasks} overdue scoped item(s) remain the clearest execution pressure.`
+    : "No overdue scoped item concentration is visible in this period.";
+  const riskSentence = risk.pointCount > 0
+    ? `${riskMovementLabel(risk.direction)} with average risk signal ${risk.average ?? "n/a"} and ${risk.delta || 0} pt movement.`
+    : `Current workspace risk is ${analysis.currentRisk?.level || "unknown"}.`;
   const outlookBase = forecast?.reasoning || "Forward outlook is based on the selected period's enterprise intelligence trajectory.";
-  const outlook =
-    `Next-month outlook: ${outlookBase} ` +
-    `Period context shows ${direction} movement, average score ${analysis.score.average ?? "n/a"}, ` +
-    `productivity ${directionLabel(productivity.direction)} (${productivity.delta || 0} pt delta), ` +
-    `and risk ${directionLabel(risk.direction)} (${risk.delta || 0} pt delta).`;
+  const outlook = compactSentence([
+    `Next-period outlook: ${outlookBase}`,
+    `The operating read is ${direction}, with score span ${scoreSpan(analysis.score)} and confidence ${analysis.confidence ?? "n/a"}/100.`,
+    riskSentence,
+    `Leadership attention should stay on ${topConcern}; the best stabilizing signal is ${topStrength}.`,
+  ]);
+
+  const narrative = compactSentence([
+    `During the ${periodName} (${analysis.bucket.label}), ${scopeLabel.toLowerCase()} ${movement} into a ${analysis.band || "unclassified"} posture at ${score}/100.`,
+    rangeInterpretation(analysis),
+    `The selected period moved ${scoreSpan(analysis.score)} across ${dataDepth}; average score was ${analysis.score.average ?? "n/a"} and volatility was ${analysis.score.volatility}.`,
+    operatingSignal("Workspace health", health) + ".",
+    operatingSignal("Productivity", productivity) + ".",
+    riskSentence,
+    `Primary positive signal: ${topStrength}.`,
+    `Primary concern: ${topConcern}.`,
+    `Main driver: ${topDriver}.`,
+    operatingIndexes,
+    taskPressure,
+    materializationNote,
+  ]);
 
   return {
-    headline: `${scopeLabel}: ${analysis.range.label} ${direction} executive intelligence (${score}/100)`,
-    narrative:
-      `For the ${periodName} (${analysis.bucket.label}), ${scopeLabel.toLowerCase()} is ${analysis.band || "unclassified"} at ${score}/100, ` +
-      `${direction} by ${delta} point(s) across ${dataDepth}. ` +
-      `The selected-period score band ranged from ${analysis.score.minimum ?? "n/a"} to ${analysis.score.maximum ?? "n/a"} with average movement volatility ${analysis.score.volatility}. ` +
-      `Productivity averaged ${productivity.average ?? "n/a"} and risk averaged ${risk.average ?? "n/a"} across the same dashboard contract. ` +
-      `The strongest repeated strength was: ${topStrength}. The most visible concern was: ${topConcern}. ` +
-      `Primary driver: ${topDriver}. ` +
-      `${analysis.taskContext.overdueTasks || 0} scoped overdue item(s) remain visible in the period context.` +
-      `${materializationNote ? ` ${materializationNote}` : ""}`,
+    headline: `${scopeLabel} ${analysis.range.label}: ${direction} operating intelligence (${score}/100)`,
+    narrative,
     outlook,
     strengths: analysis.strengths,
     risks: analysis.concerns,
@@ -401,12 +526,16 @@ export async function getOrCreateWorkspacePeriodExecutiveSummary({
     return hydrateSavedSummary(existing);
   }
 
-  const payload = buildNarrative({
+  const builtPayload = buildNarrative({
     scopeLabel,
     analysis,
     forecast,
     materialization,
   });
+  const payload = {
+    ...builtPayload,
+    quality: assessExecutiveSummaryQuality(builtPayload),
+  };
   const summaryText = [
     payload.headline,
     payload.narrative,
