@@ -3,8 +3,15 @@ import express from "express";
 import { createAIChatMessage } from "../services/chat.service.js";
 import { getProjectReport } from "../services/reports.service.js";
 import { materializeDashboardHistoryInternal } from "../intelligence/intelligence.controller.js";
+import { buildWorkspaceHealthResponse } from "../intelligence/analytics/intelligenceResponses.service.js";
+import { getDashboardOverviewFromIntelligence } from "../intelligence/analytics/unifiedDashboard.adapter.js";
 import { certifyEnterpriseIntelligenceCoreWorkspace } from "../intelligence/certification/coreCertification.service.js";
 import { traceUserScoreForWorkspace } from "../intelligence/certification/userScoreTrace.service.js";
+import { bootstrapWorkspaceIntelligence } from "../intelligence/engine/unifiedIntelligence.engine.js";
+import {
+  getWorkspaceScoringConfig,
+  upsertWorkspaceScoringConfig,
+} from "../intelligence/repositories/scoringConfig.repository.js";
 
 console.log("🔥 INTERNAL ROUTES LOADED");
 
@@ -73,6 +80,133 @@ router.post("/enterprise-intelligence/user-score-trace", async (req, res) => {
     console.error("[ENTERPRISE_INTELLIGENCE_USER_SCORE_TRACE_ERROR]", err);
     return res.status(status).json({
       error: err.message || "Enterprise intelligence user score trace failed",
+      code: err.code || null,
+    });
+  }
+});
+
+router.post("/enterprise-intelligence/closure-verify", async (req, res) => {
+  try {
+    if (!internalSecretMatches(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const workspaceId = req.body?.workspaceId;
+    if (!workspaceId) {
+      return res.status(400).json({ error: "workspaceId is required" });
+    }
+
+    const range = req.body?.range || "30d";
+    const refreshScoring = req.body?.refreshScoring === true;
+    const { rows: adminRows } = await pool.query(
+      `SELECT id, username, email, role
+       FROM users
+       WHERE workspace_id = $1 AND role = 'admin'
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [workspaceId]
+    );
+    const admin = adminRows[0];
+    if (!admin) {
+      return res.status(404).json({ error: "Workspace admin not found" });
+    }
+
+    const configBefore = await getWorkspaceScoringConfig({ workspaceId });
+    let savedConfig = configBefore;
+    let recalculation = null;
+
+    if (refreshScoring) {
+      const currentCoreWeight = Number(configBefore?.groups?.userFinalBalance?.weights?.core ?? 0.82);
+      savedConfig = await upsertWorkspaceScoringConfig({
+        workspaceId,
+        updatedBy: admin.id,
+        patch: {
+          groups: {
+            userFinalBalance: {
+              changedKey: "core",
+              weights: { core: currentCoreWeight },
+            },
+          },
+        },
+      });
+      const refreshed = await bootstrapWorkspaceIntelligence({
+        workspaceId,
+        windowDays: 30,
+      });
+      recalculation = {
+        workspaceScore: refreshed.workspace?.score ?? null,
+        users: refreshed.users.length,
+        projects: refreshed.projects.length,
+        teams: refreshed.teams.length,
+      };
+    }
+
+    const [workspaceHealth, dashboardOverview] = await Promise.all([
+      buildWorkspaceHealthResponse({ workspaceId, userId: admin.id, role: "admin" }),
+      getDashboardOverviewFromIntelligence({ workspaceId, userId: admin.id, role: "admin", range }),
+    ]);
+    const pair = savedConfig?.groups?.userFinalBalance?.weights || {};
+    const workspaceDomains = workspaceHealth?.scoreExplanation?.domainContributions || [];
+
+    return res.json({
+      source: "enterprise_intelligence_closure_verification",
+      generatedAt: new Date().toISOString(),
+      workspaceId,
+      admin: {
+        id: admin.id,
+        role: admin.role,
+        username: admin.username,
+        emailDomain: String(admin.email || "").split("@")[1] || null,
+      },
+      scoringConfig: {
+        persisted: savedConfig.persisted,
+        version: savedConfig.version,
+        pairWeights: pair,
+        pairTotal: Math.round((Number(pair.core || 0) + Number(pair.professionalDiscipline || 0)) * 10000) / 10000,
+        groups: Object.fromEntries(
+          Object.entries(savedConfig.groups || {}).map(([key, group]) => [
+            key,
+            {
+              type: group.type,
+              scoreSurface: group.scoreSurface,
+              total: group.total,
+              slotCount: Object.keys(group.weights || {}).length,
+            },
+          ])
+        ),
+        recalculation,
+      },
+      workspaceHealthExplainability: {
+        healthScore: workspaceHealth.healthScore,
+        finalScore: workspaceHealth.scoreExplanation?.finalScore ?? null,
+        authority: workspaceHealth.scoreExplanation?.scoreAuthority ?? null,
+        formula: workspaceHealth.scoreExplanation?.formulaReadable ?? null,
+        domainCount: workspaceDomains.length,
+        firstDomains: workspaceDomains.slice(0, 5).map((row) => ({
+          key: row.key,
+          label: row.label,
+          score: row.score,
+          weight: row.weight,
+          finalScoreImpactVsNeutral: row.finalScoreImpactVsNeutral,
+          effect: row.effect?.label || row.effect || null,
+        })),
+        attendanceEffect: workspaceHealth.scoreExplanation?.attendanceEffect || null,
+        upwardPressures: workspaceHealth.scoreExplanation?.upwardPressures || [],
+        downwardPressures: workspaceHealth.scoreExplanation?.downwardPressures || [],
+      },
+      dashboardContract: {
+        source: dashboardOverview.source || dashboardOverview.scoreSource || null,
+        healthScore: dashboardOverview.healthScore ?? dashboardOverview.scoreCard?.score ?? null,
+        chartCount: Array.isArray(dashboardOverview.visualizations?.charts)
+          ? dashboardOverview.visualizations.charts.length
+          : 0,
+        executiveSummarySource: dashboardOverview.executiveSummary?.source || null,
+      },
+    });
+  } catch (err) {
+    console.error("[ENTERPRISE_INTELLIGENCE_CLOSURE_VERIFY_ERROR]", err);
+    return res.status(500).json({
+      error: err.message || "Enterprise intelligence closure verification failed",
       code: err.code || null,
     });
   }

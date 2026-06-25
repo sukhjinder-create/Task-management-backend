@@ -350,6 +350,8 @@ assertIncludes(coreCertificationService, "certifyEnterpriseIntelligenceCoreWorks
 assertIncludes(coreCertificationService, "executeCutover", "Core certification service must require explicit cutover execution intent");
 assertIncludes(coreCertificationService, "CORE_CUTOVER_SURFACES", "Core certification service must verify every core cutover surface");
 assertIncludes(internalRoutes, "/enterprise-intelligence/certify-core", "Internal routes must expose locked core certification endpoint");
+assertIncludes(internalRoutes, "/enterprise-intelligence/closure-verify", "Internal routes must expose locked closure verification endpoint");
+assertIncludes(internalRoutes, "internalSecretMatches", "Internal closure verification must be protected by the internal shared secret");
 
 const workspaceHealthService = stripComments(read("services/workspaceHealth.service.js"));
 assertIncludes(workspaceHealthService, "getWorkspaceIntelligence", "Workspace health compatibility service must read enterprise intelligence");
