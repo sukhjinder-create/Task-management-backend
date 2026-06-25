@@ -9,12 +9,13 @@ import {
 } from "../repositories/unifiedIntelligence.repository.js";
 import { withLegacyIsolation } from "./cutoverIsolation.service.js";
 import { advancedForecast } from "../forecast/forecast.engine.js";
-import { adaptiveScore, roundScore } from "../engine/scorePrimitives.js";
+import { adaptiveScore, clamp, roundScore } from "../engine/scorePrimitives.js";
 import {
   getScoringGroupWeights,
   scoreObjectWithScoringConfig,
   scoreWithScoringConfig,
 } from "../config/scoringConfig.model.js";
+import { getWorkspaceScoringConfig } from "../repositories/scoringConfig.repository.js";
 
 function monthKey() {
   return new Date().toISOString().slice(0, 7);
@@ -66,6 +67,11 @@ function round2(value) {
   return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
 }
 
+function round4(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 10000) / 10000 : null;
+}
+
 function avgScore(values = []) {
   const nums = values.map(Number).filter(Number.isFinite);
   if (!nums.length) return 0;
@@ -101,6 +107,126 @@ function effectFromScore(score, { lowerIsBetter = false } = {}) {
     effect: "neutral_or_moderate",
     label: "Neutral / moderate",
     tone: "neutral",
+  };
+}
+
+function normalizedPositiveWeights(rows = []) {
+  const rawWeights = rows.map((row) => {
+    const weight = Number(row.weight);
+    return Number.isFinite(weight) && weight > 0 ? weight : 1;
+  });
+  const total = rawWeights.reduce((sum, weight) => sum + weight, 0) || rows.length || 1;
+  return rawWeights.map((weight) => weight / total);
+}
+
+function adaptiveFormulaBreakdown(rows = [], options = {}) {
+  const observed = rows
+    .filter((row) => row && Number.isFinite(Number(row.score)))
+    .map((row) => ({
+      ...row,
+      value: clamp(Number(row.score)),
+    }));
+
+  if (!observed.length) {
+    const neutral = options.neutral ?? 60;
+    return {
+      mode: "no_observed_workspace_indexes",
+      rawScoreBeforeRounding: round2(neutral),
+      finalRoundedScore: roundScore(neutral),
+      confidence: options.confidence == null ? null : round2(options.confidence),
+      normalizedWeightsByKey: {},
+      formulaComponents: [],
+      weightedMean: null,
+      weightedMedian: null,
+      weightedHarmonic: null,
+      balance: null,
+    };
+  }
+
+  const rawWeights = observed.map((row) => {
+    const weight = Number(row.weight);
+    return Number.isFinite(weight) && weight > 0 ? weight : 1;
+  });
+  const firstWeight = rawWeights[0];
+  const equalWeights = rawWeights.every((weight) => Math.abs(weight - firstWeight) < 0.000001);
+  const normalizedWeights = normalizedPositiveWeights(observed);
+  const values = observed.map((row) => row.value);
+  const confidence = options.confidence == null ? 75 : clamp(options.confidence);
+
+  let weightedMean;
+  let weightedMedian;
+  let weightedHarmonic;
+  let mode;
+
+  if (equalWeights) {
+    mode = "adaptive_equal_weight_indexes";
+    weightedMean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const sortedValues = [...values].sort((a, b) => a - b);
+    weightedMedian = sortedValues[Math.floor(sortedValues.length / 2)];
+    weightedHarmonic = values.length / values.reduce((sum, value) => sum + (1 / Math.max(8, value)), 0);
+  } else {
+    mode = "weighted_adaptive_indexes";
+    const weighted = observed.map((row, index) => ({
+      value: row.value,
+      weight: normalizedWeights[index],
+    }));
+    weightedMean = weighted.reduce((sum, row) => sum + (row.value * row.weight), 0);
+    const sorted = [...weighted].sort((a, b) => a.value - b.value);
+    let cumulative = 0;
+    weightedMedian = sorted[sorted.length - 1].value;
+    for (const row of sorted) {
+      cumulative += row.weight;
+      if (cumulative >= 0.5) {
+        weightedMedian = row.value;
+        break;
+      }
+    }
+    weightedHarmonic = 1 / weighted.reduce(
+      (sum, row) => sum + (row.weight / Math.max(8, row.value)),
+      0
+    );
+  }
+
+  const low = values.reduce((min, value) => Math.min(min, value), values[0]);
+  const high = values.reduce((max, value) => Math.max(max, value), values[0]);
+  const balance = clamp(100 - ((high - low) * 0.35));
+  const raw =
+    (weightedMean * 0.32) +
+    (weightedMedian * 0.30) +
+    (weightedHarmonic * 0.22) +
+    (balance * 0.10) +
+    (confidence * 0.06);
+
+  const componentDefinitions = [
+    ["weightedMean", equalWeights ? "Mean" : "Weighted mean", weightedMean, 0.32],
+    ["weightedMedian", equalWeights ? "Median" : "Weighted median", weightedMedian, 0.30],
+    ["weightedHarmonic", equalWeights ? "Harmonic mean" : "Weighted harmonic mean", weightedHarmonic, 0.22],
+    ["balance", "Balance / outlier dampener", balance, 0.10],
+    ["confidence", "Evidence confidence", confidence, 0.06],
+  ];
+
+  return {
+    mode,
+    rawScoreBeforeRounding: round2(raw),
+    finalRoundedScore: roundScore(raw),
+    confidence: round2(confidence),
+    normalizedWeightsRawByKey: Object.fromEntries(
+      observed.map((row, index) => [row.key, normalizedWeights[index]])
+    ),
+    normalizedWeightsByKey: Object.fromEntries(
+      observed.map((row, index) => [row.key, round4(normalizedWeights[index])])
+    ),
+    formulaComponents: componentDefinitions.map(([key, label, score, multiplier]) => ({
+      key,
+      label,
+      score: round2(score),
+      multiplier,
+      contributionPoints: round2(score * multiplier),
+    })),
+    weightedMean: round2(weightedMean),
+    weightedMedian: round2(weightedMedian),
+    weightedHarmonic: round2(weightedHarmonic),
+    balance: round2(balance),
   };
 }
 
@@ -661,15 +787,16 @@ function workspaceIndexLabel(key) {
     .trim();
 }
 
-function buildWorkspaceScoreExplanation(workspace = {}) {
+function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null } = {}) {
   const indexes = workspace.indexes || {};
   const scoreModel = workspace.scoreModel || workspace.analytics?.scoreModel || null;
   const weights = getScoringGroupWeights(scoreModel, "workspaceIndexes");
+  const userScoreBalanceWeights = getScoringGroupWeights(scoringConfig || {}, "userFinalBalance");
   const indexRows = Object.keys(weights).map((key) => ({
     key,
     label: scoreModel?.groups?.workspaceIndexes?.slots?.[key]?.label || workspaceIndexLabel(key),
     score: scoreOrNull(indexes[key]),
-    weight: round2(weights[key]),
+    weight: round4(weights[key]),
     source: `workspace_intelligence.indexes.${key}`,
     note: WORKSPACE_INDEX_EXPLANATIONS[key] || "Workspace intelligence index.",
     effect: effectFromScore(indexes[key]),
@@ -679,8 +806,11 @@ function buildWorkspaceScoreExplanation(workspace = {}) {
   const reconstructedFinalScore = scoreObjectWithScoringConfig(indexValues, scoreModel, "workspaceIndexes", {
     confidence: workspace.confidence ?? 75,
   });
-  const rawWeightedScore = indexRows.reduce((sum, row) => sum + (row.score * (row.weight || 0)), 0);
+  const adaptiveBreakdown = adaptiveFormulaBreakdown(indexRows, {
+    confidence: workspace.confidence ?? 75,
+  });
   const domainContributions = indexRows.map((row) => {
+    const normalizedWeight = adaptiveBreakdown.normalizedWeightsRawByKey?.[row.key] ?? row.weight ?? 0;
     const neutralValues = {
       ...indexValues,
       [row.key]: 60,
@@ -690,7 +820,10 @@ function buildWorkspaceScoreExplanation(workspace = {}) {
     });
     return {
       ...row,
-      weightedContributionPoints: round2(row.score * row.weight),
+      configuredWeight: row.weight,
+      normalizedWeight: round4(normalizedWeight),
+      weightedContributionPoints: round2(row.score * normalizedWeight),
+      weightedMeanContributionPoints: round2(row.score * normalizedWeight),
       finalScoreImpactVsNeutral: reconstructedFinalScore - neutralScore,
       neutralCounterfactualScore: neutralScore,
       contributionType: "weighted_workspace_index",
@@ -700,37 +833,108 @@ function buildWorkspaceScoreExplanation(workspace = {}) {
   const upward = [...domainContributions].sort((a, b) => b.score - a.score).slice(0, 2);
   const attendanceRow = domainContributions.find((row) => row.key === "attendanceReadinessIndex");
   const capacityRow = domainContributions.find((row) => row.key === "capacitySustainabilityIndex");
+  const scoreCalculation = {
+    source: "enterprise_intelligence",
+    scoreAuthority: "workspace_intelligence.score",
+    formulaLabel: "Adaptive weighted workspace intelligence indexes",
+    formulaReadable:
+      "workspace score = weighted/adaptive blend of workspace index scores: weighted mean 32%, median 30%, harmonic mean 22%, balance 10%, evidence confidence 6%",
+    finalScore: scoreOrNull(workspace.score),
+    reconstructedFinalScore,
+    rawScoreBeforeRounding: adaptiveBreakdown.rawScoreBeforeRounding,
+    finalRoundedScore: adaptiveBreakdown.finalRoundedScore,
+    confidence: scoreOrNull(workspace.confidence),
+    mode: adaptiveBreakdown.mode,
+    scoreModel,
+    domainContributions,
+    formulaComponents: adaptiveBreakdown.formulaComponents,
+    weightedMean: adaptiveBreakdown.weightedMean,
+    weightedMedian: adaptiveBreakdown.weightedMedian,
+    weightedHarmonic: adaptiveBreakdown.weightedHarmonic,
+    balance: adaptiveBreakdown.balance,
+    attendanceReadinessContribution: attendanceRow ? {
+      key: attendanceRow.key,
+      label: attendanceRow.label,
+      score: attendanceRow.score,
+      configuredWeight: attendanceRow.configuredWeight,
+      normalizedWeight: attendanceRow.normalizedWeight,
+      weightedContributionPoints: attendanceRow.weightedContributionPoints,
+      finalScoreImpactVsNeutral: attendanceRow.finalScoreImpactVsNeutral,
+      contributionPath: "direct_workspace_index",
+      directOrIndirect: "direct",
+      source: attendanceRow.source,
+      note: "Closed attendance readiness and Professional Discipline rollups feed this workspace index directly.",
+    } : null,
+    workforceSustainabilityContribution: capacityRow ? {
+      key: capacityRow.key,
+      label: capacityRow.label,
+      score: capacityRow.score,
+      configuredWeight: capacityRow.configuredWeight,
+      normalizedWeight: capacityRow.normalizedWeight,
+      weightedContributionPoints: capacityRow.weightedContributionPoints,
+      finalScoreImpactVsNeutral: capacityRow.finalScoreImpactVsNeutral,
+      contributionPath: "direct_workspace_index",
+      directOrIndirect: "direct",
+      source: capacityRow.source,
+    } : null,
+    userScoreBalancePropagation: {
+      intended: true,
+      mode: "indirect_user_intelligence_rollup",
+      summary:
+        "User Score Balance changes canonical user_intelligence.score. Workspace Health then aggregates those user scores into workspaceHealthIndex, strategicRiskIndex, high-performer/at-risk distribution, and readiness rollups, so workspace_intelligence.score can move after recalculation.",
+      userScoreBalanceWeights: {
+        core: round4(userScoreBalanceWeights.core ?? 0.82),
+        professionalDiscipline: round4(userScoreBalanceWeights.professionalDiscipline ?? 0.18),
+      },
+      directWorkspaceWeightChangedByUserBalance: false,
+      affectedWorkspaceIndexes: [
+        "workspaceHealthIndex",
+        "productivityIndex",
+        "strategicRiskIndex",
+        "attendanceReadinessIndex",
+        "capacitySustainabilityIndex",
+      ],
+    },
+  };
 
   return {
     source: "enterprise_intelligence",
     scoreAuthority: "workspace_intelligence.score",
-    formulaLabel: "Weighted workspace intelligence indexes",
-    formulaReadable: "workspace score = normalized weighted blend of workspace health, productivity, strategic risk, delivery confidence, alignment, execution reality, attendance readiness, and capacity sustainability",
+    formulaLabel: scoreCalculation.formulaLabel,
+    formulaReadable: scoreCalculation.formulaReadable,
     finalScore: scoreOrNull(workspace.score),
     reconstructedFinalScore,
-    rawScoreBeforeRounding: round2(rawWeightedScore),
+    rawScoreBeforeRounding: scoreCalculation.rawScoreBeforeRounding,
+    finalRoundedScore: scoreCalculation.finalRoundedScore,
     confidence: scoreOrNull(workspace.confidence),
     scoreModel,
     domainContributions,
+    formulaComponents: scoreCalculation.formulaComponents,
+    scoreCalculation,
     upwardPressures: upward,
     downwardPressures: downward,
     attendanceEffect: attendanceRow ? {
       score: attendanceRow.score,
       feedsDomain: "Workspace Health",
       index: "attendanceReadinessIndex",
-      weight: attendanceRow.weight,
+      weight: attendanceRow.configuredWeight,
+      normalizedWeight: attendanceRow.normalizedWeight,
       weightedContributionPoints: attendanceRow.weightedContributionPoints,
       finalScoreImpactVsNeutral: attendanceRow.finalScoreImpactVsNeutral,
+      contributionPath: "direct_workspace_index",
+      directOrIndirect: "direct",
       materiallyAffectsScore: Math.abs(attendanceRow.finalScoreImpactVsNeutral) > 0,
-      summary: `Attendance Readiness contributes to workspace intelligence through a ${Math.round((attendanceRow.weight || 0) * 100)}% workspace-index emphasis.`,
+      summary: `Attendance Readiness is ${attendanceRow.score}/100 with a ${Math.round((attendanceRow.configuredWeight || 0) * 100)}% configured workspace-index weight and ${attendanceRow.weightedContributionPoints} weighted-mean contribution points before adaptive blending.`,
     } : null,
     workforceSustainabilityEffect: capacityRow ? {
       score: capacityRow.score,
       index: "capacitySustainabilityIndex",
-      weight: capacityRow.weight,
+      weight: capacityRow.configuredWeight,
+      normalizedWeight: capacityRow.normalizedWeight,
       weightedContributionPoints: capacityRow.weightedContributionPoints,
       finalScoreImpactVsNeutral: capacityRow.finalScoreImpactVsNeutral,
     } : null,
+    userScoreBalancePropagation: scoreCalculation.userScoreBalancePropagation,
     summary: downward.length
       ? `Workspace Health is ${scoreOrNull(workspace.score)}/100 from workspace_intelligence.score. Main downward pressure: ${downward.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`
       : `Workspace Health is ${scoreOrNull(workspace.score)}/100 from workspace_intelligence.score.`,
@@ -1253,7 +1457,10 @@ export async function buildTeamComparisonResponse({ workspaceId, userId, role, m
 
 export async function buildWorkspaceDashboardResponse({ workspaceId, userId, role }) {
   const month = monthKey();
-  const snapshot = await getUnifiedIntelligenceSnapshot({ workspaceId, userId, role });
+  const [snapshot, scoringConfig] = await Promise.all([
+    getUnifiedIntelligenceSnapshot({ workspaceId, userId, role }),
+    getWorkspaceScoringConfig({ workspaceId }),
+  ]);
   const workspaceIntel = snapshot.workspace;
   const [tasksRes, autopilotRes] = await Promise.all([
     pool.query(
@@ -1304,7 +1511,7 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
       escalatedActions: Number(autopilot.escalated_actions) || 0,
     },
     intelligence: workspaceIntel,
-    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}),
+    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig }),
     computedAt: workspaceIntel?.computedAt || null,
     coverageStart: workspaceIntel?.coverageStart || null,
     coverageEnd: workspaceIntel?.coverageEnd || null,
@@ -1313,7 +1520,10 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
 }
 
 export async function buildWorkspaceHealthResponse({ workspaceId, userId, role }) {
-  const snapshot = await getUnifiedIntelligenceSnapshot({ workspaceId, userId, role });
+  const [snapshot, scoringConfig] = await Promise.all([
+    getUnifiedIntelligenceSnapshot({ workspaceId, userId, role }),
+    getWorkspaceScoringConfig({ workspaceId }),
+  ]);
   const workspaceIntel = snapshot.workspace;
   return {
     source: "enterprise_intelligence",
@@ -1325,7 +1535,7 @@ export async function buildWorkspaceHealthResponse({ workspaceId, userId, role }
     concerns: workspaceIntel?.concerns || [],
     drivers: workspaceIntel?.drivers || [],
     indexes: workspaceIntel?.indexes || {},
-    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}),
+    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig }),
     risk: workspaceIntel?.risk || null,
     computedAt: workspaceIntel?.computedAt || null,
     coverageStart: workspaceIntel?.coverageStart || null,

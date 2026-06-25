@@ -52,6 +52,7 @@ import {
   getWorkspaceScoringConfig,
   upsertWorkspaceScoringConfig,
 } from "./repositories/scoringConfig.repository.js";
+import { adminScoringConfigSurface } from "./config/scoringConfig.model.js";
 
 function internalServiceAuthorized(req) {
   const expected = process.env.AI_SERVICE_SECRET || process.env.INTERNAL_SERVICE_SECRET || "";
@@ -638,9 +639,12 @@ export async function getScoringConfig(req, res) {
     }
 
     const config = await getWorkspaceScoringConfig({ workspaceId: req.workspaceId });
+    const editableConfig = adminScoringConfigSurface(config);
     return res.json({
       source: "enterprise_intelligence_scoring_config",
       config,
+      editableConfig,
+      adminSurface: editableConfig,
     });
   } catch (err) {
     console.error("getScoringConfig error:", err);
@@ -671,9 +675,12 @@ export async function updateScoringConfig(req, res) {
       configVersion: config.version,
     });
 
+    const editableConfig = adminScoringConfigSurface(config);
     return res.json({
       source: "enterprise_intelligence_scoring_config",
       config,
+      editableConfig,
+      adminSurface: editableConfig,
       recalculation: {
         workspaceScore: recalculation.workspace?.score ?? null,
         users: recalculation.users.length,

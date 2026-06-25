@@ -12,6 +12,7 @@ import {
   getWorkspaceScoringConfig,
   upsertWorkspaceScoringConfig,
 } from "../intelligence/repositories/scoringConfig.repository.js";
+import { adminScoringConfigSurface } from "../intelligence/config/scoringConfig.model.js";
 
 console.log("🔥 INTERNAL ROUTES LOADED");
 
@@ -146,7 +147,9 @@ router.post("/enterprise-intelligence/closure-verify", async (req, res) => {
       getDashboardOverviewFromIntelligence({ workspaceId, userId: admin.id, role: "admin", range }),
     ]);
     const pair = savedConfig?.groups?.userFinalBalance?.weights || {};
+    const adminSurface = adminScoringConfigSurface(savedConfig);
     const workspaceDomains = workspaceHealth?.scoreExplanation?.domainContributions || [];
+    const workspaceCalculation = workspaceHealth?.scoreExplanation?.scoreCalculation || {};
 
     return res.json({
       source: "enterprise_intelligence_closure_verification",
@@ -163,6 +166,13 @@ router.post("/enterprise-intelligence/closure-verify", async (req, res) => {
         version: savedConfig.version,
         pairWeights: pair,
         pairTotal: Math.round((Number(pair.core || 0) + Number(pair.professionalDiscipline || 0)) * 10000) / 10000,
+        adminSurface: {
+          source: adminSurface.source,
+          editableGroupKeys: adminSurface.editableGroupKeys,
+          hiddenGroupKeys: adminSurface.hiddenGroupKeys,
+          groupCount: Object.keys(adminSurface.groups || {}).length,
+          visibleGroups: Object.keys(adminSurface.groups || {}),
+        },
         groups: Object.fromEntries(
           Object.entries(savedConfig.groups || {}).map(([key, group]) => [
             key,
@@ -181,6 +191,16 @@ router.post("/enterprise-intelligence/closure-verify", async (req, res) => {
         finalScore: workspaceHealth.scoreExplanation?.finalScore ?? null,
         authority: workspaceHealth.scoreExplanation?.scoreAuthority ?? null,
         formula: workspaceHealth.scoreExplanation?.formulaReadable ?? null,
+        scoreCalculation: {
+          finalScore: workspaceCalculation.finalScore ?? null,
+          rawScoreBeforeRounding: workspaceCalculation.rawScoreBeforeRounding ?? null,
+          finalRoundedScore: workspaceCalculation.finalRoundedScore ?? null,
+          componentCount: Array.isArray(workspaceCalculation.formulaComponents)
+            ? workspaceCalculation.formulaComponents.length
+            : 0,
+          attendanceReadinessContribution: workspaceCalculation.attendanceReadinessContribution || null,
+          userScoreBalancePropagation: workspaceCalculation.userScoreBalancePropagation || null,
+        },
         domainCount: workspaceDomains.length,
         firstDomains: workspaceDomains.slice(0, 5).map((row) => ({
           key: row.key,

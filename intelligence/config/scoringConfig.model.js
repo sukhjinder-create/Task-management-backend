@@ -3,6 +3,7 @@ import { adaptiveScore, compactJson, weightedAdaptiveScore } from "../engine/sco
 export const SCORING_CONFIG_VERSION = "enterprise-scoring-weights-v1";
 export const MIN_WEIGHT = 0.01;
 export const MAX_WEIGHT = 0.99;
+export const ADMIN_SCORING_CONFIG_GROUP_KEYS = ["userFinalBalance"];
 
 export const SCORING_WEIGHT_GROUP_DEFINITIONS = {
   userFinalBalance: {
@@ -265,6 +266,25 @@ export function normalizeScoringConfig(input = {}, base = null) {
   };
 }
 
+export function adminScoringConfigSurface(config = {}) {
+  const normalized = config?.groups ? normalizeScoringConfig(config) : defaultScoringConfig();
+  const groups = Object.fromEntries(
+    ADMIN_SCORING_CONFIG_GROUP_KEYS
+      .map((groupKey) => [groupKey, normalized.groups?.[groupKey]])
+      .filter(([, group]) => Boolean(group))
+  );
+
+  return {
+    ...normalized,
+    source: "enterprise_intelligence_scoring_config_admin_surface",
+    productSurface: "workspace_admin_user_score_balance",
+    editableGroupKeys: ADMIN_SCORING_CONFIG_GROUP_KEYS,
+    hiddenGroupKeys: Object.keys(normalized.groups || {})
+      .filter((groupKey) => !ADMIN_SCORING_CONFIG_GROUP_KEYS.includes(groupKey)),
+    groups,
+  };
+}
+
 export function getScoringGroupWeights(config, groupKey) {
   const normalized = config?.groups ? normalizeScoringConfig(config) : defaultScoringConfig();
   return normalized.groups?.[groupKey]?.weights || SCORING_WEIGHT_GROUP_DEFINITIONS[groupKey]?.weights || {};
@@ -303,9 +323,11 @@ export default {
   SCORING_CONFIG_VERSION,
   MIN_WEIGHT,
   MAX_WEIGHT,
+  ADMIN_SCORING_CONFIG_GROUP_KEYS,
   SCORING_WEIGHT_GROUP_DEFINITIONS,
   defaultScoringConfig,
   normalizeScoringConfig,
+  adminScoringConfigSurface,
   getScoringGroupWeights,
   scoreWithScoringConfig,
   scoreObjectWithScoringConfig,

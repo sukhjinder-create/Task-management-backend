@@ -6,6 +6,7 @@ import { evaluateTeamIntelligence } from "../intelligence/evaluators/teamEvaluat
 import { evaluateUserIntelligence } from "../intelligence/evaluators/userEvaluator.js";
 import { evaluateWorkspaceIntelligence } from "../intelligence/evaluators/workspaceEvaluator.js";
 import {
+  adminScoringConfigSurface,
   getScoringGroupWeights,
   normalizeScoringConfig,
 } from "../intelligence/config/scoringConfig.model.js";
@@ -209,6 +210,9 @@ const normalizedPairConfig = normalizeScoringConfig({
 const pairWeights = getScoringGroupWeights(normalizedPairConfig, "userFinalBalance");
 assert.equal(pairWeights.core, 0.91, "Pair scoring config must preserve changed side");
 assert.equal(pairWeights.professionalDiscipline, 0.09, "Pair scoring config must auto-complement the other side");
+const adminSurface = adminScoringConfigSurface(normalizedPairConfig);
+assert.deepEqual(Object.keys(adminSurface.groups), ["userFinalBalance"], "Admin scoring surface must expose only User Score Balance");
+assert.deepEqual(adminSurface.editableGroupKeys, ["userFinalBalance"], "Admin scoring surface editable keys must stay narrow");
 
 const normalizedMultiConfig = normalizeScoringConfig({
   groups: {
@@ -458,12 +462,17 @@ assertIncludes(dashboard, "ResponsiveContainer", "Dashboard must render integrat
 assertIncludes(dashboard, "dashboardOverview?.visualizations?.charts", "Dashboard charts must consume backend visualization configs");
 assertIncludes(dashboard, "/intelligence/scoring-config", "Dashboard must consume backend-owned scoring config");
 assertIncludes(dashboard, "saveScoringConfiguration", "Dashboard must provide workspace-admin scoring config save flow");
+assertIncludes(dashboard, "adminScoringGroups", "Dashboard must render the narrowed admin scoring surface");
+assertIncludes(dashboard, "group?.key === \"userFinalBalance\"", "Dashboard must hide internal scoring groups from the main admin UI");
 assertIncludes(dashboard, "workspaceScoreExplanation", "Dashboard must render backend-owned workspace score explainability");
+assertIncludes(dashboard, "workspaceScoreCalculation", "Dashboard must render backend-owned workspace formula calculation");
+assertIncludes(dashboard, "workspaceAttendanceContribution", "Dashboard must render attendance/readiness contribution math");
 assertIncludes(dashboard, "driver.impactType", "Dashboard diagnostic drivers must expose canonical impact type");
 assertIncludes(dashboard, "Feeds {", "Dashboard diagnostic drivers must show canonical domain feed linkage");
 assertNotIncludes(dashboard, "30% of score", "Dashboard must not expose old score weighting copy");
 assertNotIncludes(dashboard, "70% of score", "Dashboard must not expose old score weighting copy");
 assertNotIncludes(dashboard, "Weighted from attendance and productivity", "Dashboard must not describe a static formula");
+assertNotIncludes(dashboard, "Multi-weight groups are normalized", "Dashboard must not expose internal multi-weight copy in the main admin UI");
 
 const result = evaluateUserIntelligence(buildSyntheticEvidence());
 const repeatResult = evaluateUserIntelligence(buildSyntheticEvidence());
