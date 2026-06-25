@@ -96,18 +96,30 @@ Expected live values for Apyhub/Sukhjinder:
 
 ## Validation
 
-Required validation after deploy:
+Local validation passed:
 
-- backend syntax check
-- enterprise intelligence verifier
-- frontend production build
-- live Apyhub/Sukhjinder internal trace confirms:
-  - `scoreExplanation.scoreCalculation` exists
-  - final score remains `67`
-  - reconstructed final score remains `67`
-  - domain contributions are returned
-  - evidence impacts are returned
-  - attendance effect is visible as about `+2`
+- `node --check intelligence/analytics/intelligenceResponses.service.js`
+- `npm run verify:enterprise-intelligence`
+- frontend `npm run build`
+
+Production validation passed after deployment:
+
+| Field | Observed |
+| --- | --- |
+| API revision | `asystence-api-00241-6l8` |
+| Frontend alias | `https://app.asystence.com` |
+| Trace status | `200` |
+| `scoreExplanation.scoreCalculation` | present |
+| Final score | `67` |
+| Reconstructed final score | `67` |
+| Core score | `67` |
+| Core contribution points | `54.94` |
+| Professional Discipline score | `67` |
+| Professional Discipline contribution points | `12.06` |
+| Attendance score | `92` |
+| Attendance final effect | `+2` versus removing attendance evidence |
+
+The live trace returned domain contributions for Execution Reliability, Delivery Effectiveness, Collaboration Health, Work Sustainability, and Professional Discipline. Evidence inputs now include the domains they feed and their backend-generated effect labels.
 
 ## Verdict
 
