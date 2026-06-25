@@ -125,8 +125,9 @@ Backend:
 
 - Git commit: `1e5bf83` - core explainability and scoring weightage implementation
 - Git commit: `2b67d1c` - locked internal closure verification route
-- Cloud Run revision: `asystence-api-00245-bfg`
-- Image digest: `sha256:d4343104512811d5895ccd3ffa977f919ed5dded0797c0762d1e3e8c205fefed`
+- Git commit: `d62a086` - final closure report and live proof artifact
+- Cloud Run revision: `asystence-api-00247-2tg`
+- Image digest: `sha256:bc113db1febf02cf3de6d7689ff7f7c923ba4742fe31d02af8dfcd8188cb385c`
 - Traffic: `100%`
 
 Frontend:

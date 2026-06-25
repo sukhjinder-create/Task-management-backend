@@ -1,14 +1,14 @@
 {
   "source": "live_apyhub_enterprise_intelligence_closure_verification",
-  "generatedAt": "2026-06-25T12:59:55.985Z",
+  "generatedAt": "2026-06-25T13:05:17.856Z",
   "apiUrl": "https://asystence-api-hsi7tc5k3a-el.a.run.app",
   "workspaceId": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
-  "deployedBackend": "asystence-api-00245-bfg",
+  "deployedBackend": "asystence-api-00247-2tg",
   "deployedFrontendAlias": "https://app.asystence.com",
   "scoringConfig": {
     "getStatus": 200,
     "putStatus": 200,
-    "persistedBefore": false,
+    "persistedBefore": true,
     "persistedAfter": true,
     "version": "enterprise-scoring-weights-v1",
     "pairWeights": {
@@ -22,6 +22,16 @@
       "userCoreDomains": 1,
       "userFinalBalance": 1,
       "workspaceIndexes": 1
+    },
+    "workspaceWeights": {
+      "productivityIndex": 0.125,
+      "strategicRiskIndex": 0.125,
+      "workspaceHealthIndex": 0.125,
+      "executionRealityIndex": 0.125,
+      "deliveryConfidenceIndex": 0.125,
+      "attendanceReadinessIndex": 0.125,
+      "capacitySustainabilityIndex": 0.125,
+      "organizationalAlignmentIndex": 0.125
     },
     "recalculation": {
       "workspaceScore": 60,
@@ -90,7 +100,11 @@
       "summary": "Attendance Readiness contributes to workspace intelligence through a 13% workspace-index emphasis."
     },
     "upwardPressureCount": 2,
-    "downwardPressureCount": 2
+    "downwardPressureCount": 2,
+    "computedAt": "2026-06-25T13:05:15.247Z",
+    "coverageStart": "2026-05-27",
+    "coverageEnd": "2026-06-25",
+    "attendanceClosedThroughDate": "2026-06-24"
   },
   "dashboardContract": {
     "status": 200,
@@ -101,7 +115,7 @@
   },
   "myPerformanceExplainability": {
     "status": 200,
-    "score": 59,
+    "score": 66,
     "scoreAuthority": "user_intelligence.score",
     "formulaReadable": "final score = round((core score x 0.82) + (professional discipline x 0.18) - attendance drag + attendance lift)",
     "scoreModelVersion": "enterprise-scoring-weights-v1",
