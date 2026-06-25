@@ -4,6 +4,7 @@ import { createAIChatMessage } from "../services/chat.service.js";
 import { getProjectReport } from "../services/reports.service.js";
 import { materializeDashboardHistoryInternal } from "../intelligence/intelligence.controller.js";
 import { certifyEnterpriseIntelligenceCoreWorkspace } from "../intelligence/certification/coreCertification.service.js";
+import { traceUserScoreForWorkspace } from "../intelligence/certification/userScoreTrace.service.js";
 
 console.log("🔥 INTERNAL ROUTES LOADED");
 
@@ -45,6 +46,33 @@ router.post("/enterprise-intelligence/certify-core", async (req, res) => {
     console.error("[ENTERPRISE_INTELLIGENCE_CERTIFICATION_ERROR]", err);
     return res.status(status).json({
       error: err.message || "Enterprise intelligence certification failed",
+      code: err.code || null,
+    });
+  }
+});
+
+router.post("/enterprise-intelligence/user-score-trace", async (req, res) => {
+  try {
+    if (!internalSecretMatches(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const result = await traceUserScoreForWorkspace({
+      workspaceId: req.body?.workspaceId || null,
+      workspaceName: req.body?.workspaceName || "Apyhub",
+      userId: req.body?.userId || null,
+      userSearch: req.body?.userSearch || "Sukhjinder",
+      includeRecomputed: req.body?.includeRecomputed !== false,
+    });
+
+    return res.json(result);
+  } catch (err) {
+    const status = err?.code === "TRACE_WORKSPACE_NOT_FOUND" || err?.code === "TRACE_USER_NOT_FOUND"
+      ? 404
+      : 500;
+    console.error("[ENTERPRISE_INTELLIGENCE_USER_SCORE_TRACE_ERROR]", err);
+    return res.status(status).json({
+      error: err.message || "Enterprise intelligence user score trace failed",
       code: err.code || null,
     });
   }

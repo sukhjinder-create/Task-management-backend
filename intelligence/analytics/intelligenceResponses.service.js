@@ -50,6 +50,113 @@ function riskDistribution(users = [], style = "camel") {
   };
 }
 
+function scoreOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+function buildUserScoreExplanation(user = {}) {
+  const dimensions = user.dimensions || {};
+  const attendance = user.attendance || {};
+  const domainRows = [
+    {
+      key: "executionReliability",
+      label: "Execution Reliability",
+      score: scoreOrNull(dimensions.executionReliability?.score),
+      source: "user_intelligence.dimensions.executionReliability.score",
+      role: "core_execution_domain",
+      note: "Commitment completion, due-date discipline, carry-over behavior, ownership, and blocker responsiveness.",
+      drivers: dimensions.executionReliability?.drivers || [],
+      concerns: dimensions.executionReliability?.concerns || [],
+    },
+    {
+      key: "deliveryEffectiveness",
+      label: "Delivery Effectiveness",
+      score: scoreOrNull(dimensions.deliveryEffectiveness?.score),
+      source: "user_intelligence.dimensions.deliveryEffectiveness.score",
+      role: "core_delivery_domain",
+      note: "Throughput, velocity, estimation quality, completion quality, and output consistency.",
+      drivers: dimensions.deliveryEffectiveness?.drivers || [],
+      concerns: dimensions.deliveryEffectiveness?.concerns || [],
+    },
+    {
+      key: "collaborationHealth",
+      label: "Collaboration Health",
+      score: scoreOrNull(dimensions.collaborationHealth?.score),
+      source: "user_intelligence.dimensions.collaborationHealth.score",
+      role: "core_collaboration_domain",
+      note: "Participation, reviews, comments, stakeholder engagement, and cross-team signals.",
+      drivers: dimensions.collaborationHealth?.drivers || [],
+      concerns: dimensions.collaborationHealth?.concerns || [],
+    },
+    {
+      key: "workSustainability",
+      label: "Work Sustainability",
+      score: scoreOrNull(dimensions.workSustainability?.score),
+      source: "user_intelligence.dimensions.workSustainability.score",
+      role: "core_sustainability_domain",
+      note: "Workload balance, carry-over health, focus fragmentation, overtime risk, and productivity under load.",
+      drivers: dimensions.workSustainability?.drivers || [],
+      concerns: dimensions.workSustainability?.concerns || [],
+    },
+    {
+      key: "professionalDiscipline",
+      label: "Professional Discipline",
+      score: scoreOrNull(dimensions.professionalDiscipline?.score),
+      source: "user_intelligence.dimensions.professionalDiscipline.score",
+      role: "discipline_balancing_domain",
+      note: "Attendance, review completion, update hygiene, and workflow compliance.",
+      drivers: dimensions.professionalDiscipline?.drivers || [],
+      concerns: dimensions.professionalDiscipline?.concerns || [],
+    },
+  ];
+
+  const lowestDomains = [...domainRows]
+    .filter((row) => row.score != null)
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 2);
+  const attendanceScore = scoreOrNull(attendance.score);
+  const deliveryScore = scoreOrNull(dimensions.deliveryEffectiveness?.score);
+
+  return {
+    source: "enterprise_intelligence",
+    scoreAuthority: "user_intelligence.score",
+    score: scoreOrNull(user.score),
+    risk: user.risk || {},
+    confidence: scoreOrNull(user.confidence),
+    finalScoreIsNotAverageOfEvidenceBars: true,
+    summary: lowestDomains.length
+      ? `Overall score is the canonical user intelligence result, not an average of the visible evidence bars. The strongest downward pressure is currently ${lowestDomains.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`
+      : "Overall score is the canonical user intelligence result, not an average of the visible evidence bars.",
+    evidenceBars: [
+      {
+        key: "attendanceScore",
+        label: "Attendance Evidence",
+        score: attendanceScore,
+        source: "user_intelligence.attendance.score",
+        role: "feeds_professional_discipline",
+        note: "Attendance contributes through Professional Discipline and attendance lift/drag rules, but it does not override execution and delivery evidence.",
+      },
+      {
+        key: "deliveryEffectiveness",
+        label: "Delivery Effectiveness",
+        score: deliveryScore,
+        source: "user_intelligence.dimensions.deliveryEffectiveness.score",
+        role: "core_delivery_domain",
+        note: "This is the delivery domain score, not the final productivity/performance score.",
+      },
+    ],
+    domainRows,
+    time: {
+      computedAt: user.computedAt,
+      coverageStart: user.coverageStart,
+      coverageEnd: user.coverageEnd,
+      attendanceClosedThroughDate: user.attendanceClosedThroughDate,
+      intelligenceMode: user.intelligenceMode,
+    },
+  };
+}
+
 function buildForecastContract({ scoreHistory = [], workspace = null, executionContext = {}, rangeMeta = dashboardRangeMeta("30d") }) {
   const scores = (scoreHistory || [])
     .map((point) => Number(point.score))
@@ -148,6 +255,7 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
       professionalDiscipline: dimensions.professionalDiscipline?.score ?? null,
       hasAttendanceTracking: user.attendance?.metrics?.expectedWorkingDays > 0,
     },
+    scoreExplanation: buildUserScoreExplanation(user),
     reasoning: {
       strengths: user.strengths,
       concerns: user.concerns,

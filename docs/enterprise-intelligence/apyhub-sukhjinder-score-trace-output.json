@@ -1,0 +1,632 @@
+{
+  "source": "enterprise_intelligence_user_score_trace",
+  "generatedAt": "2026-06-25T07:43:25.421Z",
+  "workspaceResolution": {
+    "selected": {
+      "id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+      "name": "Apyhub",
+      "plan": "pro",
+      "billing_plan": "pro",
+      "is_active": true,
+      "status": "active",
+      "created_at": "2026-04-21T12:13:30.485Z"
+    },
+    "candidates": [
+      {
+        "id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "name": "Apyhub",
+        "plan": "pro",
+        "billing_plan": "pro",
+        "is_active": true,
+        "status": "active",
+        "created_at": "2026-04-21T12:13:30.485Z"
+      }
+    ]
+  },
+  "userResolution": {
+    "selected": {
+      "id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+      "username": "Sukhjinder",
+      "email": "sukhjinder@apyhub.com",
+      "role": "admin",
+      "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+      "workspace_role": "member",
+      "created_at": "2026-04-21T12:13:30.485Z"
+    },
+    "candidates": [
+      {
+        "id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+        "username": "Sukhjinder",
+        "email": "sukhjinder@apyhub.com",
+        "role": "admin",
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "workspace_role": "member",
+        "created_at": "2026-04-21T12:13:30.485Z"
+      }
+    ]
+  },
+  "displayedCard": {
+    "endpoint": "GET /intelligence/user/performance",
+    "score": 67,
+    "riskLevel": "Low",
+    "attendanceBar": 92,
+    "productivityBar": 92,
+    "explanation": "1/2 assigned task(s) completed in the active evidence window 0/2 due-date tracked task(s) delivered on time",
+    "computedAt": "2026-06-24T09:21:28.028Z",
+    "coverageStart": "2026-05-26",
+    "coverageEnd": "2026-06-24",
+    "attendanceClosedThroughDate": "2026-06-23",
+    "scoreExplanation": {
+      "source": "enterprise_intelligence",
+      "scoreAuthority": "user_intelligence.score",
+      "score": 67,
+      "risk": {
+        "level": "Low",
+        "probability": 18
+      },
+      "confidence": 82,
+      "finalScoreIsNotAverageOfEvidenceBars": true,
+      "summary": "Overall score is the canonical user intelligence result, not an average of the visible evidence bars. The strongest downward pressure is currently Collaboration Health (16/100) and Execution Reliability (59/100).",
+      "evidenceBars": [
+        {
+          "key": "attendanceScore",
+          "label": "Attendance Evidence",
+          "score": 92,
+          "source": "user_intelligence.attendance.score",
+          "role": "feeds_professional_discipline",
+          "note": "Attendance contributes through Professional Discipline and attendance lift/drag rules, but it does not override execution and delivery evidence."
+        },
+        {
+          "key": "deliveryEffectiveness",
+          "label": "Delivery Effectiveness",
+          "score": 92,
+          "source": "user_intelligence.dimensions.deliveryEffectiveness.score",
+          "role": "core_delivery_domain",
+          "note": "This is the delivery domain score, not the final productivity/performance score."
+        }
+      ],
+      "domainRows": [
+        {
+          "key": "executionReliability",
+          "label": "Execution Reliability",
+          "score": 59,
+          "source": "user_intelligence.dimensions.executionReliability.score",
+          "role": "core_execution_domain",
+          "note": "Commitment completion, due-date discipline, carry-over behavior, ownership, and blocker responsiveness.",
+          "drivers": [
+            "1/2 assigned task(s) completed in the active evidence window",
+            "0/2 due-date tracked task(s) delivered on time"
+          ],
+          "concerns": [
+            "Commitment completion is below expected reliability",
+            "Deadline discipline needs attention"
+          ]
+        },
+        {
+          "key": "deliveryEffectiveness",
+          "label": "Delivery Effectiveness",
+          "score": 92,
+          "source": "user_intelligence.dimensions.deliveryEffectiveness.score",
+          "role": "core_delivery_domain",
+          "note": "Throughput, velocity, estimation quality, completion quality, and output consistency.",
+          "drivers": [
+            "1 completion(s), 0 story point(s), 0 avg completion day(s)"
+          ],
+          "concerns": []
+        },
+        {
+          "key": "collaborationHealth",
+          "label": "Collaboration Health",
+          "score": 16,
+          "source": "user_intelligence.dimensions.collaborationHealth.score",
+          "role": "core_collaboration_domain",
+          "note": "Participation, reviews, comments, stakeholder engagement, and cross-team signals.",
+          "drivers": [
+            "0 comment(s), 0 watched task signal(s), 1 review record(s)"
+          ],
+          "concerns": [
+            "Limited collaboration signal in comments or watched work",
+            "Review participation requires follow-through"
+          ]
+        },
+        {
+          "key": "workSustainability",
+          "label": "Work Sustainability",
+          "score": 85,
+          "source": "user_intelligence.dimensions.workSustainability.score",
+          "role": "core_sustainability_domain",
+          "note": "Workload balance, carry-over health, focus fragmentation, overtime risk, and productivity under load.",
+          "drivers": [
+            "1 open task(s), 0 in-progress task(s), 0 carry-over item(s)"
+          ],
+          "concerns": [
+            "Burnout indicators require manager visibility"
+          ]
+        },
+        {
+          "key": "professionalDiscipline",
+          "label": "Professional Discipline",
+          "score": 67,
+          "source": "user_intelligence.dimensions.professionalDiscipline.score",
+          "role": "discipline_balancing_domain",
+          "note": "Attendance, review completion, update hygiene, and workflow compliance.",
+          "drivers": [
+            "Attendance confidence 100/100, 3 activity log signal(s)"
+          ],
+          "concerns": [
+            "Review completion is incomplete"
+          ]
+        }
+      ],
+      "time": {
+        "computedAt": "2026-06-24T09:21:28.028Z",
+        "coverageStart": "2026-05-26",
+        "coverageEnd": "2026-06-24",
+        "attendanceClosedThroughDate": "2026-06-23",
+        "intelligenceMode": "live_operational"
+      }
+    }
+  },
+  "sourceRow": {
+    "id": "d91e3ebe-4300-4522-a232-d05cf567fd7c",
+    "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+    "user_id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+    "score": 67,
+    "band": "Healthy",
+    "confidence": "82.00",
+    "evidence_hash": "874588aac57ab2c3427e0e3fbe6a1e692211028a3bea4c68bc098b23ae34bbec",
+    "calculation_version": "enterprise-intelligence-v1",
+    "last_evaluated_at": "2026-06-24T09:21:28.028Z",
+    "source_window": {
+      "endDate": "2026-06-24",
+      "startDate": "2026-05-26",
+      "windowDays": 30,
+      "attendanceCoverageEnd": "2026-06-23",
+      "attendanceCoverageStart": "2026-05-26",
+      "attendanceClosedThroughDate": "2026-06-23"
+    },
+    "created_at": "2026-06-24T09:21:28.028Z",
+    "updated_at": "2026-06-24T09:21:28.028Z"
+  },
+  "fieldAuthorityMap": [
+    {
+      "field": "overall score",
+      "apiField": "score",
+      "authority": "user_intelligence.score",
+      "path": "GET /intelligence/user/performance -> getUserPerformance -> buildUserPerformanceResponse -> getUnifiedIntelligenceSnapshot -> getUserIntelligence",
+      "inlineScoreCalculation": false,
+      "legacyPath": false
+    },
+    {
+      "field": "attendance evidence bar",
+      "apiField": "breakdown.attendanceScore",
+      "authority": "user_intelligence.attendance.score",
+      "path": "buildUserPerformanceResponse maps currentUser.attendance.score",
+      "inlineScoreCalculation": false,
+      "legacyPath": false
+    },
+    {
+      "field": "productivity evidence bar",
+      "apiField": "breakdown.productivityScore",
+      "authority": "user_intelligence.dimensions.deliveryEffectiveness.score",
+      "path": "buildUserPerformanceResponse maps currentUser.dimensions.deliveryEffectiveness.score",
+      "inlineScoreCalculation": false,
+      "legacyPath": false
+    },
+    {
+      "field": "risk badge",
+      "apiField": "intelligence.risk.level",
+      "authority": "user_intelligence.risk.level",
+      "path": "buildUserPerformanceResponse maps currentUser.risk",
+      "inlineScoreCalculation": false,
+      "legacyPath": false
+    },
+    {
+      "field": "delta",
+      "apiField": "frontend delta from /intelligence/user/trend series",
+      "authority": "intelligence_snapshots for scope_type='user'",
+      "path": "Dashboard.jsx compares current score against the previous trend series point",
+      "inlineScoreCalculation": "rendering delta only, not score authority",
+      "legacyPath": false
+    },
+    {
+      "field": "evidence text",
+      "apiField": "explanation",
+      "authority": "user_intelligence.drivers",
+      "path": "buildUserPerformanceResponse joins the first two currentUser.drivers",
+      "inlineScoreCalculation": false,
+      "legacyPath": false
+    }
+  ],
+  "persistedUserIntelligence": {
+    "id": "d91e3ebe-4300-4522-a232-d05cf567fd7c",
+    "score": 67,
+    "band": "Healthy",
+    "confidence": 82,
+    "risk": {
+      "level": "Low",
+      "probability": 18
+    },
+    "dimensions": {
+      "workSustainability": {
+        "band": "Exceptional",
+        "name": "Work Sustainability",
+        "score": 85,
+        "drivers": [
+          "1 open task(s), 0 in-progress task(s), 0 carry-over item(s)"
+        ],
+        "metrics": {
+          "overtimeRisk": 35,
+          "carryOverHealth": 100,
+          "workloadBalance": 100,
+          "focusFragmentation": 100,
+          "productivityUnderLoad": 72
+        },
+        "concerns": [
+          "Burnout indicators require manager visibility"
+        ],
+        "strengths": [
+          "Workload is staying within a manageable range",
+          "Concurrent work-in-progress is controlled"
+        ],
+        "confidence": 100,
+        "indicators": []
+      },
+      "collaborationHealth": {
+        "band": "Critical",
+        "name": "Collaboration Health",
+        "score": 16,
+        "drivers": [
+          "0 comment(s), 0 watched task signal(s), 1 review record(s)"
+        ],
+        "metrics": {
+          "crossTeam": 0,
+          "participation": 0,
+          "reviewCompletion": 0,
+          "stakeholderEngagement": 0
+        },
+        "concerns": [
+          "Limited collaboration signal in comments or watched work",
+          "Review participation requires follow-through"
+        ],
+        "strengths": [],
+        "confidence": 69,
+        "indicators": []
+      },
+      "executionReliability": {
+        "band": "Watch",
+        "name": "Execution Reliability",
+        "score": 59,
+        "drivers": [
+          "1/2 assigned task(s) completed in the active evidence window",
+          "0/2 due-date tracked task(s) delivered on time"
+        ],
+        "metrics": {
+          "carryOverControl": 100,
+          "dueDateDiscipline": 0,
+          "commitmentCompletion": 50,
+          "ownershipConsistency": 100,
+          "blockerResponsiveness": 72
+        },
+        "concerns": [
+          "Commitment completion is below expected reliability",
+          "Deadline discipline needs attention"
+        ],
+        "strengths": [],
+        "confidence": 77,
+        "indicators": []
+      },
+      "deliveryEffectiveness": {
+        "band": "Exceptional",
+        "name": "Delivery Effectiveness",
+        "score": 92,
+        "drivers": [
+          "1 completion(s), 0 story point(s), 0 avg completion day(s)"
+        ],
+        "metrics": {
+          "velocity": 100,
+          "throughput": 100,
+          "completionQuality": 100,
+          "estimationQuality": 64,
+          "outputConsistency": 100
+        },
+        "concerns": [],
+        "strengths": [
+          "Throughput is improving against the previous window",
+          "Completed work is moving at a healthy pace"
+        ],
+        "confidence": 66,
+        "indicators": []
+      },
+      "professionalDiscipline": {
+        "band": "Healthy",
+        "name": "Professional Discipline",
+        "score": 67,
+        "drivers": [
+          "Attendance confidence 100/100, 3 activity log signal(s)"
+        ],
+        "metrics": {
+          "updateHygiene": 75,
+          "workflowScore": 100,
+          "attendanceScore": 92,
+          "reviewCompletion": 0
+        },
+        "concerns": [
+          "Review completion is incomplete"
+        ],
+        "strengths": [
+          "Attendance discipline supports operational readiness"
+        ],
+        "confidence": 100,
+        "indicators": []
+      }
+    },
+    "attendance": {
+      "band": "Exceptional",
+      "name": "Attendance Intelligence",
+      "score": 92,
+      "drivers": [
+        "Evaluated 21 valid working day(s) after excluding holidays and approved leave",
+        "Observed 21 day(s) with attendance telemetry",
+        "8 non-working day attendance signal(s) treated as informational because delivery evidence was not meaningful"
+      ],
+      "metrics": {
+        "trend": "stable",
+        "confidence": 100,
+        "coverageEnd": "2026-06-23",
+        "presentDays": 21,
+        "reliability": "High",
+        "coverageStart": "2026-05-26",
+        "breakDiscipline": "High",
+        "excludedHolidays": 0,
+        "approvedLeaveDays": 0,
+        "scheduleDiscipline": "Moderate",
+        "availabilityQuality": "Moderate",
+        "expectedWorkingDays": 21,
+        "meaningfulDeliveryRule": {
+          "storyPoints": "any completed story-point delivery",
+          "timeLogHours": "at least 2 logged hour(s) on delivery work",
+          "completedTasks": "at least one completed task",
+          "indicatorLimit": 3,
+          "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+          "blockerResolutions": "at least one blocker resolved"
+        },
+        "attendanceClosedThroughDate": "2026-06-23"
+      },
+      "concerns": [
+        "Repeated non-working day attendance detected",
+        "Sustained long work hours detected"
+      ],
+      "strengths": [
+        "Consistent attendance on expected working days",
+        "Break and away-time patterns stayed controlled",
+        "Attendance pattern is stable across the evaluation window"
+      ],
+      "confidence": 100,
+      "indicators": []
+    },
+    "drivers": [
+      "1/2 assigned task(s) completed in the active evidence window",
+      "0/2 due-date tracked task(s) delivered on time",
+      "1 completion(s), 0 story point(s), 0 avg completion day(s)",
+      "0 comment(s), 0 watched task signal(s), 1 review record(s)",
+      "1 open task(s), 0 in-progress task(s), 0 carry-over item(s)",
+      "Attendance confidence 100/100, 3 activity log signal(s)"
+    ],
+    "strengths": [
+      "Throughput is improving against the previous window",
+      "Completed work is moving at a healthy pace",
+      "Workload is staying within a manageable range",
+      "Concurrent work-in-progress is controlled",
+      "Attendance discipline supports operational readiness",
+      "Consistent attendance on expected working days",
+      "Break and away-time patterns stayed controlled",
+      "Attendance pattern is stable across the evaluation window"
+    ],
+    "concerns": [
+      "Commitment completion is below expected reliability",
+      "Deadline discipline needs attention",
+      "Limited collaboration signal in comments or watched work",
+      "Review participation requires follow-through",
+      "Burnout indicators require manager visibility",
+      "Review completion is incomplete",
+      "Repeated non-working day attendance detected",
+      "Sustained long work hours detected"
+    ],
+    "computedAt": "2026-06-24T09:21:28.028Z",
+    "coverageStart": "2026-05-26",
+    "coverageEnd": "2026-06-24",
+    "attendanceClosedThroughDate": "2026-06-23",
+    "calculationVersion": "enterprise-intelligence-v1",
+    "evidenceHash": "874588aac57ab2c3427e0e3fbe6a1e692211028a3bea4c68bc098b23ae34bbec"
+  },
+  "exactScoreComposition": {
+    "formulaPath": "roundScore((coreScore * 0.82) + (professionalDiscipline * 0.18) - attendanceDrag + attendanceLift)",
+    "persistedFinalScore": 67,
+    "reconstructedFinalScore": 67,
+    "reconstructedRawScore": 67,
+    "coreScore": 67,
+    "professionalDisciplineScore": 67,
+    "confidenceAverage": 82.4,
+    "attendanceScore": 92,
+    "attendanceDrag": 0,
+    "attendanceLift": 0,
+    "primaryDomains": [
+      {
+        "key": "executionReliability",
+        "label": "Execution Reliability",
+        "score": 59,
+        "confidence": 77,
+        "metrics": {
+          "carryOverControl": 100,
+          "dueDateDiscipline": 0,
+          "commitmentCompletion": 50,
+          "ownershipConsistency": 100,
+          "blockerResponsiveness": 72
+        },
+        "drivers": [
+          "1/2 assigned task(s) completed in the active evidence window",
+          "0/2 due-date tracked task(s) delivered on time"
+        ],
+        "strengths": [],
+        "concerns": [
+          "Commitment completion is below expected reliability",
+          "Deadline discipline needs attention"
+        ]
+      },
+      {
+        "key": "deliveryEffectiveness",
+        "label": "Delivery Effectiveness",
+        "score": 92,
+        "confidence": 66,
+        "metrics": {
+          "velocity": 100,
+          "throughput": 100,
+          "completionQuality": 100,
+          "estimationQuality": 64,
+          "outputConsistency": 100
+        },
+        "drivers": [
+          "1 completion(s), 0 story point(s), 0 avg completion day(s)"
+        ],
+        "strengths": [
+          "Throughput is improving against the previous window",
+          "Completed work is moving at a healthy pace"
+        ],
+        "concerns": []
+      },
+      {
+        "key": "collaborationHealth",
+        "label": "Collaboration Health",
+        "score": 16,
+        "confidence": 69,
+        "metrics": {
+          "crossTeam": 0,
+          "participation": 0,
+          "reviewCompletion": 0,
+          "stakeholderEngagement": 0
+        },
+        "drivers": [
+          "0 comment(s), 0 watched task signal(s), 1 review record(s)"
+        ],
+        "strengths": [],
+        "concerns": [
+          "Limited collaboration signal in comments or watched work",
+          "Review participation requires follow-through"
+        ]
+      },
+      {
+        "key": "workSustainability",
+        "label": "Work Sustainability",
+        "score": 85,
+        "confidence": 100,
+        "metrics": {
+          "overtimeRisk": 35,
+          "carryOverHealth": 100,
+          "workloadBalance": 100,
+          "focusFragmentation": 100,
+          "productivityUnderLoad": 72
+        },
+        "drivers": [
+          "1 open task(s), 0 in-progress task(s), 0 carry-over item(s)"
+        ],
+        "strengths": [
+          "Workload is staying within a manageable range",
+          "Concurrent work-in-progress is controlled"
+        ],
+        "concerns": [
+          "Burnout indicators require manager visibility"
+        ]
+      }
+    ],
+    "professionalDiscipline": {
+      "key": "professionalDiscipline",
+      "label": "Professional Discipline",
+      "score": 67,
+      "confidence": 100,
+      "metrics": {
+        "updateHygiene": 75,
+        "workflowScore": 100,
+        "attendanceScore": 92,
+        "reviewCompletion": 0
+      },
+      "drivers": [
+        "Attendance confidence 100/100, 3 activity log signal(s)"
+      ],
+      "strengths": [
+        "Attendance discipline supports operational readiness"
+      ],
+      "concerns": [
+        "Review completion is incomplete"
+      ]
+    },
+    "attendanceContribution": {
+      "attendanceScore": 92,
+      "enteredThrough": [
+        "user_intelligence.attendance.score",
+        "user_intelligence.dimensions.professionalDiscipline.metrics.attendanceScore",
+        "userEvaluator attendance lift/drag rule"
+      ],
+      "professionalWithAttendance": 67,
+      "professionalWithoutAttendanceSignal": 58,
+      "professionalWithNeutralAttendance": 59,
+      "finalWithAttendance": 67,
+      "finalWithoutAttendanceSignal": 65,
+      "finalWithNeutralAttendance": 66,
+      "effectiveFinalLiftVsNoAttendanceSignal": 2,
+      "effectiveFinalLiftVsNeutralAttendance": 1,
+      "directAttendanceAdjustment": 0,
+      "materiallyAffectsScore": true,
+      "explanation": "Attendance is not cosmetic. It enters the Professional Discipline domain and may also add a bounded lift/drag. It does not override weak execution domains."
+    }
+  },
+  "trendDelta": {
+    "source": "intelligence_snapshots",
+    "frontendLabelBeforeFix": "vs last month",
+    "correctedLabel": "vs previous intelligence point",
+    "previousPoint": {
+      "month": "2026-06",
+      "date": "2026-06-24",
+      "score": 67,
+      "computedAt": "2026-06-25T07:14:29.541Z",
+      "coverageStart": "2026-05-26",
+      "coverageEnd": "2026-06-24",
+      "attendanceClosedThroughDate": "2026-06-24",
+      "snapshotDate": "2026-06-24"
+    },
+    "currentPoint": {
+      "month": "2026-06",
+      "date": "2026-06-25",
+      "score": 67,
+      "computedAt": "2026-06-25T07:14:31.879Z",
+      "coverageStart": "2026-05-27",
+      "coverageEnd": "2026-06-25",
+      "attendanceClosedThroughDate": "2026-06-24",
+      "snapshotDate": "2026-06-25"
+    },
+    "delta": 0
+  },
+  "taskEvidenceSummary": {
+    "total_tasks": 2,
+    "completed_tasks": 1,
+    "due_date_tracked_tasks": 2,
+    "on_time_completed_tasks": 0,
+    "overdue_open_tasks": 0,
+    "coverageStart": "2026-05-26",
+    "coverageEnd": "2026-06-24",
+    "source": "tasks_filtered_to_user_intelligence_source_window"
+  },
+  "recomputedFromCurrentEvidence": {
+    "score": 67,
+    "attendanceScore": 89,
+    "deliveryEffectiveness": 92,
+    "executionReliability": 59,
+    "evidenceHash": "2e82faea688e4fff691244f6edda112cdd26757ba2fdc6661d1fc08a84208d3b",
+    "matchesPersistedScore": true,
+    "source": "non_persisted_recalculation_from_live_evidence"
+  },
+  "mismatchExplanation": {
+    "answer": "Attendance and Delivery Effectiveness are evidence/domain scores. The final score is the persisted canonical user_intelligence.score, reconstructed from execution reliability, delivery effectiveness, collaboration health, work sustainability, professional discipline, and bounded attendance adjustment.",
+    "uiWasMisleading": "Partially. Showing 'Attendance' and 'Productivity' beside the final score without saying they are evidence dimensions could imply the final score should average near those bars."
+  }
+}
