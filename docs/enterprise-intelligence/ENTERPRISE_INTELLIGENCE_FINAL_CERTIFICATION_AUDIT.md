@@ -3,6 +3,48 @@
 Generated: 2026-06-25
 Scope: final certification audit over the existing enterprise intelligence implementation, updated after the final P0 closure code pass and live Apyhub production workspace certification. This pass did not redesign the intelligence model, remove legacy rollback code, touch huddles/chat/calling/video modules, or broaden rollout globally.
 
+## Final Closure Addendum
+
+The final enterprise intelligence/dashboard closure pass has now been completed and deployed for the certified Apyhub core scope.
+
+Closure report:
+
+- `docs/enterprise-intelligence/ENTERPRISE_INTELLIGENCE_FINAL_CLOSURE_PASS.md`
+
+Live proof artifact:
+
+- `docs/enterprise-intelligence/enterprise-closure-verification-output.json`
+
+Closure outcome:
+
+- `WORKSTREAM_CLOSED_WITH_EXPLICIT_NON_CORE_EXCLUSIONS`
+
+Closed in this pass:
+
+- Workspace Health now has backend-owned score explainability sourced from `workspace_intelligence.score`.
+- My Performance diagnostic drivers now expose canonical domain linkage, impact type, materiality, and score-affecting status.
+- Workspace-admin scoring weightage configuration is now a backend-owned product feature through `enterprise_intelligence_scoring_configs`.
+- The canonical user/project/team/workspace evaluators apply the active workspace scoring config.
+- Score explainability reflects the active score model.
+- Certified dashboard/intelligence surfaces were normalized to the dark/orange Asystence visual language.
+
+Live Apyhub verification after deployment showed:
+
+- Scoring config GET: `200`
+- Scoring config PUT: `200`
+- Config persisted: `true`
+- All scoring group totals: `1`
+- Canonical recalculation: `3 users`, `3 projects`, `0 teams`
+- Workspace Health authority: `workspace_intelligence.score`
+- Workspace Health canonical domain count: `8`
+- My Performance score model: `enterprise-scoring-weights-v1`
+- My Performance linked diagnostic drivers: `8`
+
+Explicit exclusions remain:
+
+- Unrelated huddle/chat/calling/video modules were not touched.
+- Previously isolated non-core specialty intelligence surfaces remain outside the certified core dashboard workstream.
+
 ## Final Certification Verdict
 
 | Question | Verdict | Certification Level |

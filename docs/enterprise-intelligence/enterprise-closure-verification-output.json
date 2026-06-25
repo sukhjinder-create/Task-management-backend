@@ -1,0 +1,163 @@
+{
+  "source": "live_apyhub_enterprise_intelligence_closure_verification",
+  "generatedAt": "2026-06-25T12:59:55.985Z",
+  "apiUrl": "https://asystence-api-hsi7tc5k3a-el.a.run.app",
+  "workspaceId": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+  "deployedBackend": "asystence-api-00245-bfg",
+  "deployedFrontendAlias": "https://app.asystence.com",
+  "scoringConfig": {
+    "getStatus": 200,
+    "putStatus": 200,
+    "persistedBefore": false,
+    "persistedAfter": true,
+    "version": "enterprise-scoring-weights-v1",
+    "pairWeights": {
+      "core": 0.82,
+      "professionalDiscipline": 0.18
+    },
+    "pairTotal": 1,
+    "groupTotals": {
+      "teamIndexes": 1,
+      "projectIndexes": 1,
+      "userCoreDomains": 1,
+      "userFinalBalance": 1,
+      "workspaceIndexes": 1
+    },
+    "recalculation": {
+      "workspaceScore": 60,
+      "users": 3,
+      "projects": 3,
+      "teams": 0
+    }
+  },
+  "workspaceHealthExplainability": {
+    "status": 200,
+    "healthScore": 60,
+    "finalScore": 60,
+    "authority": "workspace_intelligence.score",
+    "formula": "workspace score = normalized weighted blend of workspace health, productivity, strategic risk, delivery confidence, alignment, execution reality, attendance readiness, and capacity sustainability",
+    "domainCount": 8,
+    "firstDomains": [
+      {
+        "key": "workspaceHealthIndex",
+        "label": "Workspace Health",
+        "score": 56,
+        "weight": 0.13,
+        "finalScoreImpactVsNeutral": -1,
+        "effect": "Neutral / moderate"
+      },
+      {
+        "key": "productivityIndex",
+        "label": "Productivity",
+        "score": 48,
+        "weight": 0.13,
+        "finalScoreImpactVsNeutral": -1,
+        "effect": "Downward pressure"
+      },
+      {
+        "key": "strategicRiskIndex",
+        "label": "Strategic Risk",
+        "score": 65,
+        "weight": 0.13,
+        "finalScoreImpactVsNeutral": 1,
+        "effect": "Neutral / moderate"
+      },
+      {
+        "key": "deliveryConfidenceIndex",
+        "label": "Delivery Confidence",
+        "score": 68,
+        "weight": 0.13,
+        "finalScoreImpactVsNeutral": 2,
+        "effect": "Neutral / moderate"
+      },
+      {
+        "key": "organizationalAlignmentIndex",
+        "label": "Organizational Alignment",
+        "score": 54,
+        "weight": 0.13,
+        "finalScoreImpactVsNeutral": -1,
+        "effect": "Downward pressure"
+      }
+    ],
+    "attendanceEffect": {
+      "score": 67,
+      "feedsDomain": "Workspace Health",
+      "index": "attendanceReadinessIndex",
+      "weight": 0.13,
+      "weightedContributionPoints": 8.71,
+      "finalScoreImpactVsNeutral": 2,
+      "materiallyAffectsScore": true,
+      "summary": "Attendance Readiness contributes to workspace intelligence through a 13% workspace-index emphasis."
+    },
+    "upwardPressureCount": 2,
+    "downwardPressureCount": 2
+  },
+  "dashboardContract": {
+    "status": 200,
+    "source": null,
+    "healthScore": 60,
+    "chartCount": 6,
+    "executiveSummarySource": null
+  },
+  "myPerformanceExplainability": {
+    "status": 200,
+    "score": 59,
+    "scoreAuthority": "user_intelligence.score",
+    "formulaReadable": "final score = round((core score x 0.82) + (professional discipline x 0.18) - attendance drag + attendance lift)",
+    "scoreModelVersion": "enterprise-scoring-weights-v1",
+    "domainContributionCount": 5,
+    "diagnosticDriverCount": 8,
+    "linkedDriverSample": [
+      {
+        "key": "commitmentCompletion",
+        "feedsDomains": [
+          "Execution Reliability"
+        ],
+        "impactType": "direct_domain_input",
+        "scoreAffecting": true,
+        "materiality": "domain_shaping",
+        "effectLabel": "Downward pressure"
+      },
+      {
+        "key": "timeliness",
+        "feedsDomains": [
+          "Execution Reliability"
+        ],
+        "impactType": "direct_domain_input",
+        "scoreAffecting": true,
+        "materiality": "domain_shaping",
+        "effectLabel": "Downward pressure"
+      },
+      {
+        "key": "blockerResponsiveness",
+        "feedsDomains": [
+          "Execution Reliability"
+        ],
+        "impactType": "direct_domain_input",
+        "scoreAffecting": true,
+        "materiality": "domain_shaping",
+        "effectLabel": "Neutral / moderate"
+      },
+      {
+        "key": "taskVelocity",
+        "feedsDomains": [
+          "Delivery Effectiveness"
+        ],
+        "impactType": "direct_domain_input",
+        "scoreAffecting": true,
+        "materiality": "domain_shaping",
+        "effectLabel": "Positive support"
+      },
+      {
+        "key": "estimationQuality",
+        "feedsDomains": [
+          "Delivery Effectiveness"
+        ],
+        "impactType": "direct_domain_input",
+        "scoreAffecting": true,
+        "materiality": "domain_shaping",
+        "effectLabel": "Neutral / moderate"
+      }
+    ]
+  }
+}
