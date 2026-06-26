@@ -213,6 +213,12 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
               maxBitrate: 1700000,
               maxFramerate: 30,
             ),
+            // Capture is 720x1280 but the highest simulcast layer used to top
+            // out at 360x640 — a quarter of the captured pixels. No viewer,
+            // on any network, could ever receive more than 360p from this
+            // device. Adding a 540x960 ceiling lets viewers with bandwidth
+            // to spare actually get it; low/mid layers are unchanged so
+            // bandwidth-constrained viewers see no difference.
             videoSimulcastLayers: [
               lk.VideoParameters(
                 dimensions: lk.VideoDimensions(180, 320),
@@ -226,6 +232,13 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
                 encoding: lk.VideoEncoding(
                   maxBitrate: 450000,
                   maxFramerate: 20,
+                ),
+              ),
+              lk.VideoParameters(
+                dimensions: lk.VideoDimensions(540, 960),
+                encoding: lk.VideoEncoding(
+                  maxBitrate: 900000,
+                  maxFramerate: 30,
                 ),
               ),
             ],
