@@ -2461,7 +2461,62 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ),
+        _captionOverlay(call),
       ],
+    );
+  }
+
+  /// Bottom overlay for live captions — Google Meet style: anchored to the
+  /// bottom, never covers more than a couple of lines, never blocks the
+  /// video above it. Captions arrive via the same huddle:caption push event
+  /// every platform receives (see HuddleCallController._attachCaptionListener),
+  /// so there is exactly one caption pipeline behind this, matching web.
+  Widget _captionOverlay(HuddleCallController call) {
+    final captions = call.captions;
+    if (captions.isEmpty) return const SizedBox.shrink();
+    final visible = captions.length > 2
+        ? captions.sublist(captions.length - 2)
+        : captions;
+    return Positioned(
+      left: 16,
+      right: 16,
+      bottom: MediaQuery.paddingOf(context).bottom + 88,
+      child: IgnorePointer(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.6),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final caption in visible)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: RichText(
+                    text: TextSpan(
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        height: 1.3,
+                      ),
+                      children: [
+                        if (caption.speakerLabel != null)
+                          TextSpan(
+                            text: '${caption.speakerLabel}: ',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        TextSpan(text: caption.text),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 

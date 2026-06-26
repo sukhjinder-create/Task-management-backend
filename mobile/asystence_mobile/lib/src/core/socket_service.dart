@@ -26,6 +26,8 @@ class SocketService {
       StreamController<JsonMap>.broadcast();
   final StreamController<JsonMap> _huddleMediaController =
       StreamController<JsonMap>.broadcast();
+  final StreamController<JsonMap> _huddleCaptionController =
+      StreamController<JsonMap>.broadcast();
 
   Stream<JsonMap> get messages => _messageController.stream;
   Stream<JsonMap> get history => _historyController.stream;
@@ -35,6 +37,7 @@ class SocketService {
   Stream<JsonMap> get huddleParticipants => _huddleParticipantController.stream;
   Stream<JsonMap> get huddleSignals => _huddleSignalController.stream;
   Stream<JsonMap> get huddleMedia => _huddleMediaController.stream;
+  Stream<JsonMap> get huddleCaptions => _huddleCaptionController.stream;
 
   bool get connected => _socket?.connected ?? false;
   String? get baseUrl => _baseUrl;
@@ -131,6 +134,10 @@ class SocketService {
         _huddleMediaController,
         {'event': 'camera-on', ..._map(data)},
       ),
+    );
+    socket.on(
+      'huddle:caption',
+      (data) => _add(_huddleCaptionController, _map(data)),
     );
     socket.connect();
     socket.onConnect((_) => socket.emit('huddle:sync'));

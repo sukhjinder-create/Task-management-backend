@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -8,19 +10,61 @@ import 'huddle_media/huddle_media_provider.dart';
 import 'huddle_media/huddle_media_service.dart';
 import 'huddle_media/huddle_media_state_v2.dart';
 
+/// One entry in the live caption feed. Mirrors the shape pushed by the
+/// backend's huddle:caption socket event (services/huddleTranscriptionPipeline
+/// .service.js -> routes/huddleTranscription.routes.js), which is the same
+/// canonical pipeline every platform (web, Android, mobile browser) posts
+/// Deepgram results through.
+class HuddleCaption {
+  HuddleCaption({
+    required this.id,
+    required this.text,
+    required this.status,
+    this.speakerLabel,
+    this.emittedAt,
+  });
+
+  factory HuddleCaption.fromJson(JsonMap json) {
+    final speaker = json['speaker'];
+    return HuddleCaption(
+      id: readString(json, ['id']) ?? '',
+      text: readString(json, ['text']) ?? '',
+      status: readString(json, ['status']) ?? 'partial',
+      speakerLabel: speaker is Map
+          ? readString(JsonMap.from(speaker), ['label'])
+          : null,
+      emittedAt: readString(json, ['emittedAt', 'emitted_at']),
+    );
+  }
+
+  final String id;
+  final String text;
+  final String status;
+  final String? speakerLabel;
+  final String? emittedAt;
+}
+
 class HuddleCallController extends ChangeNotifier {
   HuddleCallController({
     required SocketService socket,
     required String currentUserId,
     HuddleIceBaseUrlProvider? apiBaseUrlProvider,
-  }) : _provider = HuddleMediaService.createProvider(
+  })  : _socket = socket,
+        _provider = HuddleMediaService.createProvider(
           socket: socket,
           currentUserId: currentUserId,
           apiBaseUrlProvider: apiBaseUrlProvider,
         );
 
+  final SocketService _socket;
   final HuddleMediaProvider _provider;
   bool _providerListenerAttached = false;
+  StreamSubscription<JsonMap>? _captionSub;
+  final List<HuddleCaption> _captions = [];
+
+  static const int _maxCaptionHistory = 50;
+
+  List<HuddleCaption> get captions => List.unmodifiable(_captions);
 
   HuddleMediaProviderKind get providerKind => _provider.kind;
 
@@ -53,6 +97,7 @@ class HuddleCallController extends ChangeNotifier {
 
   Future<void> initialize() async {
     _attachProviderListener();
+    _attachCaptionListener();
     await _provider.initialize();
   }
 
@@ -62,6 +107,7 @@ class HuddleCallController extends ChangeNotifier {
     String? provider,
     List<JsonMap> participants = const [],
   }) {
+    _captions.clear();
     return _provider.join(
       channelId: channelId,
       huddleId: huddleId,
@@ -71,10 +117,33 @@ class HuddleCallController extends ChangeNotifier {
   }
 
   Future<void> leave({bool emitLeave = true}) {
+    _captions.clear();
     return _provider.leave(emitLeave: emitLeave);
   }
 
+  void _attachCaptionListener() {
+    _captionSub ??= _socket.huddleCaptions.listen((payload) {
+      // A device is only ever connected to one huddle call at a time (the
+      // call UI is only shown while joined), so unlike the web client this
+      // doesn't need to match the event's sessionId against a locally
+      // tracked one — anything arriving while joined belongs to this call.
+      if (!joined) return;
+      final captionJson = payload['caption'];
+      if (captionJson is! Map) return;
+      final caption = HuddleCaption.fromJson(JsonMap.from(captionJson));
+      if (caption.id.isEmpty || caption.text.isEmpty) return;
+      _captions.removeWhere((existing) => existing.id == caption.id);
+      _captions.add(caption);
+      if (_captions.length > _maxCaptionHistory) {
+        _captions.removeRange(0, _captions.length - _maxCaptionHistory);
+      }
+      notifyListeners();
+    });
+  }
+
   Future<void> disposeController() async {
+    await _captionSub?.cancel();
+    _captionSub = null;
     await _provider.disposeController();
     _detachProviderListener();
   }

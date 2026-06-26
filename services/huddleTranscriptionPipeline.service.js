@@ -1170,6 +1170,28 @@ export async function ingestTranscriptionProviderEvent({
   });
 }
 
+// Used to push a freshly created caption to every participant's socket the
+// instant it's written, instead of making every platform poll an HTTP
+// endpoint on a timer for it. Targets each participant's personal userId
+// room (joined unconditionally on connect) rather than a chat-channel room,
+// so delivery doesn't depend on which page a participant currently has open
+// — the huddle call window is commonly left running while navigating
+// elsewhere in the app.
+export async function listActiveSessionParticipantUserIds({ workspaceId, sessionId }) {
+  const { rows } = await pool.query(
+    `
+    SELECT DISTINCT user_id
+    FROM huddle_session_participants
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND user_id IS NOT NULL
+      AND left_at IS NULL
+    `,
+    [workspaceId, sessionId]
+  );
+  return rows.map((row) => String(row.user_id)).filter(Boolean);
+}
+
 function transcriptArtifactText(segments = []) {
   return segments
     .map((segment) => {

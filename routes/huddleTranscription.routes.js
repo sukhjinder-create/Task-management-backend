@@ -1,5 +1,6 @@
 import express from "express";
 import { allowRoles } from "../middleware/role.middleware.js";
+import { getIO } from "../realtime/socket.js";
 import { findHuddleSessionByLegacy } from "../services/huddleSession.service.js";
 import {
   finalizeHuddleTranscript,
@@ -8,8 +9,40 @@ import {
   getTranscriptionSessionDiagnostics,
   grantTranscriptionProviderToken,
   ingestTranscriptionProviderEvent,
+  listActiveSessionParticipantUserIds,
   upsertTranscriptionPolicy,
 } from "../services/huddleTranscriptionPipeline.service.js";
+
+// One push point for the canonical caption pipeline: every platform (web,
+// Android, mobile browser) posts Deepgram results through the same
+// /sessions/:sessionId/events endpoint, so broadcasting from here covers all
+// of them identically instead of each platform needing its own delivery
+// mechanism. Push, not poll — every participant's personal userId room
+// (joined unconditionally on socket connect) gets the caption the instant
+// it's written, regardless of which page they currently have open.
+async function broadcastCaptionIfPresent({ workspaceId, sessionId, result }) {
+  const caption = result?.caption;
+  if (!caption) return;
+  try {
+    const io = getIO();
+    const userIds = await listActiveSessionParticipantUserIds({ workspaceId, sessionId });
+    if (!userIds.length) return;
+    const payload = {
+      ...caption,
+      speaker: {
+        ...(caption.speaker || {}),
+        label: caption.speaker?.label || result?.segment?.speaker?.label || null,
+        userId: caption.speaker?.userId || result?.segment?.speaker?.userId || null,
+        guestId: caption.speaker?.guestId || result?.segment?.speaker?.guestId || null,
+      },
+    };
+    for (const userId of userIds) {
+      io.to(userId).emit("huddle:caption", { sessionId, caption: payload });
+    }
+  } catch (error) {
+    console.warn("[huddle:transcription] caption broadcast failed:", error?.message || error);
+  }
+}
 
 const router = express.Router();
 const requireTranscriptionAdmin = allowRoles("admin", "manager", "owner");
@@ -143,6 +176,11 @@ router.post("/sessions/:sessionId/events", async (req, res) => {
       transcriptionSessionId:
         req.body?.transcriptionSessionId || req.body?.transcription_session_id,
       input: req.body || {},
+    });
+    void broadcastCaptionIfPresent({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      result,
     });
     res.status(result.ignored ? 202 : 201).json({ ok: true, ...result });
   } catch (error) {
