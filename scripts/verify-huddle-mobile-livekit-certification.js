@@ -8,6 +8,9 @@ const read = (filePath) => fs.readFileSync(path.join(root, filePath), "utf8");
 const provider = read(
   "mobile/asystence_mobile/lib/src/features/workspace/huddle_media/livekit_huddle_media_provider.dart"
 );
+const mobileTranscriptionClient = read(
+  "mobile/asystence_mobile/lib/src/features/workspace/huddle_media/mobile_live_transcription_client.dart"
+);
 const service = read(
   "mobile/asystence_mobile/lib/src/features/workspace/huddle_media/huddle_media_service.dart"
 );
@@ -27,6 +30,7 @@ const config = read("mobile/asystence_mobile/lib/src/config/app_config.dart");
 const pubspec = read("mobile/asystence_mobile/pubspec.yaml");
 const iosPlist = read("mobile/asystence_mobile/ios/Runner/Info.plist");
 const backendRoute = read("routes/huddleMedia.routes.js");
+const transcriptionRoute = read("routes/huddleTranscription.routes.js");
 const packageJson = JSON.parse(read("package.json"));
 
 function assertContains(source, pattern, message) {
@@ -41,6 +45,11 @@ assertContains(
   pubspec,
   /livekit_client:\s*2\.8\.0/,
   "Mobile app must pin the API-36 compatible LiveKit SDK"
+);
+assertContains(
+  pubspec,
+  /record:\s*\^6\.2\.1/,
+  "Mobile app must include the recorder dependency for canonical Android caption ingestion"
 );
 assertContains(providerContract, /HuddleMediaProviderKind\s*{[\s\S]*mesh,[\s\S]*livekit,/,
   "Provider contract must add LiveKit without removing mesh");
@@ -99,6 +108,26 @@ assertContains(provider, /activeSpeakers/,
   "Mobile provider must expose active speaker diagnostics");
 assertContains(provider, /networkQuality/,
   "Mobile provider must expose network quality diagnostics");
+assertContains(provider, /MobileLiveTranscriptionClient/,
+  "Mobile LiveKit must start Android speech ingestion through the dedicated transcript pipeline");
+assertContains(provider, /_startLiveTranscriptionForActiveCall/,
+  "Mobile LiveKit must start transcription after microphone publication");
+assertContains(provider, /_stopLiveTranscription/,
+  "Mobile LiveKit must stop transcription on mute, leave, and cleanup");
+assertContains(mobileTranscriptionClient, /\/huddle\/transcription\/sessions\/\$sessionId\/grant/,
+  "Android caption ingestion must use the canonical transcription grant endpoint");
+assertContains(mobileTranscriptionClient, /\/huddle\/transcription\/sessions\/\$sessionId\/events/,
+  "Android caption ingestion must post provider events through the canonical transcription event endpoint");
+assertContains(mobileTranscriptionClient, /AudioEncoder\.pcm16bits/,
+  "Android caption ingestion must stream PCM audio to the STT provider");
+assertContains(mobileTranscriptionClient, /'audioEncoding':\s*'linear16'/,
+  "Android caption ingestion must request an explicit provider audio encoding");
+assertContains(mobileTranscriptionClient, /'x-client-platform':\s*'android'/,
+  "Android caption ingestion must identify its platform for diagnostics");
+assertContains(transcriptionRoute, /grantTranscriptionProviderToken/,
+  "Backend must expose transcription grants for mobile clients");
+assertContains(transcriptionRoute, /ingestTranscriptionProviderEvent/,
+  "Backend must expose canonical transcription event ingestion");
 
 assertContains(provider, /MeshHuddleMediaProvider/,
   "Mobile LiveKit failures must have a mesh fallback path");
@@ -180,8 +209,13 @@ assert.equal(
 );
 
 assertNotContains(provider, /\brecording\b/i, "Mobile LiveKit bundle must not implement recording");
-assertNotContains(provider, /\btranscription\b/i, "Mobile LiveKit bundle must not implement transcription");
-assertNotContains(provider, /\bAI\b/, "Mobile LiveKit bundle must not implement AI features");
+assertNotContains(provider, /\bsummary\b/i, "Mobile LiveKit bundle must not implement summary generation");
+assertNotContains(provider, /\bcopilot\b/i, "Mobile LiveKit bundle must not implement copilot features");
+assertNotContains(provider, /\bmemory\b/i, "Mobile LiveKit bundle must not implement memory features");
+assertNotContains(mobileTranscriptionClient, /\bsummary\b/i, "Android transcription client must not generate summaries");
+assertNotContains(mobileTranscriptionClient, /\bcopilot\b/i, "Android transcription client must not implement copilot features");
+assertNotContains(mobileTranscriptionClient, /\bmemory\b/i, "Android transcription client must not implement memory features");
+assertNotContains(mobileTranscriptionClient, /\bAI\b/, "Android transcription client must not implement AI features");
 assertNotContains(provider, /active-session provider switching/i,
   "Mobile LiveKit bundle must not implement active-session provider switching");
 

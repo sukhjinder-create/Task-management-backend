@@ -56,6 +56,7 @@ class _ChatScreenState extends State<ChatScreen> {
   JsonMap? _pendingInitialHuddleData;
   final Set<String> _joinedHuddles = {};
   final Set<String> _locallyStartedHuddles = {};
+  final Set<String> _autoJoinAttemptedHuddles = {};
   final List<ChatAttachment> _pendingAttachments = [];
   final _message = TextEditingController();
   HuddleCallController? _call;
@@ -1158,12 +1159,26 @@ class _ChatScreenState extends State<ChatScreen> {
       'channelId': channelKey,
       'huddleId': huddleId,
     });
+    final shouldAutoJoin =
+        initialHuddle['autoJoin'] == true ||
+        initialHuddle['acceptedFromIncoming'] == true;
     setState(() {
       _activeHuddles[channelKey] = initialHuddle;
     });
     AppScope.of(context).socket.syncHuddles();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _showHuddleSheet(channelKey);
+      if (!mounted) return;
+      _showHuddleSheet(channelKey);
+      if (shouldAutoJoin && _autoJoinAttemptedHuddles.add(huddleId)) {
+        unawaited(
+          _joinHuddleFromState(
+            channelKey,
+            huddleId,
+            source: 'android_incoming_auto_join',
+            recordAnswer: false,
+          ),
+        );
+      }
     });
   }
 
@@ -1372,38 +1387,111 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (!shouldJoin && !locallyStarted && !alreadyJoined) return;
 
-    _setHuddleAction('Opening huddle...');
-    final activeHuddle = _activeHuddles[channelId];
-    final provider =
-        _providerForHuddle(activeHuddle) ?? _providerForHuddle(event);
-    final sessionId = readString(activeHuddle ?? event, [
+    await _joinHuddleFromState(
+      channelId,
+      huddleId,
+      source: shouldJoin
+          ? 'android_started_huddle'
+          : locallyStarted
+              ? 'android_local_start'
+              : 'android_rejoin',
+      recordAnswer: false,
+      providerOverride: _providerForHuddle(event),
+    );
+  }
+
+  Future<void> _joinHuddleFromState(
+    String channelKey,
+    String huddleId, {
+    required String source,
+    bool recordAnswer = true,
+    List<JsonMap>? participantsOverride,
+    String? providerOverride,
+  }) async {
+    final currentCall = _call;
+    final alreadyJoined = _joinedHuddles.contains(huddleId) ||
+        (currentCall?.joined == true && currentCall?.huddleId == huddleId);
+    if (alreadyJoined) return;
+
+    _mobileHuddleControlsVisible = false;
+    _setHuddleAction('Joining huddle...');
+
+    final activeHuddle = _activeHuddles[channelKey];
+    final effectiveProvider = _providerForHuddle(activeHuddle) ??
+        _normalizeHuddleProvider(providerOverride);
+    final sessionId = readString(activeHuddle ?? const {}, [
       'sessionId',
       'session_id',
     ]);
+    final hasProviderLock =
+        activeHuddle != null && activeHuddle['providerLock'] != null;
+    final participants = participantsOverride ??
+        _huddleParticipants[huddleId] ??
+        const <JsonMap>[];
+
+    if (recordAnswer) {
+      unawaited(
+        AppScope.of(context).api.recordHuddleCallTrace(
+          step: 'answer_pressed',
+          channelId: channelKey,
+          huddleId: huddleId,
+          sessionId: sessionId,
+          status: 'success',
+          metadata: {
+            'source': source,
+            'provider': effectiveProvider,
+            'providerLockPresent': hasProviderLock,
+          },
+        ),
+      );
+    }
+
+    if (effectiveProvider == null) {
+      unawaited(
+        AppScope.of(context).api.recordHuddleCallTrace(
+          step: 'join_request_sent',
+          channelId: channelKey,
+          huddleId: huddleId,
+          sessionId: sessionId,
+          status: 'failure',
+          reason: 'provider_not_resolved',
+          metadata: {
+            'source': source,
+            'providerLockPresent': hasProviderLock,
+            'callReady': _callReady,
+          },
+        ),
+      );
+      if (mounted) {
+        _setHuddleAction(null);
+        showSnack(context, 'Syncing call provider. Please try again.');
+      }
+      return;
+    }
+
     unawaited(
       AppScope.of(context).api.recordHuddleCallTrace(
         step: 'join_request_sent',
-        channelId: channelId,
+        channelId: channelKey,
         huddleId: huddleId,
         sessionId: sessionId,
         status: 'attempted',
         metadata: {
-          'source': shouldJoin
-              ? 'android_started_huddle'
-              : locallyStarted
-                  ? 'android_local_start'
-                  : 'android_rejoin',
-          'provider': provider,
+          'source': source,
+          'provider': effectiveProvider,
+          'providerLockPresent': hasProviderLock,
+          'callReady': _callReady,
         },
       ),
     );
+
     try {
       final call = await _requireReadyCall();
       await call.join(
-        channelId: channelId,
+        channelId: channelKey,
         huddleId: huddleId,
-        provider: provider,
-        participants: _huddleParticipants[huddleId] ?? const [],
+        provider: effectiveProvider,
+        participants: participants,
       );
       if (!call.joined) {
         throw StateError(call.error ?? 'Could not join huddle');
@@ -1415,14 +1503,15 @@ class _ChatScreenState extends State<ChatScreen> {
       unawaited(
         AppScope.of(context).api.recordHuddleCallTrace(
           step: 'join_request_sent',
-          channelId: channelId,
+          channelId: channelKey,
           huddleId: huddleId,
           sessionId: sessionId,
           status: 'failure',
           reason: error.toString().replaceFirst('Bad state: ', ''),
           metadata: {
-            'source': 'android_auto_join',
-            'provider': provider,
+            'source': source,
+            'provider': effectiveProvider,
+            'providerLockPresent': hasProviderLock,
           },
         ),
       );
@@ -2081,78 +2170,13 @@ class _ChatScreenState extends State<ChatScreen> {
     String provider,
   ) async {
     if (joined) return;
-    _mobileHuddleControlsVisible = false;
-    _setHuddleAction('Joining huddle...');
-    final activeHuddle = _activeHuddles[channelKey];
-    final effectiveProvider = _providerForHuddle(activeHuddle) ?? provider;
-    final sessionId = readString(activeHuddle ?? const {}, [
-      'sessionId',
-      'session_id',
-    ]);
-    unawaited(
-      AppScope.of(context).api.recordHuddleCallTrace(
-        step: 'answer_pressed',
-        channelId: channelKey,
-        huddleId: huddleId,
-        sessionId: sessionId,
-        status: 'success',
-        metadata: {
-          'source': 'android_huddle_sheet',
-          'provider': effectiveProvider,
-        },
-      ),
+    await _joinHuddleFromState(
+      channelKey,
+      huddleId,
+      source: 'android_huddle_sheet',
+      participantsOverride: participants,
+      providerOverride: provider,
     );
-    unawaited(
-      AppScope.of(context).api.recordHuddleCallTrace(
-        step: 'join_request_sent',
-        channelId: channelKey,
-        huddleId: huddleId,
-        sessionId: sessionId,
-        status: 'attempted',
-        metadata: {
-          'source': 'android_huddle_sheet',
-          'provider': effectiveProvider,
-        },
-      ),
-    );
-    try {
-      final call = await _requireReadyCall();
-      await call.join(
-        channelId: channelKey,
-        huddleId: huddleId,
-        provider: effectiveProvider,
-        participants: participants,
-      );
-      if (!call.joined) {
-        throw StateError(call.error ?? 'Could not join huddle');
-      }
-      if (!mounted) return;
-      setState(() => _joinedHuddles.add(huddleId));
-      _bumpHuddleUi();
-    } catch (error) {
-      unawaited(
-        AppScope.of(context).api.recordHuddleCallTrace(
-          step: 'join_request_sent',
-          channelId: channelKey,
-          huddleId: huddleId,
-          sessionId: sessionId,
-          status: 'failure',
-          reason: error.toString().replaceFirst('Bad state: ', ''),
-          metadata: {
-            'source': 'android_huddle_sheet',
-            'provider': effectiveProvider,
-          },
-        ),
-      );
-      if (mounted) {
-        showSnack(
-          context,
-          _call?.error ?? error.toString().replaceFirst('Bad state: ', ''),
-        );
-      }
-    } finally {
-      if (mounted) _setHuddleAction(null);
-    }
   }
 
   Future<void> _leaveHuddle(String channelKey, String huddleId) async {

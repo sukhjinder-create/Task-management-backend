@@ -106,10 +106,20 @@ export function buildDeepgramListenUrl({
   endpoint = "wss://api.deepgram.com/v1/listen",
   metadata = {},
   keyterms = [],
+  audioEncoding = null,
+  sampleRate = null,
+  channels = null,
 } = {}) {
   const url = new URL(endpoint);
   url.searchParams.set("model", safeString(model, 80) || DEFAULT_DEEPGRAM_MODEL);
   if (language) url.searchParams.set("language", safeString(language, 32));
+  if (audioEncoding) url.searchParams.set("encoding", safeString(audioEncoding, 40));
+  if (Number.isInteger(Number(sampleRate)) && Number(sampleRate) > 0) {
+    url.searchParams.set("sample_rate", String(Number(sampleRate)));
+  }
+  if (Number.isInteger(Number(channels)) && Number(channels) > 0) {
+    url.searchParams.set("channels", String(Number(channels)));
+  }
   url.searchParams.set("interim_results", "true");
   url.searchParams.set("smart_format", "true");
   url.searchParams.set("punctuate", "true");
@@ -241,6 +251,9 @@ export async function createSttProviderGrant({
   provider = null,
   language = null,
   keyterms = [],
+  audioEncoding = null,
+  sampleRate = null,
+  channels = null,
   env = process.env,
 } = {}) {
   const config = getHuddleSttConfig(env);
@@ -270,6 +283,9 @@ export async function createSttProviderGrant({
     endpoint: config.deepgram.endpoint,
     metadata: { workspaceId, sessionId, participantId },
     keyterms,
+    audioEncoding,
+    sampleRate,
+    channels,
   });
 
   return {
@@ -284,6 +300,9 @@ export async function createSttProviderGrant({
     grantCacheHit: Boolean(token.cached),
     grantSharedInFlight: Boolean(token.sharedInFlight),
     listenUrl,
+    audioEncoding: safeString(audioEncoding, 40) || null,
+    sampleRate: Number.isInteger(Number(sampleRate)) ? Number(sampleRate) : null,
+    channels: Number.isInteger(Number(channels)) ? Number(channels) : null,
     keytermCount: [...new Set(
       (Array.isArray(keyterms) ? keyterms : []).map((item) => safeString(item, 100)).filter(Boolean)
     )].slice(0, 100).length,

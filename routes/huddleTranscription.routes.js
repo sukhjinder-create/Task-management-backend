@@ -124,6 +124,9 @@ router.post("/sessions/:sessionId/grant", async (req, res) => {
       participantId: req.body?.participantId || req.body?.participant_id,
       language: req.body?.language,
       provider: req.body?.provider,
+      audioEncoding: req.body?.audioEncoding || req.body?.audio_encoding,
+      sampleRate: req.body?.sampleRate || req.body?.sample_rate,
+      channels: req.body?.channels,
     });
     res.json({ ok: true, ...result });
   } catch (error) {

@@ -14,6 +14,7 @@ import 'huddle_ice_config_service.dart';
 import 'huddle_media_provider.dart';
 import 'huddle_media_state_v2.dart';
 import 'mesh_huddle_media_provider.dart';
+import 'mobile_live_transcription_client.dart';
 
 class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
   LiveKitHuddleMediaProvider({
@@ -51,6 +52,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
   int _fallbackCount = 0;
   String? _lastFallbackReason;
   String? _sessionId;
+  MobileLiveTranscriptionClient? _transcriptionClient;
 
   @override
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
@@ -196,17 +198,35 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           adaptiveStream: true,
           dynacast: true,
           defaultCameraCaptureOptions: const lk.CameraCaptureOptions(
-            params: lk.VideoParametersPresets.h720_43,
+            params: lk.VideoParameters(
+              dimensions: lk.VideoDimensions(720, 1280),
+              encoding: lk.VideoEncoding(
+                maxBitrate: 1700000,
+                maxFramerate: 30,
+              ),
+            ),
             maxFrameRate: 30,
           ),
           defaultVideoPublishOptions: const lk.VideoPublishOptions(
             videoEncoding: lk.VideoEncoding(
-              maxBitrate: 1100000,
+              maxBitrate: 1700000,
               maxFramerate: 30,
             ),
             videoSimulcastLayers: [
-              lk.VideoParametersPresets.h180_43,
-              lk.VideoParametersPresets.h360_43,
+              lk.VideoParameters(
+                dimensions: lk.VideoDimensions(180, 320),
+                encoding: lk.VideoEncoding(
+                  maxBitrate: 160000,
+                  maxFramerate: 15,
+                ),
+              ),
+              lk.VideoParameters(
+                dimensions: lk.VideoDimensions(360, 640),
+                encoding: lk.VideoEncoding(
+                  maxBitrate: 450000,
+                  maxFramerate: 20,
+                ),
+              ),
             ],
           ),
         ),
@@ -248,6 +268,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           metadata: {'source': 'android_livekit_provider'},
         ),
       );
+      unawaited(_startLiveTranscriptionForActiveCall());
       await _setCameraEnabled(true);
       unawaited(
         _recordCallTrace(
@@ -388,8 +409,14 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     final currentChannel = channelId;
     if (currentChannel != null) socket.setHuddleMuted(currentChannel, value);
     notifyListeners();
+    if (value) unawaited(_stopLiveTranscription());
     unawaited(
-      _setMicrophoneEnabled(!value).catchError((Object err) {
+      (() async {
+        await _setMicrophoneEnabled(!value);
+        if (!value) {
+          await _startLiveTranscriptionForActiveCall();
+        }
+      })().catchError((Object err) {
         _fallbackForActiveFailure(
           'mobile_livekit_microphone_publish_failed',
           err,
@@ -597,6 +624,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
   }
 
   Future<void> _cleanupLiveKit() async {
+    await _stopLiveTranscription();
     final room = _room;
     _room = null;
     if (room == null) return;
@@ -606,6 +634,87 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     try {
       await room.dispose();
     } catch (_) {}
+  }
+
+  Future<void> _startLiveTranscriptionForActiveCall() async {
+    final sessionId = _sessionId;
+    final currentChannel = channelId;
+    final currentHuddle = huddleId;
+    if (_usingMeshFallback ||
+        !joined ||
+        muted ||
+        sessionId == null ||
+        currentChannel == null ||
+        currentHuddle == null ||
+        _transcriptionClient != null) {
+      return;
+    }
+
+    try {
+      final baseUrl = await _resolvedApiBaseUrl();
+      final client = MobileLiveTranscriptionClient(
+        baseUrl: baseUrl,
+        authTokenProvider: () => socket.authToken,
+        sessionId: sessionId,
+        httpClient: _httpClient,
+        onDiagnostics: (diagnostics) {
+          final status = readString(diagnostics, ['status']);
+          if (status == 'failed' || status == 'degraded') {
+            unawaited(
+              _recordCallTrace(
+                step: 'audio_connected',
+                channelId: currentChannel,
+                huddleId: currentHuddle,
+                status: 'observed',
+                reason: readString(diagnostics, ['reason']),
+                metadata: {
+                  'source': 'android_live_transcription',
+                  'transcription': diagnostics,
+                },
+              ),
+            );
+          }
+        },
+      );
+      _transcriptionClient = client;
+      await client.start();
+      unawaited(
+        _recordCallTrace(
+          step: 'audio_connected',
+          channelId: currentChannel,
+          huddleId: currentHuddle,
+          status: 'observed',
+          metadata: {
+            'source': 'android_live_transcription',
+            'transcriptionStarted': true,
+            'sessionId': sessionId,
+          },
+        ),
+      );
+    } catch (err) {
+      final client = _transcriptionClient;
+      _transcriptionClient = null;
+      await client?.dispose();
+      unawaited(
+        _recordCallTrace(
+          step: 'audio_connected',
+          channelId: currentChannel,
+          huddleId: currentHuddle,
+          status: 'observed',
+          reason: err.toString().replaceFirst('Bad state: ', ''),
+          metadata: {
+            'source': 'android_live_transcription',
+            'transcriptionStarted': false,
+          },
+        ),
+      );
+    }
+  }
+
+  Future<void> _stopLiveTranscription() async {
+    final client = _transcriptionClient;
+    _transcriptionClient = null;
+    await client?.dispose();
   }
 
   void _attachRoomListener(dynamic room) {

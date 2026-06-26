@@ -727,6 +727,8 @@ class _HomeShellState extends State<HomeShell> {
       if (accepted == true) {
         final authoritativeHuddleData = {
           ...data,
+          'acceptedFromIncoming': true,
+          'autoJoin': true,
           if (incomingProvider != null) 'provider': incomingProvider,
           if (incomingProvider != null) 'selectedProvider': incomingProvider,
           if (incomingProvider != null)

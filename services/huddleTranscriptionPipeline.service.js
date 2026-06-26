@@ -681,6 +681,9 @@ export async function grantTranscriptionProviderToken({
   role = "user",
   participantId = null,
   language = null,
+  audioEncoding = null,
+  sampleRate = null,
+  channels = null,
   client = null,
 } = {}) {
   return withTransaction(client, async (tx) => {
@@ -742,6 +745,9 @@ export async function grantTranscriptionProviderToken({
       provider: policy.providerName,
       language: language || policy.defaultLanguage,
       keyterms,
+      audioEncoding,
+      sampleRate,
+      channels,
     });
     const transcriptionSession = await upsertTranscriptionSession({
       workspaceId,
@@ -779,6 +785,9 @@ export async function grantTranscriptionProviderToken({
         expiresIn: grant.expiresIn,
         grantCacheHit: Boolean(grant.grantCacheHit),
         grantSharedInFlight: Boolean(grant.grantSharedInFlight),
+        audioEncoding: grant.audioEncoding,
+        sampleRate: grant.sampleRate,
+        channels: grant.channels,
       },
       status: "processed",
       client: tx,
@@ -809,6 +818,9 @@ export async function grantTranscriptionProviderToken({
       expiresAt: grant.expiresAt,
       grantCacheHit: Boolean(grant.grantCacheHit),
       grantSharedInFlight: Boolean(grant.grantSharedInFlight),
+      audioEncoding: grant.audioEncoding,
+      sampleRate: grant.sampleRate,
+      channels: grant.channels,
       keytermCount: grant.keytermCount,
       transcriptionSession: serializeTranscriptionSession(transcriptionSession),
       policy,

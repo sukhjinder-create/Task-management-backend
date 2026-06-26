@@ -25,6 +25,7 @@ dependencies:
   firebase_messaging: ^16.3.0
   flutter_webrtc: 1.4.0
   livekit_client: 2.8.0
+  record: ^6.2.1
 
 dev_dependencies:
   flutter_test:
