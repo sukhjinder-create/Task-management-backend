@@ -1807,6 +1807,11 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     };
 
     const starterDeviceContext = getHuddleSocketDeviceContext(socket);
+    // Other sockets belonging to the same user (other tabs/devices) receive this
+    // same broadcast via the workspace/channel room. Without this field they have
+    // no way to tell "I started this" apart from "this user started it on another
+    // device", and the frontend auto-joins+publishes media on every such socket.
+    out.startedByDeviceId = starterDeviceContext.deviceId || null;
     huddleRealtimeService.createRoom({
       huddleId,
       channelId,

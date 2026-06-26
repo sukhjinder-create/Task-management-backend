@@ -7,6 +7,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/device_identity.dart';
 import '../../core/formatters.dart';
 import '../../core/models.dart';
 import '../../core/ui.dart';
@@ -1380,9 +1381,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final currentCall = _call;
     final alreadyJoined = _joinedHuddles.contains(huddleId) ||
         (currentCall?.joined == true && currentCall?.huddleId == huddleId);
+    final startedByDeviceId = readString(event, ['startedByDeviceId']);
+    // Same account can be signed in on this phone, another phone, and the web
+    // app at once. "startedBy == me" alone would auto-join and publish mic/
+    // camera on every one of those devices for a call only one of them
+    // actually started. Missing startedByDeviceId (old backend, mid-rollout)
+    // falls back to the previous behavior so a real join is never blocked.
+    final startedByThisDevice = startedByDeviceId == null ||
+        startedByDeviceId == await DeviceIdentity.getOrCreate();
     final shouldJoin = startedByUserId != null &&
         currentUserId != null &&
-        startedByUserId.toString() == currentUserId.toString();
+        startedByUserId.toString() == currentUserId.toString() &&
+        startedByThisDevice;
     final locallyStarted = _locallyStartedHuddles.contains(huddleId);
 
     if (!shouldJoin && !locallyStarted && !alreadyJoined) return;

@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 import '../../../config/app_config.dart';
+import '../../../core/device_identity.dart';
 import '../../../core/models.dart';
 import '../../../core/socket_service.dart';
 import 'huddle_ice_config_service.dart';
@@ -474,6 +475,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
           if (_sessionId != null) 'sessionId': _sessionId,
           if (providerRoomId != null) 'providerRoomId': providerRoomId,
           'platform': _platformName,
+          'deviceId': await DeviceIdentity.getOrCreate(),
           'clientCapabilities': _clientCapabilities,
         }),
       );

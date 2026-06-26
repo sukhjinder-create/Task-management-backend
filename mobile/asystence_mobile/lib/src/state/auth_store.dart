@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
 import '../core/api_client.dart';
 import '../core/api_service.dart';
+import '../core/device_identity.dart';
 import '../core/models.dart';
 import '../core/push_service.dart';
 import '../core/session_store.dart';
@@ -157,10 +159,14 @@ class AuthStore extends ChangeNotifier {
   void _connectSocket() {
     final session = _session;
     if (session == null || session.token.isEmpty) return;
-    socketService.connect(
-      baseUrl: client.currentBaseUrl,
-      token: session.token,
-    );
+    unawaited(() async {
+      final deviceId = await DeviceIdentity.getOrCreate();
+      socketService.connect(
+        baseUrl: client.currentBaseUrl,
+        token: session.token,
+        deviceId: deviceId,
+      );
+    }());
   }
 
   JsonMap _decodeJwtPayload(String token) {

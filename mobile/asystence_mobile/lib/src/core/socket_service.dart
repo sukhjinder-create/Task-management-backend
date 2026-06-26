@@ -43,6 +43,7 @@ class SocketService {
   void connect({
     required String baseUrl,
     required String token,
+    String? deviceId,
   }) {
     disconnect();
     _baseUrl = baseUrl;
@@ -52,7 +53,7 @@ class SocketService {
       io.OptionBuilder()
           .setTransports(['websocket'])
           .disableAutoConnect()
-          .setAuth({'token': token})
+          .setAuth({'token': token, if (deviceId != null) 'deviceId': deviceId})
           .build(),
     );
 
