@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/device_identity.dart';
 import '../../core/formatters.dart';
 import '../../core/models.dart';
 import '../../core/navigation_intent_service.dart';
@@ -80,7 +81,7 @@ class _HomeShellState extends State<HomeShell> {
       for (final intent in scope.navigationIntents.takePending()) {
         _handleIntent(intent);
       }
-      _huddleSub = scope.socket.huddles.listen((event) {
+      _huddleSub = scope.socket.huddles.listen((event) async {
         final eventType = readString(event, ['event']);
         final huddleId = readString(event, ['huddleId', 'huddle_id']);
         if (huddleId == null) return;
@@ -94,7 +95,16 @@ class _HomeShellState extends State<HomeShell> {
         final startedById = startedBy is Map
             ? readString(JsonMap.from(startedBy), ['userId', 'user_id'])
             : null;
-        if (startedById == scope.auth.user?.id) return;
+        // "I started this" used to suppress the incoming-call dialog
+        // unconditionally, on the assumption chat_screen's auto-join would
+        // handle it. That assumption only holds on the device that actually
+        // started the call. On every other device of the same account this
+        // silently swallowed the prompt too, leaving that device with no way
+        // to join. Only suppress when this is genuinely the same device.
+        final startedByDeviceId = readString(event, ['startedByDeviceId']);
+        final startedByThisDevice = startedByDeviceId == null ||
+            startedByDeviceId == await DeviceIdentity.getOrCreate();
+        if (startedById == scope.auth.user?.id && startedByThisDevice) return;
         if (_presentingIncomingHuddles.contains(huddleId) ||
             _openedIncomingHuddles.contains(huddleId) ||
             (_index == 3 && _chatHuddleId == huddleId)) {
