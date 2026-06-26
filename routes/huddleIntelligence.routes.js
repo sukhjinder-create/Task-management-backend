@@ -35,6 +35,8 @@ import {
 import {
   getHuddleIntelligenceGenerationDiagnostics,
 } from "../services/huddleIntelligenceGeneration.service.js";
+import { listTopicSegments } from "../services/huddleTopicSegmentation.service.js";
+import { listRiskBlockerItems } from "../services/huddleRiskBlockerExtraction.service.js";
 import {
   getMeetingIntelligenceReview,
   getWhatDidIMiss,
@@ -462,6 +464,32 @@ router.post("/sessions/:sessionId/captions", async (req, res) => {
       input: req.body || {},
     });
     res.status(201).json({ ok: true, ...result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.get("/sessions/:sessionId/topic-segments", async (req, res) => {
+  try {
+    const topicSegments = await listTopicSegments({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ...actor(req),
+    });
+    res.json({ ok: true, topicSegments });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+});
+
+router.get("/sessions/:sessionId/risk-blockers", async (req, res) => {
+  try {
+    const items = await listRiskBlockerItems({
+      workspaceId: req.workspaceId,
+      sessionId: req.params.sessionId,
+      ...actor(req),
+    });
+    res.json({ ok: true, items });
   } catch (error) {
     errorResponse(res, error);
   }

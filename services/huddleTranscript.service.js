@@ -144,6 +144,9 @@ function serializeTranscriptSegment(row = {}) {
     sourceSegmentId: row.source_segment_id,
     sourceEventId: row.source_event_id,
     language: row.language,
+    normalizedText: row.normalized_text || null,
+    detectedLanguage: row.detected_language || null,
+    normalizedAt: row.normalized_at || null,
     text: normalizedText.text,
     status: row.status,
     confidence: row.confidence === null || row.confidence === undefined

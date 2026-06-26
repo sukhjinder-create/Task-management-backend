@@ -5,9 +5,12 @@ import { createHuddleSessionEvent } from "./huddleEvent.service.js";
 export const HUDDLE_INTELLIGENCE_JOB_TYPES = Object.freeze({
   TRANSCRIPT_FINALIZATION: "transcript_finalization",
   CAPTION_GENERATION: "caption_generation",
+  LANGUAGE_NORMALIZATION: "language_normalization",
+  TOPIC_SEGMENTATION: "topic_segmentation",
   SUMMARY_GENERATION: "summary_generation",
   DECISION_EXTRACTION: "decision_extraction",
   ACTION_ITEM_EXTRACTION: "action_item_extraction",
+  RISK_BLOCKER_EXTRACTION: "risk_blocker_extraction",
   OWNERSHIP_RESOLUTION: "ownership_resolution",
   TIMELINE_GENERATION: "timeline_generation",
   MEMORY_PROMOTION: "memory_promotion",
@@ -2263,6 +2266,13 @@ export function getHuddleIntelligenceDiagnostics() {
     },
   };
 }
+
+// Shared with huddleTopicSegmentation.service.js and
+// huddleRiskBlockerExtraction.service.js so their read endpoints enforce the
+// exact same session-participant/host/privileged-role access rule as every
+// other huddle intelligence read (captions, timeline, ownership, etc.)
+// instead of only being scoped by workspace.
+export { getSessionAccessContext, assertSessionPermission };
 
 export default {
   HUDDLE_INTELLIGENCE_JOB_TYPES,

@@ -12,6 +12,7 @@ import {
 import {
   createHuddleArtifact,
   listHuddleArtifacts,
+  updateHuddleArtifact,
 } from "./huddleArtifact.service.js";
 import { finalizeHuddleTranscript } from "./huddleTranscriptionPipeline.service.js";
 import {
@@ -19,20 +20,25 @@ import {
   generateHuddleArtifact,
   getHuddleIntelligenceGenerationDiagnostics,
 } from "./huddleIntelligenceGeneration.service.js";
+import { runLanguageNormalization } from "./huddleLanguageNormalization.service.js";
+import { runTopicSegmentation, listTopicSegments } from "./huddleTopicSegmentation.service.js";
+import { runRiskBlockerExtraction, listRiskBlockerItems } from "./huddleRiskBlockerExtraction.service.js";
 import {
   getMeetingIntelligenceDeliveryContext,
 } from "./huddleMeetingIntelligence.service.js";
 import { notifyUser } from "./notification.service.js";
 
-const ORCHESTRATION_VERSION = 1;
+const ORCHESTRATION_VERSION = 2;
 const DEFAULT_LEASE_SECONDS = 90;
 const DEFAULT_BATCH_SIZE = 10;
 
+// Timeline is deterministic (derived from topic segments, no LLM call) and
+// gets its own dedicated handler below instead of going through the
+// LLM-based artifact generator used for summary/decision/action_item.
 const ARTIFACT_JOB_TYPES = Object.freeze({
   [HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION]: "summary",
   [HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION]: "decision",
   [HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION]: "action_item",
-  [HUDDLE_INTELLIGENCE_JOB_TYPES.TIMELINE_GENERATION]: "timeline",
 });
 
 const GENERATED_ARTIFACT_TYPES = new Set(["summary", "decision", "action_item"]);
@@ -136,23 +142,48 @@ async function enqueueTranscriptWorkflow(job, transcriptArtifactId, client = nul
     client,
   };
 
-  const summary = await enqueueIntelligenceJob({
+  // Pipeline order: language normalization runs first so every later stage
+  // works from consistent English text; topic segmentation runs next so
+  // decision/action/risk extraction and the summary all condition on
+  // discussion structure instead of raw undifferentiated dialogue.
+  const languageNormalization = await enqueueIntelligenceJob({
     ...base,
+    jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.LANGUAGE_NORMALIZATION,
+    idempotencyKey: `language-normalization:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
+  });
+  const topicSegmentation = await enqueueIntelligenceJob({
+    ...base,
+    jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.TOPIC_SEGMENTATION,
+    idempotencyKey: `topic-segmentation:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
+    dependsOnJobIds: [languageNormalization.job.id],
+  });
+  const segmentationDependent = {
+    ...base,
+    dependsOnJobIds: [topicSegmentation.job.id],
+  };
+
+  const summary = await enqueueIntelligenceJob({
+    ...segmentationDependent,
     jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
     idempotencyKey: `summary:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
   });
   const decisions = await enqueueIntelligenceJob({
-    ...base,
+    ...segmentationDependent,
     jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION,
     idempotencyKey: `decisions:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
   });
   const actions = await enqueueIntelligenceJob({
-    ...base,
+    ...segmentationDependent,
     jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION,
     idempotencyKey: `actions:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
   });
+  const riskBlockers = await enqueueIntelligenceJob({
+    ...segmentationDependent,
+    jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.RISK_BLOCKER_EXTRACTION,
+    idempotencyKey: `risk-blockers:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
+  });
   const timeline = await enqueueIntelligenceJob({
-    ...base,
+    ...segmentationDependent,
     jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.TIMELINE_GENERATION,
     idempotencyKey: `timeline:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
   });
@@ -170,15 +201,19 @@ async function enqueueTranscriptWorkflow(job, transcriptArtifactId, client = nul
       summary.job.id,
       decisions.job.id,
       actions.job.id,
+      riskBlockers.job.id,
       timeline.job.id,
       ownership.job.id,
     ],
   });
 
   return {
+    languageNormalizationJobId: languageNormalization.job.id,
+    topicSegmentationJobId: topicSegmentation.job.id,
     summaryJobId: summary.job.id,
     decisionJobId: decisions.job.id,
     actionItemJobId: actions.job.id,
+    riskBlockerJobId: riskBlockers.job.id,
     timelineJobId: timeline.job.id,
     ownershipJobId: ownership.job.id,
     meetingDigestJobId: digest.job.id,
@@ -247,6 +282,80 @@ async function processArtifactPreparation(job, client = null) {
   };
 }
 
+async function processLanguageNormalization(job, client = null) {
+  const result = await runLanguageNormalization({ job, client });
+  return { stage: "language_normalization", ...result };
+}
+
+async function processTopicSegmentation(job, client = null) {
+  const result = await runTopicSegmentation({ job, client });
+  return { stage: "topic_segmentation", ...result };
+}
+
+async function processRiskBlockerExtraction(job, client = null) {
+  const result = await runRiskBlockerExtraction({ job, client });
+  return { stage: "risk_blocker_extraction", ...result };
+}
+
+async function processTimelineGeneration(job, client = null) {
+  const actor = jobActor(job);
+  const topicSegments = await listTopicSegments({
+    workspaceId: job.workspaceId,
+    sessionId: job.sessionId,
+    client,
+  });
+  const prepared = await ensurePendingArtifact(job, "timeline", client);
+  if (!topicSegments.length) {
+    return {
+      orchestrationOnly: true,
+      generationImplemented: false,
+      artifactId: prepared.artifact.id,
+      reason: "no_topic_segments",
+    };
+  }
+  const timelineEntries = topicSegments.map((topic) => ({
+    title: topic.title,
+    description: topic.summary,
+    occurredAt: topic.startedAt,
+    evidenceSegmentIds: topic.evidenceSegmentIds,
+  }));
+  const completed = await updateHuddleArtifact({
+    workspaceId: job.workspaceId,
+    artifactId: prepared.artifact.id,
+    actorUserId: actor.actorUserId,
+    role: "admin",
+    patch: {
+      status: "ready",
+      approvalStatus: "not_required",
+      contentJson: {
+        timeline: timelineEntries,
+        generationState: "generated",
+        generatedAt: new Date().toISOString(),
+      },
+      contentText: timelineEntries
+        .map((entry) => `${entry.occurredAt || ""} - ${entry.title}: ${entry.description || ""}`)
+        .join("\n"),
+      provenance: {
+        ...prepared.artifact.provenance,
+        source: "huddle_topic_segments_deterministic",
+        generationImplemented: true,
+      },
+      metadata: {
+        orchestrationOnly: false,
+        generationImplemented: true,
+        generationState: "generated",
+      },
+    },
+    client,
+  });
+  return {
+    orchestrationOnly: false,
+    generationImplemented: true,
+    artifactId: completed.artifact.id,
+    entryCount: timelineEntries.length,
+  };
+}
+
 async function processOwnershipResolution(job, client = null) {
   const result = await createOwnershipSuggestions({ job, client });
   return {
@@ -259,7 +368,7 @@ async function processOwnershipResolution(job, client = null) {
 
 async function processMeetingDigest(job, client = null) {
   const actor = jobActor(job);
-  const [artifacts, delivery] = await Promise.all([
+  const [artifacts, delivery, riskBlockerItems, topicSegments] = await Promise.all([
     listHuddleArtifacts({
       workspaceId: job.workspaceId,
       sessionId: job.sessionId,
@@ -273,6 +382,8 @@ async function processMeetingDigest(job, client = null) {
       sessionId: job.sessionId,
       client,
     }),
+    listRiskBlockerItems({ workspaceId: job.workspaceId, sessionId: job.sessionId, client }),
+    listTopicSegments({ workspaceId: job.workspaceId, sessionId: job.sessionId, client }),
   ]);
   const latestReady = (type) =>
     artifacts.find(
@@ -289,6 +400,8 @@ async function processMeetingDigest(job, client = null) {
   const actionItemCount = Array.isArray(actions?.contentJson?.actionItems)
     ? actions.contentJson.actionItems.length
     : 0;
+  const riskCount = riskBlockerItems.filter((item) => item.itemType === "risk").length;
+  const blockerCount = riskBlockerItems.filter((item) => item.itemType === "blocker").length;
   const reviewPath = `/huddles/${job.sessionId}/intelligence`;
   const summaryLabel = summary
     ? "summary available"
@@ -308,12 +421,15 @@ async function processMeetingDigest(job, client = null) {
       timelineArtifactId: timeline?.id,
       generatedByJobId: job.id,
       digest: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         generationState: "ready_for_review",
         summaryAvailable: Boolean(summary),
         transcriptAvailable: Boolean(transcript),
         decisionCount,
         actionItemCount,
+        riskCount,
+        blockerCount,
+        topicSegmentCount: topicSegments.length,
         reviewPath,
         transcriptUnavailableReason:
           job.input?.transcriptUnavailableReason ||
@@ -349,7 +465,7 @@ async function processMeetingDigest(job, client = null) {
         workspaceId: job.workspaceId,
         type: "huddle_intelligence_ready",
         title: "Meeting intelligence is ready",
-        message: `${delivery.title}: ${summaryLabel}, ${decisionCount} decision${decisionCount === 1 ? "" : "s"}, ${actionItemCount} action item${actionItemCount === 1 ? "" : "s"}.`,
+        message: `${delivery.title}: ${summaryLabel}, ${decisionCount} decision${decisionCount === 1 ? "" : "s"}, ${actionItemCount} action item${actionItemCount === 1 ? "" : "s"}${riskCount + blockerCount > 0 ? `, ${riskCount} risk${riskCount === 1 ? "" : "s"} & ${blockerCount} blocker${blockerCount === 1 ? "" : "s"}` : ""}.`,
         action_url: reviewPath,
         source_key: `huddle-intelligence:${job.sessionId}:${userId}`,
         metadata: {
@@ -363,6 +479,8 @@ async function processMeetingDigest(job, client = null) {
             null,
           decisionCount,
           actionItemCount,
+          riskCount,
+          blockerCount,
           meetingDigestId: result.meetingDigest.id,
         },
       })
@@ -409,6 +527,18 @@ async function processClaimedJob(job, client = null) {
   if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.TRANSCRIPT_FINALIZATION) {
     return processTranscriptFinalization(job, client);
   }
+  if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.LANGUAGE_NORMALIZATION) {
+    return processLanguageNormalization(job, client);
+  }
+  if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.TOPIC_SEGMENTATION) {
+    return processTopicSegmentation(job, client);
+  }
+  if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.RISK_BLOCKER_EXTRACTION) {
+    return processRiskBlockerExtraction(job, client);
+  }
+  if (job.jobType === HUDDLE_INTELLIGENCE_JOB_TYPES.TIMELINE_GENERATION) {
+    return processTimelineGeneration(job, client);
+  }
   if (ARTIFACT_JOB_TYPES[job.jobType]) {
     return processArtifactPreparation(job, client);
   }
@@ -442,16 +572,24 @@ export function getHuddleIntelligenceWorkerDiagnostics() {
           registered: true,
           generationImplemented:
             [
+              HUDDLE_INTELLIGENCE_JOB_TYPES.LANGUAGE_NORMALIZATION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.TOPIC_SEGMENTATION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.RISK_BLOCKER_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.TIMELINE_GENERATION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.OWNERSHIP_RESOLUTION,
             ].includes(jobType),
           orchestrationOnly:
             ![
+              HUDDLE_INTELLIGENCE_JOB_TYPES.LANGUAGE_NORMALIZATION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.TOPIC_SEGMENTATION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.ACTION_ITEM_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.RISK_BLOCKER_EXTRACTION,
+              HUDDLE_INTELLIGENCE_JOB_TYPES.TIMELINE_GENERATION,
               HUDDLE_INTELLIGENCE_JOB_TYPES.OWNERSHIP_RESOLUTION,
             ].includes(jobType),
           preparesArtifact: Boolean(ARTIFACT_JOB_TYPES[jobType]),

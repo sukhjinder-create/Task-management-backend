@@ -559,8 +559,27 @@ export async function getMeetingIntelligenceReview({
     String(context.session.started_by || "") === String(actorUserId || "") ||
     String(context.session.host_user_id || "") === String(actorUserId || "");
   const latestDigest = digests[0] || null;
+  // selected.timeline is the auto-generated artifact (huddleIntelligenceWorker
+  // .service.js processTimelineGeneration, derived deterministically from
+  // topic segments) — its contentJson.timeline entries were being computed
+  // and stored but never actually merged into what the UI renders, only
+  // `timeline` (the separate, manually-created huddle_timeline_entries) and
+  // lifecycle events were. Without this the entire timeline_generation stage
+  // had no visible effect on the meeting intelligence page.
+  const generatedTimelineSource = selected.timeline?.contentJson?.timeline;
+  const generatedTimelineEntries = (Array.isArray(generatedTimelineSource) ? generatedTimelineSource : []).map(
+    (entry, index) => ({
+      id: `generated-timeline-${index}`,
+      title: entry.title,
+      description: entry.description,
+      occurredAt: entry.occurredAt,
+      entryType: "topic_segment",
+      transcriptSegmentId: entry.evidenceSegmentIds?.[0] || null,
+    })
+  );
   const combinedTimeline = [
     ...timeline,
+    ...generatedTimelineEntries,
     ...context.lifecycleEvents,
   ].map((entry) =>
     resolveParticipantAliases(entry, context.participants)

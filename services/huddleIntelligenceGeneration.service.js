@@ -1204,6 +1204,27 @@ export function getHuddleIntelligenceGenerationDiagnostics(env = process.env) {
   };
 }
 
+// Shared with huddleTopicSegmentation.service.js, huddleLanguageNormalization
+// .service.js, and huddleRiskBlockerExtraction.service.js so the new pipeline
+// stages build transcript packets, call the LLM, and parse/validate evidence
+// the exact same way the existing summary/decision/action generation does,
+// instead of drifting into their own copies of this logic.
+export {
+  generationConfig,
+  evaluateAiConsent,
+  loadParticipants,
+  buildTranscriptPacket,
+  cleanJsonResponse,
+  normalizeEvidenceIds,
+  generationError,
+  safeString,
+  safeUuid,
+  safeConfidence,
+  arrayOrEmpty,
+  objectOrEmpty,
+  hash,
+};
+
 export default {
   HUDDLE_GENERATION_TYPES,
   evaluateHuddleGenerationAccess,
