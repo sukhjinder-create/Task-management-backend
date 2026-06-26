@@ -40,9 +40,17 @@ abstract class HuddleMediaProvider extends ChangeNotifier {
 
   Future<void> disposeController();
 
-  Widget? buildLocalVideoView({bool mirror = false}) => null;
+  Widget? buildLocalVideoView({
+    bool mirror = false,
+    RTCVideoViewObjectFit fit = RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+  }) =>
+      null;
 
-  Widget? buildRemoteVideoView(String userId) => null;
+  Widget? buildRemoteVideoView(
+    String userId, {
+    RTCVideoViewObjectFit fit = RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+  }) =>
+      null;
 
   void setMuted(bool value);
 

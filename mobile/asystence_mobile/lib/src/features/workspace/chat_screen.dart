@@ -2388,16 +2388,21 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
+    // A single full-screen remote tile is where cropping is most jarring —
+    // there's nowhere else to look. Contain (letterbox) rather than cover
+    // (crop) so a portrait camera's full face is always visible, matching
+    // the web client's behavior for the equivalent 1-on-1 case.
+    const singleRemoteFit = RTCVideoViewObjectFit.RTCVideoViewObjectFitContain;
     final remoteStage = remoteIds.length == 1
         ? _videoTile(
             label: call.remoteNames[remoteIds.first] ??
                 _nameForUser(remoteIds.first) ??
                 'Teammate',
-            mediaView: call.buildRemoteVideoView(remoteIds.first),
+            mediaView: call.buildRemoteVideoView(remoteIds.first, fit: singleRemoteFit),
             renderer: call.remoteRenderers[remoteIds.first],
             emptyIcon: Icons.videocam_off_outlined,
             helper: 'Connecting video...',
-            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+            objectFit: singleRemoteFit,
           )
         : GridView.builder(
             padding: EdgeInsets.zero,

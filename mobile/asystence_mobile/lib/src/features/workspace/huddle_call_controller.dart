@@ -79,12 +79,18 @@ class HuddleCallController extends ChangeNotifier {
     _detachProviderListener();
   }
 
-  Widget? buildLocalVideoView({bool mirror = false}) {
-    return _provider.buildLocalVideoView(mirror: mirror);
+  Widget? buildLocalVideoView({
+    bool mirror = false,
+    RTCVideoViewObjectFit fit = RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+  }) {
+    return _provider.buildLocalVideoView(mirror: mirror, fit: fit);
   }
 
-  Widget? buildRemoteVideoView(String userId) {
-    return _provider.buildRemoteVideoView(userId);
+  Widget? buildRemoteVideoView(
+    String userId, {
+    RTCVideoViewObjectFit fit = RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+  }) {
+    return _provider.buildRemoteVideoView(userId, fit: fit);
   }
 
   void setMuted(bool value) {

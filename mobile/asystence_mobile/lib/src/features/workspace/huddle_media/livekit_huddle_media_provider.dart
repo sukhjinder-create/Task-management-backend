@@ -378,14 +378,22 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     if (_ownsHttpClient) _httpClient.close();
   }
 
+  lk.VideoViewFit _liveKitFit(RTCVideoViewObjectFit fit) =>
+      fit == RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
+          ? lk.VideoViewFit.contain
+          : lk.VideoViewFit.cover;
+
   @override
-  Widget? buildLocalVideoView({bool mirror = false}) {
+  Widget? buildLocalVideoView({
+    bool mirror = false,
+    RTCVideoViewObjectFit fit = RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+  }) {
     if (_usingMeshFallback) return null;
     final track = _cameraTrackForParticipant(_localParticipant());
     if (track == null) return null;
     final view = lk.VideoTrackRenderer(
       track,
-      fit: lk.VideoViewFit.cover,
+      fit: _liveKitFit(fit),
     );
     if (!mirror) return view;
     return Transform(
@@ -396,7 +404,10 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
   }
 
   @override
-  Widget? buildRemoteVideoView(String userId) {
+  Widget? buildRemoteVideoView(
+    String userId, {
+    RTCVideoViewObjectFit fit = RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+  }) {
     if (_usingMeshFallback) return null;
     for (final participant in _remoteParticipants()) {
       if (_userIdForParticipant(participant) != userId) continue;
@@ -404,7 +415,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
       if (track != null) {
         return lk.VideoTrackRenderer(
           track,
-          fit: lk.VideoViewFit.cover,
+          fit: _liveKitFit(fit),
         );
       }
     }
