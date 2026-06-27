@@ -1301,6 +1301,44 @@ export async function listLiveKitQualitySamples({
   }));
 }
 
+// Internal, un-gated summary used by the server itself to compute a media
+// policy at token-issuance time. Unlike listLiveKitQualitySamples this does NOT
+// expose raw samples to a caller and performs no per-user access check — the
+// server is reading its own telemetry to decide policy, not serving data to a
+// user. Returns null when no telemetry exists yet (first joiner).
+export async function getSessionLiveKitQualitySummary({
+  workspaceId,
+  sessionId,
+  limit = 200,
+  client = null,
+} = {}) {
+  if (!workspaceId || !sessionId) return null;
+  const { rows } = await runner(client).query(
+    `
+    SELECT id, observed_at, aggregate, tracks, browser, metadata, created_at
+    FROM huddle_media_quality_samples
+    WHERE workspace_id = $1
+      AND session_id = $2
+      AND provider_type = 'livekit'
+    ORDER BY observed_at DESC, created_at DESC
+    LIMIT $3
+    `,
+    [workspaceId, sessionId, Math.min(Math.max(Number(limit) || 200, 1), 1000)]
+  );
+  if (!rows.length) return null;
+  const samples = rows.map((row) => ({
+    id: row.id,
+    observedAt: row.observed_at,
+    aggregate: sanitizeQualityAggregate(row.aggregate || {}),
+    tracks: boundedArray(row.tracks, 80).map((track) =>
+      sanitizeQualityTrack(track)
+    ),
+    browser: sanitizeQualityBrowser(row.browser || {}),
+    metadata: row.metadata || {},
+  }));
+  return summarizeLiveKitQualitySamples(samples);
+}
+
 function finiteValues(values) {
   return values.map(Number).filter(Number.isFinite);
 }

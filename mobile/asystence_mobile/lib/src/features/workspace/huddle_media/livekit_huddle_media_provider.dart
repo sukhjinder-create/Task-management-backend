@@ -194,57 +194,12 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
         throw const _LiveKitJoinFailure('token_readiness_missing_token');
       }
 
-      final room = lk.Room(
-        roomOptions: lk.RoomOptions(
-          adaptiveStream: true,
-          dynacast: true,
-          defaultCameraCaptureOptions: const lk.CameraCaptureOptions(
-            params: lk.VideoParameters(
-              dimensions: lk.VideoDimensions(720, 1280),
-              encoding: lk.VideoEncoding(
-                maxBitrate: 1700000,
-                maxFramerate: 30,
-              ),
-            ),
-            maxFrameRate: 30,
-          ),
-          defaultVideoPublishOptions: const lk.VideoPublishOptions(
-            videoEncoding: lk.VideoEncoding(
-              maxBitrate: 1700000,
-              maxFramerate: 30,
-            ),
-            // Capture is 720x1280 but the highest simulcast layer used to top
-            // out at 360x640 — a quarter of the captured pixels. No viewer,
-            // on any network, could ever receive more than 360p from this
-            // device. Adding a 540x960 ceiling lets viewers with bandwidth
-            // to spare actually get it; low/mid layers are unchanged so
-            // bandwidth-constrained viewers see no difference.
-            videoSimulcastLayers: [
-              lk.VideoParameters(
-                dimensions: lk.VideoDimensions(180, 320),
-                encoding: lk.VideoEncoding(
-                  maxBitrate: 160000,
-                  maxFramerate: 15,
-                ),
-              ),
-              lk.VideoParameters(
-                dimensions: lk.VideoDimensions(360, 640),
-                encoding: lk.VideoEncoding(
-                  maxBitrate: 450000,
-                  maxFramerate: 20,
-                ),
-              ),
-              lk.VideoParameters(
-                dimensions: lk.VideoDimensions(540, 960),
-                encoding: lk.VideoEncoding(
-                  maxBitrate: 900000,
-                  maxFramerate: 30,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+      // Server-authoritative media policy (computed from this session's quality
+      // telemetry + platform). Applied verbatim so the same decision drives web
+      // and Android; absent policy falls back to the static defaults below.
+      final mediaPolicy =
+          _readNestedMap(tokenPayload, const ['liveKit', 'mediaPolicy']);
+      final room = lk.Room(roomOptions: _buildRoomOptions(mediaPolicy));
       _room = room;
       _attachRoomListener(room);
       unawaited(
@@ -1166,6 +1121,144 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
     }
     if (current is bool) return current;
     return '$current'.toLowerCase() == 'true';
+  }
+
+  Map<String, dynamic>? _readNestedMap(JsonMap payload, List<String> path) {
+    dynamic current = payload;
+    for (final part in path) {
+      if (current is! Map) return null;
+      current = current[part];
+    }
+    if (current is Map) {
+      return current.map((key, value) => MapEntry('$key', value));
+    }
+    return null;
+  }
+
+  // Portrait capture dimensions for a policy resolution label. The server policy
+  // expresses ceilings in landscape (h720 = 1280x720); on a phone we publish
+  // portrait, so the long edge becomes the height.
+  static const Map<String, List<int>> _policyPortraitDimensions = {
+    'h180': [180, 320],
+    'h360': [360, 640],
+    'h540': [540, 960],
+    'h720': [720, 1280],
+  };
+
+  static const Map<String, int> _policyLayerBitrate = {
+    'h180': 160000,
+    'h360': 450000,
+    'h540': 900000,
+    'h720': 1700000,
+  };
+
+  static const List<String> _policyLadder = ['h180', 'h360', 'h540', 'h720'];
+
+  // Build RoomOptions, applying the server-authoritative media policy when
+  // present (publish ceiling, simulcast ladder, dynacast, adaptiveStream). When
+  // absent, fall back to the previous static 720p capture + 3-layer ladder so
+  // the client never hard-depends on the policy being delivered.
+  lk.RoomOptions _buildRoomOptions(Map<String, dynamic>? mediaPolicy) {
+    final publish = mediaPolicy == null
+        ? null
+        : (mediaPolicy['publish'] is Map
+            ? (mediaPolicy['publish'] as Map)
+                .map((key, value) => MapEntry('$key', value))
+            : null);
+
+    final ceilingLabel = () {
+      final value = publish?['maxResolution'];
+      if (value is String && _policyLadder.contains(value)) return value;
+      return 'h540';
+    }();
+    final ceilingIndex = _policyLadder.indexOf(ceilingLabel);
+
+    final maxFramerate = () {
+      final value = publish?['maxFramerate'];
+      if (value is num && value > 0) return value.toInt();
+      return 30;
+    }();
+
+    final adaptiveStream = mediaPolicy == null
+        ? true
+        : (mediaPolicy['subscribe'] is Map &&
+                (mediaPolicy['subscribe'] as Map)['adaptiveStream'] == false
+            ? false
+            : true);
+    final dynacast = publish == null ? true : (publish['dynacast'] != false);
+
+    if (mediaPolicy == null) {
+      // Legacy defaults: 720p portrait capture, full three-layer ladder.
+      // RoomOptions itself has no const constructor (the inner options do), so
+      // match the original const-ness exactly.
+      return lk.RoomOptions(
+        adaptiveStream: true,
+        dynacast: true,
+        defaultCameraCaptureOptions: const lk.CameraCaptureOptions(
+          params: lk.VideoParameters(
+            dimensions: lk.VideoDimensions(720, 1280),
+            encoding: lk.VideoEncoding(maxBitrate: 1700000, maxFramerate: 30),
+          ),
+          maxFrameRate: 30,
+        ),
+        defaultVideoPublishOptions: const lk.VideoPublishOptions(
+          videoEncoding: lk.VideoEncoding(maxBitrate: 1700000, maxFramerate: 30),
+          videoSimulcastLayers: [
+            lk.VideoParameters(
+              dimensions: lk.VideoDimensions(180, 320),
+              encoding: lk.VideoEncoding(maxBitrate: 160000, maxFramerate: 15),
+            ),
+            lk.VideoParameters(
+              dimensions: lk.VideoDimensions(360, 640),
+              encoding: lk.VideoEncoding(maxBitrate: 450000, maxFramerate: 20),
+            ),
+            lk.VideoParameters(
+              dimensions: lk.VideoDimensions(540, 960),
+              encoding: lk.VideoEncoding(maxBitrate: 900000, maxFramerate: 30),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final ceilingDims = _policyPortraitDimensions[ceilingLabel] ?? [540, 960];
+    final ceilingBitrate = _policyLayerBitrate[ceilingLabel] ?? 900000;
+
+    final ladderLabels = _policyLadder.sublist(
+      (ceilingIndex - 2) < 0 ? 0 : ceilingIndex - 2,
+      ceilingIndex + 1,
+    );
+    final simulcastLayers = ladderLabels.map((label) {
+      final dims = _policyPortraitDimensions[label] ?? [360, 640];
+      final bitrate = _policyLayerBitrate[label] ?? 450000;
+      final framerate = label == 'h180' ? 15 : (label == 'h360' ? 20 : maxFramerate);
+      return lk.VideoParameters(
+        dimensions: lk.VideoDimensions(dims[0], dims[1]),
+        encoding: lk.VideoEncoding(maxBitrate: bitrate, maxFramerate: framerate),
+      );
+    }).toList();
+
+    return lk.RoomOptions(
+      adaptiveStream: adaptiveStream,
+      dynacast: dynacast,
+      defaultCameraCaptureOptions: lk.CameraCaptureOptions(
+        params: lk.VideoParameters(
+          dimensions: lk.VideoDimensions(ceilingDims[0], ceilingDims[1]),
+          encoding: lk.VideoEncoding(
+            maxBitrate: ceilingBitrate,
+            maxFramerate: maxFramerate,
+          ),
+        ),
+        maxFrameRate: maxFramerate,
+      ),
+      defaultVideoPublishOptions: lk.VideoPublishOptions(
+        videoEncoding: lk.VideoEncoding(
+          maxBitrate: ceilingBitrate,
+          maxFramerate: maxFramerate,
+        ),
+        videoSimulcastLayers: simulcastLayers,
+      ),
+    );
   }
 
   JsonMap get _clientCapabilities => {

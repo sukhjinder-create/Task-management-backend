@@ -9,11 +9,13 @@ import {
   buildProviderRoomIdentity,
   createOrGetLockedMediaSession,
   findLockedMediaSession,
+  getSessionLiveKitQualitySummary,
   listLiveKitQualitySamples,
   recordLiveKitQualityDiagnostics,
   summarizeLiveKitQualitySamples,
   upsertMediaProviderIdentity,
 } from "../services/huddleMediaSession.service.js";
+import { computeHuddleMediaPolicy } from "../services/huddleMediaPolicy.service.js";
 import {
   getLiveKitRoomEndpointConfig,
 } from "../services/liveKitRoom.service.js";
@@ -918,6 +920,41 @@ router.post("/livekit/token", async (req, res) => {
       void primeTranscriptionGrant();
     }
 
+    // Server-authoritative media policy: read the session's own LiveKit quality
+    // telemetry and the joining platform, and hand the client a concrete policy
+    // (publish ceiling, simulcast, dynacast, degradation preference, subscribe
+    // quality) to apply at connect time. This is what makes the telemetry
+    // actively shape quality instead of only reporting it. Failure here must
+    // never block token issuance — fall back to a platform default.
+    let mediaPolicy = null;
+    try {
+      const qualitySummary = await getSessionLiveKitQualitySummary({
+        workspaceId: authz.workspaceId,
+        sessionId: authz.sessionId,
+        limit: 200,
+      });
+      mediaPolicy = computeHuddleMediaPolicy({
+        platform:
+          safeString(req.body?.platform) ||
+          safeString(req.get?.("x-client-platform")) ||
+          "web",
+        qualitySummary,
+        clientCapabilities: resolveClientCapabilities(req, req.body),
+      });
+    } catch (policyError) {
+      console.warn("[huddle:media:livekit:policy_failed]", {
+        sessionId: authz.sessionId,
+        reason: policyError?.message || "media_policy_compute_failed",
+      });
+      mediaPolicy = computeHuddleMediaPolicy({
+        platform:
+          safeString(req.body?.platform) ||
+          safeString(req.get?.("x-client-platform")) ||
+          "web",
+        qualitySummary: null,
+      });
+    }
+
     recordHuddleMediaOperationalEvent({
       providerType: HUDDLE_MEDIA_PROVIDERS.LIVEKIT,
       eventType: HUDDLE_MEDIA_OPERATIONAL_EVENTS.TOKEN_ISSUANCE,
@@ -957,9 +994,11 @@ router.post("/livekit/token", async (req, res) => {
         token: tokenResult.token,
         expiresAt: tokenResult.expiresAt,
         identity: tokenResult.providerIdentity,
+        mediaPolicy,
       },
       diagnostics: {
         token: tokenResult.diagnostics,
+        mediaPolicy,
         authorization: authz.checks,
         selector: getProviderSelectionDiagnostics(authz.selector),
         providerLock: authz.providerLock,
