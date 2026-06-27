@@ -89,42 +89,61 @@ function numberOrNull(value) {
 }
 
 // Derive a degradation severity (0 = clean, 3 = severe) from the telemetry
-// summary. Each network/decode signal contributes; we take the strongest.
+// summary.
+//
+// Crucial distinction: only signals that actually indicate the *upstream/send*
+// path is congested should pull the publish ceiling down. Packet loss, RTT and
+// the encoder's own qualityLimitationReason ("bandwidth"/"cpu") are such hard
+// signals. Receive-side FPS/resolution being low is usually NOT congestion — it
+// is adaptiveStream deliberately giving a small or off-screen tile a cheap
+// layer, i.e. the system working as designed. So receive metrics and the
+// holistic session rating are treated as SOFT signals that can only nudge to
+// level 1; they can never, on their own, drop a clean session to h360/h180.
 function deriveDegradation(summary) {
   if (!summary || !summary.ready) {
     return { level: 0, reasons: [], metricsSeen: false };
   }
   const metrics = summary.metrics || {};
   const reasons = [];
-  let level = 0;
-  const bump = (to, reason) => {
-    if (to > level) level = to;
+  let hardLevel = 0;
+  let softLevel = 0;
+  const hard = (to, reason) => {
+    if (to > hardLevel) hardLevel = to;
+    reasons.push(reason);
+  };
+  const soft = (reason) => {
+    if (softLevel < 1) softLevel = 1;
     reasons.push(reason);
   };
 
+  // --- Hard congestion signals (send path) ---
   const loss = numberOrNull(metrics.averagePacketLoss);
-  if (loss !== null && loss > 0.08) bump(3, "packet_loss_above_8pct");
-  else if (loss !== null && loss > 0.05) bump(2, "packet_loss_above_5pct");
-  else if (loss !== null && loss > 0.02) bump(1, "packet_loss_above_2pct");
+  if (loss !== null && loss > 0.08) hard(3, "packet_loss_above_8pct");
+  else if (loss !== null && loss > 0.05) hard(2, "packet_loss_above_5pct");
+  else if (loss !== null && loss > 0.02) hard(1, "packet_loss_above_2pct");
 
   const rtt = numberOrNull(metrics.averageRttMs);
-  if (rtt !== null && rtt > 400) bump(3, "rtt_above_400ms");
-  else if (rtt !== null && rtt > 300) bump(2, "rtt_above_300ms");
-  else if (rtt !== null && rtt > 180) bump(1, "rtt_above_180ms");
+  if (rtt !== null && rtt > 400) hard(2, "rtt_above_400ms");
+  else if (rtt !== null && rtt > 300) hard(2, "rtt_above_300ms");
+  else if (rtt !== null && rtt > 180) hard(1, "rtt_above_180ms");
 
   const bandwidthLimited = Number(metrics.qualityLimitationReasons?.bandwidth) || 0;
-  if (bandwidthLimited > 0) bump(2, "bandwidth_limited_samples");
+  if (bandwidthLimited > 0) hard(2, "bandwidth_limited_samples");
 
   const cpuLimited = Number(metrics.qualityLimitationReasons?.cpu) || 0;
-  if (cpuLimited > 0) bump(1, "cpu_limited_samples");
+  if (cpuLimited > 0) hard(1, "cpu_limited_samples");
 
+  // --- Soft signals (receive side / holistic): cap at level 1 ---
+  // Only a clearly-broken receive frame rate counts, and only as a nudge.
   const recvFps = numberOrNull(metrics.averageReceiveFps);
-  if (recvFps !== null && recvFps < 15) bump(2, "receive_fps_below_15");
-  else if (recvFps !== null && recvFps < 22) bump(1, "receive_fps_below_22");
+  if (recvFps !== null && recvFps < 10) soft("receive_fps_below_10");
 
-  if (summary.rating === "poor") bump(2, "session_rating_poor");
-  else if (summary.rating === "degraded") bump(1, "session_rating_degraded");
+  if (summary.rating === "poor") soft("session_rating_poor");
+  else if (summary.rating === "degraded") soft("session_rating_degraded");
 
+  // Hard signals fully determine the level; soft signals only apply when there
+  // is no hard congestion, and never beyond level 1.
+  const level = hardLevel > 0 ? hardLevel : softLevel;
   return { level, reasons, metricsSeen: true };
 }
 
