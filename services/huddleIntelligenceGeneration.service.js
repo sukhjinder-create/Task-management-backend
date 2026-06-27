@@ -1257,6 +1257,9 @@ export {
   arrayOrEmpty,
   objectOrEmpty,
   hash,
+  // Exposed for offline validation of the executive synthesis stage.
+  promptFor,
+  fuzzyMatchParticipant,
 };
 
 export default {
