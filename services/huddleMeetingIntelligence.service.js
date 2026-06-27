@@ -88,6 +88,7 @@ function resolveParticipantAliases(value, participants = []) {
   if (Array.isArray(value)) {
     return value.map((item) => resolveParticipantAliases(item, participants));
   }
+  if (value instanceof Date) return value;
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, nested]) => [
@@ -398,7 +399,7 @@ async function loadMeetingContext({ workspaceId, sessionId, client = null }) {
       entryType: "system",
       title: lifecycleTitle(row.event_type),
       description: row.actor_name ? `${row.actor_name} - ${lifecycleTitle(row.event_type)}` : null,
-      occurredAt: row.created_at,
+      occurredAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
       eventType: row.event_type,
       eventPayload: row.event_payload || {},
       actorUserId: row.actor_user_id,
