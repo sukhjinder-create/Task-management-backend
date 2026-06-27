@@ -12,8 +12,8 @@ import {
   listOwnershipResolutions,
 } from "./huddleIntelligence.service.js";
 
-const GENERATION_VERSION = 3;
-const PROMPT_VERSION = "huddle-intelligence-report-v4";
+const GENERATION_VERSION = 4;
+const PROMPT_VERSION = "huddle-intelligence-executive-synthesis-v5";
 const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 12000;
 const HARD_MAX_TRANSCRIPT_CHARACTERS = 12000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 2200;
@@ -225,7 +225,11 @@ function transcriptLine(segment) {
     segment.participantId ||
     "Participant";
   const at = segment.startedAt || "";
-  return `[${segment.id}] [${at}] ${speaker}: ${segment.text}`;
+  // Prefer the language-normalized (cleaned, translated-to-English) text when
+  // the normalization stage has produced it, so every downstream reasoning
+  // stage works from consistent English rather than raw code-switched ASR.
+  const text = segment.normalizedText || segment.text;
+  return `[${segment.id}] [${at}] ${speaker}: ${text}`;
 }
 
 function buildTranscriptPacket(segments, {
@@ -327,6 +331,68 @@ function normalizeTextItem(value, maxLength) {
   return safeString(value, maxLength);
 }
 
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const prev = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    let prevDiag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const temp = prev[j];
+      prev[j] = Math.min(
+        prev[j] + 1,
+        prev[j - 1] + 1,
+        prevDiag + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+      prevDiag = temp;
+    }
+  }
+  return prev[b.length];
+}
+
+// Resolve a (possibly mis-transcribed) speaker/owner label to a real
+// participant display name. ASR routinely garbles names — "Amrinder" becomes
+// "M Rinder", "Sukhjinder" becomes "Sukh Jinder" — and propagating those into
+// owners/decisions makes the report look like it invented people. We match by:
+// exact, then space-stripped substring (catches "M Rinder"⊂"amrinder"), then
+// first-name token, then a small edit-distance tolerance.
+function fuzzyMatchParticipant(requested, participants = []) {
+  const want = requested.toLowerCase().trim();
+  const wantCompact = want.replace(/[^a-z0-9]/g, "");
+  if (!wantCompact) return null;
+  let best = null;
+  let bestScore = Infinity;
+  for (const participant of participants) {
+    const name = safeString(participant.displayName, 160).toLowerCase();
+    const compact = name.replace(/[^a-z0-9]/g, "");
+    if (!compact) continue;
+    if (compact === wantCompact) return participant.displayName;
+    // Space-stripped containment in either direction (handles split/joined names).
+    if (
+      compact.length >= 4 &&
+      (compact.includes(wantCompact) || wantCompact.includes(compact))
+    ) {
+      return participant.displayName;
+    }
+    // First-name token match.
+    const firstToken = name.split(/\s+/)[0];
+    if (firstToken && firstToken.length >= 4 && want.split(/\s+/).includes(firstToken)) {
+      return participant.displayName;
+    }
+    // Edit-distance tolerance proportional to name length (cap ~25%).
+    const distance = levenshtein(wantCompact, compact);
+    const tolerance = Math.max(1, Math.floor(compact.length * 0.25));
+    if (distance <= tolerance && distance < bestScore) {
+      best = participant.displayName;
+      bestScore = distance;
+    }
+  }
+  return best;
+}
+
 function normalizeParticipantLabel(value, participants = []) {
   const requested = safeString(value, 160);
   if (!requested) return null;
@@ -337,11 +403,13 @@ function normalizeParticipantLabel(value, participants = []) {
   if (/^participant$/i.test(requested)) {
     return participants.length === 1 ? participants[0]?.displayName || null : null;
   }
-  return participants.find(
+  const exact = participants.find(
     (participant) =>
       safeString(participant.displayName, 160).toLowerCase() ===
       requested.toLowerCase()
-  )?.displayName || null;
+  )?.displayName;
+  if (exact) return exact;
+  return fuzzyMatchParticipant(requested, participants);
 }
 
 function normalizeEvidenceItems(value, context, {
@@ -373,130 +441,78 @@ function normalizeEvidenceItems(value, context, {
     .filter(Boolean);
 }
 
+// Executive synthesis (schemaVersion 4). This stage no longer restates the
+// transcript as per-speaker dialogue ("X said, Y replied"). It synthesizes the
+// meeting the way a senior executive assistant would: purpose, business
+// context, discussion themes, recommendations, open questions, and a narrative
+// executive summary. Decisions / action items / risks / blockers are extracted
+// by dedicated upstream stages and surfaced in their own sections, so this
+// stage references them rather than re-deriving them.
 function normalizeSummary(raw, context) {
   const root = objectOrEmpty(raw);
-  const keyPoints = normalizeEvidenceItems(
-    root.keyPoints || root.key_points,
-    context,
-    {
-      maxItems: 16,
-      textFields: ["text", "point"],
-      textLength: 1400,
-      idPrefix: "summary-point",
-    }
-  );
-  const discussionHighlights = arrayOrEmpty(
-    root.discussionHighlights || root.discussion_highlights || root.keyPoints || root.key_points
+
+  const discussionThemes = arrayOrEmpty(
+    root.discussionThemes || root.discussion_themes || root.themes
   )
-    .slice(0, 16)
+    .slice(0, 12)
     .map((item, index) => {
-      const normalized = objectOrEmpty(item);
-      const text = normalizeTextItem(
-        normalized.text || normalized.point || normalized.highlight,
-        1800
+      const normalized = typeof item === "string" ? { theme: item } : objectOrEmpty(item);
+      const theme = normalizeTextItem(normalized.theme || normalized.title, 300);
+      const detail = normalizeTextItem(
+        normalized.detail || normalized.text || normalized.description || normalized.summary,
+        2200
       );
       const evidenceSegmentIds = normalizeEvidenceIds(
         normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
         context.knownSegmentIds
       );
-      if (!text || evidenceSegmentIds.length === 0) return null;
+      if (!theme && !detail) return null;
       return {
-        id: `discussion-highlight-${index + 1}`,
-        speaker: normalizeParticipantLabel(
-          normalized.speaker || normalized.speakerName || normalized.speaker_name,
-          context.participants
-        ) || "Multiple participants",
-        text,
+        id: `theme-${index + 1}`,
+        theme: theme || `Theme ${index + 1}`,
+        detail: detail || theme,
         evidenceSegmentIds,
       };
     })
     .filter(Boolean);
-  const discussionSummary = normalizeEvidenceItems(
-    root.discussionSummary || root.discussion_summary,
-    context,
-    {
-      maxItems: 12,
-      textFields: ["text", "summary", "description"],
-      textLength: 2200,
-      idPrefix: "discussion",
-    }
-  );
-  const conclusions = normalizeEvidenceItems(root.conclusions, context, {
-    maxItems: 12,
-    textFields: ["text", "conclusion"],
-    textLength: 1400,
-    idPrefix: "conclusion",
-  });
+
+  const recommendations = arrayOrEmpty(root.recommendations || root.recommendation)
+    .slice(0, 12)
+    .map((item, index) => {
+      const normalized = typeof item === "string" ? { text: item } : objectOrEmpty(item);
+      const text = normalizeTextItem(
+        normalized.text || normalized.recommendation || normalized.detail,
+        1600
+      );
+      if (!text) return null;
+      return {
+        id: `recommendation-${index + 1}`,
+        text,
+        evidenceSegmentIds: normalizeEvidenceIds(
+          normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
+          context.knownSegmentIds
+        ),
+      };
+    })
+    .filter(Boolean);
+
   const risksRaised = normalizeEvidenceItems(
     root.risksRaised || root.risks_raised || root.risks,
     context,
-    {
-      maxItems: 12,
-      textFields: ["text", "risk", "description"],
-      textLength: 1400,
-      idPrefix: "risk",
-    }
-  );
-  const nextSteps = normalizeEvidenceItems(
-    root.nextSteps || root.next_steps,
-    context,
-    {
-      maxItems: 12,
-      textFields: ["text", "step", "description"],
-      textLength: 1400,
-      idPrefix: "next-step",
-    }
+    { maxItems: 12, textFields: ["text", "risk", "description"], textLength: 1400, idPrefix: "risk" }
   );
   const meetingOutcomes = normalizeEvidenceItems(
     root.meetingOutcomes || root.meeting_outcomes || root.outcomes,
     context,
-    {
-      maxItems: 12,
-      textFields: ["text", "outcome"],
-      textLength: 1400,
-      idPrefix: "outcome",
-    }
+    { maxItems: 12, textFields: ["text", "outcome"], textLength: 1400, idPrefix: "outcome" }
   );
-  const chronologicalSummary = arrayOrEmpty(
-    root.chronologicalSummary || root.chronological_summary
-  )
-    .slice(0, 20)
-    .map((item, index) => {
-      const normalized = objectOrEmpty(item);
-      const description = normalizeTextItem(
-        normalized.description || normalized.text || normalized.summary,
-        1800
-      );
-      const evidenceSegmentIds = normalizeEvidenceIds(
-        normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
-        context.knownSegmentIds
-      );
-      if (!description || evidenceSegmentIds.length === 0) return null;
-      return {
-        id: `chronology-${index + 1}`,
-        title: normalizeTextItem(normalized.title, 300) || `Discussion ${index + 1}`,
-        description,
-        occurredAt: normalizeTextItem(
-          normalized.occurredAt || normalized.occurred_at,
-          80
-        ) || null,
-        evidenceSegmentIds,
-      };
-    })
-    .filter(Boolean);
+
   const openQuestions = arrayOrEmpty(root.openQuestions || root.open_questions)
     .slice(0, 12)
     .map((item, index) => {
       const normalized = typeof item === "string" ? { question: item } : objectOrEmpty(item);
-      const question = normalizeTextItem(
-        normalized.question || normalized.text,
-        1200
-      );
-      const evidenceSegmentIds = normalizeEvidenceIds(
-        normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
-        context.knownSegmentIds
-      );
-      if (!question || evidenceSegmentIds.length === 0) return null;
+      const question = normalizeTextItem(normalized.question || normalized.text, 1200);
+      if (!question) return null;
       return {
         id: `open-question-${index + 1}`,
         question,
@@ -504,52 +520,73 @@ function normalizeSummary(raw, context) {
           normalized.raisedBy || normalized.raised_by || normalized.speaker,
           context.participants
         ),
-        evidenceSegmentIds,
+        evidenceSegmentIds: normalizeEvidenceIds(
+          normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
+          context.knownSegmentIds
+        ),
       };
     })
     .filter(Boolean);
-  const overview = normalizeTextItem(root.overview || root.summary, 5000);
-  const overviewEvidenceSegmentIds = normalizeEvidenceIds(
-    root.overviewEvidenceSegmentIds || root.overview_evidence_segment_ids,
-    context.knownSegmentIds
+
+  const executiveSummary = normalizeTextItem(
+    root.executiveSummary || root.executive_summary || root.overview || root.summary,
+    6000
+  );
+  const businessContext = normalizeTextItem(
+    root.businessContext || root.business_context || root.context,
+    3000
   );
   const purpose = normalizeTextItem(root.purpose || root.meetingPurpose, 1800);
-  const purposeEvidenceSegmentIds = normalizeEvidenceIds(
-    root.purposeEvidenceSegmentIds ||
-      root.purpose_evidence_segment_ids ||
-      root.overviewEvidenceSegmentIds,
+  const overviewEvidenceSegmentIds = normalizeEvidenceIds(
+    root.overviewEvidenceSegmentIds ||
+      root.overview_evidence_segment_ids ||
+      root.executiveSummaryEvidenceSegmentIds,
     context.knownSegmentIds
   );
-  if (
-    !overview ||
-    overviewEvidenceSegmentIds.length === 0 ||
-    keyPoints.length === 0 ||
-    discussionHighlights.length === 0
-  ) {
+  const purposeEvidenceSegmentIds = normalizeEvidenceIds(
+    root.purposeEvidenceSegmentIds || root.purpose_evidence_segment_ids,
+    context.knownSegmentIds
+  );
+
+  // Backward-compat keyPoints: every legacy consumer (digest, copilot, the
+  // report builder) reads keyPoints. Derive them from the themes so nothing
+  // downstream breaks while the new executive fields drive the UI.
+  const keyPoints = discussionThemes.map((theme, index) => ({
+    id: `summary-point-${index + 1}`,
+    text: theme.detail || theme.theme,
+    evidenceSegmentIds: theme.evidenceSegmentIds,
+  }));
+
+  // The executive narrative is the core deliverable; require it plus at least
+  // one synthesized theme. Evidence is preferred but not hard-required here,
+  // because synthesis legitimately spans many segments and the per-section
+  // evidence (themes/risks/questions) carries the binding.
+  if (!executiveSummary || discussionThemes.length === 0) {
     throw generationError("summary_evidence_validation_failed", {
       retryable: true,
       statusCode: 502,
     });
   }
+
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     title: normalizeTextItem(root.title, 300) || "Meeting summary",
     purpose: purpose || normalizeTextItem(root.title, 300) || "Meeting discussion",
     purposeEvidenceSegmentIds:
       purposeEvidenceSegmentIds.length > 0
         ? purposeEvidenceSegmentIds
         : overviewEvidenceSegmentIds,
-    overview,
+    businessContext: businessContext || null,
+    executiveSummary,
+    // Compatibility: legacy consumers read `overview`.
+    overview: executiveSummary,
     overviewEvidenceSegmentIds,
-    discussionSummary,
+    discussionThemes,
+    recommendations,
     keyPoints,
-    discussionHighlights,
-    conclusions,
     openQuestions,
     risksRaised,
-    nextSteps,
     meetingOutcomes,
-    chronologicalSummary,
     confidence: safeConfidence(root.confidence, 0.5),
   };
 }
@@ -689,30 +726,21 @@ function evidenceIdsFromContent(artifactType, content) {
   if (artifactType === HUDDLE_GENERATION_TYPES.SUMMARY) {
     return [...new Set([
       ...arrayOrEmpty(content.overviewEvidenceSegmentIds),
+      ...arrayOrEmpty(content.purposeEvidenceSegmentIds),
+      ...arrayOrEmpty(content.discussionThemes).flatMap((item) =>
+        arrayOrEmpty(item.evidenceSegmentIds)
+      ),
       ...arrayOrEmpty(content.keyPoints).flatMap((item) => arrayOrEmpty(item.evidenceSegmentIds)),
-      ...arrayOrEmpty(content.discussionHighlights).flatMap((item) =>
+      ...arrayOrEmpty(content.recommendations).flatMap((item) =>
         arrayOrEmpty(item.evidenceSegmentIds)
       ),
       ...arrayOrEmpty(content.openQuestions).flatMap((item) =>
         arrayOrEmpty(item.evidenceSegmentIds)
       ),
-      ...arrayOrEmpty(content.purposeEvidenceSegmentIds),
-      ...arrayOrEmpty(content.discussionSummary).flatMap((item) =>
-        arrayOrEmpty(item.evidenceSegmentIds)
-      ),
-      ...arrayOrEmpty(content.conclusions).flatMap((item) =>
-        arrayOrEmpty(item.evidenceSegmentIds)
-      ),
       ...arrayOrEmpty(content.risksRaised).flatMap((item) =>
         arrayOrEmpty(item.evidenceSegmentIds)
       ),
-      ...arrayOrEmpty(content.nextSteps).flatMap((item) =>
-        arrayOrEmpty(item.evidenceSegmentIds)
-      ),
       ...arrayOrEmpty(content.meetingOutcomes).flatMap((item) =>
-        arrayOrEmpty(item.evidenceSegmentIds)
-      ),
-      ...arrayOrEmpty(content.chronologicalSummary).flatMap((item) =>
         arrayOrEmpty(item.evidenceSegmentIds)
       ),
     ])];
@@ -731,29 +759,27 @@ function contentText(artifactType, content) {
   if (artifactType === HUDDLE_GENERATION_TYPES.SUMMARY) {
     return [
       content.title,
-      "Meeting Purpose",
+      "Purpose",
       content.purpose,
+      content.businessContext ? "Business Context" : null,
+      content.businessContext || null,
       "Executive Summary",
-      content.overview,
-      "Discussion Summary",
-      ...content.discussionSummary.map((item) => `- ${item.text}`),
-      "Discussion Highlights",
-      ...content.discussionHighlights.map((item) => `- ${item.speaker}: ${item.text}`),
-      "Important Points",
-      ...content.keyPoints.map((item) => `- ${item.text}`),
-      "Conclusions",
-      ...content.conclusions.map((item) => `- ${item.text}`),
+      content.executiveSummary || content.overview,
+      "Discussion Themes",
+      ...arrayOrEmpty(content.discussionThemes).map(
+        (item) => `- ${item.theme}: ${item.detail}`
+      ),
+      "Recommendations",
+      ...(arrayOrEmpty(content.recommendations).length
+        ? content.recommendations.map((item) => `- ${item.text}`)
+        : ["- None"]),
       "Open Questions",
-      ...(content.openQuestions.length
+      ...(arrayOrEmpty(content.openQuestions).length
         ? content.openQuestions.map((item) => `- ${item.question}`)
         : ["- None identified"]),
       "Risks",
-      ...(content.risksRaised.length
+      ...(arrayOrEmpty(content.risksRaised).length
         ? content.risksRaised.map((item) => `- ${item.text}`)
-        : ["- None identified"]),
-      "Next Steps",
-      ...(content.nextSteps.length
-        ? content.nextSteps.map((item) => `- ${item.text}`)
         : ["- None identified"]),
     ].filter(Boolean).join("\n\n");
   }
@@ -771,7 +797,7 @@ function contentText(artifactType, content) {
     .join("\n\n");
 }
 
-function promptFor({ artifactType, packet, participants }) {
+function promptFor({ artifactType, packet, participants, synthesisContext = null }) {
   const participantDirectory = participants.map((participant) => ({
     participantId: participant.participantId,
     userId: participant.userId,
@@ -784,27 +810,23 @@ function promptFor({ artifactType, packet, participants }) {
     "Do not invent facts. Cite only segment IDs present in the transcript.",
     "Write every field in clear professional English, regardless of what language the meeting was conducted in. Understand non-English and code-switched speech (Hindi, Punjabi, Hinglish, etc.) and translate the underlying meaning into professional English prose — never copy non-English wording verbatim into summary fields. Evidence binding is unaffected: evidenceSegmentIds still point at the original transcript segments regardless of what language the generated text is in. Quote a participant's original wording directly only when the exact phrasing itself is the evidence (e.g. a precise commitment or figure), and even then keep surrounding text in English.",
     "Use exact participant display names from the participant directory. Never use numbered participant aliases.",
+    "Speech-to-text frequently garbles names (e.g. \"Amrinder\" becomes \"M Rinder\", \"Sukhjinder\" becomes \"Sukh Jinder\"). Always map any garbled or partial name to the closest matching display name in the participant directory. Never emit a person who is not in the directory.",
     "If the transcript line contains a generic speaker label but participant IDs map to a directory name, use the directory name.",
-    "Write for a manager who did not attend: clear context, concrete outcomes, and no filler.",
-    "Never restate the transcript as dialogue (e.g. \"X said hello, Y replied hello\"). Synthesize what happened and why it matters, the way an executive assistant would write meeting notes, not the way a court reporter would.",
+    "Write for a senior executive who did not attend: clear context, concrete outcomes, decisions, owners, deadlines, risks, and recommendations. No filler.",
+    "Never restate the transcript as dialogue (e.g. \"X said hello, Y replied hello\"). Synthesize what happened and why it matters, the way a senior executive assistant or Chief of Staff would write board-ready meeting notes — not the way a court reporter would.",
     "Return one JSON object and no markdown.",
   ].join(" ");
   const task = {
     summary: `
+You are writing the EXECUTIVE SUMMARY of this meeting. Upstream stages have already extracted the structured decisions, action items, risks, blockers, and topic segments; they are provided to you under "Structured facts already extracted" when available. Your job is to SYNTHESIZE them with the transcript into an executive-quality report — not to re-list dialogue.
 Return:
-{"title":"...","purpose":"why the meeting happened","purposeEvidenceSegmentIds":["uuid"],"overview":"2-5 substantive paragraphs","overviewEvidenceSegmentIds":["uuid"],"discussionSummary":[{"text":"a stage of the discussion and its context","evidenceSegmentIds":["uuid"]}],"discussionHighlights":[{"speaker":"exact participant display name","text":"what this person contributed and why it mattered","evidenceSegmentIds":["uuid"]}],"keyPoints":[{"text":"important discussion point","evidenceSegmentIds":["uuid"]}],"conclusions":[{"text":"supported conclusion","evidenceSegmentIds":["uuid"]}],"openQuestions":[{"question":"unresolved question or issue","raisedBy":"exact participant display name or null","evidenceSegmentIds":["uuid"]}],"risksRaised":[{"text":"risk, blocker, dependency, or uncertainty","evidenceSegmentIds":["uuid"]}],"nextSteps":[{"text":"evidence-backed next step, not an invented commitment","evidenceSegmentIds":["uuid"]}],"meetingOutcomes":[{"text":"observable outcome from this meeting","evidenceSegmentIds":["uuid"]}],"chronologicalSummary":[{"title":"discussion stage","description":"what happened","occurredAt":"ISO timestamp or null","evidenceSegmentIds":["uuid"]}],"confidence":0.0}
-Write a complete, useful meeting report rather than a generic short summary.
-The overview should normally be 3-5 substantive paragraphs for real meetings and should explain who contributed what, what changed, and what still needs attention.
-Explain the meeting purpose, discussion progression, outcomes, unresolved work, ownership, risks, blockers, and disagreement if present.
-Discussion highlights must attribute contributions to the actual speaker shown in the transcript.
-Use only exact names from the participant directory. Never emit Participant 1, Participant 2, or invented names.
-Use several distinct transcript segments when the meeting contains enough evidence; do not cite the same segment for every claim.
-Do not duplicate decisions or action items verbatim; provide the context that makes them understandable.
-Do not turn questions, possibilities, or vague discussion into decisions, commitments, risks, or next steps.
-Translate the intent of any non-English or code-switched discussion into professional English prose; do not copy Hindi/Punjabi/Hinglish wording into the output.
-Prefer specific statements like "Asha raised the rollout risk" over vague statements like "the team discussed risks".
-When the transcript is short, still produce the most useful evidence-grounded report possible and say what was not discussed through empty arrays, not invented claims.
-Every claim, highlight, point, and open question must cite evidence. Return an empty openQuestions array only when the transcript contains no unresolved issue.`,
+{"title":"concise meeting title","purpose":"why this meeting happened, in one or two sentences","purposeEvidenceSegmentIds":["uuid"],"businessContext":"the business situation, project, customer, or background that makes this meeting matter, inferred from the discussion","executiveSummary":"3-6 flowing paragraphs that a senior executive would read to understand the meeting end to end: what it was about, what was discussed, what was decided, who owns what, what the risks and blockers are, and what should happen next. Professional English only.","overviewEvidenceSegmentIds":["uuid"],"discussionThemes":[{"theme":"a short theme label","detail":"a synthesized paragraph explaining this theme and its significance, NOT a quote of who said what","evidenceSegmentIds":["uuid"]}],"recommendations":[{"text":"a concrete, senior-level recommendation or next step the team should consider","evidenceSegmentIds":["uuid"]}],"openQuestions":[{"question":"an unresolved question or decision still pending","raisedBy":"exact participant display name or null","evidenceSegmentIds":["uuid"]}],"risksRaised":[{"text":"a risk, blocker, dependency, or uncertainty in professional English","evidenceSegmentIds":["uuid"]}],"meetingOutcomes":[{"text":"an observable outcome of this meeting","evidenceSegmentIds":["uuid"]}],"confidence":0.0}
+Synthesize, do not transcribe. The executiveSummary must read like prose written by a person, organized by meaning, never "Participant A said ... Participant B replied ...".
+Translate the intent of any Hindi/Punjabi/Hinglish/code-switched discussion into professional English; never copy non-English wording into the output.
+discussionThemes group the conversation by topic/meaning, not by speaker. Each theme is a synthesized paragraph.
+recommendations are your senior-level synthesis of what the team should do next, grounded in the discussion — not invented commitments.
+Map every owner/person to a participant-directory display name, correcting ASR name errors.
+When the meeting is short or thin, still produce the best possible executive report and use empty arrays rather than inventing content. Do not turn vague discussion into decisions or commitments.`,
     decision: `
 Return:
 {"decisions":[{"title":"...","decision":"...","rationale":"...","confidence":0.0,"evidenceSegmentIds":["uuid"]}]}
@@ -814,13 +836,23 @@ Return:
 {"actionItems":[{"title":"...","description":"...","dueDate":"YYYY-MM-DD or null","confidence":0.0,"evidenceSegmentIds":["uuid"],"suggestedOwner":{"participantId":"uuid or null","userId":"uuid or null","label":"...","confidence":0.0}}]}
 Include only explicit or strongly evidenced commitments. Descriptions must explain the requested work, context, and acceptance signal when the transcript supports it. Owner suggestions must come from the participant directory. Return an empty actionItems array when none exist.`,
   }[artifactType];
+  const userParts = [
+    `Participant directory: ${JSON.stringify(participantDirectory)}`,
+  ];
+  if (artifactType === HUDDLE_GENERATION_TYPES.SUMMARY && synthesisContext) {
+    userParts.push(
+      `Structured facts already extracted by upstream stages (synthesize, do not re-derive):\n${JSON.stringify(
+        synthesisContext
+      )}`
+    );
+  }
+  userParts.push(
+    `Transcript (${packet.includedSegmentCount}/${packet.totalSegmentCount} final segments):`,
+    packet.transcript
+  );
   return {
     system: `${common}${task}`,
-    user: [
-      `Participant directory: ${JSON.stringify(participantDirectory)}`,
-      `Transcript (${packet.includedSegmentCount}/${packet.totalSegmentCount} final segments):`,
-      packet.transcript,
-    ].join("\n\n"),
+    user: userParts.join("\n\n"),
   };
 }
 
@@ -846,6 +878,7 @@ export async function generateHuddleArtifact({
   client = null,
   env = process.env,
   generate = generateText,
+  synthesisContext = null,
 } = {}) {
   const access = evaluateHuddleGenerationAccess({
     workspaceId: job.workspaceId,
@@ -902,6 +935,7 @@ export async function generateHuddleArtifact({
     artifactType: artifact.artifactType,
     packet,
     participants,
+    synthesisContext,
   });
   const promptHash = hash(`${prompt.system}\n${prompt.user}`);
   await updateHuddleArtifact({

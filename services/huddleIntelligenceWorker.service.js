@@ -28,7 +28,7 @@ import {
 } from "./huddleMeetingIntelligence.service.js";
 import { notifyUser } from "./notification.service.js";
 
-const ORCHESTRATION_VERSION = 2;
+const ORCHESTRATION_VERSION = 3;
 const DEFAULT_LEASE_SECONDS = 90;
 const DEFAULT_BATCH_SIZE = 10;
 
@@ -162,11 +162,7 @@ async function enqueueTranscriptWorkflow(job, transcriptArtifactId, client = nul
     dependsOnJobIds: [topicSegmentation.job.id],
   };
 
-  const summary = await enqueueIntelligenceJob({
-    ...segmentationDependent,
-    jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
-    idempotencyKey: `summary:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
-  });
+  // Extraction stages run in parallel off topic segmentation.
   const decisions = await enqueueIntelligenceJob({
     ...segmentationDependent,
     jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.DECISION_EXTRACTION,
@@ -192,6 +188,23 @@ async function enqueueTranscriptWorkflow(job, transcriptArtifactId, client = nul
     jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.OWNERSHIP_RESOLUTION,
     idempotencyKey: `ownership:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
     dependsOnJobIds: [actions.job.id],
+  });
+  // The executive summary is now a SYNTHESIS stage: it runs after the extraction
+  // stages so it can reason over their structured outputs (decisions, actions,
+  // owners, risks, blockers, topics) instead of re-deriving everything from raw
+  // dialogue. This is the multi-pass reasoning architecture — small focused
+  // extractors first, then a synthesis pass that composes the executive report.
+  const summary = await enqueueIntelligenceJob({
+    ...base,
+    jobType: HUDDLE_INTELLIGENCE_JOB_TYPES.SUMMARY_GENERATION,
+    idempotencyKey: `summary:${transcriptArtifactId}:v${ORCHESTRATION_VERSION}`,
+    dependsOnJobIds: [
+      topicSegmentation.job.id,
+      decisions.job.id,
+      actions.job.id,
+      riskBlockers.job.id,
+      ownership.job.id,
+    ],
   });
   const digest = await enqueueIntelligenceJob({
     ...base,
@@ -252,14 +265,72 @@ async function processTranscriptFinalization(job, client = null) {
   };
 }
 
+// For the executive summary (synthesis) stage, gather the structured outputs of
+// the upstream extraction stages so the synthesis pass reasons over facts, not
+// raw dialogue. Best-effort: any missing piece simply isn't included.
+async function loadSummarySynthesisContext(job, client = null) {
+  const actor = jobActor(job);
+  const [artifacts, riskBlockerItems, topicSegments] = await Promise.all([
+    listHuddleArtifacts({
+      workspaceId: job.workspaceId,
+      sessionId: job.sessionId,
+      ...actor,
+      includeDeleted: false,
+      limit: 200,
+      client,
+    }).catch(() => []),
+    listRiskBlockerItems({
+      workspaceId: job.workspaceId,
+      sessionId: job.sessionId,
+      client,
+    }).catch(() => []),
+    listTopicSegments({
+      workspaceId: job.workspaceId,
+      sessionId: job.sessionId,
+      client,
+    }).catch(() => []),
+  ]);
+  const latestReady = (type) =>
+    artifacts
+      .filter((a) => a.artifactType === type && a.status === "ready")
+      .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0] || null;
+  const decisionsArtifact = latestReady("decision");
+  const actionsArtifact = latestReady("action_item");
+  return {
+    decisions: (decisionsArtifact?.contentJson?.decisions || []).map((d) => ({
+      title: d.title,
+      decision: d.decision,
+      rationale: d.rationale,
+    })),
+    actionItems: (actionsArtifact?.contentJson?.actionItems || []).map((a) => ({
+      title: a.title,
+      description: a.description,
+      owner: a.suggestedOwner?.label || null,
+      dueDate: a.dueDate || null,
+    })),
+    risks: (riskBlockerItems || [])
+      .filter((r) => r.itemType === "risk")
+      .map((r) => ({ text: r.text, severity: r.severity })),
+    blockers: (riskBlockerItems || [])
+      .filter((r) => r.itemType === "blocker")
+      .map((r) => ({ text: r.text, severity: r.severity })),
+    topics: (topicSegments || []).map((t) => ({ title: t.title, summary: t.summary })),
+  };
+}
+
 async function processArtifactPreparation(job, client = null) {
   const artifactType = ARTIFACT_JOB_TYPES[job.jobType];
   const prepared = await ensurePendingArtifact(job, artifactType, client);
   if (GENERATED_ARTIFACT_TYPES.has(artifactType)) {
+    const synthesisContext =
+      artifactType === "summary"
+        ? await loadSummarySynthesisContext(job, client).catch(() => null)
+        : null;
     const generated = await generateHuddleArtifact({
       job,
       artifact: prepared.artifact,
       client,
+      synthesisContext,
     });
     return {
       orchestrationOnly: false,

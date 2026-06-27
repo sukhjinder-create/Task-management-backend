@@ -262,14 +262,32 @@ function buildMeetingReport({
           text: item.text || item.question,
           evidenceSegmentIds: item.evidenceSegmentIds || [],
         }));
+  // Executive synthesis fields (schemaVersion 4 summary). These drive the new
+  // executive-report UI. discussionThemes replaces per-speaker highlights.
+  const discussionThemes = array(summary.discussionThemes).map((item, index) => ({
+    id: item.id || `theme-${index + 1}`,
+    theme: safeString(item.theme) || `Theme ${index + 1}`,
+    detail: safeString(item.detail),
+    evidenceSegmentIds: array(item.evidenceSegmentIds),
+  })).filter((item) => item.detail || item.theme);
+  const recommendations = array(summary.recommendations).map((item, index) => ({
+    id: item.id || `recommendation-${index + 1}`,
+    text: safeString(item.text),
+    evidenceSegmentIds: array(item.evidenceSegmentIds),
+  })).filter((item) => item.text);
+  const executiveNarrative =
+    safeString(summary.executiveSummary) || safeString(summary.overview) || "";
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     title,
     executiveSummary: {
       purpose: safeString(summary.purpose) || safeString(summary.title) || title,
+      businessContext: safeString(summary.businessContext) || null,
+      narrative: executiveNarrative,
+      // `outcome` retained for backward compatibility with older clients.
       outcome:
         safeString(summary.outcome) ||
-        safeString(summary.overview) ||
+        executiveNarrative ||
         "No executive summary is available yet.",
       conclusions: array(summary.conclusions).length
         ? array(summary.conclusions)
@@ -277,6 +295,9 @@ function buildMeetingReport({
       unresolved: openQuestions,
       evidenceSegmentIds: array(summary.overviewEvidenceSegmentIds),
     },
+    businessContext: safeString(summary.businessContext) || null,
+    discussionThemes,
+    recommendations,
     discussionHighlights,
     discussionSummary: array(summary.discussionSummary),
     speakerHighlights,
