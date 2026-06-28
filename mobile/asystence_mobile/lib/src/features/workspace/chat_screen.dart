@@ -2221,31 +2221,61 @@ class _ChatScreenState extends State<ChatScreen> {
     String? huddleId,
     void Function(void Function()) setSheetState,
   ) {
+    // A control whose "off" state reads as danger (red), matching the web call
+    // window where a muted mic / disabled camera turns red. Active = neutral
+    // tonal so only the meaningful "off" state draws the eye.
+    final scheme = Theme.of(context).colorScheme;
+    Widget toggle({
+      required bool off,
+      required String tooltip,
+      required IconData icon,
+      required VoidCallback onPressed,
+    }) {
+      if (off) {
+        return IconButton.filled(
+          tooltip: tooltip,
+          style: IconButton.styleFrom(
+            backgroundColor: scheme.error,
+            foregroundColor: scheme.onError,
+          ),
+          onPressed: onPressed,
+          icon: Icon(icon),
+        );
+      }
+      return IconButton.filledTonal(
+        tooltip: tooltip,
+        onPressed: onPressed,
+        icon: Icon(icon),
+      );
+    }
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        IconButton.filledTonal(
+        toggle(
+          off: call.muted,
           tooltip: call.muted ? 'Unmute' : 'Mute',
+          icon: call.muted ? Icons.mic_off : Icons.mic,
           onPressed: () {
             call.setMuted(!call.muted);
             setSheetState(() {});
           },
-          icon: Icon(call.muted ? Icons.mic_off : Icons.mic),
         ),
         const SizedBox(width: 12),
-        IconButton.filledTonal(
+        toggle(
+          off: !call.cameraOn,
           tooltip: call.cameraOn ? 'Camera off' : 'Camera on',
+          icon: call.cameraOn ? Icons.videocam : Icons.videocam_off,
           onPressed: () {
             call.setCameraOn(!call.cameraOn);
             setSheetState(() {});
           },
-          icon: Icon(call.cameraOn ? Icons.videocam : Icons.videocam_off),
         ),
         const SizedBox(width: 12),
         IconButton.filled(
           tooltip: _selected?.isDm == true ? 'End call' : 'Leave call',
           style: IconButton.styleFrom(
-            backgroundColor: Theme.of(context).colorScheme.error,
+            backgroundColor: scheme.error,
             foregroundColor: Colors.white,
           ),
           onPressed: huddleId == null
@@ -2483,10 +2513,14 @@ class _ChatScreenState extends State<ChatScreen> {
       bottom: MediaQuery.paddingOf(context).bottom + 88,
       child: IgnorePointer(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.6),
-            borderRadius: BorderRadius.circular(12),
+            // Match the web caption overlay: a slightly stronger scrim, a softer
+            // 2xl radius, and a faint hairline border for definition on busy
+            // video. Speaker labels use the Asystence orange tint, like web.
+            color: Colors.black.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2494,19 +2528,22 @@ class _ChatScreenState extends State<ChatScreen> {
             children: [
               for (final caption in visible)
                 Padding(
-                  padding: const EdgeInsets.only(top: 2),
+                  padding: const EdgeInsets.only(top: 3),
                   child: RichText(
                     text: TextSpan(
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 14,
-                        height: 1.3,
+                        height: 1.35,
                       ),
                       children: [
                         if (caption.speakerLabel != null)
                           TextSpan(
                             text: '${caption.speakerLabel}: ',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFFFDBA74),
+                            ),
                           ),
                         TextSpan(text: caption.text),
                       ],
