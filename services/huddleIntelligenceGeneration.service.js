@@ -16,8 +16,13 @@ const GENERATION_VERSION = 4;
 const PROMPT_VERSION = "huddle-intelligence-executive-synthesis-v5";
 const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 12000;
 const HARD_MAX_TRANSCRIPT_CHARACTERS = 12000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 2200;
-const HARD_MAX_OUTPUT_TOKENS = 2600;
+// The executive synthesis summary (purpose, business context, multi-paragraph
+// executive narrative, themes, recommendations, risks) is a substantially richer
+// document than the old compression summary and routinely needs ~2500-3500
+// output tokens. The previous 2600 hard cap truncated it mid-JSON, so the
+// summary stage could never succeed. Raised to comfortably fit the full report.
+const DEFAULT_MAX_OUTPUT_TOKENS = 4000;
+const HARD_MAX_OUTPUT_TOKENS = 8000;
 const DEFAULT_MAX_TRANSCRIPT_SEGMENTS = 48;
 const HARD_MAX_TRANSCRIPT_SEGMENTS = 64;
 
@@ -393,6 +398,25 @@ function fuzzyMatchParticipant(requested, participants = []) {
   return best;
 }
 
+// Models sometimes embed transcript segment UUIDs inline in prose (e.g.
+// "...by Friday (e40301c4-be76-...)"). Those belong only in the evidence
+// arrays, never in human-readable text. Strip parenthetical UUID lists and any
+// bare UUIDs, then tidy the leftover spacing/punctuation.
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+function stripSegmentIds(value) {
+  if (typeof value !== "string" || !value) return value;
+  return value
+    // "(uuid, uuid)" or "(uuid)" possibly with separators
+    .replace(/\s*[([][^)\]]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[^)\]]*[)\]]/gi, "")
+    // any remaining bare UUIDs
+    .replace(UUID_RE, "")
+    // tidy double spaces and space-before-punctuation left behind
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([.,;:])/g, "$1")
+    .replace(/\(\s*\)/g, "")
+    .trim();
+}
+
 function normalizeParticipantLabel(value, participants = []) {
   const requested = safeString(value, 160);
   if (!requested) return null;
@@ -457,11 +481,11 @@ function normalizeSummary(raw, context) {
     .slice(0, 12)
     .map((item, index) => {
       const normalized = typeof item === "string" ? { theme: item } : objectOrEmpty(item);
-      const theme = normalizeTextItem(normalized.theme || normalized.title, 300);
-      const detail = normalizeTextItem(
+      const theme = stripSegmentIds(normalizeTextItem(normalized.theme || normalized.title, 300));
+      const detail = stripSegmentIds(normalizeTextItem(
         normalized.detail || normalized.text || normalized.description || normalized.summary,
         2200
-      );
+      ));
       const evidenceSegmentIds = normalizeEvidenceIds(
         normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
         context.knownSegmentIds
@@ -480,10 +504,10 @@ function normalizeSummary(raw, context) {
     .slice(0, 12)
     .map((item, index) => {
       const normalized = typeof item === "string" ? { text: item } : objectOrEmpty(item);
-      const text = normalizeTextItem(
+      const text = stripSegmentIds(normalizeTextItem(
         normalized.text || normalized.recommendation || normalized.detail,
         1600
-      );
+      ));
       if (!text) return null;
       return {
         id: `recommendation-${index + 1}`,
@@ -528,15 +552,15 @@ function normalizeSummary(raw, context) {
     })
     .filter(Boolean);
 
-  const executiveSummary = normalizeTextItem(
+  const executiveSummary = stripSegmentIds(normalizeTextItem(
     root.executiveSummary || root.executive_summary || root.overview || root.summary,
     6000
-  );
-  const businessContext = normalizeTextItem(
+  ));
+  const businessContext = stripSegmentIds(normalizeTextItem(
     root.businessContext || root.business_context || root.context,
     3000
-  );
-  const purpose = normalizeTextItem(root.purpose || root.meetingPurpose, 1800);
+  ));
+  const purpose = stripSegmentIds(normalizeTextItem(root.purpose || root.meetingPurpose, 1800));
   const overviewEvidenceSegmentIds = normalizeEvidenceIds(
     root.overviewEvidenceSegmentIds ||
       root.overview_evidence_segment_ids ||
@@ -822,6 +846,7 @@ You are writing the EXECUTIVE SUMMARY of this meeting. Upstream stages have alre
 Return:
 {"title":"concise meeting title","purpose":"why this meeting happened, in one or two sentences","purposeEvidenceSegmentIds":["uuid"],"businessContext":"the business situation, project, customer, or background that makes this meeting matter, inferred from the discussion","executiveSummary":"3-6 flowing paragraphs that a senior executive would read to understand the meeting end to end: what it was about, what was discussed, what was decided, who owns what, what the risks and blockers are, and what should happen next. Professional English only.","overviewEvidenceSegmentIds":["uuid"],"discussionThemes":[{"theme":"a short theme label","detail":"a synthesized paragraph explaining this theme and its significance, NOT a quote of who said what","evidenceSegmentIds":["uuid"]}],"recommendations":[{"text":"a concrete, senior-level recommendation or next step the team should consider","evidenceSegmentIds":["uuid"]}],"openQuestions":[{"question":"an unresolved question or decision still pending","raisedBy":"exact participant display name or null","evidenceSegmentIds":["uuid"]}],"risksRaised":[{"text":"a risk, blocker, dependency, or uncertainty in professional English","evidenceSegmentIds":["uuid"]}],"meetingOutcomes":[{"text":"an observable outcome of this meeting","evidenceSegmentIds":["uuid"]}],"confidence":0.0}
 Synthesize, do not transcribe. The executiveSummary must read like prose written by a person, organized by meaning, never "Participant A said ... Participant B replied ...".
+NEVER write transcript segment IDs (UUIDs) into any human-readable text field (executiveSummary, purpose, businessContext, theme detail, recommendations). Evidence UUIDs belong ONLY in the evidenceSegmentIds / overviewEvidenceSegmentIds arrays. Prose must contain no UUIDs or parenthetical citations.
 Translate the intent of any Hindi/Punjabi/Hinglish/code-switched discussion into professional English; never copy non-English wording into the output.
 discussionThemes group the conversation by topic/meaning, not by speaker. Each theme is a synthesized paragraph.
 recommendations are your senior-level synthesis of what the team should do next, grounded in the discussion — not invented commitments.
