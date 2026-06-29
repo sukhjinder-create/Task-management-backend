@@ -35,7 +35,7 @@ function getTransporter() {
 
 async function send({ to, subject, html, text }) {
   try {
-    if (!to) return;
+    if (!to) return false;
     const transporter = getTransporter();
     await transporter.sendMail({
       from: `"${FROM_NAME}" <${FROM_ADDRESS}>`,
@@ -44,9 +44,19 @@ async function send({ to, subject, html, text }) {
       html,
       text: text || html.replace(/<[^>]+>/g, ""),
     });
+    return true;
   } catch (err) {
     console.warn("[email] Failed to send email:", err.message);
+    return false;
   }
+}
+
+export function isEmailDeliveryConfigured() {
+  return Boolean(
+    process.env.SMTP_HOST &&
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASS
+  );
 }
 
 // ─── HTML template wrapper ─────────────────────────────────────────────────────
@@ -210,6 +220,19 @@ export async function sendPasswordResetEmail({ to, username, resetUrl }) {
       <p>We received a request to reset your password. Click the button below — this link expires in 1 hour.</p>
       <a class="btn" href="${resetUrl}">Reset Password</a>
       <p style="color:#6b7280;font-size:14px">If you didn't request this, you can safely ignore this email.</p>
+    `),
+  });
+}
+
+export async function sendSuperadminPasswordResetEmail({ to, resetUrl }) {
+  return send({
+    to,
+    subject: `Reset your ${FROM_NAME} Super Admin password`,
+    html: wrap("Super Admin Password Reset", `
+      <p>A password reset was requested for the ${FROM_NAME} platform console.</p>
+      <p>This link expires in <strong>1 hour</strong> and can be used only once.</p>
+      <a class="btn" href="${resetUrl}">Reset Super Admin Password</a>
+      <p style="color:#6b7280;font-size:14px">If you did not request this, ignore this email. Your password and active sessions remain unchanged.</p>
     `),
   });
 }

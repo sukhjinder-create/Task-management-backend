@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import pool from "../db.js";
+import {
+  isEmailDeliveryConfigured,
+  sendSuperadminPasswordResetEmail,
+} from "./email.service.js";
 
 const ACCESS_TOKEN_TTL = process.env.SUPERADMIN_ACCESS_TOKEN_TTL || "15m";
 const SESSION_TTL_DAYS = Math.max(
@@ -10,6 +14,8 @@ const SESSION_TTL_DAYS = Math.max(
 );
 const ISSUER = "asystence-superadmin";
 const AUDIENCE = "asystence-platform-console";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const DUMMY_PASSWORD_HASH = "$2b$12$pc1nO1nT4OqXHYNxS9GQAe.gPLNDDSJJvH6Hn2cNQD2cIPJ2V2NlO";
 
 export function getSuperadminJwtSecret() {
@@ -166,4 +172,179 @@ export async function getSuperadminById(id, database = pool) {
     [id]
   );
   return rows[0] ? safeSuperadmin(rows[0]) : null;
+}
+
+export async function isSuperadminSessionActive(superadminId, sessionId, database = pool) {
+  if (!superadminId || !sessionId) return false;
+  const { rows } = await database.query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM superadmin_sessions
+        WHERE id = $1
+          AND superadmin_id = $2
+          AND revoked_at IS NULL
+          AND expires_at > now()
+     ) AS active`,
+    [sessionId, superadminId]
+  );
+  return rows[0]?.active === true;
+}
+
+export function validateSuperadminPassword(password) {
+  const value = String(password || "");
+  if (value.length < 12) {
+    throw new Error("Password must be at least 12 characters");
+  }
+  if (
+    !/[a-z]/.test(value) ||
+    !/[A-Z]/.test(value) ||
+    !/\d/.test(value) ||
+    !/[^A-Za-z0-9]/.test(value)
+  ) {
+    throw new Error("Password must include upper, lower, number, and symbol characters");
+  }
+  return value;
+}
+
+async function runSecurityTransaction(database, operation) {
+  if (database && database !== pool) return operation(database);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await operation(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function revokeAllSuperadminSessions(superadminId, database = pool) {
+  await database.query(
+    `UPDATE superadmin_sessions
+        SET revoked_at = COALESCE(revoked_at, now())
+      WHERE superadmin_id = $1`,
+    [superadminId]
+  );
+}
+
+export async function changeSuperadminPassword(
+  superadminId,
+  currentPassword,
+  newPassword,
+  context = {}
+) {
+  if (!currentPassword) throw new Error("Current password is required");
+  const validatedPassword = validateSuperadminPassword(newPassword);
+  return runSecurityTransaction(context.database, async (database) => {
+    const { rows } = await database.query(
+      "SELECT password_hash FROM superadmins WHERE id = $1 FOR UPDATE",
+      [superadminId]
+    );
+    if (!rows[0]) throw new Error("Super Admin account not found");
+    if (!(await bcrypt.compare(String(currentPassword), rows[0].password_hash))) {
+      throw new Error("Current password is incorrect");
+    }
+    if (await bcrypt.compare(validatedPassword, rows[0].password_hash)) {
+      throw new Error("New password must be different from the current password");
+    }
+    const passwordHash = await bcrypt.hash(validatedPassword, 12);
+    await database.query(
+      "UPDATE superadmins SET password_hash = $1 WHERE id = $2",
+      [passwordHash, superadminId]
+    );
+    await revokeAllSuperadminSessions(superadminId, database);
+    await database.query(
+      `UPDATE superadmin_password_reset_tokens
+          SET used_at = COALESCE(used_at, now())
+        WHERE superadmin_id = $1 AND used_at IS NULL`,
+      [superadminId]
+    );
+    return true;
+  });
+}
+
+export async function requestSuperadminPasswordReset(email, context = {}) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const database = context.database || pool;
+  const { rows } = await database.query(
+    "SELECT id, email FROM superadmins WHERE lower(email) = $1 LIMIT 1",
+    [normalizedEmail]
+  );
+  const superadmin = rows[0];
+  if (!superadmin) {
+    await bcrypt.compare("enumeration-timing-padding", DUMMY_PASSWORD_HASH);
+    return { accountFound: false, delivered: false };
+  }
+
+  const token = crypto.randomBytes(32).toString("base64url");
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+  await runSecurityTransaction(context.database, async (transaction) => {
+    await transaction.query(
+      "DELETE FROM superadmin_password_reset_tokens WHERE superadmin_id = $1",
+      [superadmin.id]
+    );
+    await transaction.query(
+      `INSERT INTO superadmin_password_reset_tokens
+         (superadmin_id, token_hash, requested_ip_hash, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [superadmin.id, tokenHash, hashIp(context.ipAddress), expiresAt]
+    );
+  });
+
+  const resetUrl = `${FRONTEND_URL}/superadmin/reset-password?token=${encodeURIComponent(token)}`;
+  const delivered = await sendSuperadminPasswordResetEmail({
+    to: superadmin.email,
+    resetUrl,
+  });
+  return {
+    accountFound: true,
+    delivered: Boolean(delivered && isEmailDeliveryConfigured()),
+  };
+}
+
+export async function resetSuperadminPassword(token, newPassword, context = {}) {
+  const rawToken = String(token || "").trim();
+  if (!rawToken || rawToken.length > 256) throw new Error("Invalid or expired reset link");
+  const validatedPassword = validateSuperadminPassword(newPassword);
+  const tokenHash = hashToken(rawToken);
+
+  return runSecurityTransaction(context.database, async (database) => {
+    const { rows } = await database.query(
+      `SELECT id, superadmin_id
+         FROM superadmin_password_reset_tokens
+        WHERE token_hash = $1
+          AND used_at IS NULL
+          AND expires_at > now()
+        FOR UPDATE`,
+      [tokenHash]
+    );
+    const record = rows[0];
+    if (!record) throw new Error("Invalid or expired reset link. Please request a new one.");
+
+    const adminResult = await database.query(
+      "SELECT password_hash FROM superadmins WHERE id = $1 FOR UPDATE",
+      [record.superadmin_id]
+    );
+    if (!adminResult.rows[0]) throw new Error("Super Admin account not found");
+    if (await bcrypt.compare(validatedPassword, adminResult.rows[0].password_hash)) {
+      throw new Error("New password must be different from the current password");
+    }
+
+    const passwordHash = await bcrypt.hash(validatedPassword, 12);
+    await database.query(
+      "UPDATE superadmins SET password_hash = $1 WHERE id = $2",
+      [passwordHash, record.superadmin_id]
+    );
+    await database.query(
+      "UPDATE superadmin_password_reset_tokens SET used_at = now() WHERE id = $1",
+      [record.id]
+    );
+    await revokeAllSuperadminSessions(record.superadmin_id, database);
+    return true;
+  });
 }

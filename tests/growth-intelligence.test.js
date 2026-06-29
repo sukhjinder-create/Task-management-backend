@@ -13,6 +13,7 @@ import { matchProductGrowthEvent } from "../growth/growthProductTelemetry.middle
 import { parseGrowthRange } from "../growth/growthDashboard.service.js";
 import {
   getSuperadminJwtSecret,
+  validateSuperadminPassword,
   verifySuperadminAccessToken,
 } from "../services/superadmin.service.js";
 
@@ -80,10 +81,26 @@ test("Super Admin verifier rejects ordinary user tokens", () => {
   assert.throws(() => verifySuperadminAccessToken(ordinary));
 });
 
+test("Super Admin recovery enforces the dedicated strong-password policy", () => {
+  assert.equal(validateSuperadminPassword("Strong-Admin-Password-42!"), "Strong-Admin-Password-42!");
+  assert.throws(() => validateSuperadminPassword("short"), /at least 12/);
+  assert.throws(() => validateSuperadminPassword("alllowercasepassword"), /upper, lower, number, and symbol/);
+  assert.throws(() => validateSuperadminPassword("NoSymbolPassword42"), /upper, lower, number, and symbol/);
+});
+
 test("migration has dedicated sessions, event idempotency, and query indexes", () => {
   const sql = fs.readFileSync(new URL("../migrations/20260629_superadmin_growth_intelligence.sql", import.meta.url), "utf8");
   assert.match(sql, /CREATE TABLE IF NOT EXISTS superadmin_sessions/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS growth_events/);
   assert.match(sql, /refresh_token_hash\s+TEXT NOT NULL UNIQUE/);
   assert.match(sql, /idx_growth_events_name_time/);
+});
+
+test("password recovery migration stores only hashed, expiring, single-use tokens", () => {
+  const sql = fs.readFileSync(new URL("../migrations/20260629_superadmin_password_recovery.sql", import.meta.url), "utf8");
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS superadmin_password_reset_tokens/);
+  assert.match(sql, /token_hash\s+TEXT NOT NULL UNIQUE/);
+  assert.match(sql, /expires_at\s+TIMESTAMPTZ NOT NULL/);
+  assert.match(sql, /used_at\s+TIMESTAMPTZ/);
+  assert.match(sql, /ENABLE ROW LEVEL SECURITY/);
 });

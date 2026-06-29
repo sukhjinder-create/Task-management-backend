@@ -8,6 +8,7 @@ Super Admin authentication is deliberately separate from workspace-user authenti
 - Access tokens are short-lived, carry `type=superadmin`, and are restricted by issuer and audience.
 - `POST /superadmin/refresh` renews access from a hashed, server-side refresh session.
 - `POST /superadmin/logout` revokes that dedicated session.
+- Every protected Super Admin request verifies that its server-side session is still active, so password changes and explicit revocation invalidate access immediately.
 - Workspace JWTs cannot pass `requireSuperadmin`, and Super Admin JWTs are not placed in normal user storage.
 - Configure `SUPERADMIN_JWT_SECRET` in production. `JWT_SECRET` is accepted as a migration fallback, but a separate high-entropy value is preferred.
 
@@ -16,6 +17,14 @@ The former implementation had two competing `/superadmin/login` routers and a ha
 ## Credential storage and recovery
 
 Super Admin accounts are database records in `superadmins`; no credential seed or recoverable plaintext password exists. Passwords are bcrypt hashes. Before this change there was no Super Admin reset utility.
+
+Three recovery paths are now available:
+
+- An authenticated Super Admin can change their password under **Settings → Security**. The current password is required and all Super Admin sessions are revoked after success.
+- **Forgot password?** on `/superadmin/login` creates a random, one-hour, single-use reset link. Only the SHA-256 token hash is stored in `superadmin_password_reset_tokens`; completing the reset revokes every existing Super Admin session.
+- The guarded CLI below remains the emergency recovery path when email delivery or interactive login is unavailable.
+
+Email recovery requires `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` in the deployed backend. The endpoint deliberately returns the same response for existing and unknown email addresses. It is rate-limited and timing-padded to reduce account enumeration.
 
 The reset utility never accepts a password as a command-line argument and never prints it. It updates one explicitly named account, optionally bootstraps a missing account only when separately authorized, and revokes existing dedicated sessions.
 
@@ -66,8 +75,10 @@ The dashboard API is `GET /superadmin/growth/dashboard?from=YYYY-MM-DD&to=YYYY-M
 
 1. Set `SUPERADMIN_JWT_SECRET` to a high-entropy secret.
 2. Apply `npm run migrate:superadmin-growth` using the repository database safety confirmation process.
-3. Deploy the backend, then the frontend.
-4. Existing Super Admin access tokens are intentionally invalid after cutover; sign in through the dedicated page or use the reset utility.
-5. Validate `/superadmin/me`, refresh, logout, `/growth/events`, and `/superadmin/growth/dashboard`.
+3. Apply `npm run migrate:superadmin-password-recovery` for the additive recovery-token table.
+4. Configure SMTP if email-delivered recovery links are required.
+5. Deploy the backend, then the frontend.
+6. Existing Super Admin access tokens are intentionally invalid after cutover; sign in through the dedicated page or use the reset utility.
+7. Validate `/superadmin/me`, refresh, logout, password change/reset, `/growth/events`, and `/superadmin/growth/dashboard`.
 
 Rollback is additive: revert application code first. The two new tables can remain dormant without affecting existing modules. Drop them only after confirming no retained telemetry or sessions are required.

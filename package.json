@@ -22,6 +22,7 @@
     "migrate:enterprise-intelligence": "node --import ./scripts/database-safety-guard.js run-enterprise-intelligence-migration.js",
     "migrate:enterprise-intelligence-cutover-controls": "node --import ./scripts/database-safety-guard.js run-enterprise-intelligence-cutover-controls-migration.js",
     "migrate:superadmin-growth": "node --import ./scripts/database-safety-guard.js run-superadmin-growth-intelligence-migration.js",
+    "migrate:superadmin-password-recovery": "node --import ./scripts/database-safety-guard.js run-superadmin-password-recovery-migration.js",
     "superadmin:reset": "node scripts/reset-superadmin-credentials.js",
     "test:growth-intelligence": "node --test tests/growth-intelligence.test.js",
     "test:growth-intelligence:db": "node scripts/test-growth-intelligence-db.js",

@@ -5,7 +5,10 @@ import bcrypt from "bcryptjs";
 import pool from "../db.js";
 import { getGrowthDashboard } from "../growth/growthDashboard.service.js";
 import {
+  changeSuperadminPassword,
+  isSuperadminSessionActive,
   refreshSuperadminSession,
+  resetSuperadminPassword,
   revokeSuperadminSession,
   superadminLogin,
   verifySuperadminAccessToken,
@@ -15,9 +18,14 @@ const migration = fs.readFileSync(
   new URL("../migrations/20260629_superadmin_growth_intelligence.sql", import.meta.url),
   "utf8"
 );
+const passwordRecoveryMigration = fs.readFileSync(
+  new URL("../migrations/20260629_superadmin_password_recovery.sql", import.meta.url),
+  "utf8"
+);
 
 const DAY_MS = 86_400_000;
-const now = new Date();
+// Use an isolated future range so production telemetry cannot affect deterministic assertions.
+const now = new Date("2099-06-29T12:00:00.000Z");
 const fromDate = new Date(now.getTime() - 6 * DAY_MS).toISOString().slice(0, 10);
 const toDate = now.toISOString().slice(0, 10);
 const actorId = crypto.randomUUID();
@@ -41,6 +49,7 @@ const client = await pool.connect();
 try {
   await client.query("BEGIN");
   await client.query(migration);
+  await client.query(passwordRecoveryMigration);
 
   const validationAdminId = crypto.randomUUID();
   const validationEmail = `validation-${validationAdminId}@example.invalid`;
@@ -68,6 +77,53 @@ try {
     /expired or invalid/
   );
 
+  const resetSourceSession = await superadminLogin(validationEmail, validationPassword, {
+    database: client,
+  });
+  const resetSourceClaims = verifySuperadminAccessToken(resetSourceSession.token);
+  assert.equal(
+    await isSuperadminSessionActive(validationAdminId, resetSourceClaims.sid, client),
+    true
+  );
+  const resetToken = crypto.randomBytes(32).toString("base64url");
+  const resetTokenHash = crypto.createHash("sha256").update(resetToken).digest("hex");
+  await client.query(
+    `INSERT INTO superadmin_password_reset_tokens
+       (superadmin_id, token_hash, expires_at)
+     VALUES ($1, $2, now() + interval '1 hour')`,
+    [validationAdminId, resetTokenHash]
+  );
+  const resetPassword = "Reset-Validation-Password-43!";
+  await resetSuperadminPassword(resetToken, resetPassword, { database: client });
+  assert.equal(
+    await isSuperadminSessionActive(validationAdminId, resetSourceClaims.sid, client),
+    false
+  );
+  assert.equal(await superadminLogin(validationEmail, validationPassword, { database: client }), null);
+  await assert.rejects(
+    () => refreshSuperadminSession(resetSourceSession.refreshToken, { database: client }),
+    /expired or invalid/
+  );
+  await assert.rejects(
+    () => resetSuperadminPassword(resetToken, "Another-Validation-Password-44!", { database: client }),
+    /Invalid or expired/
+  );
+
+  const resetLogin = await superadminLogin(validationEmail, resetPassword, { database: client });
+  assert.equal(resetLogin.superadmin.id, validationAdminId);
+  const finalPassword = "Final-Validation-Password-45!";
+  await changeSuperadminPassword(validationAdminId, resetPassword, finalPassword, {
+    database: client,
+  });
+  assert.equal(await superadminLogin(validationEmail, resetPassword, { database: client }), null);
+  await assert.rejects(
+    () => refreshSuperadminSession(resetLogin.refreshToken, { database: client }),
+    /expired or invalid/
+  );
+  const finalLogin = await superadminLogin(validationEmail, finalPassword, { database: client });
+  assert.equal(finalLogin.superadmin.id, validationAdminId);
+  await revokeSuperadminSession(finalLogin.refreshToken, client);
+
   for (const [eventName, category, eventActor, eventWorkspace, pagePath, featureName] of definitions) {
     await client.query(
       `INSERT INTO growth_events
@@ -75,12 +131,12 @@ try {
           session_id, page_path, landing_page, traffic_source, device_type, browser,
           country_code, properties, occurred_at)
        VALUES ($1, $2, $3, 'server', $4, $5, $6, $7, $8, $9, 'direct', 'desktop',
-               'Chrome', 'IN', $10::jsonb, now())
+               'Chrome', 'IN', $10::jsonb, $11)
        ON CONFLICT (id) DO NOTHING`,
       [
         crypto.randomUUID(), eventName, category, eventActor, eventWorkspace,
         anonymousId, sessionId, pagePath, pagePath,
-        JSON.stringify({ feature_name: featureName }),
+        JSON.stringify({ feature_name: featureName }), now,
       ]
     );
   }
@@ -106,6 +162,7 @@ try {
     transactionalDatabaseValidation: "passed",
     committed: false,
     superadminLoginRefreshLogoutContract: "passed",
+    superadminResetAndChangePasswordContract: "passed",
     overview: dashboard.overview,
     funnelStages: dashboard.funnel.length,
     featureRows: dashboard.engagement.feature_adoption.length,
