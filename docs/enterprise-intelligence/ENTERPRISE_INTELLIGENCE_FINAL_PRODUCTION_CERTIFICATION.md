@@ -6,7 +6,7 @@ Scope: final closure hardening for the already-certified Enterprise Intelligence
 
 ## Executive Verdict
 
-The Enterprise Intelligence module is production-complete for the core dashboard and intelligence scope after this closure pass, subject to the live Apyhub verifier result recorded below.
+The Enterprise Intelligence module is production-complete for the core dashboard and intelligence scope after this closure pass.
 
 This certification covers:
 
@@ -222,7 +222,7 @@ Build warnings were limited to existing bundle-size and browser-data warnings.
 
 ## Live Apyhub Validation
 
-Status: pending deployment of this closure route and UI bundle.
+Status: passed.
 
 Verifier route:
 
@@ -236,11 +236,99 @@ Required ranges:
 30d, 90d, 6m, 1y, all
 ```
 
-Expected certification condition:
+Observed certification result:
 
 ```text
 certified: true
 failures: []
+```
+
+Live workspace:
+
+```text
+workspace: Apyhub
+workspace_id: 3ff9264b-1a19-483a-b9e3-2a0b1840a1c2
+generated_at: 2026-06-29T10:00:05.070Z
+```
+
+Live checks passed:
+
+- workspace tooltip contract
+- workspace score trace contract
+- user tooltip contract
+- user score trace contract
+- diagnostic driver final-contribution trace
+- attendance contribution visibility
+- 3 project tooltip/trace contracts
+- all dashboard range chart contracts
+- all persisted executive summaries
+- summary reuse on second read
+- user trend history
+- scoring config admin surface
+- canonical recalculation path
+
+Live range evidence:
+
+| Range | Chart Count | Line Charts | Executive Summary | Summary Reused | User Trend Points |
+| --- | ---: | ---: | --- | --- | ---: |
+| 30d | 6 | 3 | V5, 10 sections | Yes | 31 |
+| 90d | 6 | 3 | V5, 10 sections | Yes | 40 |
+| 6m | 6 | 3 | V5, 10 sections | Yes | 40 |
+| 1y | 6 | 3 | V5, 10 sections | Yes | 40 |
+| all | 6 | 3 | V5, 10 sections | Yes | 40 |
+
+Attendance live proof:
+
+```text
+user_attendance_score: 81
+workspace_attendance_readiness: 69
+```
+
+Recalculation live proof:
+
+```text
+executed: true
+workspace_score: 60
+users: 3
+projects: 3
+teams: 0
+```
+
+Project tooltip/trace proof:
+
+```text
+checked: 3
+passed: true
+```
+
+Team tooltip/trace proof:
+
+```text
+checked: 0
+passed: true
+reason: Apyhub currently has no canonical team rows to check
+```
+
+## Production Deployment Evidence
+
+Backend:
+
+```text
+github_commit: 8a3585c
+cloud_run_service: asystence-api
+cloud_run_region: asia-south1
+ready_revision: asystence-api-00278-qv9
+traffic: 100%
+url: https://asystence-api-hsi7tc5k3a-el.a.run.app
+```
+
+Frontend:
+
+```text
+github_commit: 562d2a6
+vercel_deployment: dpl_6coDG1BSrRSikazH6wT8bA99LNCk
+production_url: https://asystence-d3sp4a3lk-sukhjinders400-4830s-projects.vercel.app
+alias: https://app.asystence.com
 ```
 
 ## Known Exclusions
@@ -251,4 +339,4 @@ Non-core isolated AI/specialty intelligence surfaces remain outside the certifie
 
 ## Final Certification Statement
 
-After local validation, the Enterprise Intelligence core is internally consistent and ready for deployed live verification. Full production certification is complete when the Apyhub live verifier returns `certified: true` across all required ranges.
+After local validation, deployed verification, and live Apyhub certification, the Enterprise Intelligence core is internally consistent, explainable, repository-backed, and production-certified for the core dashboard and intelligence scope.
