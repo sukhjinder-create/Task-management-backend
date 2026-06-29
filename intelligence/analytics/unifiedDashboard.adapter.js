@@ -190,6 +190,16 @@ function directionLabel(direction) {
   return "stable";
 }
 
+function cleanExecutiveText(text) {
+  return String(text || "")
+    .replace(/\bscore(?:d|s)?\b/gi, "posture")
+    .replace(/\b\d+(?:\.\d+)?\s*\/\s*100\b/g, "the current band")
+    .replace(/\bby\s+\d+(?:\.\d+)?\s+point\(s\)/gi, "based on retained movement")
+    .replace(/\b[+-]?\d+(?:\.\d+)?\s*(?:pt|point|points)\s+movement\b/gi, "material movement")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function latestSeriesScore(series = [], fallback = null) {
   const scores = series.map((point) => Number(point.score)).filter(Number.isFinite);
   if (scores.length) return scores[scores.length - 1];
@@ -240,7 +250,7 @@ function buildDashboardForecast({ trendSeries, subject, counts, rangeMeta }) {
     source: "enterprise_intelligence_current_snapshot",
     reasoning:
       `Only ${scores.length} historical intelligence snapshot(s) are available for the selected ${rangeLabel(rangeMeta)} period. ` +
-      `The outlook therefore uses the current authoritative intelligence posture (${currentScore ?? "unavailable"}/100), ` +
+      `The outlook therefore uses the current authoritative intelligence posture, ` +
       `${counts?.overdueTasks || 0} overdue scoped task(s), and current risk level ${subject?.risk?.level || "unknown"} until more snapshot history is available.`,
   };
 }
@@ -249,12 +259,9 @@ function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOver
   const subject = intelligence || {};
   const topRiskTask = topOverdue?.[0];
   const trendAnalytics = buildTrendAnalytics(trendSeries);
-  const score = latestSeriesScore(trendSeries, subject.score) ?? 0;
-  const band = subject.band || "Unavailable";
   const strengths = subject.strengths || [];
   const concerns = subject.concerns || [];
   const period = rangeLabel(rangeMeta);
-  const delta = Number(trendAnalytics.delta) || 0;
   const direction = directionLabel(trendAnalytics.direction);
   const healthAverage = chartAverage(visualizations, "workspace_health_trends");
   const productivityAverage = chartAverage(visualizations, "productivity_trends");
@@ -262,6 +269,10 @@ function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOver
   const dataQualifier = trendSeries.length > 1
     ? `${trendSeries.length} historical intelligence snapshot(s)`
     : "the current authoritative intelligence snapshot";
+  const outlook = cleanExecutiveText(
+    forecast?.reasoning ||
+    `The outlook is based on ${dataQualifier}, current risk level ${subject.risk?.level || "unknown"}, and scoped delivery pressure.`
+  );
   const priorities = [
     ...(concerns.slice(0, 3)),
     "Keep intelligence snapshots current through event-driven recalculation.",
@@ -269,43 +280,37 @@ function buildExecutiveSummary({ role, scopeLabel, intelligence, counts, topOver
 
   if (role === "user") {
     return {
-      headline: `${scopeLabel}: ${period} ${direction} personal intelligence (${score}/100)`,
+      headline: `${scopeLabel}: ${period} ${direction} personal intelligence brief`,
       narrative:
-        `For ${period}, personal intelligence is ${band} at ${score}/100 and ${direction} by ${Math.abs(delta)} point(s). ` +
-        `This view is grounded in ${dataQualifier}, ${counts.overdueTasks || 0} overdue task(s), and current delivery/workload evidence. ` +
+        `For ${period}, personal intelligence is ${direction} based on ${dataQualifier}, ` +
+        `${counts.overdueTasks || 0} overdue task(s), and current delivery/workload evidence. ` +
         `${concerns[0] || strengths[0] || "Keep delivery, collaboration, and sustainability signals balanced."}`,
-      outlook: forecast?.reasoning || null,
+      outlook,
       strengths,
       risks: concerns,
       priorities,
       drivers: subject.drivers || [],
       period: rangeMeta,
-      metrics: { score, delta, direction, snapshotCount: trendSeries.length },
+      metrics: { direction, snapshotCount: trendSeries.length, overdueTasks: counts.overdueTasks || 0 },
     };
   }
 
   return {
-    headline: `${scopeLabel}: ${period} ${direction} intelligence posture (${score}/100)`,
+    headline: `${scopeLabel}: ${period} ${direction} intelligence brief`,
     narrative:
-      `Across ${period}, the intelligence posture is ${band} at ${score}/100 and ${direction} by ${Math.abs(delta)} point(s). ` +
-      `The summary is backed by ${dataQualifier}, confidence ${subject.confidence || 0}/100, ` +
+      `Across ${period}, the intelligence posture is ${direction} based on ${dataQualifier}, ` +
       `${counts.totalTasks || 0} scoped task(s), ${counts.overdueTasks || 0} overdue item(s), ` +
-      `average health ${healthAverage ?? "n/a"}, productivity ${productivityAverage ?? "n/a"}, and risk ${riskAverage ?? "n/a"}. ` +
+      `workspace health ${healthAverage == null ? "not yet conclusive" : "visible"}, productivity ${productivityAverage == null ? "not yet conclusive" : "visible"}, and risk ${riskAverage == null ? "not yet conclusive" : "visible"}. ` +
       `${topRiskTask ? `Highest urgency: "${topRiskTask.task}" (${topRiskTask.overdue_days} day(s) overdue).` : concerns[0] || strengths[0] || "No concentrated risk is currently visible."}`,
-    outlook: forecast?.reasoning || null,
+    outlook,
     strengths,
     risks: concerns,
     priorities,
     drivers: subject.drivers || [],
     period: rangeMeta,
     metrics: {
-      score,
-      delta,
       direction,
       snapshotCount: trendSeries.length,
-      healthAverage,
-      productivityAverage,
-      riskAverage,
       scopedTasks: counts.totalTasks || 0,
       overdueTasks: counts.overdueTasks || 0,
     },
@@ -419,6 +424,7 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
       visualizations,
       forecast,
       materialization: historyMaterialization,
+      snapshot,
     })
     : buildExecutiveSummary({
       role,
@@ -494,26 +500,28 @@ export async function getDashboardExecutiveDetailFromIntelligence({ workspaceId,
       narrative: overview.executiveSummary?.narrative || "",
       outlook: overview.executiveSummary?.outlook || null,
     },
-    fullSummary: [
-      overview.executiveSummary?.headline || "Executive intelligence update",
-      overview.executiveSummary?.narrative || "",
-      `Score ${subject.score || 0}/100, band ${subject.band || "N/A"}, confidence ${subject.confidence || 0}/100.`,
-      `Primary strengths: ${(subject.strengths || []).slice(0, 3).join(" ") || "No dominant strength detected yet."}`,
-      `Primary concerns: ${(subject.concerns || []).slice(0, 3).join(" ") || "No concentrated concern detected yet."}`,
-      `Outlook: ${overview.forecast?.reasoning || "Outlook context is unavailable."}`,
-    ].join(" "),
+    sections: overview.executiveSummary?.sections || [],
+    fullSummary:
+      overview.executiveSummary?.fullSummary ||
+      overview.executiveSummary?.text ||
+      [
+        overview.executiveSummary?.headline || "Executive intelligence update",
+        overview.executiveSummary?.narrative || "",
+        overview.executiveSummary?.outlook ? `Outlook\n${overview.executiveSummary.outlook}` : "",
+      ].filter(Boolean).join("\n\n"),
     reasoning: [
-      `Source: enterprise intelligence repositories, calculation version ${subject.calculationVersion || "unknown"}.`,
-      `Drivers: ${(subject.drivers || []).join(" ") || "No driver detail available."}`,
-      `Indicators: ${(subject.indicators || []).map((item) => item.label || item.type).join(", ") || "none"}.`,
+      `Source: enterprise intelligence repositories and retained intelligence snapshots for ${overview.dashboardRange?.label || "the selected period"}.`,
+      `Regeneration policy: ${overview.executiveSummary?.regenerationPolicy?.regenerationTrigger || "material operational evidence change"}.`,
+      `Evidence signature: ${overview.executiveSummary?.operationalEvidenceHash || overview.executiveSummary?.persistence?.operationalEvidenceHash || "not available"}.`,
     ],
     priorities: overview.executiveSummary?.priorities || [],
-    recommendations: overview.executiveSummary?.priorities || [],
+    recommendations: overview.executiveSummary?.recommendations || overview.executiveSummary?.priorities || [],
     strengths: subject.strengths || [],
     risks: subject.concerns || [],
     forecast: overview.forecast,
     summaryPersistence: overview.executiveSummary?.persistence || null,
     summaryBucket: overview.executiveSummary?.summaryBucket || null,
+    regenerationPolicy: overview.executiveSummary?.regenerationPolicy || null,
     metrics: {
       counts: overview.counts,
       scoreCard: overview.scoreCard,

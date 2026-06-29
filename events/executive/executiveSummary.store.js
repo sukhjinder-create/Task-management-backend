@@ -17,7 +17,8 @@ export async function saveExecutiveSummary({
     DO UPDATE SET
       summary = EXCLUDED.summary,
       source_data = EXCLUDED.source_data,
-      status = 'ready'
+      status = 'ready',
+      created_at = now()
     RETURNING *
     `,
     [uuid(), workspaceId, period, summary, sourceData]

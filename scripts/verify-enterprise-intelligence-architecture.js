@@ -348,8 +348,10 @@ assertIncludes(aiContextBuilder, "workspace_intelligence", "AI intelligence quer
 assertIncludes(aiContextBuilder, "workspace_executive_summaries", "AI intelligence query must use canonical persisted summary context");
 assertNotIncludes(aiContextBuilder, "workspace_monthly_scores", "AI intelligence query must not read legacy monthly scores");
 assertNotIncludes(aiContextBuilder, "workspace_project_monthly_scores", "AI intelligence query must not read legacy project monthly scores");
-assertIncludes(periodExecutiveSummary, "dashboard_period_summary_v4", "Executive summaries must use the enterprise-grade v4 summary artifact");
+assertIncludes(periodExecutiveSummary, "enterprise_executive_summary_v5", "Executive summaries must use the enterprise-grade v5 evidence-driven summary artifact");
 assertIncludes(periodExecutiveSummary, "assessExecutiveSummaryQuality", "Executive summaries must persist quality assessment metadata");
+assertIncludes(periodExecutiveSummary, "operationalEvidenceHash", "Executive summaries must reuse based on operational evidence, not score weighting changes");
+assertIncludes(periodExecutiveSummary, "scoreWeightageChangesInvalidateSummary: false", "Executive summaries must not be invalidated by score weightage changes alone");
 assertIncludes(coreCertificationService, "certifyEnterpriseIntelligenceCoreWorkspace", "Core certification service must provide row-level proof entrypoint");
 assertIncludes(coreCertificationService, "executeCutover", "Core certification service must require explicit cutover execution intent");
 assertIncludes(coreCertificationService, "CORE_CUTOVER_SURFACES", "Core certification service must verify every core cutover surface");

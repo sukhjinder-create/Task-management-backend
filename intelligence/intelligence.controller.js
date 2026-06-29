@@ -253,9 +253,12 @@ export async function getExecutiveSummary(req, res) {
       reasoning: detail.reasoning,
       outlook: detail.reflectiveSummary?.outlook || null,
       reflectiveSummary: detail.reflectiveSummary,
+      sections: detail.sections || [],
+      recommendations: detail.recommendations || [],
       forecast: detail.forecast,
       summaryPersistence: detail.summaryPersistence,
       summaryBucket: detail.summaryBucket,
+      regenerationPolicy: detail.regenerationPolicy || null,
     });
 
     const data = await buildExecutiveSummaryData({

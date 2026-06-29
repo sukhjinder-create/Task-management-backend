@@ -7,6 +7,7 @@ import { buildWorkspaceHealthResponse } from "../intelligence/analytics/intellig
 import { getDashboardOverviewFromIntelligence } from "../intelligence/analytics/unifiedDashboard.adapter.js";
 import { certifyEnterpriseIntelligenceCoreWorkspace } from "../intelligence/certification/coreCertification.service.js";
 import { traceUserScoreForWorkspace } from "../intelligence/certification/userScoreTrace.service.js";
+import { PERIOD_EXECUTIVE_SUMMARY_VERSION } from "../intelligence/analytics/periodExecutiveSummary.service.js";
 import { bootstrapWorkspaceIntelligence } from "../intelligence/engine/unifiedIntelligence.engine.js";
 import {
   getWorkspaceScoringConfig,
@@ -17,6 +18,7 @@ import { adminScoringConfigSurface } from "../intelligence/config/scoringConfig.
 console.log("🔥 INTERNAL ROUTES LOADED");
 
 const router = express.Router();
+const EXECUTIVE_SUMMARY_VALIDATION_RANGES = Object.freeze(["30d", "90d", "6m", "1y", "all"]);
 
 router.post("/dashboard-history/materialize", materializeDashboardHistoryInternal);
 
@@ -33,6 +35,56 @@ function internalSecretMatches(req) {
     req.body?.secret ||
     "";
   return Boolean(expected && provided === expected);
+}
+
+async function findInternalWorkspaceAdmin(workspaceId) {
+  const { rows } = await pool.query(
+    `SELECT id, username, email, role
+     FROM users
+     WHERE workspace_id = $1
+       AND COALESCE(is_system, false) = false
+       AND COALESCE(role, '') IN ('admin', 'manager', 'user')
+     ORDER BY
+       CASE WHEN role = 'admin' THEN 0
+            WHEN role = 'manager' THEN 1
+            ELSE 2 END,
+       created_at ASC
+     LIMIT 1`,
+    [workspaceId]
+  );
+  return rows[0] || null;
+}
+
+function summarizeExecutiveSummaryPayload(overview) {
+  const summary = overview?.executiveSummary || {};
+  return {
+    summaryId: summary.persistence?.summaryId || summary.summaryId || null,
+    reused: Boolean(summary.persistence?.reused),
+    version: summary.persistence?.summaryVersion || summary.quality?.summaryVersion || null,
+    operationalEvidenceHash: summary.persistence?.operationalEvidenceHash || summary.operationalEvidenceHash || null,
+    sectionCount: Array.isArray(summary.sections) ? summary.sections.length : 0,
+    sectionKeys: (summary.sections || []).map((section) => section.key),
+    qualityPassed: Boolean(summary.quality?.passed),
+    avoidsScoreCentricLanguage: summary.quality?.checks?.avoidsScoreCentricLanguage ?? null,
+    scoreWeightageChangesInvalidateSummary: summary.regenerationPolicy?.scoreWeightageChangesInvalidateSummary ?? null,
+    headline: summary.headline || null,
+    textLength: String(summary.text || summary.fullSummary || summary.narrative || "").length,
+  };
+}
+
+async function invalidateExecutiveSummaryEvidenceHash(summaryId) {
+  if (!summaryId) return false;
+  await pool.query(
+    `UPDATE workspace_executive_summaries
+     SET source_data = jsonb_set(
+       jsonb_set(COALESCE(source_data, '{}'::jsonb), '{operationalEvidenceHash}', '"validation_mismatch"', true),
+       '{payload,operationalEvidenceHash}', '"validation_mismatch"',
+       true
+     )
+     WHERE id = $1`,
+    [summaryId]
+  );
+  return true;
 }
 
 router.post("/enterprise-intelligence/certify-core", async (req, res) => {
@@ -227,6 +279,203 @@ router.post("/enterprise-intelligence/closure-verify", async (req, res) => {
     console.error("[ENTERPRISE_INTELLIGENCE_CLOSURE_VERIFY_ERROR]", err);
     return res.status(500).json({
       error: err.message || "Enterprise intelligence closure verification failed",
+      code: err.code || null,
+    });
+  }
+});
+
+router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, res) => {
+  try {
+    if (!internalSecretMatches(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const workspaceId = req.body?.workspaceId;
+    if (!workspaceId) {
+      return res.status(400).json({ error: "workspaceId is required" });
+    }
+
+    const ranges = Array.isArray(req.body?.ranges) && req.body.ranges.length
+      ? req.body.ranges.filter((range) => EXECUTIVE_SUMMARY_VALIDATION_RANGES.includes(range))
+      : EXECUTIVE_SUMMARY_VALIDATION_RANGES;
+    const executeWeightToggle = req.body?.executeWeightToggle === true;
+    const executeEvidenceHashMismatch = req.body?.executeEvidenceHashMismatch === true;
+
+    const admin = await findInternalWorkspaceAdmin(workspaceId);
+    if (!admin) {
+      return res.status(404).json({ error: "Workspace admin not found" });
+    }
+
+    const rangeResults = [];
+    for (const range of ranges) {
+      const first = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range,
+      });
+      const second = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range,
+      });
+      rangeResults.push({
+        range,
+        first: summarizeExecutiveSummaryPayload(first),
+        second: summarizeExecutiveSummaryPayload(second),
+      });
+    }
+
+    let weightageValidation = null;
+    if (executeWeightToggle) {
+      const configBefore = await getWorkspaceScoringConfig({ workspaceId });
+      const currentCoreWeight = Number(configBefore?.groups?.userFinalBalance?.weights?.core ?? 0.82);
+      const targetCoreWeight = currentCoreWeight >= 0.98
+        ? Math.max(0.01, Math.round((currentCoreWeight - 0.02) * 10000) / 10000)
+        : Math.min(0.99, Math.round((currentCoreWeight + 0.02) * 10000) / 10000);
+      const before = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range: "30d",
+      });
+
+      await upsertWorkspaceScoringConfig({
+        workspaceId,
+        updatedBy: admin.id,
+        patch: {
+          groups: {
+            userFinalBalance: {
+              changedKey: "core",
+              weights: { core: targetCoreWeight },
+            },
+          },
+        },
+      });
+      const changedRecalc = await bootstrapWorkspaceIntelligence({ workspaceId, windowDays: 30 });
+      const afterWeightChange = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range: "30d",
+      });
+
+      await upsertWorkspaceScoringConfig({
+        workspaceId,
+        updatedBy: admin.id,
+        patch: {
+          groups: {
+            userFinalBalance: {
+              changedKey: "core",
+              weights: { core: currentCoreWeight },
+            },
+          },
+        },
+      });
+      const restoredRecalc = await bootstrapWorkspaceIntelligence({ workspaceId, windowDays: 30 });
+      const restored = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range: "30d",
+      });
+
+      const beforeSummary = summarizeExecutiveSummaryPayload(before);
+      const changedSummary = summarizeExecutiveSummaryPayload(afterWeightChange);
+      const restoredSummary = summarizeExecutiveSummaryPayload(restored);
+      weightageValidation = {
+        currentCoreWeight,
+        targetCoreWeight,
+        restoredCoreWeight: currentCoreWeight,
+        workspaceScores: {
+          before: before.healthScore ?? null,
+          afterWeightChange: changedRecalc.workspace?.score ?? afterWeightChange.healthScore ?? null,
+          restored: restoredRecalc.workspace?.score ?? restored.healthScore ?? null,
+        },
+        summaries: {
+          before: beforeSummary,
+          afterWeightChange: changedSummary,
+          restored: restoredSummary,
+        },
+        summaryRegeneratedByWeightChange: changedSummary.reused === false,
+        evidenceHashStableAcrossWeightChange:
+          beforeSummary.operationalEvidenceHash === changedSummary.operationalEvidenceHash,
+      };
+    }
+
+    let operationalEvidenceValidation = null;
+    if (executeEvidenceHashMismatch) {
+      const before = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range: "30d",
+      });
+      const beforeSummary = summarizeExecutiveSummaryPayload(before);
+      const invalidated = await invalidateExecutiveSummaryEvidenceHash(beforeSummary.summaryId);
+      const regenerated = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range: "30d",
+      });
+      const secondRead = await getDashboardOverviewFromIntelligence({
+        workspaceId,
+        userId: admin.id,
+        role: "admin",
+        range: "30d",
+      });
+      operationalEvidenceValidation = {
+        invalidatedStoredEvidenceHash: invalidated,
+        before: beforeSummary,
+        afterMismatchRead: summarizeExecutiveSummaryPayload(regenerated),
+        secondRead: summarizeExecutiveSummaryPayload(secondRead),
+      };
+    }
+
+    const failures = [];
+    for (const result of rangeResults) {
+      if (result.second.version !== PERIOD_EXECUTIVE_SUMMARY_VERSION) failures.push(`${result.range} did not return v5`);
+      if (result.second.sectionCount < 10) failures.push(`${result.range} missing required sections`);
+      if (!result.second.qualityPassed) failures.push(`${result.range} quality check failed`);
+      if (!result.second.reused) failures.push(`${result.range} second read did not reuse persisted summary`);
+      if (result.second.scoreWeightageChangesInvalidateSummary !== false) failures.push(`${result.range} regeneration policy is not weightage independent`);
+    }
+    if (weightageValidation && weightageValidation.summaryRegeneratedByWeightChange) {
+      failures.push("Score weightage change regenerated the executive summary");
+    }
+    if (weightageValidation && !weightageValidation.evidenceHashStableAcrossWeightChange) {
+      failures.push("Operational evidence hash changed during score weightage toggle");
+    }
+    if (operationalEvidenceValidation && operationalEvidenceValidation.afterMismatchRead.reused !== false) {
+      failures.push("Operational evidence hash mismatch did not force regeneration");
+    }
+    if (operationalEvidenceValidation && operationalEvidenceValidation.secondRead.reused !== true) {
+      failures.push("Regenerated operational summary was not reused on second read");
+    }
+
+    return res.status(failures.length ? 409 : 200).json({
+      source: "enterprise_executive_summary_v5_verification",
+      generatedAt: new Date().toISOString(),
+      workspaceId,
+      summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
+      admin: {
+        id: admin.id,
+        role: admin.role,
+        username: admin.username,
+        emailDomain: String(admin.email || "").split("@")[1] || null,
+      },
+      ranges: rangeResults,
+      weightageValidation,
+      operationalEvidenceValidation,
+      failures,
+      certified: failures.length === 0,
+    });
+  } catch (err) {
+    console.error("[ENTERPRISE_EXECUTIVE_SUMMARY_V5_VERIFY_ERROR]", err);
+    return res.status(500).json({
+      error: err.message || "Executive summary v5 verification failed",
       code: err.code || null,
     });
   }

@@ -39,7 +39,16 @@ Goals Intelligence Signal: ${
   }
 
   const prompt = `
-You are a senior organizational performance analyst hired by executive leadership.
+You are an experienced Chief Operating Officer writing an evidence-driven executive operational briefing.
+
+V5 EXECUTIVE SUMMARY DIRECTIVE:
+- Explain what happened operationally during the selected period.
+- Do not narrate raw score values, score movement, or scoring formulas.
+- Treat numerical scores only as internal classification hints.
+- Write in these sections: Executive Overview, Operational Strengths, Operational Risks, Trend Narrative, Attendance & Workforce Readiness, Delivery & Execution, Collaboration & Organizational Health, Capacity & Sustainability, Leadership Recommendations, Outlook.
+- Leadership Recommendations must include 3-5 prioritized actions using High Priority, Medium Priority, or Monitor.
+- Outlook must describe likely operational trajectory, not predicted scores.
+- Tone: experienced COO, concise, objective, evidence-based, no hype, no generic AI language.
 
 Your role is to INTERPRET organizational behavior — not summarize statistics.
 You must explain what the data MEANS for leadership decisions, organizational health,
@@ -210,7 +219,7 @@ ${okrSection}
     // Extract PERFORMANCE OUTLOOK
     // ===============================
     const outlookMatch = fullText.match(
-      /===\s*PERFORMANCE OUTLOOK\s*===([\s\S]*?)(?====|\Z)/i
+      /===\s*(?:PERFORMANCE\s+OUTLOOK|OUTLOOK)\s*===([\s\S]*?)(?====|\Z)/i
     );
 
     let outlookText = null;

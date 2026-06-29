@@ -1,8 +1,9 @@
+import { createHash } from "crypto";
 import pool from "../../db.js";
 import { saveExecutiveSummary } from "../../events/executive/executiveSummary.store.js";
 import { buildTrendAnalytics } from "./historicalAnalytics.service.js";
 
-export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "dashboard_period_summary_v4";
+export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "enterprise_executive_summary_v5";
 const SUMMARY_KIND = "dashboard_period_executive_summary";
 
 function dateKey(value) {
@@ -58,6 +59,69 @@ function scoreSpan(score = {}) {
 
 function compactSentence(parts = []) {
   return parts.filter(Boolean).join(" ");
+}
+
+function sentenceList(items = [], fallback = "No dominant pattern is visible yet.", limit = 3) {
+  const list = compactList(items, limit);
+  if (!list.length) return fallback;
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(", ")}, and ${list[list.length - 1]}`;
+}
+
+function qualitativeBand(value, { inverse = false } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "not yet conclusive";
+  const normalized = inverse ? 100 - number : number;
+  if (normalized >= 76) return "strong";
+  if (normalized >= 62) return "stable";
+  if (normalized >= 48) return "uneven";
+  return "under pressure";
+}
+
+function trendPhrase(direction) {
+  if (direction === "up") return "strengthened";
+  if (direction === "down") return "weakened";
+  return "remained broadly stable";
+}
+
+function riskPhrase(direction) {
+  if (direction === "up") return "risk pressure expanded";
+  if (direction === "down") return "risk pressure eased";
+  return "risk pressure remained broadly stable";
+}
+
+function hashJson(value) {
+  return createHash("sha256")
+    .update(JSON.stringify(value ?? {}))
+    .digest("hex");
+}
+
+function sanitizeSummaryText(text) {
+  return String(text || "")
+    .replace(/\bscore(?:d|s)?\b/gi, "posture")
+    .replace(/\b\d+(?:\.\d+)?\s*\/\s*100\b/g, "the current band")
+    .replace(/\b[+-]?\d+(?:\.\d+)?\s*(?:pt|point|points)\s+movement\b/gi, "material movement")
+    .replace(/\bfrom\s+\d+(?:\.\d+)?\s+to\s+\d+(?:\.\d+)?\b/gi, "over the period")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function section(key, title, body, extra = {}) {
+  return {
+    key,
+    title,
+    body: sanitizeSummaryText(body),
+    ...extra,
+  };
+}
+
+function recommendation(priority, action, rationale) {
+  return {
+    priority,
+    action: sanitizeSummaryText(action),
+    rationale: sanitizeSummaryText(rationale),
+  };
 }
 
 function topOrFallback(items = [], fallback) {
@@ -238,7 +302,102 @@ export function summaryBucketForRange(rangeMeta = {}, now = new Date()) {
   };
 }
 
-function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {}, rangeMeta = {}, bucket = {}, counts = {}, topOverdue = [] }) {
+function summaryStoragePeriodKey(bucket = {}) {
+  const digest = createHash("sha1")
+    .update(`${PERIOD_EXECUTIVE_SUMMARY_VERSION}:${bucket.periodKey || "unknown"}`)
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase();
+  return `V5${digest}`;
+}
+
+function summarizeSnapshotEvidence(snapshot = {}, intelligence = {}) {
+  const users = snapshot.users || [];
+  const projects = snapshot.projects || [];
+  const teams = snapshot.teams || [];
+  const usersWithAttendance = users.filter((user) => user.attendance?.score != null);
+  const projectRisks = projects.filter((project) => String(project.risk?.level || "").toLowerCase() === "high");
+  const blockedProjects = projects.filter((project) =>
+    (project.concerns || []).some((concern) => /block|depend|risk|delay|overdue/i.test(String(concern)))
+  );
+  const collaborationSignals = [
+    ...users.flatMap((user) => user.dimensions?.collaborationHealth?.drivers || []),
+    ...teams.flatMap((team) => team.drivers || []),
+  ];
+
+  return {
+    users: {
+      count: users.length,
+      usersWithAttendance: usersWithAttendance.length,
+      attendanceReadiness: qualitativeBand(intelligence?.indexes?.attendanceReadinessIndex),
+      professionalDiscipline: qualitativeBand(average(users.map((user) => user.dimensions?.professionalDiscipline?.score))),
+      collaborationHealth: qualitativeBand(average(users.map((user) => user.dimensions?.collaborationHealth?.score))),
+      sustainability: qualitativeBand(average(users.map((user) => user.dimensions?.workSustainability?.score))),
+      deliveryEffectiveness: qualitativeBand(average(users.map((user) => user.dimensions?.deliveryEffectiveness?.score))),
+      executionReliability: qualitativeBand(average(users.map((user) => user.dimensions?.executionReliability?.score))),
+    },
+    projects: {
+      count: projects.length,
+      highRiskCount: projectRisks.length,
+      blockedOrDelayedCount: blockedProjects.length,
+      deliveryConfidence: qualitativeBand(intelligence?.indexes?.deliveryConfidenceIndex),
+      velocityHealth: qualitativeBand(average(projects.map((project) => project.indexes?.velocityHealth))),
+      scopeStability: qualitativeBand(average(projects.map((project) => project.indexes?.scopeStability))),
+      projectNames: compactList(projects.map((project) => project.projectName), 5),
+    },
+    teams: {
+      count: teams.length,
+      collaboration: qualitativeBand(intelligence?.indexes?.organizationalAlignmentIndex),
+      predictability: qualitativeBand(average(teams.map((team) => team.indexes?.executionPredictability))),
+      workloadBalance: qualitativeBand(average(teams.map((team) => team.indexes?.workloadBalanceIndex))),
+    },
+    collaborationSignals: compactList(collaborationSignals, 4),
+    capacity: {
+      sustainability: qualitativeBand(intelligence?.indexes?.capacitySustainabilityIndex),
+      executionReality: qualitativeBand(intelligence?.indexes?.executionRealityIndex),
+    },
+  };
+}
+
+function operationalEvidenceSignature({ analysis, snapshot = {}, materialization = null }) {
+  const signature = {
+    summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
+    range: analysis.range?.value,
+    bucket: analysis.bucket?.periodKey,
+    coverageStart: analysis.coverageStart,
+    coverageEnd: analysis.coverageEnd,
+    snapshotDates: (analysis.snapshotDates || []).slice(-120),
+    snapshotPointCount: analysis.snapshotPointCount,
+    taskContext: {
+      totalTasks: analysis.taskContext.totalTasks,
+      completedTasks: analysis.taskContext.completedTasks,
+      overdueTasks: analysis.taskContext.overdueTasks,
+      topOverdue: (analysis.taskContext.topOverdue || []).map((task) => ({
+        id: task.id || null,
+        task: task.task,
+        projectName: task.projectName,
+        overdueDays: task.overdueDays,
+        priority: task.priority,
+      })),
+    },
+    sourceWindow: {
+      coverageStart: analysis.sourceWindow?.coverageStart || null,
+      coverageEnd: analysis.sourceWindow?.coverageEnd || null,
+      attendanceClosedThroughDate: analysis.sourceWindow?.attendanceClosedThroughDate || null,
+    },
+    operationalEvidence: analysis.operationalEvidence || {},
+    entityCounts: {
+      users: snapshot.users?.length || 0,
+      projects: snapshot.projects?.length || 0,
+      teams: snapshot.teams?.length || 0,
+    },
+    projectNames: (snapshot.projects || []).map((project) => project.projectName).sort(),
+    materialized: Boolean(materialization?.materialized),
+  };
+  return hashJson(signature);
+}
+
+function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {}, rangeMeta = {}, bucket = {}, counts = {}, topOverdue = [], snapshot = {}, materialization = null }) {
   const scores = trendSeries.map((point) => Number(point.score)).filter(Number.isFinite);
   const trend = buildTrendAnalytics(trendSeries);
   const firstScore = scores.length ? scores[0] : Number(intelligence?.score) || null;
@@ -264,10 +423,11 @@ function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {
     addFrequency(indicatorCounts, point.payload?.indicators);
   }
 
-  return {
+  const analysis = {
     range: rangeMeta,
     bucket,
     snapshotPointCount: trendSeries.length,
+    snapshotDates: trendSeries.map((point) => dateKey(point.date)).filter(Boolean),
     coverageStart: dateKey(trendSeries[0]?.date),
     coverageEnd: dateKey(trendSeries[trendSeries.length - 1]?.date),
     score: {
@@ -292,13 +452,20 @@ function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {
     currentRisk: intelligence?.risk || {},
     indexes: intelligence?.indexes || {},
     analytics: intelligence?.analytics || {},
+    operationalEvidence: summarizeSnapshotEvidence(snapshot, intelligence),
     confidence: intelligence?.confidence ?? null,
     band: intelligence?.band || null,
+    sourceWindow: {
+      coverageStart: intelligence?.coverageStart || intelligence?.sourceWindow?.startDate || null,
+      coverageEnd: intelligence?.coverageEnd || intelligence?.sourceWindow?.endDate || null,
+      attendanceClosedThroughDate: intelligence?.attendanceClosedThroughDate || intelligence?.sourceWindow?.attendanceClosedThroughDate || null,
+    },
     taskContext: {
       totalTasks: counts?.totalTasks || 0,
       completedTasks: counts?.completedTasks || 0,
       overdueTasks: counts?.overdueTasks || 0,
       topOverdue: (topOverdue || []).slice(0, 3).map((task) => ({
+        id: task.id || null,
         task: task.task,
         projectName: task.project_name,
         overdueDays: task.overdue_days,
@@ -306,6 +473,14 @@ function analyzePeriod({ trendSeries = [], intelligence = {}, visualizations = {
       })),
     },
   };
+
+  analysis.operationalEvidenceHash = operationalEvidenceSignature({
+    analysis,
+    snapshot,
+    materialization,
+  });
+
+  return analysis;
 }
 
 export function assessExecutiveSummaryQuality(summary = {}) {
@@ -314,6 +489,7 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     summary.narrative,
     summary.outlook,
     ...(summary.priorities || []),
+    ...(summary.sections || []).map((item) => `${item.title || ""} ${item.body || ""}`),
   ].filter(Boolean).join(" ");
   const words = text.toLowerCase().match(/[a-z0-9]+/g) || [];
   const uniqueWords = new Set(words);
@@ -330,45 +506,92 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     "confidence",
     "delivery",
     "workspace",
+    "attendance",
+    "execution",
+    "collaboration",
+    "capacity",
+    "sustainability",
+    "leadership",
   ];
+  const scoreCentricPattern = /\b(score|scored|scores|\/100|points?\s+movement|increased\s+from\s+\d|decreased\s+from\s+\d)\b/i;
+  const requiredSectionKeys = [
+    "executiveOverview",
+    "operationalStrengths",
+    "operationalRisks",
+    "trendNarrative",
+    "attendanceWorkforceReadiness",
+    "deliveryExecution",
+    "collaborationOrganizationalHealth",
+    "capacitySustainability",
+    "leadershipRecommendations",
+    "outlook",
+  ];
+  const sectionKeys = new Set((summary.sections || []).map((item) => item.key));
   const checks = {
-    hasSubstance: words.length >= 95,
-    conciseEnough: words.length <= 360,
+    hasSubstance: words.length >= 170,
+    conciseEnough: words.length <= 900,
     referencesPeriod: /30d|90d|6m|1y|all|period|quarter|half-year|annual|history/i.test(text),
-    referencesEvidence: evidenceTerms.filter((term) => text.toLowerCase().includes(term)).length >= 5,
+    referencesEvidence: evidenceTerms.filter((term) => text.toLowerCase().includes(term)).length >= 8,
     hasPriorities: Array.isArray(summary.priorities) && summary.priorities.length > 0,
     lowRepetition: words.length === 0 ? false : uniqueWords.size / words.length >= 0.42,
     hasOutlook: Boolean(summary.outlook && String(summary.outlook).length >= 80),
+    hasRequiredSections: requiredSectionKeys.every((key) => sectionKeys.has(key)),
+    avoidsScoreCentricLanguage: !scoreCentricPattern.test(text),
   };
   return {
     passed: Object.values(checks).every(Boolean),
     checks,
     wordCount: words.length,
     uniquenessRatio: words.length === 0 ? 0 : Math.round((uniqueWords.size / words.length) * 100) / 100,
+    summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
   };
 }
 
-function buildPriorities(analysis) {
-  const priorities = [];
-  if (analysis.score.direction === "down") {
-    priorities.push("Stabilize the intelligence trajectory by addressing the period's recurring delivery risks.");
+function buildRecommendations(analysis) {
+  const recommendations = [];
+  const topConcern = topOrFallback(analysis.concerns, "execution variability");
+  const topDriver = topOrFallback(analysis.drivers, "the selected period's operating evidence");
+
+  if ((analysis.taskContext.overdueTasks || 0) > 0 || /declining|down/i.test(analysis.score.direction)) {
+    recommendations.push(recommendation(
+      "High Priority",
+      "Stabilize delivery commitments and clear the work most exposed to deadline slippage.",
+      `This is driven by ${topConcern} and should be handled before it becomes a planning drag.`
+    ));
   }
-  if ((analysis.taskContext.overdueTasks || 0) > 0) {
-    priorities.push(`Reduce the overdue task queue (${analysis.taskContext.overdueTasks} item(s)) before it becomes a planning drag.`);
+
+  if ((analysis.operationalEvidence?.projects?.highRiskCount || 0) > 0 || /risk|blocker|delay|overdue/i.test(topConcern)) {
+    recommendations.push(recommendation(
+      "High Priority",
+      "Run a manager-level risk review focused on ownership, blockers, and recovery actions.",
+      "The period evidence shows enough delivery or portfolio risk concentration to justify active leadership review."
+    ));
   }
-  if (String(analysis.currentRisk?.level || "").toLowerCase() === "high") {
-    priorities.push("Review the high-risk workspace signals with project owners and agree on immediate recovery actions.");
-  }
-  priorities.push(...analysis.concerns.slice(0, 3));
-  priorities.push("Keep event-driven intelligence snapshots current so leadership sees period movement, not only current posture.");
-  return compactList(priorities, 5);
+
+  recommendations.push(recommendation(
+    recommendations.length ? "Medium Priority" : "High Priority",
+    "Reinforce the strongest operating behaviour visible in the period.",
+    `${sentenceList(analysis.strengths, "The positive evidence is distributed rather than concentrated", 2)} should be made repeatable across projects.`
+  ));
+
+  recommendations.push(recommendation(
+    "Medium Priority",
+    "Improve collaboration hygiene where participation or review signals are uneven.",
+    "Execution confidence improves when comments, reviews, stakeholder follow-up, and cross-team visibility stay current."
+  ));
+
+  recommendations.push(recommendation(
+    "Monitor",
+    "Keep watching capacity sustainability and attendance readiness as leading indicators.",
+    `${topDriver} should be reviewed alongside workload balance before new commitments are added.`
+  ));
+
+  return recommendations.slice(0, 5);
 }
 
 function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
   const periodName = rangeNarrative(analysis.range?.value);
   const direction = directionLabel(analysis.score.direction);
-  const movement = movementVerb(analysis.score.direction);
-  const score = analysis.score.last ?? 0;
   const pointCount = analysis.snapshotPointCount;
   const productivity = analysis.chartSignals.productivity;
   const risk = analysis.chartSignals.risk;
@@ -376,6 +599,8 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
   const topConcern = topOrFallback(analysis.concerns, "no single recurring concern dominated the period");
   const topStrength = topOrFallback(analysis.strengths, "no single recurring strength dominated the period");
   const topDriver = topOrFallback(analysis.drivers, "combined execution, delivery, collaboration, and risk evidence shaped the period");
+  const recommendations = buildRecommendations(analysis);
+  const evidence = analysis.operationalEvidence || {};
   const dataDepth = pointCount >= 3
     ? `${pointCount} historical intelligence points`
     : pointCount === 2
@@ -385,71 +610,109 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
     ? `Historical materialization expanded this view from ${materialization.beforePointCount || 0} to ${materialization.afterPointCount || pointCount} point(s).`
     : null;
 
-  const readiness = analysis.indexes?.attendanceReadinessIndex;
-  const sustainability = analysis.indexes?.capacitySustainabilityIndex;
-  const deliveryConfidence = analysis.indexes?.deliveryConfidenceIndex;
-  const operatingIndexes = compactSentence([
-    deliveryConfidence != null && `Delivery confidence is ${Math.round(deliveryConfidence)}/100.`,
-    readiness != null && `Attendance readiness is ${Math.round(readiness)}/100.`,
-    sustainability != null && `Capacity sustainability is ${Math.round(sustainability)}/100.`,
-  ]);
   const taskPressure = (analysis.taskContext.overdueTasks || 0) > 0
-    ? `${analysis.taskContext.overdueTasks} overdue scoped item(s) remain the clearest execution pressure.`
-    : "No overdue scoped item concentration is visible in this period.";
+    ? "Overdue work remains the clearest execution pressure in the selected scope."
+    : "No concentrated overdue-work pressure is visible in this period.";
   const riskSentence = risk.pointCount > 0
-    ? `${riskMovementLabel(risk.direction)} with average risk signal ${risk.average ?? "n/a"} and ${risk.delta || 0} pt movement.`
-    : `Current workspace risk is ${analysis.currentRisk?.level || "unknown"}.`;
-  const outlookBase = forecast?.reasoning || "Forward outlook is based on the selected period's enterprise intelligence trajectory.";
-  const outlook = compactSentence([
-    `Next-period outlook: ${outlookBase}`,
-    `The operating read is ${direction}, with score span ${scoreSpan(analysis.score)} and confidence ${analysis.confidence ?? "n/a"}/100.`,
+    ? `${riskPhrase(risk.direction)} across the retained history.`
+    : "Current risk context is based on retained repository signals rather than a raw numeric label.";
+  const periodLabel = `${analysis.range.label} ${analysis.bucket.label}`;
+  const trendNarrative = compactSentence([
+    `Across ${dataDepth}, the operating trajectory ${trendPhrase(analysis.score.direction)} during the ${periodName}.`,
+    health.pointCount > 0 && `Workspace health signals ${trendPhrase(health.direction)} while productivity ${trendPhrase(productivity.direction)}.`,
     riskSentence,
-    `Leadership attention should stay on ${topConcern}; the best stabilizing signal is ${topStrength}.`,
-  ]);
-
-  const narrative = compactSentence([
-    `During the ${periodName} (${analysis.bucket.label}), ${scopeLabel.toLowerCase()} ${movement} into a ${analysis.band || "unclassified"} posture at ${score}/100.`,
-    rangeInterpretation(analysis),
-    `The selected period moved ${scoreSpan(analysis.score)} across ${dataDepth}; average score was ${analysis.score.average ?? "n/a"} and volatility was ${analysis.score.volatility}.`,
-    operatingSignal("Workspace health", health) + ".",
-    operatingSignal("Productivity", productivity) + ".",
-    riskSentence,
-    `Primary positive signal: ${topStrength}.`,
-    `Primary concern: ${topConcern}.`,
-    `Main driver: ${topDriver}.`,
-    operatingIndexes,
-    taskPressure,
     materializationNote,
   ]);
+  const attendanceBody = compactSentence([
+    `Attendance and workforce readiness appear ${evidence.users?.attendanceReadiness || "not yet conclusive"} for this period.`,
+    `Professional discipline is ${evidence.users?.professionalDiscipline || "not yet conclusive"}, supported by the attendance closeout through ${analysis.sourceWindow.attendanceClosedThroughDate || "the latest closed attendance day"}.`,
+    "Non-working-day attendance remains a recognition signal only when paired with meaningful delivery, while repeated overtime remains a sustainability concern rather than an automatic performance lift.",
+  ]);
+  const deliveryBody = compactSentence([
+    `Delivery and execution are ${evidence.projects?.deliveryConfidence || "not yet conclusive"} overall, with execution reliability reading as ${evidence.users?.executionReliability || "not yet conclusive"}.`,
+    taskPressure,
+    `Project momentum is shaped by ${sentenceList(analysis.drivers, "the available project and task evidence", 2)}.`,
+  ]);
+  const collaborationBody = compactSentence([
+    `Collaboration and organizational health are ${evidence.teams?.collaboration || evidence.users?.collaborationHealth || "not yet conclusive"}.`,
+    evidence.collaborationSignals?.length
+      ? `The clearest collaboration signals are ${sentenceList(evidence.collaborationSignals, "", 3)}.`
+      : "Review participation, communication hygiene, and stakeholder follow-up should remain part of manager review.",
+  ]);
+  const capacityBody = compactSentence([
+    `Capacity sustainability is ${evidence.capacity?.sustainability || "not yet conclusive"}, with workload balance ${evidence.teams?.workloadBalance || "not yet conclusive"}.`,
+    "The leadership read should watch for focus fragmentation, repeated overtime, and declining delivery despite longer hours.",
+  ]);
+  const outlook = compactSentence([
+    `Outlook: current operational patterns suggest the workspace will remain ${direction} if the strongest behaviours are repeated and ${topConcern} receives active follow-up.`,
+    forecast?.confidence === "low"
+      ? "The outlook should be treated as directional because retained historical evidence is still thin for the selected period."
+      : "The outlook is grounded in retained intelligence history and current repository evidence.",
+  ]);
+  const overview = compactSentence([
+    `During the ${periodName} (${periodLabel}), ${scopeLabel.toLowerCase()} showed a ${direction} operating posture.`,
+    `The strongest observed behaviour was ${topStrength}.`,
+    `The main leadership concern was ${topConcern}.`,
+    `The business read is driven by ${topDriver}.`,
+  ]);
+
+  const sections = [
+    section("executiveOverview", "Executive Overview", overview),
+    section("operationalStrengths", "Operational Strengths", `The strongest operating behaviours were ${sentenceList(analysis.strengths, "distributed across execution, delivery, and readiness signals", 4)}.`),
+    section("operationalRisks", "Operational Risks", `The primary risks were ${sentenceList(analysis.concerns, "not concentrated in a single operating area", 4)}. ${riskSentence}`),
+    section("trendNarrative", "Trend Narrative", trendNarrative),
+    section("attendanceWorkforceReadiness", "Attendance & Workforce Readiness", attendanceBody),
+    section("deliveryExecution", "Delivery & Execution", deliveryBody),
+    section("collaborationOrganizationalHealth", "Collaboration & Organizational Health", collaborationBody),
+    section("capacitySustainability", "Capacity & Sustainability", capacityBody),
+    section(
+      "leadershipRecommendations",
+      "Leadership Recommendations",
+      recommendations.map((item) => `${item.priority}: ${item.action} ${item.rationale}`).join(" "),
+      { recommendations }
+    ),
+    section("outlook", "Outlook", outlook),
+  ];
+  const fullSummary = sections
+    .map((item) => `${item.title}\n${item.body}`)
+    .join("\n\n");
+  const narrative = sections[0].body;
 
   return {
-    headline: `${scopeLabel} ${analysis.range.label}: ${direction} operating intelligence (${score}/100)`,
+    headline: `${scopeLabel} ${analysis.range.label}: ${direction} executive operating brief`,
     narrative,
+    sections,
+    fullSummary,
     outlook,
     strengths: analysis.strengths,
     risks: analysis.concerns,
     concerns: analysis.concerns,
-    priorities: buildPriorities(analysis),
+    priorities: recommendations.map((item) => `${item.priority}: ${item.action}`),
+    recommendations,
     drivers: analysis.drivers,
     indicators: analysis.indicators,
     period: analysis.range,
     summaryBucket: analysis.bucket,
+    operationalEvidenceHash: analysis.operationalEvidenceHash,
+    regenerationPolicy: {
+      summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
+      regenerationTrigger: "material_operational_evidence_change",
+      scoreWeightageChangesInvalidateSummary: false,
+      evidenceSignature: analysis.operationalEvidenceHash,
+    },
     metrics: {
-      score: analysis.score.last,
-      averageScore: analysis.score.average,
-      delta: analysis.score.delta,
       direction: directionLabel(analysis.score.direction),
       snapshotCount: analysis.snapshotPointCount,
       coverageStart: analysis.coverageStart,
       coverageEnd: analysis.coverageEnd,
-      productivityAverage: productivity.average,
-      productivityDelta: productivity.delta,
-      riskAverage: risk.average,
-      riskDelta: risk.delta,
       scopedTasks: analysis.taskContext.totalTasks,
       completedTasks: analysis.taskContext.completedTasks,
       overdueTasks: analysis.taskContext.overdueTasks,
-      confidence: analysis.confidence,
+      operationalState: direction,
+      attendanceReadiness: evidence.users?.attendanceReadiness || null,
+      deliveryConfidence: evidence.projects?.deliveryConfidence || null,
+      collaborationHealth: evidence.teams?.collaboration || evidence.users?.collaborationHealth || null,
+      capacitySustainability: evidence.capacity?.sustainability || null,
     },
   };
 }
@@ -476,6 +739,12 @@ function shouldReuseSavedSummary(row, analysis, rangeMeta, bucket) {
 
   const savedCount = Number(source.analysis?.snapshotPointCount || source.payload?.metrics?.snapshotCount || 0);
   if (savedCount < 2 && analysis.snapshotPointCount > savedCount) return false;
+  if (source.operationalEvidenceHash && source.operationalEvidenceHash !== analysis.operationalEvidenceHash) {
+    return false;
+  }
+  if (source.payload?.operationalEvidenceHash && source.payload.operationalEvidenceHash !== analysis.operationalEvidenceHash) {
+    return false;
+  }
 
   return true;
 }
@@ -491,10 +760,13 @@ function hydrateSavedSummary(row) {
     summaryId: row.id,
     persistence: {
       summaryId: row.id,
-      periodKey: row.period,
+      periodKey: source.bucket?.periodKey || row.period,
+      storagePeriodKey: row.period,
       reused: true,
       generatedAt: row.created_at,
       summaryVersion: source.summaryVersion,
+      operationalEvidenceHash: source.operationalEvidenceHash || payload.operationalEvidenceHash || null,
+      regenerationPolicy: payload.regenerationPolicy || source.regenerationPolicy || null,
     },
   };
 }
@@ -510,8 +782,10 @@ export async function getOrCreateWorkspacePeriodExecutiveSummary({
   visualizations,
   forecast,
   materialization = null,
+  snapshot = {},
 }) {
   const bucket = summaryBucketForRange(rangeMeta);
+  const storagePeriodKey = summaryStoragePeriodKey(bucket);
   const analysis = analyzePeriod({
     trendSeries,
     intelligence,
@@ -520,8 +794,10 @@ export async function getOrCreateWorkspacePeriodExecutiveSummary({
     bucket,
     counts,
     topOverdue,
+    snapshot,
+    materialization,
   });
-  const existing = await loadSavedSummary({ workspaceId, periodKey: bucket.periodKey });
+  const existing = await loadSavedSummary({ workspaceId, periodKey: storagePeriodKey });
   if (shouldReuseSavedSummary(existing, analysis, rangeMeta, bucket)) {
     return hydrateSavedSummary(existing);
   }
@@ -537,23 +813,24 @@ export async function getOrCreateWorkspacePeriodExecutiveSummary({
     quality: assessExecutiveSummaryQuality(builtPayload),
   };
   const summaryText = [
-    payload.headline,
-    payload.narrative,
-    payload.outlook,
+    payload.fullSummary,
   ].filter(Boolean).join("\n\n");
 
   const saved = await saveExecutiveSummary({
     workspaceId,
-    period: bucket.periodKey,
+    period: storagePeriodKey,
     summary: summaryText,
     sourceData: {
       summaryKind: SUMMARY_KIND,
       summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
       dashboardRange: rangeMeta,
       bucket,
+      storagePeriodKey,
       analysis,
       materialization,
       payload,
+      operationalEvidenceHash: analysis.operationalEvidenceHash,
+      regenerationPolicy: payload.regenerationPolicy,
     },
   });
 
@@ -566,9 +843,12 @@ export async function getOrCreateWorkspacePeriodExecutiveSummary({
     persistence: {
       summaryId: saved?.id || null,
       periodKey: bucket.periodKey,
+      storagePeriodKey,
       reused: false,
       generatedAt: saved?.created_at || null,
       summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
+      operationalEvidenceHash: analysis.operationalEvidenceHash,
+      regenerationPolicy: payload.regenerationPolicy,
     },
   };
 }
