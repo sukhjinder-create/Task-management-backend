@@ -65,6 +65,9 @@ function summarizeExecutiveSummaryPayload(overview) {
     sectionCount: Array.isArray(summary.sections) ? summary.sections.length : 0,
     sectionKeys: (summary.sections || []).map((section) => section.key),
     qualityPassed: Boolean(summary.quality?.passed),
+    qualityChecks: summary.quality?.checks || null,
+    qualityWordCount: summary.quality?.wordCount || null,
+    qualityUniquenessRatio: summary.quality?.uniquenessRatio || null,
     avoidsScoreCentricLanguage: summary.quality?.checks?.avoidsScoreCentricLanguage ?? null,
     scoreWeightageChangesInvalidateSummary: summary.regenerationPolicy?.scoreWeightageChangesInvalidateSummary ?? null,
     headline: summary.headline || null,
@@ -306,6 +309,11 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
       return res.status(404).json({ error: "Workspace admin not found" });
     }
 
+    const baselineRecalculation = await bootstrapWorkspaceIntelligence({
+      workspaceId,
+      windowDays: 30,
+    });
+
     const rangeResults = [];
     for (const range of ranges) {
       const first = await getDashboardOverviewFromIntelligence({
@@ -331,9 +339,7 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
     if (executeWeightToggle) {
       const configBefore = await getWorkspaceScoringConfig({ workspaceId });
       const currentCoreWeight = Number(configBefore?.groups?.userFinalBalance?.weights?.core ?? 0.82);
-      const targetCoreWeight = currentCoreWeight >= 0.98
-        ? Math.max(0.01, Math.round((currentCoreWeight - 0.02) * 10000) / 10000)
-        : Math.min(0.99, Math.round((currentCoreWeight + 0.02) * 10000) / 10000);
+      const targetCoreWeight = currentCoreWeight <= 0.5 ? 0.99 : 0.01;
       const before = await getDashboardOverviewFromIntelligence({
         workspaceId,
         userId: admin.id,
@@ -389,7 +395,7 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
         targetCoreWeight,
         restoredCoreWeight: currentCoreWeight,
         workspaceScores: {
-          before: before.healthScore ?? null,
+          before: baselineRecalculation.workspace?.score ?? before.healthScore ?? null,
           afterWeightChange: changedRecalc.workspace?.score ?? afterWeightChange.healthScore ?? null,
           restored: restoredRecalc.workspace?.score ?? restored.healthScore ?? null,
         },
@@ -401,6 +407,9 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
         summaryRegeneratedByWeightChange: changedSummary.reused === false,
         evidenceHashStableAcrossWeightChange:
           beforeSummary.operationalEvidenceHash === changedSummary.operationalEvidenceHash,
+        scoreChangedDuringWeightToggle:
+          Number(baselineRecalculation.workspace?.score ?? before.healthScore) !==
+          Number(changedRecalc.workspace?.score ?? afterWeightChange.healthScore),
       };
     }
 
@@ -448,6 +457,9 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
     if (weightageValidation && !weightageValidation.evidenceHashStableAcrossWeightChange) {
       failures.push("Operational evidence hash changed during score weightage toggle");
     }
+    if (weightageValidation && !weightageValidation.scoreChangedDuringWeightToggle) {
+      failures.push("Score weightage toggle did not change the workspace score");
+    }
     if (operationalEvidenceValidation && operationalEvidenceValidation.afterMismatchRead.reused !== false) {
       failures.push("Operational evidence hash mismatch did not force regeneration");
     }
@@ -460,6 +472,12 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
       generatedAt: new Date().toISOString(),
       workspaceId,
       summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
+      baselineRecalculation: {
+        workspaceScore: baselineRecalculation.workspace?.score ?? null,
+        users: baselineRecalculation.users?.length ?? 0,
+        projects: baselineRecalculation.projects?.length ?? 0,
+        teams: baselineRecalculation.teams?.length ?? 0,
+      },
       admin: {
         id: admin.id,
         role: admin.role,

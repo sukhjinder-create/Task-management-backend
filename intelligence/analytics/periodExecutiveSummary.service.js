@@ -533,7 +533,7 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     referencesPeriod: /30d|90d|6m|1y|all|period|quarter|half-year|annual|history/i.test(text),
     referencesEvidence: evidenceTerms.filter((term) => text.toLowerCase().includes(term)).length >= 8,
     hasPriorities: Array.isArray(summary.priorities) && summary.priorities.length > 0,
-    lowRepetition: words.length === 0 ? false : uniqueWords.size / words.length >= 0.42,
+    lowRepetition: words.length === 0 ? false : uniqueWords.size / words.length >= 0.3,
     hasOutlook: Boolean(summary.outlook && String(summary.outlook).length >= 80),
     hasRequiredSections: requiredSectionKeys.every((key) => sectionKeys.has(key)),
     avoidsScoreCentricLanguage: !scoreCentricPattern.test(text),
@@ -752,8 +752,10 @@ function shouldReuseSavedSummary(row, analysis, rangeMeta, bucket) {
 function hydrateSavedSummary(row) {
   const source = row.source_data || {};
   const payload = source.payload || {};
+  const quality = assessExecutiveSummaryQuality(payload);
   return {
     ...payload,
+    quality,
     text: row.summary,
     persisted: true,
     reused: true,
