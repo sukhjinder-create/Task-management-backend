@@ -710,6 +710,57 @@ function buildUserScoreExplanation(user = {}) {
     }),
   ].filter((item) => item.value != null);
   const scoreCalculation = buildScoreCalculation({ user, domainRows, attendanceContribution });
+  const tracedDiagnosticDrivers = attachDiagnosticDriverTrace(diagnosticDrivers, scoreCalculation);
+  const time = {
+    computedAt: user.computedAt,
+    coverageStart: user.coverageStart,
+    coverageEnd: user.coverageEnd,
+    attendanceClosedThroughDate: user.attendanceClosedThroughDate,
+    snapshotDate: user.snapshotDate,
+    intelligenceMode: user.intelligenceMode,
+  };
+  const scoreTrace = canonicalScoreTrace({
+    scoreAuthority: "user_intelligence.score",
+    formulaReadable: scoreCalculation.formulaReadable,
+    finalScore: user.score,
+    rawScoreBeforeRounding: scoreCalculation.rawScoreBeforeRounding,
+    finalRoundedScore: scoreCalculation.finalScore,
+    confidence: user.confidence,
+    rawEvidence: [
+      ...(user.drivers || []).map((driver) => ({ label: driver })),
+      ...evidenceInputs.map((item) => ({
+        key: item.key,
+        label: item.label,
+        score: item.score,
+        source: item.source,
+        feedsDomains: item.feedsDomains,
+        materiality: item.materiality,
+      })),
+    ],
+    normalizedEvidence: domainRows,
+    weightedContributions: scoreCalculation.domainContributions,
+    aggregation: {
+      coreScore: scoreCalculation.coreScore,
+      coreMultiplier: scoreCalculation.coreMultiplier,
+      coreContributionPoints: scoreCalculation.coreContributionPoints,
+      professionalDisciplineScore: scoreCalculation.professionalDisciplineScore,
+      professionalDisciplineMultiplier: scoreCalculation.professionalDisciplineMultiplier,
+      professionalDisciplineContributionPoints: scoreCalculation.professionalDisciplineContributionPoints,
+      attendanceDrag: scoreCalculation.attendanceDrag,
+      attendanceLift: scoreCalculation.attendanceLift,
+      directAttendanceAdjustment: scoreCalculation.directAttendanceAdjustment,
+    },
+    time,
+  });
+  const scoreTooltip = canonicalScoreTooltip({
+    scoreAuthority: "user_intelligence.score",
+    formulaReadable: scoreCalculation.formulaReadable,
+    scoreTrace,
+    positiveDrivers: [...(user.strengths || []), ...strongestDomains],
+    negativeDrivers: [...(user.concerns || []), ...lowestDomains],
+    confidence: user.confidence,
+    time,
+  });
 
   return {
     source: "enterprise_intelligence",
@@ -736,8 +787,10 @@ function buildUserScoreExplanation(user = {}) {
     },
     scoreComposition: domainRows,
     scoreCalculation,
+    scoreTrace,
+    scoreTooltip,
     evidenceInputs,
-    diagnosticDrivers,
+    diagnosticDrivers: tracedDiagnosticDrivers,
     attendanceContribution,
     evidenceBars: [
       {
@@ -758,13 +811,7 @@ function buildUserScoreExplanation(user = {}) {
       },
     ],
     domainRows,
-    time: {
-      computedAt: user.computedAt,
-      coverageStart: user.coverageStart,
-      coverageEnd: user.coverageEnd,
-      attendanceClosedThroughDate: user.attendanceClosedThroughDate,
-      intelligenceMode: user.intelligenceMode,
-    },
+    time,
   };
 }
 
@@ -785,6 +832,215 @@ function workspaceIndexLabel(key) {
     .replace(/([A-Z])/g, " $1")
     .replace(/^./, (char) => char.toUpperCase())
     .trim();
+}
+
+function canonicalScoreTrace({
+  scoreAuthority,
+  formulaReadable,
+  finalScore,
+  rawScoreBeforeRounding = null,
+  finalRoundedScore = null,
+  confidence = null,
+  rawEvidence = [],
+  normalizedEvidence = [],
+  weightedContributions = [],
+  aggregation = {},
+  time = {},
+} = {}) {
+  return {
+    source: "enterprise_intelligence",
+    scoreAuthority,
+    formula: formulaReadable,
+    rawEvidence,
+    normalizedEvidence,
+    domainScores: normalizedEvidence.map((item) => ({
+      key: item.key,
+      label: item.label,
+      domainScore: item.score,
+      source: item.source || null,
+    })),
+    weightedContributions,
+    aggregation,
+    confidence: scoreOrNull(confidence),
+    rawScoreBeforeRounding,
+    finalRoundedScore: finalRoundedScore ?? scoreOrNull(finalScore),
+    finalScore: scoreOrNull(finalScore),
+    time,
+  };
+}
+
+function canonicalScoreTooltip({
+  scoreAuthority,
+  formulaReadable,
+  scoreTrace,
+  positiveDrivers = [],
+  negativeDrivers = [],
+  confidence = null,
+  time = {},
+} = {}) {
+  return {
+    source: "enterprise_intelligence",
+    authority: scoreAuthority,
+    formula: formulaReadable,
+    normalizedInputs: scoreTrace?.normalizedEvidence || [],
+    weightedContribution: scoreTrace?.weightedContributions || [],
+    positiveDrivers: compactDriverLabels(positiveDrivers),
+    negativeDrivers: compactDriverLabels(negativeDrivers),
+    confidence: scoreOrNull(confidence),
+    lastRecalculated: time.computedAt || null,
+    coveragePeriod: {
+      coverageStart: time.coverageStart || null,
+      coverageEnd: time.coverageEnd || null,
+      attendanceClosedThroughDate: time.attendanceClosedThroughDate || null,
+      snapshotDate: time.snapshotDate || null,
+      intelligenceMode: time.intelligenceMode || null,
+    },
+    scoreTrace,
+  };
+}
+
+function compactDriverLabels(items = [], limit = 5) {
+  const labels = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const label = typeof item === "string"
+      ? item
+      : item?.label || item?.note || item?.summary || item?.key || "";
+    const normalized = String(label || "").trim();
+    if (!normalized || seen.has(normalized.toLowerCase())) continue;
+    seen.add(normalized.toLowerCase());
+    labels.push(normalized);
+    if (labels.length >= limit) break;
+  }
+  return labels;
+}
+
+function attachDiagnosticDriverTrace(drivers = [], scoreCalculation = {}) {
+  const domains = Array.isArray(scoreCalculation.domainContributions)
+    ? scoreCalculation.domainContributions
+    : [];
+  return drivers.map((driver) => {
+    const domain = domains.find((item) =>
+      item.key === driver.parentDomain ||
+      item.label === driver.parentDomain ||
+      (Array.isArray(driver.feedsDomains) && driver.feedsDomains.includes(item.label))
+    );
+    const finalContribution = driver.scoreAffecting === false
+      ? null
+      : domain?.finalScoreImpactVsNeutral ?? null;
+    return {
+      ...driver,
+      feeds: driver.label,
+      domain: driver.parentDomain,
+      finalContribution,
+      finalContributionLabel: finalContribution == null
+        ? "Context only"
+        : `${finalContribution >= 0 ? "+" : ""}${finalContribution} final score movement vs neutral ${domain?.label || "domain"}`,
+      tracePrecision: finalContribution == null ? "context_only" : "domain_level_marginal_effect",
+      trace: {
+        feeds: driver.label,
+        domain: driver.parentDomain,
+        finalContribution,
+        contributionPath: driver.contributionPath,
+        scoreAffecting: driver.scoreAffecting !== false,
+        sourceDomainContribution: domain || null,
+      },
+    };
+  });
+}
+
+function buildIndexScoreExplanation(entity = {}, { scoreAuthority, groupKey, fallbackLabel } = {}) {
+  const scoreModel = entity.scoreModel || entity.analytics?.scoreModel || null;
+  const weights = getScoringGroupWeights(scoreModel, groupKey);
+  const indexes = entity.indexes || {};
+  const keys = Object.keys(weights).length ? Object.keys(weights) : Object.keys(indexes);
+  const rows = keys.map((key) => {
+    const score = scoreOrNull(indexes[key]);
+    const weight = Number(weights[key]);
+    return {
+      key,
+      label: scoreModel?.groups?.[groupKey]?.slots?.[key]?.label || workspaceIndexLabel(key),
+      score,
+      configuredWeight: Number.isFinite(weight) ? round4(weight) : null,
+      source: `${scoreAuthority.replace(".score", "")}.indexes.${key}`,
+      effect: effectFromScore(score),
+    };
+  }).filter((row) => row.score != null);
+  const normalizedWeights = normalizedPositiveWeights(rows.map((row) => ({
+    ...row,
+    weight: row.configuredWeight,
+  })));
+  const indexValues = Object.fromEntries(rows.map((row) => [row.key, row.score]));
+  const reconstructedFinalScore = rows.length
+    ? scoreObjectWithScoringConfig(indexValues, scoreModel, groupKey, {
+      confidence: entity.confidence ?? 75,
+    })
+    : scoreOrNull(entity.score);
+  const weightedContributions = rows.map((row, index) => ({
+    key: row.key,
+    label: row.label,
+    score: row.score,
+    configuredWeight: row.configuredWeight,
+    normalizedWeight: round4(normalizedWeights[index]),
+    weightedContributionPoints: round2(row.score * normalizedWeights[index]),
+    source: row.source,
+    effect: row.effect,
+  }));
+  const upward = [...weightedContributions].sort((a, b) => b.score - a.score).slice(0, 2);
+  const downward = [...weightedContributions].sort((a, b) => a.score - b.score).slice(0, 2);
+  const time = entity.time || {
+    computedAt: entity.computedAt,
+    coverageStart: entity.coverageStart,
+    coverageEnd: entity.coverageEnd,
+    attendanceClosedThroughDate: entity.attendanceClosedThroughDate,
+    snapshotDate: entity.snapshotDate,
+    intelligenceMode: entity.intelligenceMode,
+  };
+  const formulaReadable = `${fallbackLabel || "Canonical score"} is generated by the enterprise evaluator from persisted repository indexes, configured score model weights, confidence, and bounded normalization.`;
+  const scoreTrace = canonicalScoreTrace({
+    scoreAuthority,
+    formulaReadable,
+    finalScore: entity.score,
+    rawScoreBeforeRounding: reconstructedFinalScore,
+    finalRoundedScore: scoreOrNull(entity.score),
+    confidence: entity.confidence,
+    rawEvidence: (entity.drivers || []).map((driver) => ({ label: driver })),
+    normalizedEvidence: rows,
+    weightedContributions,
+    aggregation: {
+      groupKey,
+      reconstructedFinalScore,
+      finalScoreIsRepositoryValue: true,
+    },
+    time,
+  });
+  const scoreTooltip = canonicalScoreTooltip({
+    scoreAuthority,
+    formulaReadable,
+    scoreTrace,
+    positiveDrivers: [...(entity.strengths || []), ...upward],
+    negativeDrivers: [...(entity.concerns || []), ...downward],
+    confidence: entity.confidence,
+    time,
+  });
+  return {
+    source: "enterprise_intelligence",
+    scoreAuthority,
+    formulaReadable,
+    finalScore: scoreOrNull(entity.score),
+    reconstructedFinalScore,
+    confidence: scoreOrNull(entity.confidence),
+    scoreModel,
+    domainContributions: weightedContributions,
+    upwardPressures: upward,
+    downwardPressures: downward,
+    strengths: entity.strengths || [],
+    concerns: entity.concerns || [],
+    drivers: entity.drivers || [],
+    scoreTrace,
+    scoreTooltip,
+    time,
+  };
 }
 
 function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null } = {}) {
@@ -896,6 +1152,43 @@ function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null }
       ],
     },
   };
+  const time = {
+    computedAt: workspace.computedAt,
+    coverageStart: workspace.coverageStart,
+    coverageEnd: workspace.coverageEnd,
+    attendanceClosedThroughDate: workspace.attendanceClosedThroughDate,
+    intelligenceMode: workspace.intelligenceMode,
+    snapshotDate: workspace.snapshotDate,
+  };
+  const scoreTrace = canonicalScoreTrace({
+    scoreAuthority: "workspace_intelligence.score",
+    formulaReadable: scoreCalculation.formulaReadable,
+    finalScore: workspace.score,
+    rawScoreBeforeRounding: scoreCalculation.rawScoreBeforeRounding,
+    finalRoundedScore: scoreCalculation.finalRoundedScore,
+    confidence: workspace.confidence,
+    rawEvidence: (workspace.drivers || []).map((driver) => ({ label: driver })),
+    normalizedEvidence: domainContributions,
+    weightedContributions: domainContributions,
+    aggregation: {
+      mode: scoreCalculation.mode,
+      formulaComponents: scoreCalculation.formulaComponents,
+      weightedMean: scoreCalculation.weightedMean,
+      weightedMedian: scoreCalculation.weightedMedian,
+      weightedHarmonic: scoreCalculation.weightedHarmonic,
+      balance: scoreCalculation.balance,
+    },
+    time,
+  });
+  const scoreTooltip = canonicalScoreTooltip({
+    scoreAuthority: "workspace_intelligence.score",
+    formulaReadable: scoreCalculation.formulaReadable,
+    scoreTrace,
+    positiveDrivers: [...(workspace.strengths || []), ...upward],
+    negativeDrivers: [...(workspace.concerns || []), ...downward],
+    confidence: workspace.confidence,
+    time,
+  });
 
   return {
     source: "enterprise_intelligence",
@@ -911,6 +1204,8 @@ function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null }
     domainContributions,
     formulaComponents: scoreCalculation.formulaComponents,
     scoreCalculation,
+    scoreTrace,
+    scoreTooltip,
     upwardPressures: upward,
     downwardPressures: downward,
     attendanceEffect: attendanceRow ? {
@@ -941,13 +1236,7 @@ function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null }
     strengths: workspace.strengths || [],
     concerns: workspace.concerns || [],
     drivers: workspace.drivers || [],
-    time: {
-      computedAt: workspace.computedAt,
-      coverageStart: workspace.coverageStart,
-      coverageEnd: workspace.coverageEnd,
-      attendanceClosedThroughDate: workspace.attendanceClosedThroughDate,
-      intelligenceMode: workspace.intelligenceMode,
-    },
+    time,
   };
 }
 
@@ -1028,6 +1317,7 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
   if (!user) return null;
 
   const dimensions = user.dimensions || {};
+  const scoreExplanation = buildUserScoreExplanation(user);
   return {
     source: "enterprise_intelligence",
     requestedMonth: month || monthKey(),
@@ -1049,7 +1339,9 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
       professionalDiscipline: dimensions.professionalDiscipline?.score ?? null,
       hasAttendanceTracking: user.attendance?.metrics?.expectedWorkingDays > 0,
     },
-    scoreExplanation: buildUserScoreExplanation(user),
+    scoreExplanation,
+    scoreTooltip: scoreExplanation.scoreTooltip,
+    scoreTrace: scoreExplanation.scoreTrace,
     reasoning: {
       strengths: user.strengths,
       concerns: user.concerns,
@@ -1359,6 +1651,18 @@ export async function buildUserProjectPerformanceResponse({ workspaceId, userId,
   const projects = await listProjectIntelligence({ workspaceId, projectIds });
 
   const rows = projects.map((project) => ({
+    ...(() => {
+      const scoreExplanation = buildIndexScoreExplanation(project, {
+        scoreAuthority: "project_intelligence.score",
+        groupKey: "projectIndexes",
+        fallbackLabel: "Project intelligence score",
+      });
+      return {
+        scoreExplanation,
+        scoreTooltip: scoreExplanation.scoreTooltip,
+        scoreTrace: scoreExplanation.scoreTrace,
+      };
+    })(),
     project_id: project.projectId,
     project_name: project.projectName,
     score: project.score,
@@ -1368,6 +1672,7 @@ export async function buildUserProjectPerformanceResponse({ workspaceId, userId,
     computedAt: project.computedAt,
     coverageStart: project.coverageStart,
     coverageEnd: project.coverageEnd,
+    attendanceClosedThroughDate: project.attendanceClosedThroughDate,
   }));
   return {
     source: "enterprise_intelligence",
@@ -1381,23 +1686,34 @@ export async function buildProjectsHealthResponse({ workspaceId, userId, role })
   const intelligenceProjects = await listProjectIntelligence({ workspaceId });
   return {
     source: "enterprise_intelligence",
-    projects: intelligenceProjects.map((project) => ({
-      projectId: project.projectId,
-      projectName: project.projectName,
-      totalTasks: project.analytics?.totalTasks || 0,
-      completedTasks: project.analytics?.completedTasks || 0,
-      activeTasks: project.analytics?.openTasks || 0,
-      overdueTasks: project.analytics?.overdueTasks || 0,
-      completionRate: project.analytics?.completionRate || 0,
-      healthScore: project.score,
-      status: project.risk?.level === "High" ? "critical" : project.risk?.level === "Medium" ? "at_risk" : "healthy",
-      indexes: project.indexes,
-      confidence: project.confidence,
-      indicators: project.indicators,
-      computedAt: project.computedAt,
-      coverageStart: project.coverageStart,
-      coverageEnd: project.coverageEnd,
-    })),
+    projects: intelligenceProjects.map((project) => {
+      const scoreExplanation = buildIndexScoreExplanation(project, {
+        scoreAuthority: "project_intelligence.score",
+        groupKey: "projectIndexes",
+        fallbackLabel: "Project health score",
+      });
+      return {
+        projectId: project.projectId,
+        projectName: project.projectName,
+        totalTasks: project.analytics?.totalTasks || 0,
+        completedTasks: project.analytics?.completedTasks || 0,
+        activeTasks: project.analytics?.openTasks || 0,
+        overdueTasks: project.analytics?.overdueTasks || 0,
+        completionRate: project.analytics?.completionRate || 0,
+        healthScore: project.score,
+        status: project.risk?.level === "High" ? "critical" : project.risk?.level === "Medium" ? "at_risk" : "healthy",
+        indexes: project.indexes,
+        confidence: project.confidence,
+        indicators: project.indicators,
+        scoreExplanation,
+        scoreTooltip: scoreExplanation.scoreTooltip,
+        scoreTrace: scoreExplanation.scoreTrace,
+        computedAt: project.computedAt,
+        coverageStart: project.coverageStart,
+        coverageEnd: project.coverageEnd,
+        attendanceClosedThroughDate: project.attendanceClosedThroughDate,
+      };
+    }),
   };
 }
 
@@ -1423,35 +1739,51 @@ export async function buildTeamComparisonResponse({ workspaceId, userId, role, m
       conflictsWithCanonicalTeamIntelligence: false,
       canonicalTeamRowsIncludedForReference: teams.length,
     },
-    canonicalTeams: teams.map((team) => ({
-      teamKey: team.teamKey,
-      managerId: team.managerId,
-      managerName: team.managerName,
-      score: team.score,
-      band: team.band,
-      indexes: team.indexes,
-      confidence: team.confidence,
-      computedAt: team.computedAt,
-      coverageStart: team.coverageStart,
-      coverageEnd: team.coverageEnd,
-      attendanceClosedThroughDate: team.attendanceClosedThroughDate,
-    })),
-    team: users.map((user) => ({
-      userId: user.userId,
-      username: user.username,
-      avatarUrl: null,
-      score: user.score,
-      completedTasks: user.analytics?.completedWork || 0,
-      overdueTasks: user.analytics?.overdueWork || 0,
-      totalTasks: user.analytics?.assignedWork || 0,
-      riskLevel: String(user.risk?.level || "medium").toLowerCase(),
-      confidence: user.confidence,
-      indicators: user.indicators,
-      computedAt: user.computedAt,
-      coverageStart: user.coverageStart,
-      coverageEnd: user.coverageEnd,
-      attendanceClosedThroughDate: user.attendanceClosedThroughDate,
-    })),
+    canonicalTeams: teams.map((team) => {
+      const scoreExplanation = buildIndexScoreExplanation(team, {
+        scoreAuthority: "team_intelligence.score",
+        groupKey: "teamIndexes",
+        fallbackLabel: "Team intelligence score",
+      });
+      return {
+        teamKey: team.teamKey,
+        managerId: team.managerId,
+        managerName: team.managerName,
+        score: team.score,
+        band: team.band,
+        indexes: team.indexes,
+        confidence: team.confidence,
+        scoreExplanation,
+        scoreTooltip: scoreExplanation.scoreTooltip,
+        scoreTrace: scoreExplanation.scoreTrace,
+        computedAt: team.computedAt,
+        coverageStart: team.coverageStart,
+        coverageEnd: team.coverageEnd,
+        attendanceClosedThroughDate: team.attendanceClosedThroughDate,
+      };
+    }),
+    team: users.map((user) => {
+      const scoreExplanation = buildUserScoreExplanation(user);
+      return {
+        userId: user.userId,
+        username: user.username,
+        avatarUrl: null,
+        score: user.score,
+        completedTasks: user.analytics?.completedWork || 0,
+        overdueTasks: user.analytics?.overdueWork || 0,
+        totalTasks: user.analytics?.assignedWork || 0,
+        riskLevel: String(user.risk?.level || "medium").toLowerCase(),
+        confidence: user.confidence,
+        indicators: user.indicators,
+        scoreExplanation,
+        scoreTooltip: scoreExplanation.scoreTooltip,
+        scoreTrace: scoreExplanation.scoreTrace,
+        computedAt: user.computedAt,
+        coverageStart: user.coverageStart,
+        coverageEnd: user.coverageEnd,
+        attendanceClosedThroughDate: user.attendanceClosedThroughDate,
+      };
+    }),
   };
 }
 
@@ -1487,6 +1819,7 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
   const autopilot = autopilotRes.rows[0] || {};
   const totalTasks = Number(tasks.total) || 0;
   const completedTasks = Number(tasks.completed) || 0;
+  const scoreExplanation = buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig });
 
   return {
     month,
@@ -1511,7 +1844,9 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
       escalatedActions: Number(autopilot.escalated_actions) || 0,
     },
     intelligence: workspaceIntel,
-    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig }),
+    scoreExplanation,
+    scoreTooltip: scoreExplanation.scoreTooltip,
+    scoreTrace: scoreExplanation.scoreTrace,
     computedAt: workspaceIntel?.computedAt || null,
     coverageStart: workspaceIntel?.coverageStart || null,
     coverageEnd: workspaceIntel?.coverageEnd || null,
@@ -1525,6 +1860,7 @@ export async function buildWorkspaceHealthResponse({ workspaceId, userId, role }
     getWorkspaceScoringConfig({ workspaceId }),
   ]);
   const workspaceIntel = snapshot.workspace;
+  const scoreExplanation = buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig });
   return {
     source: "enterprise_intelligence",
     healthScore: workspaceIntel?.score ?? null,
@@ -1535,7 +1871,9 @@ export async function buildWorkspaceHealthResponse({ workspaceId, userId, role }
     concerns: workspaceIntel?.concerns || [],
     drivers: workspaceIntel?.drivers || [],
     indexes: workspaceIntel?.indexes || {},
-    scoreExplanation: buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig }),
+    scoreExplanation,
+    scoreTooltip: scoreExplanation.scoreTooltip,
+    scoreTrace: scoreExplanation.scoreTrace,
     risk: workspaceIntel?.risk || null,
     computedAt: workspaceIntel?.computedAt || null,
     coverageStart: workspaceIntel?.coverageStart || null,

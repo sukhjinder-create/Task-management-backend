@@ -3,7 +3,14 @@ import express from "express";
 import { createAIChatMessage } from "../services/chat.service.js";
 import { getProjectReport } from "../services/reports.service.js";
 import { materializeDashboardHistoryInternal } from "../intelligence/intelligence.controller.js";
-import { buildWorkspaceHealthResponse } from "../intelligence/analytics/intelligenceResponses.service.js";
+import {
+  buildProjectsHealthResponse,
+  buildTeamComparisonResponse,
+  buildUserPerformanceResponse,
+  buildUserProjectPerformanceResponse,
+  buildUserTrendResponse,
+  buildWorkspaceHealthResponse,
+} from "../intelligence/analytics/intelligenceResponses.service.js";
 import { getDashboardOverviewFromIntelligence } from "../intelligence/analytics/unifiedDashboard.adapter.js";
 import { certifyEnterpriseIntelligenceCoreWorkspace } from "../intelligence/certification/coreCertification.service.js";
 import { traceUserScoreForWorkspace } from "../intelligence/certification/userScoreTrace.service.js";
@@ -53,6 +60,105 @@ async function findInternalWorkspaceAdmin(workspaceId) {
     [workspaceId]
   );
   return rows[0] || null;
+}
+
+async function resolveInternalWorkspace({ workspaceId = null, workspaceName = null } = {}) {
+  if (workspaceId) {
+    const { rows } = await pool.query(
+      `SELECT id, name
+       FROM workspaces
+       WHERE id = $1
+       LIMIT 1`,
+      [workspaceId]
+    );
+    if (rows[0]) return rows[0];
+  }
+  if (workspaceName) {
+    const { rows } = await pool.query(
+      `SELECT id, name
+       FROM workspaces
+       WHERE LOWER(name) = LOWER($1)
+          OR name ILIKE $2
+       ORDER BY CASE WHEN LOWER(name) = LOWER($1) THEN 0 ELSE 1 END, created_at ASC
+       LIMIT 1`,
+      [workspaceName, `%${workspaceName}%`]
+    );
+    if (rows[0]) return rows[0];
+  }
+  return null;
+}
+
+function tooltipContractStatus(tooltip = {}) {
+  const missing = [];
+  if (!tooltip.authority) missing.push("authority");
+  if (!tooltip.formula) missing.push("formula");
+  if (!Array.isArray(tooltip.normalizedInputs)) missing.push("normalizedInputs");
+  if (!Array.isArray(tooltip.weightedContribution)) missing.push("weightedContribution");
+  if (tooltip.confidence == null) missing.push("confidence");
+  if (!Object.prototype.hasOwnProperty.call(tooltip, "lastRecalculated")) missing.push("lastRecalculated");
+  if (!tooltip.coveragePeriod) missing.push("coveragePeriod");
+  return {
+    passed: missing.length === 0,
+    missing,
+  };
+}
+
+function traceContractStatus(trace = {}) {
+  const missing = [];
+  if (!trace.scoreAuthority) missing.push("scoreAuthority");
+  if (!trace.formula) missing.push("formula");
+  if (!Array.isArray(trace.rawEvidence)) missing.push("rawEvidence");
+  if (!Array.isArray(trace.normalizedEvidence)) missing.push("normalizedEvidence");
+  if (!Array.isArray(trace.weightedContributions)) missing.push("weightedContributions");
+  if (!trace.aggregation) missing.push("aggregation");
+  if (trace.finalRoundedScore == null) missing.push("finalRoundedScore");
+  if (!trace.time) missing.push("time");
+  return {
+    passed: missing.length === 0,
+    missing,
+  };
+}
+
+function chartContractStatus(overview = {}) {
+  const charts = overview?.visualizations?.charts || [];
+  const lineCharts = charts.filter((chart) => chart.type === "line");
+  const barCharts = charts.filter((chart) => chart.type === "bar");
+  return {
+    passed: charts.length > 0 && lineCharts.length > 0 && charts.every((chart) =>
+      chart.id &&
+      chart.key &&
+      chart.axis &&
+      Array.isArray(chart.series) &&
+      Array.isArray(chart.data)
+    ),
+    chartCount: charts.length,
+    lineChartCount: lineCharts.length,
+    barChartCount: barCharts.length,
+    pointCounts: charts.map((chart) => ({
+      key: chart.key,
+      type: chart.type,
+      points: Array.isArray(chart.data) ? chart.data.length : 0,
+    })),
+  };
+}
+
+function summarySectionStatus(overview = {}) {
+  const summary = overview?.executiveSummary || {};
+  const sectionKeys = (summary.sections || []).map((section) => section.key);
+  const version = summary.persistence?.summaryVersion || summary.quality?.summaryVersion || summary.summaryVersion || null;
+  return {
+    passed:
+      version === PERIOD_EXECUTIVE_SUMMARY_VERSION &&
+      Boolean(summary.persistence?.summaryId || summary.summaryId) &&
+      sectionKeys.includes("leadershipRecommendations") &&
+      sectionKeys.includes("deliveryExecution") &&
+      sectionKeys.includes("capacitySustainability") &&
+      summary.quality?.passed !== false,
+    summary: summarizeExecutiveSummaryPayload(overview),
+    recommendationCount: Array.isArray(summary.recommendations)
+      ? summary.recommendations.length
+      : (summary.sections || []).filter((section) => section.key === "leadershipRecommendations").length,
+  };
 }
 
 function summarizeExecutiveSummaryPayload(overview) {
@@ -503,6 +609,186 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
  * 🔒 Internal AI reply endpoint
  * Called ONLY by AI service
  */
+router.post("/enterprise-intelligence/final-production-certification", async (req, res) => {
+  try {
+    if (!internalSecretMatches(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const workspace = await resolveInternalWorkspace({
+      workspaceId: req.body?.workspaceId || null,
+      workspaceName: req.body?.workspaceName || "Apyhub",
+    });
+    if (!workspace) {
+      return res.status(404).json({ error: "Workspace not found" });
+    }
+
+    const workspaceId = workspace.id;
+    const ranges = Array.isArray(req.body?.ranges) && req.body.ranges.length
+      ? req.body.ranges.filter((range) => EXECUTIVE_SUMMARY_VALIDATION_RANGES.includes(range))
+      : EXECUTIVE_SUMMARY_VALIDATION_RANGES;
+    const executeRecalculation = req.body?.executeRecalculation !== false;
+    const admin = await findInternalWorkspaceAdmin(workspaceId);
+    if (!admin) {
+      return res.status(404).json({ error: "Workspace admin not found" });
+    }
+    const role = admin.role || "admin";
+
+    const recalculation = executeRecalculation
+      ? await bootstrapWorkspaceIntelligence({ workspaceId, windowDays: 30 })
+      : null;
+
+    const [workspaceHealth, userPerformance, userProjects, projectsHealth, teamComparison] = await Promise.all([
+      buildWorkspaceHealthResponse({ workspaceId, userId: admin.id, role }),
+      buildUserPerformanceResponse({ workspaceId, userId: admin.id, role }),
+      buildUserProjectPerformanceResponse({ workspaceId, userId: admin.id, role }),
+      buildProjectsHealthResponse({ workspaceId, userId: admin.id, role }),
+      buildTeamComparisonResponse({ workspaceId, userId: admin.id, role }),
+    ]);
+
+    const userTrend = {};
+    const rangeResults = [];
+    for (const range of ranges) {
+      const [overview, secondOverview, trend] = await Promise.all([
+        getDashboardOverviewFromIntelligence({ workspaceId, userId: admin.id, role, range }),
+        getDashboardOverviewFromIntelligence({ workspaceId, userId: admin.id, role, range }),
+        buildUserTrendResponse({ workspaceId, userId: admin.id, role, range }),
+      ]);
+      userTrend[range] = {
+        pointCount: Array.isArray(trend.series) ? trend.series.length : 0,
+        source: trend.source,
+      };
+      rangeResults.push({
+        range,
+        dashboardSource: overview.source || overview.scoreSource || overview.scoreCard?.source || null,
+        healthScore: overview.healthScore ?? overview.scoreCard?.score ?? null,
+        charts: chartContractStatus(overview),
+        executiveSummary: summarySectionStatus(overview),
+        persistedSummaryReusedOnSecondRead: Boolean(secondOverview?.executiveSummary?.persistence?.reused),
+        time: {
+          computedAt: overview.computedAt || overview.time?.computedAt || null,
+          coverageStart: overview.coverageStart || overview.time?.coverageStart || null,
+          coverageEnd: overview.coverageEnd || overview.time?.coverageEnd || null,
+          attendanceClosedThroughDate: overview.attendanceClosedThroughDate || overview.time?.attendanceClosedThroughDate || null,
+        },
+      });
+    }
+
+    const projectTooltipStatuses = (projectsHealth.projects || []).slice(0, 10).map((project) => ({
+      projectId: project.projectId,
+      projectName: project.projectName,
+      tooltip: tooltipContractStatus(project.scoreTooltip),
+      trace: traceContractStatus(project.scoreTrace),
+    }));
+    const teamTooltipStatuses = (teamComparison.canonicalTeams || []).slice(0, 10).map((team) => ({
+      teamKey: team.teamKey,
+      managerId: team.managerId,
+      tooltip: tooltipContractStatus(team.scoreTooltip),
+      trace: traceContractStatus(team.scoreTrace),
+    }));
+    const userDriverTrace = userPerformance?.scoreExplanation?.diagnosticDrivers || [];
+    const config = await getWorkspaceScoringConfig({ workspaceId });
+    const adminSurface = adminScoringConfigSurface(config);
+
+    const checks = {
+      workspaceTooltip: tooltipContractStatus(workspaceHealth.scoreTooltip),
+      workspaceTrace: traceContractStatus(workspaceHealth.scoreTrace),
+      userTooltip: tooltipContractStatus(userPerformance?.scoreTooltip),
+      userTrace: traceContractStatus(userPerformance?.scoreTrace),
+      userDiagnosticDriverTrace: {
+        passed: userDriverTrace.length > 0 && userDriverTrace.every((driver) =>
+          driver.trace &&
+          driver.feeds &&
+          driver.domain &&
+          Object.prototype.hasOwnProperty.call(driver, "finalContribution")
+        ),
+        driverCount: userDriverTrace.length,
+      },
+      attendanceContribution: {
+        passed: Boolean(
+          userPerformance?.scoreExplanation?.attendanceContribution &&
+          workspaceHealth?.scoreExplanation?.attendanceEffect
+        ),
+        userAttendanceScore: userPerformance?.breakdown?.attendanceScore ?? null,
+        workspaceAttendanceReadiness: workspaceHealth?.indexes?.attendanceReadinessIndex ?? null,
+      },
+      projectsTooltip: {
+        passed: projectTooltipStatuses.every((row) => row.tooltip.passed && row.trace.passed),
+        checked: projectTooltipStatuses.length,
+        rows: projectTooltipStatuses,
+      },
+      teamsTooltip: {
+        passed: teamTooltipStatuses.every((row) => row.tooltip.passed && row.trace.passed),
+        checked: teamTooltipStatuses.length,
+        rows: teamTooltipStatuses,
+      },
+      dashboardRanges: {
+        passed: rangeResults.every((row) =>
+          row.charts.passed &&
+          row.executiveSummary.passed &&
+          row.dashboardSource === "enterprise_intelligence"
+        ),
+        ranges: rangeResults,
+      },
+      userTrend,
+      scoringConfig: {
+        passed: adminSurface.source === "enterprise_intelligence_scoring_config_admin_surface",
+        persisted: config.persisted,
+        version: config.version,
+        visibleGroups: Object.keys(adminSurface.groups || {}),
+      },
+      userProjectRows: {
+        passed: Array.isArray(userProjects.rows || userProjects.projects),
+        count: (userProjects.rows || userProjects.projects || []).length,
+      },
+      recalculation: {
+        executed: executeRecalculation,
+        workspaceScore: recalculation?.workspace?.score ?? null,
+        users: recalculation?.users?.length ?? null,
+        projects: recalculation?.projects?.length ?? null,
+        teams: recalculation?.teams?.length ?? null,
+      },
+    };
+
+    const failures = [];
+    for (const [key, value] of Object.entries(checks)) {
+      if (value && Object.prototype.hasOwnProperty.call(value, "passed") && !value.passed) {
+        failures.push(key);
+      }
+    }
+    for (const result of rangeResults) {
+      if (!result.charts.passed) failures.push(`${result.range}:dashboard_charts`);
+      if (!result.executiveSummary.passed) failures.push(`${result.range}:executive_summary`);
+      if (!result.persistedSummaryReusedOnSecondRead) failures.push(`${result.range}:summary_reuse`);
+    }
+
+    return res.status(failures.length ? 409 : 200).json({
+      source: "enterprise_intelligence_final_production_certification",
+      generatedAt: new Date().toISOString(),
+      workspace: {
+        id: workspaceId,
+        name: workspace.name,
+      },
+      admin: {
+        id: admin.id,
+        role: admin.role,
+        username: admin.username,
+        emailDomain: String(admin.email || "").split("@")[1] || null,
+      },
+      ranges,
+      checks,
+      failures,
+      certified: failures.length === 0,
+    });
+  } catch (err) {
+    console.error("[ENTERPRISE_INTELLIGENCE_FINAL_PRODUCTION_CERTIFICATION_ERROR]", err);
+    return res.status(500).json({
+      error: err.message || "Final production certification failed",
+      code: err.code || null,
+    });
+  }
+});
+
 router.post("/ai/reply", async (req, res) => {
   try {
     // 🔐 Shared-secret auth

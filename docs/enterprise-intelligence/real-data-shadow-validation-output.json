@@ -1,320 +1,453 @@
 {
-  "generatedAt": "2026-06-25T06:42:18.512Z",
-  "status": "completed",
-  "readiness": "representative_seeded_workspace_validation_passed_for_staged_cutover",
+  "generatedAt": "2026-06-29T09:50:47.166Z",
+  "status": "completed_with_findings",
+  "readiness": "review_required_before_cutover",
   "source": {
-    "type": "local_representative_seeded_workspace_snapshot",
-    "path": "C:\\Users\\Sukhjinder Singh\\Desktop\\task_m\\Task-management-be\\docs\\enterprise-intelligence\\representative-workspace-shadow-dataset.json",
-    "datasetName": "Asystence representative workspace shadow dataset",
-    "workspaceId": "22222222-2222-4222-8222-222222222222",
-    "fallbackReason": "configured_database_unreachable",
-    "originalDatabaseError": {
-      "message": "getaddrinfo ENOTFOUND db.jygpfnpdphbnmysnyyww.supabase.co",
-      "code": "ENOTFOUND"
-    },
-    "limitations": [
-      "Representative seeded workspace data, not live production rows.",
-      "Validates schema contracts, score sanity, cutover classifications, and anomaly rules locally."
-    ]
+    "type": "reachable_database",
+    "limitations": []
   },
   "tables": {
-    "user_intelligence": "file_backed_representative",
-    "project_intelligence": "file_backed_representative",
-    "team_intelligence": "file_backed_representative",
-    "workspace_intelligence": "file_backed_representative",
-    "intelligence_snapshots": "file_backed_representative",
-    "workspace_monthly_scores": "file_backed_legacy_reference",
-    "workspace_project_monthly_scores": "file_backed_legacy_reference"
+    "user_intelligence": true,
+    "project_intelligence": true,
+    "team_intelligence": true,
+    "workspace_intelligence": true,
+    "intelligence_snapshots": true,
+    "workspace_monthly_scores": true,
+    "workspace_project_monthly_scores": true
   },
-  "coverage": {
-    "coverageStart": "2026-06-01",
-    "coverageEnd": "2026-06-24",
-    "attendanceClosedThroughDate": "2026-06-23",
-    "users": 4,
-    "projects": 2,
-    "tasks": 12,
-    "comments": 9,
-    "reviews": 4,
-    "timeLogs": 8,
-    "attendanceRows": 58,
-    "leaveRequests": 2,
-    "projectStatusRows": 5,
-    "blockers": 2,
-    "milestones": 3,
-    "sprints": 2
-  },
+  "coverage": {},
   "samples": {
     "users": {
       "rows": [
         {
-          "userId": "11111111-1111-4111-8111-111111111111",
-          "username": "Asha",
-          "new_score": 81,
-          "legacy_score": 78,
-          "delta": 3,
-          "band": "Strong",
-          "risk_level": "Low",
-          "confidence": 92,
-          "computed_at": "2026-06-24T06:28:00.000Z"
+          "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+          "user_id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+          "username": "Sukhjinder",
+          "new_score": 97,
+          "legacy_score": 24,
+          "delta": 73,
+          "new_computed_at": "2026-06-29T09:30:02.067Z",
+          "legacy_month": "2026-06"
         },
         {
-          "userId": "11111111-1111-4111-8111-111111111112",
-          "username": "Ravi",
-          "new_score": 79,
-          "legacy_score": 76,
-          "delta": 3,
-          "band": "Strong",
-          "risk_level": "Low",
-          "confidence": 90,
-          "computed_at": "2026-06-24T06:28:00.000Z"
+          "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+          "user_id": "d0d9307e-1286-4a02-b1a5-80a9039ac9e2",
+          "username": "Amrinder",
+          "new_score": 46,
+          "legacy_score": 24,
+          "delta": 22,
+          "new_computed_at": "2026-06-29T09:30:01.645Z",
+          "legacy_month": "2026-06"
         },
         {
-          "userId": "11111111-1111-4111-8111-111111111113",
-          "username": "Meera",
-          "new_score": 69,
-          "legacy_score": 71,
-          "delta": -2,
-          "band": "Healthy",
-          "risk_level": "Medium",
-          "confidence": 87,
-          "computed_at": "2026-06-24T06:28:00.000Z"
+          "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+          "user_id": "77083f8c-3c49-44fd-91b9-9c629f125806",
+          "username": "Parmeet",
+          "new_score": 21,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-29T09:30:01.103Z",
+          "legacy_month": null
         },
         {
-          "userId": "11111111-1111-4111-8111-111111111114",
-          "username": "Kabir",
-          "new_score": 64,
-          "legacy_score": 61,
-          "delta": 3,
-          "band": "Watch",
-          "risk_level": "Medium",
-          "confidence": 82,
-          "computed_at": "2026-06-24T06:28:00.000Z"
-        }
-      ],
-      "summary": {
-        "comparable": 4,
-        "largeDeltaCount": 0,
-        "contradictionCount": 0,
-        "largeDeltas": [],
-        "contradictions": []
-      }
-    },
-    "projects": {
-      "rows": [
-        {
-          "projectId": "33333333-3333-4333-8333-333333333331",
-          "projectName": "Enterprise Dashboard Cutover",
-          "new_score": 82,
-          "legacy_score": 79,
-          "delta": 3,
-          "band": "Strong",
-          "risk_level": "Low",
-          "confidence": 91,
-          "computed_at": "2026-06-24T06:29:00.000Z"
+          "workspace_id": "8b80a982-5e74-4d28-b838-2d10ef8ee3b2",
+          "user_id": "b9930f09-2b91-4aef-8547-77526d6a0460",
+          "username": "Rahulpreet",
+          "new_score": 59,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-26T00:10:37.270Z",
+          "legacy_month": null
         },
         {
-          "projectId": "33333333-3333-4333-8333-333333333332",
-          "projectName": "Attendance Intelligence Closeout",
-          "new_score": 66,
-          "legacy_score": 68,
-          "delta": -2,
-          "band": "Watch",
-          "risk_level": "Medium",
-          "confidence": 84,
-          "computed_at": "2026-06-24T06:29:00.000Z"
+          "workspace_id": "91fd34ae-09a9-4739-a932-9df49f75ddd7",
+          "user_id": "01ef2b65-3167-4336-a476-f92c62a3df71",
+          "username": "Sukhjinder singh",
+          "new_score": 59,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-26T00:10:40.471Z",
+          "legacy_month": null
+        },
+        {
+          "workspace_id": "ba1fca50-897e-4a18-8b22-dc72dd35e7fd",
+          "user_id": "d0818652-0399-4340-89ef-8544a9ac205c",
+          "username": "Khushvinder Singh",
+          "new_score": 59,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-26T00:10:43.570Z",
+          "legacy_month": null
         }
       ],
       "summary": {
         "comparable": 2,
-        "largeDeltaCount": 0,
-        "contradictionCount": 0,
-        "largeDeltas": [],
-        "contradictions": []
+        "largeDeltaCount": 1,
+        "contradictionCount": 1,
+        "largeDeltas": [
+          {
+            "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+            "user_id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+            "username": "Sukhjinder",
+            "new_score": 97,
+            "legacy_score": 24,
+            "delta": 73,
+            "new_computed_at": "2026-06-29T09:30:02.067Z",
+            "legacy_month": "2026-06",
+            "delta_abs": 73
+          }
+        ],
+        "contradictions": [
+          {
+            "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+            "user_id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+            "username": "Sukhjinder",
+            "new_score": 97,
+            "legacy_score": 24,
+            "delta": 73,
+            "new_computed_at": "2026-06-29T09:30:02.067Z",
+            "legacy_month": "2026-06"
+          }
+        ]
       }
-    },
-    "workspaces": {
-      "rows": [
-        {
-          "workspaceId": "22222222-2222-4222-8222-222222222222",
-          "new_score": 77,
-          "legacy_score": 74,
-          "delta": 3,
-          "band": "Strong",
-          "risk_level": "Medium",
-          "confidence": 91,
-          "computed_at": "2026-06-24T06:30:00.000Z"
-        }
-      ],
-      "summary": {
-        "comparable": 1,
-        "largeDeltaCount": 0,
-        "contradictionCount": 0,
-        "largeDeltas": [],
-        "contradictions": []
-      }
-    }
-  },
-  "anomalies": {
-    "attendance": {
-      "rows": [
-        {
-          "userId": "11111111-1111-4111-8111-111111111111",
-          "username": "Asha",
-          "score": 84,
-          "expectedWorkingDays": 17,
-          "approvedLeaveDays": 0,
-          "approvedHalfDays": 0,
-          "nonWorkingAttendanceDays": 0,
-          "nonWorkingMeaningfulDeliveryDays": 0,
-          "nonWorkingInformationalDays": 0,
-          "exceptionalContributionBonus": 0,
-          "burnoutRiskLevel": "low",
-          "attendanceClosedThroughDate": "2026-06-23",
-          "indicators": []
-        },
-        {
-          "userId": "11111111-1111-4111-8111-111111111112",
-          "username": "Ravi",
-          "score": 83,
-          "expectedWorkingDays": 17,
-          "approvedLeaveDays": 0,
-          "approvedHalfDays": 0,
-          "nonWorkingAttendanceDays": 1,
-          "nonWorkingMeaningfulDeliveryDays": 1,
-          "nonWorkingInformationalDays": 0,
-          "exceptionalContributionBonus": 2,
-          "burnoutRiskLevel": "moderate",
-          "attendanceClosedThroughDate": "2026-06-23",
-          "indicators": [
-            {
-              "type": "Weekend Contribution",
-              "label": "Meaningful delivery on a non-working day",
-              "meaningfulDelivery": true
-            },
-            {
-              "type": "Burnout Watch",
-              "label": "Repeated overtime should be monitored",
-              "recognitionOnly": true
-            }
-          ]
-        },
-        {
-          "userId": "11111111-1111-4111-8111-111111111113",
-          "username": "Meera",
-          "score": 70,
-          "expectedWorkingDays": 16,
-          "approvedLeaveDays": 1,
-          "approvedHalfDays": 0,
-          "nonWorkingAttendanceDays": 1,
-          "nonWorkingMeaningfulDeliveryDays": 0,
-          "nonWorkingInformationalDays": 1,
-          "exceptionalContributionBonus": 0,
-          "burnoutRiskLevel": "low",
-          "attendanceClosedThroughDate": "2026-06-23",
-          "indicators": []
-        },
-        {
-          "userId": "11111111-1111-4111-8111-111111111114",
-          "username": "Kabir",
-          "score": 66,
-          "expectedWorkingDays": 16.5,
-          "approvedLeaveDays": 0,
-          "approvedHalfDays": 1,
-          "nonWorkingAttendanceDays": 0,
-          "nonWorkingMeaningfulDeliveryDays": 0,
-          "nonWorkingInformationalDays": 0,
-          "exceptionalContributionBonus": 0,
-          "burnoutRiskLevel": "low",
-          "attendanceClosedThroughDate": "2026-06-23",
-          "indicators": []
-        }
-      ],
-      "anomalies": []
     },
     "projects": {
       "rows": [
         {
-          "projectId": "33333333-3333-4333-8333-333333333331",
-          "projectName": "Enterprise Dashboard Cutover",
-          "score": 82,
-          "completionConfidence": 82,
-          "dependencyRisk": 79,
-          "executionMomentum": 85,
-          "riskLevel": "Low"
+          "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+          "project_id": "4e61f242-e1d8-48bb-abd5-1658e2416acd",
+          "project_name": "[Imported] Aidrian",
+          "new_score": 68,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-29T09:30:03.032Z",
+          "legacy_month": null
         },
         {
-          "projectId": "33333333-3333-4333-8333-333333333332",
-          "projectName": "Attendance Intelligence Closeout",
-          "score": 66,
-          "completionConfidence": 66,
-          "dependencyRisk": 61,
-          "executionMomentum": 69,
-          "riskLevel": "Medium"
+          "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+          "project_id": "4c6096f0-ac74-44a5-95ef-833c9800f8f3",
+          "project_name": "Aidrian ",
+          "new_score": 80,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-29T09:30:02.452Z",
+          "legacy_month": null
+        },
+        {
+          "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+          "project_id": "e1c2d212-e8be-4854-b979-bc04e60dbeaa",
+          "project_name": "v3",
+          "new_score": 59,
+          "legacy_score": null,
+          "delta": null,
+          "new_computed_at": "2026-06-29T09:30:03.421Z",
+          "legacy_month": null
         }
       ],
-      "anomalies": []
+      "summary": {
+        "comparable": 0,
+        "largeDeltaCount": 0,
+        "contradictionCount": 0,
+        "largeDeltas": [],
+        "contradictions": []
+      }
     },
-    "workspace": {
-      "row": {
-        "workspaceId": "22222222-2222-4222-8222-222222222222",
-        "score": 77,
-        "band": "Strong",
-        "riskLevel": "Medium",
-        "confidence": 91,
-        "userAverage": 73.25,
-        "projectAverage": 74,
-        "teamAverage": 75,
-        "computedAt": "2026-06-24T06:30:00.000Z"
-      },
-      "anomalies": []
-    },
-    "teamComparison": {
-      "classification": {
-        "surfaceClassification": "derived_user_comparison",
-        "scoreAuthority": "user_intelligence",
-        "canonicalTeamAuthority": "team_intelligence",
-        "teamScoreAuthority": false,
-        "canonicalTeamRowsAvailable": 1
-      },
-      "rows": [
-        {
-          "userId": "11111111-1111-4111-8111-111111111111",
-          "username": "Asha",
-          "score": 81,
-          "authorityScore": 81,
-          "classification": "derived_user_comparison"
+    "workspaces": [
+      {
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "new_workspace_score": 60,
+        "band": "Watch",
+        "confidence": "75.00",
+        "last_evaluated_at": "2026-06-29T09:30:03.681Z",
+        "source_window": {
+          "source": "latest_authoritative_profiles",
+          "endDate": "2026-06-29",
+          "startDate": "2026-05-31",
+          "attendanceClosedThroughDate": "2026-06-28"
         },
-        {
-          "userId": "11111111-1111-4111-8111-111111111112",
-          "username": "Ravi",
-          "score": 79,
-          "authorityScore": 79,
-          "classification": "derived_user_comparison"
+        "indexes": {
+          "productivityIndex": 58,
+          "strategicRiskIndex": 58,
+          "workspaceHealthIndex": 54,
+          "executionRealityIndex": 18,
+          "deliveryConfidenceIndex": 72,
+          "attendanceReadinessIndex": 69,
+          "capacitySustainabilityIndex": 70,
+          "organizationalAlignmentIndex": 55
         },
-        {
-          "userId": "11111111-1111-4111-8111-111111111113",
-          "username": "Meera",
-          "score": 69,
-          "authorityScore": 69,
-          "classification": "derived_user_comparison"
-        },
-        {
-          "userId": "11111111-1111-4111-8111-111111111114",
-          "username": "Kabir",
-          "score": 64,
-          "authorityScore": 64,
-          "classification": "derived_user_comparison"
+        "risk": {
+          "level": "Medium",
+          "probability": 48
         }
-      ],
-      "anomalies": []
-    },
-    "snapshots": {
-      "totalSnapshots": 8,
-      "missing": [],
-      "anomalies": []
-    }
+      },
+      {
+        "workspace_id": "ba1fca50-897e-4a18-8b22-dc72dd35e7fd",
+        "new_workspace_score": 65,
+        "band": "Healthy",
+        "confidence": "52.00",
+        "last_evaluated_at": "2026-06-26T00:10:45.070Z",
+        "source_window": {
+          "source": "latest_authoritative_profiles",
+          "endDate": "2026-06-26",
+          "startDate": "2026-05-28",
+          "attendanceClosedThroughDate": null
+        },
+        "indexes": {
+          "productivityIndex": 49,
+          "strategicRiskIndex": 80,
+          "workspaceHealthIndex": 64,
+          "executionRealityIndex": 62,
+          "deliveryConfidenceIndex": 65,
+          "attendanceReadinessIndex": 56,
+          "capacitySustainabilityIndex": 79,
+          "organizationalAlignmentIndex": 54
+        },
+        "risk": {
+          "level": "Low",
+          "probability": 20
+        }
+      },
+      {
+        "workspace_id": "91fd34ae-09a9-4739-a932-9df49f75ddd7",
+        "new_workspace_score": 65,
+        "band": "Healthy",
+        "confidence": "52.00",
+        "last_evaluated_at": "2026-06-26T00:10:41.572Z",
+        "source_window": {
+          "source": "latest_authoritative_profiles",
+          "endDate": "2026-06-26",
+          "startDate": "2026-05-28",
+          "attendanceClosedThroughDate": null
+        },
+        "indexes": {
+          "productivityIndex": 49,
+          "strategicRiskIndex": 80,
+          "workspaceHealthIndex": 64,
+          "executionRealityIndex": 62,
+          "deliveryConfidenceIndex": 65,
+          "attendanceReadinessIndex": 56,
+          "capacitySustainabilityIndex": 79,
+          "organizationalAlignmentIndex": 54
+        },
+        "risk": {
+          "level": "Low",
+          "probability": 20
+        }
+      },
+      {
+        "workspace_id": "8b80a982-5e74-4d28-b838-2d10ef8ee3b2",
+        "new_workspace_score": 65,
+        "band": "Healthy",
+        "confidence": "52.00",
+        "last_evaluated_at": "2026-06-26T00:10:38.370Z",
+        "source_window": {
+          "source": "latest_authoritative_profiles",
+          "endDate": "2026-06-26",
+          "startDate": "2026-05-28",
+          "attendanceClosedThroughDate": null
+        },
+        "indexes": {
+          "productivityIndex": 49,
+          "strategicRiskIndex": 80,
+          "workspaceHealthIndex": 64,
+          "executionRealityIndex": 62,
+          "deliveryConfidenceIndex": 65,
+          "attendanceReadinessIndex": 56,
+          "capacitySustainabilityIndex": 79,
+          "organizationalAlignmentIndex": 54
+        },
+        "risk": {
+          "level": "Low",
+          "probability": 20
+        }
+      }
+    ],
+    "attendance": [
+      {
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "user_id": "f3d29844-e74e-418a-a28a-94c3c30bd9e7",
+        "score": 97,
+        "attendance_metrics": {
+          "trend": "down",
+          "confidence": 92,
+          "coverageEnd": "2026-06-28",
+          "presentDays": 20,
+          "reliability": "High",
+          "coverageStart": "2026-05-31",
+          "breakDiscipline": "High",
+          "excludedHolidays": 0,
+          "approvedLeaveDays": 0,
+          "scheduleDiscipline": "Moderate",
+          "availabilityQuality": "Moderate",
+          "expectedWorkingDays": 20,
+          "meaningfulDeliveryRule": {
+            "storyPoints": "any completed story-point delivery",
+            "timeLogHours": "at least 2 logged hour(s) on delivery work",
+            "completedTasks": "at least one completed task",
+            "indicatorLimit": 3,
+            "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+            "blockerResolutions": "at least one blocker resolved"
+          },
+          "attendanceClosedThroughDate": "2026-06-28"
+        },
+        "attendance_indicators": [],
+        "last_evaluated_at": "2026-06-29T09:30:02.067Z"
+      },
+      {
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "user_id": "d0d9307e-1286-4a02-b1a5-80a9039ac9e2",
+        "score": 46,
+        "attendance_metrics": {
+          "trend": "down",
+          "confidence": 66,
+          "coverageEnd": "2026-06-28",
+          "presentDays": 10,
+          "reliability": "Low",
+          "coverageStart": "2026-05-31",
+          "breakDiscipline": "High",
+          "excludedHolidays": 0,
+          "approvedLeaveDays": 0,
+          "scheduleDiscipline": "Moderate",
+          "availabilityQuality": "Moderate",
+          "expectedWorkingDays": 20,
+          "meaningfulDeliveryRule": {
+            "storyPoints": "any completed story-point delivery",
+            "timeLogHours": "at least 2 logged hour(s) on delivery work",
+            "completedTasks": "at least one completed task",
+            "indicatorLimit": 3,
+            "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+            "blockerResolutions": "at least one blocker resolved"
+          },
+          "attendanceClosedThroughDate": "2026-06-28"
+        },
+        "attendance_indicators": [],
+        "last_evaluated_at": "2026-06-29T09:30:01.645Z"
+      },
+      {
+        "workspace_id": "3ff9264b-1a19-483a-b9e3-2a0b1840a1c2",
+        "user_id": "77083f8c-3c49-44fd-91b9-9c629f125806",
+        "score": 21,
+        "attendance_metrics": {
+          "trend": "up",
+          "confidence": 80,
+          "coverageEnd": "2026-06-28",
+          "presentDays": 16,
+          "reliability": "Moderate",
+          "coverageStart": "2026-05-31",
+          "breakDiscipline": "High",
+          "excludedHolidays": 0,
+          "approvedLeaveDays": 0,
+          "scheduleDiscipline": "Moderate",
+          "availabilityQuality": "Moderate",
+          "expectedWorkingDays": 20,
+          "meaningfulDeliveryRule": {
+            "storyPoints": "any completed story-point delivery",
+            "timeLogHours": "at least 2 logged hour(s) on delivery work",
+            "completedTasks": "at least one completed task",
+            "indicatorLimit": 3,
+            "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+            "blockerResolutions": "at least one blocker resolved"
+          },
+          "attendanceClosedThroughDate": "2026-06-28"
+        },
+        "attendance_indicators": [],
+        "last_evaluated_at": "2026-06-29T09:30:01.103Z"
+      },
+      {
+        "workspace_id": "ba1fca50-897e-4a18-8b22-dc72dd35e7fd",
+        "user_id": "d0818652-0399-4340-89ef-8544a9ac205c",
+        "score": 59,
+        "attendance_metrics": {
+          "trend": "stable",
+          "confidence": 44,
+          "coverageEnd": "2026-06-26",
+          "presentDays": 0,
+          "reliability": "Low",
+          "coverageStart": "2026-05-28",
+          "breakDiscipline": "High",
+          "excludedHolidays": 0,
+          "approvedLeaveDays": 0,
+          "scheduleDiscipline": "Moderate",
+          "availabilityQuality": "Low",
+          "expectedWorkingDays": 22,
+          "meaningfulDeliveryRule": {
+            "storyPoints": "any completed story-point delivery",
+            "timeLogHours": "at least 2 logged hour(s) on delivery work",
+            "completedTasks": "at least one completed task",
+            "indicatorLimit": 3,
+            "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+            "blockerResolutions": "at least one blocker resolved"
+          },
+          "attendanceClosedThroughDate": null
+        },
+        "attendance_indicators": [],
+        "last_evaluated_at": "2026-06-26T00:10:43.570Z"
+      },
+      {
+        "workspace_id": "91fd34ae-09a9-4739-a932-9df49f75ddd7",
+        "user_id": "01ef2b65-3167-4336-a476-f92c62a3df71",
+        "score": 59,
+        "attendance_metrics": {
+          "trend": "stable",
+          "confidence": 44,
+          "coverageEnd": "2026-06-26",
+          "presentDays": 0,
+          "reliability": "Low",
+          "coverageStart": "2026-05-28",
+          "breakDiscipline": "High",
+          "excludedHolidays": 0,
+          "approvedLeaveDays": 0,
+          "scheduleDiscipline": "Moderate",
+          "availabilityQuality": "Low",
+          "expectedWorkingDays": 22,
+          "meaningfulDeliveryRule": {
+            "storyPoints": "any completed story-point delivery",
+            "timeLogHours": "at least 2 logged hour(s) on delivery work",
+            "completedTasks": "at least one completed task",
+            "indicatorLimit": 3,
+            "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+            "blockerResolutions": "at least one blocker resolved"
+          },
+          "attendanceClosedThroughDate": null
+        },
+        "attendance_indicators": [],
+        "last_evaluated_at": "2026-06-26T00:10:40.471Z"
+      },
+      {
+        "workspace_id": "8b80a982-5e74-4d28-b838-2d10ef8ee3b2",
+        "user_id": "b9930f09-2b91-4aef-8547-77526d6a0460",
+        "score": 59,
+        "attendance_metrics": {
+          "trend": "stable",
+          "confidence": 44,
+          "coverageEnd": "2026-06-26",
+          "presentDays": 0,
+          "reliability": "Low",
+          "coverageStart": "2026-05-28",
+          "breakDiscipline": "High",
+          "excludedHolidays": 0,
+          "approvedLeaveDays": 0,
+          "scheduleDiscipline": "Moderate",
+          "availabilityQuality": "Low",
+          "expectedWorkingDays": 22,
+          "meaningfulDeliveryRule": {
+            "storyPoints": "any completed story-point delivery",
+            "timeLogHours": "at least 2 logged hour(s) on delivery work",
+            "completedTasks": "at least one completed task",
+            "indicatorLimit": 3,
+            "scoreInflation": "exceptional contribution indicators are recognition signals only, not direct score multipliers",
+            "blockerResolutions": "at least one blocker resolved"
+          },
+          "attendanceClosedThroughDate": null
+        },
+        "attendance_indicators": [],
+        "last_evaluated_at": "2026-06-26T00:10:37.270Z"
+      }
+    ],
+    "teams": []
   },
+  "anomalies": {},
   "findings": [
-    "Representative workspace validation completed with no large deltas, contradictions, or blocker anomalies."
+    "2 large delta or contradiction sample(s) require review."
   ]
 }

@@ -357,7 +357,10 @@ assertIncludes(coreCertificationService, "executeCutover", "Core certification s
 assertIncludes(coreCertificationService, "CORE_CUTOVER_SURFACES", "Core certification service must verify every core cutover surface");
 assertIncludes(internalRoutes, "/enterprise-intelligence/certify-core", "Internal routes must expose locked core certification endpoint");
 assertIncludes(internalRoutes, "/enterprise-intelligence/closure-verify", "Internal routes must expose locked closure verification endpoint");
+assertIncludes(internalRoutes, "/enterprise-intelligence/final-production-certification", "Internal routes must expose locked final production certification endpoint");
 assertIncludes(internalRoutes, "internalSecretMatches", "Internal closure verification must be protected by the internal shared secret");
+assertIncludes(internalRoutes, "tooltipContractStatus", "Final certification must validate canonical score tooltip contracts");
+assertIncludes(internalRoutes, "traceContractStatus", "Final certification must validate canonical score trace contracts");
 
 const workspaceHealthService = stripComments(read("services/workspaceHealth.service.js"));
 assertIncludes(workspaceHealthService, "getWorkspaceIntelligence", "Workspace health compatibility service must read enterprise intelligence");
@@ -470,11 +473,33 @@ assertIncludes(dashboard, "workspaceScoreExplanation", "Dashboard must render ba
 assertIncludes(dashboard, "workspaceScoreCalculation", "Dashboard must render backend-owned workspace formula calculation");
 assertIncludes(dashboard, "workspaceAttendanceContribution", "Dashboard must render attendance/readiness contribution math");
 assertIncludes(dashboard, "driver.impactType", "Dashboard diagnostic drivers must expose canonical impact type");
+assertIncludes(dashboard, "driver.finalContributionLabel", "Dashboard diagnostic drivers must expose final contribution trace labels");
 assertIncludes(dashboard, "Feeds {", "Dashboard diagnostic drivers must show canonical domain feed linkage");
+assertNotIncludes(dashboard, "setHealthScore(Math", "Dashboard must not overwrite canonical scores from socket payloads");
+assertNotIncludes(dashboard, "AI PERFORMANCE INTERPRETATION", "Dashboard outlook must use enterprise executive terminology");
+assertNotIncludes(dashboard, "View AI forecast reasoning", "Dashboard forecast detail must not use generic AI terminology");
 assertNotIncludes(dashboard, "30% of score", "Dashboard must not expose old score weighting copy");
 assertNotIncludes(dashboard, "70% of score", "Dashboard must not expose old score weighting copy");
 assertNotIncludes(dashboard, "Weighted from attendance and productivity", "Dashboard must not describe a static formula");
 assertNotIncludes(dashboard, "Multi-weight groups are normalized", "Dashboard must not expose internal multi-weight copy in the main admin UI");
+
+const userPerformancePage = read("src/pages/intelligence/UserPerformance.jsx", frontendRoot);
+const adminIntelligencePage = read("src/pages/intelligence/AdminIntelligence.jsx", frontendRoot);
+const intelligenceApi = read("src/services/intelligence.api.js", frontendRoot);
+assertIncludes(userPerformancePage, "scoreTooltip", "Dedicated user performance page must render backend-owned score tooltips");
+assertIncludes(userPerformancePage, "scoreTrace", "Dedicated user performance page must render backend-owned score traces");
+assertIncludes(userPerformancePage, "Previous intelligence point unavailable", "Dedicated user performance page must not treat missing previous score as zero");
+assertNotIncludes(userPerformancePage, "var(--score-good)", "Dedicated user performance page must not use green score styling");
+assertNotIncludes(adminIntelligencePage, "Recalculate Scores", "Admin intelligence page must not expose legacy score recalculation wording");
+assertNotIncludes(adminIntelligencePage, "monthly evaluation", "Admin intelligence page must not describe enterprise refresh as monthly evaluation");
+assertNotIncludes(adminIntelligencePage, "var(--score-good)", "Admin intelligence page must not use green score styling");
+assertNotIncludes(intelligenceApi, "Monthly score", "Frontend intelligence API comments must not use legacy monthly score terminology");
+
+assertIncludes(intelligenceResponses, "canonicalScoreTooltip", "Response builders must expose canonical score tooltip envelopes");
+assertIncludes(intelligenceResponses, "canonicalScoreTrace", "Response builders must expose canonical score trace envelopes");
+assertIncludes(intelligenceResponses, "attachDiagnosticDriverTrace", "User diagnostic drivers must carry trace linkage to final contribution");
+assertIncludes(intelligenceResponses, "scoreTooltip: scoreExplanation.scoreTooltip", "Canonical response surfaces must pass backend score tooltips through");
+assertIncludes(intelligenceResponses, "scoreTrace: scoreExplanation.scoreTrace", "Canonical response surfaces must pass backend score traces through");
 
 const result = evaluateUserIntelligence(buildSyntheticEvidence());
 const repeatResult = evaluateUserIntelligence(buildSyntheticEvidence());
