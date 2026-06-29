@@ -1,52 +1,33 @@
-import jwt from "jsonwebtoken";
-
-// Fixed secret for superadmin (intentionally separate from normal users)
-const FIXED_JWT_SECRET = "TASKMANAGEMENT_SUPERADMIN_SECRET_987654321";
+import { verifySuperadminAccessToken } from "../services/superadmin.service.js";
 
 export default function requireSuperadmin(req, res, next) {
   const auth = req.headers.authorization;
-
   if (!auth || !auth.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing superadmin token" });
+    return res.status(401).json({ error: "Missing Super Admin token" });
   }
 
-  const token = auth.split(" ")[1];
-
   try {
-    const decoded = jwt.verify(token, FIXED_JWT_SECRET);
-
-    if (!decoded || typeof decoded !== "object") {
-      return res.status(401).json({ error: "Invalid superadmin token payload" });
+    const decoded = verifySuperadminAccessToken(auth.slice(7));
+    if (
+      !decoded ||
+      decoded.role !== "superadmin" ||
+      decoded.type !== "superadmin" ||
+      !decoded.sub ||
+      !decoded.sid
+    ) {
+      return res.status(401).json({ error: "Invalid Super Admin token" });
     }
-
-    // Normalize role check (defensive)
-    if (decoded.role !== "superadmin") {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-
-    // Normalize superadmin id (supports future extension)
-    const superadminId =
-      decoded.id ||
-      decoded.superadminId ||
-      decoded.sub ||
-      null;
-
-    if (!superadminId) {
-      return res
-        .status(401)
-        .json({ error: "Invalid superadmin token: missing id" });
-    }
-
-    // Attach superadmin context
     req.superadmin = {
-      ...decoded,
-      id: superadminId,
+      id: decoded.sub,
+      email: decoded.email,
       role: "superadmin",
+      sessionId: decoded.sid,
     };
-
-    next();
-  } catch (err) {
-    console.error("Superadmin JWT verify error:", err.message);
-    return res.status(401).json({ error: "Invalid or expired token" });
+    return next();
+  } catch (error) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("[superadmin auth] token rejected:", error.message);
+    }
+    return res.status(401).json({ error: "Invalid or expired Super Admin token" });
   }
 }

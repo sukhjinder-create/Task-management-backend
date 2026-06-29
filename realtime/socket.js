@@ -47,6 +47,8 @@ import workspaceService from "../services/workspace.service.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
 import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
 import { getWorkspaceHealthScore } from "../services/workspaceHealth.service.js";
+import { captureGrowthEvent } from "../growth/growthCollector.js";
+import { deterministicGrowthEventId } from "../growth/growthEvent.js";
 
 let io;
 let socketRealtimeDiagnostics = {
@@ -1834,6 +1836,16 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     });
 
     socket.emit("huddle:started", out);
+    captureGrowthEvent({
+      id: deterministicGrowthEventId(`product.huddle_created:${workspaceId}:${sessionId || huddleId}`),
+      eventName: "product.huddle_created",
+      source: "server",
+      actorUserId: String(userId),
+      workspaceId,
+      entityType: "huddle",
+      entityId: sessionId || huddleId,
+      properties: { feature_name: "Huddles" },
+    });
 
     const inviteResult = await emitHuddleInviteEvent(scope, "huddle:started", out, {
       exceptUserId: scope.type === "dm" || scope.isPrivate ? userId : null,

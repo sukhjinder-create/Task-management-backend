@@ -48,9 +48,11 @@ import { allowRoles } from "./middleware/role.middleware.js";
 
 import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
-import superadminRoutes from "./routes/superadmin.routes.js";
 import superadminPlansRoutes from "./routes/superadminPlans.routes.js";
+import superadminGrowthRoutes from "./routes/superadminGrowth.routes.js";
 import backupRoutes from "./routes/backup.routes.js";
+import growthRoutes from "./routes/growth.routes.js";
+import { growthProductTelemetry } from "./growth/growthProductTelemetry.middleware.js";
 
 import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
@@ -167,6 +169,8 @@ app.use(
       "Content-Type",
       "Authorization",
       "x-workspace-id",
+      "x-growth-anonymous-id",
+      "x-growth-session-id",
       "Cache-Control"
     ],
   })
@@ -184,6 +188,7 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(growthProductTelemetry);
 
 app.use("/integration-webhooks", integrationWebhookReceiverRoutes);
 app.use(
@@ -253,6 +258,7 @@ app.get("/", (req, res) => {
 app.get("/version", (req, res) => res.json({ commit: "1aa8be5", built: "2026-04-30" }));
 
 app.use("/auth", authRoutes);
+app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
 app.use("/internal", internalRoutes);
@@ -263,7 +269,7 @@ app.use("/superadmin", superadminAuthRoutes);
 app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin/plans", superadminPlansRoutes);
 app.use("/superadmin/backups", backupRoutes);
-app.use("/superadmin", superadminRoutes);
+app.use("/superadmin/growth", superadminGrowthRoutes);
 app.use("/app-version", appVersionRoutes);
 
 // Public endpoint — no auth required (must be before any catch-all authMiddleware)

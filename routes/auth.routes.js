@@ -25,6 +25,8 @@ import {
 } from "../services/payments.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { logAudit } from "../services/audit.service.js";
+import { captureGrowthEvent } from "../growth/growthCollector.js";
+import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
 
 const router = express.Router();
 
@@ -112,6 +114,39 @@ function isConsentAccepted(value) {
   return value === true || value === "true" || value === "1" || value === 1;
 }
 
+function captureAuthGrowth(req, eventName, data = {}, properties = {}, id = null) {
+  const context = requestGrowthContext(req);
+  captureGrowthEvent({
+    ...context,
+    id,
+    eventName,
+    source: "server",
+    actorUserId: data.user?.id || context.actorUserId,
+    workspaceId:
+      data.user?.workspaceId ||
+      data.user?.workspace_id ||
+      data.workspace?.id ||
+      context.workspaceId,
+    entityType: data.workspace ? "workspace" : "user",
+    entityId: data.workspace?.id || data.user?.id || null,
+    properties,
+  });
+}
+
+function captureCompletedSignup(req, data, method) {
+  const workspaceId = data.workspace?.id || data.user?.workspaceId || data.user?.workspace_id;
+  captureAuthGrowth(req, "product.signup_completed", data, {
+    feature_name: "Signup",
+    method,
+    outcome: "success",
+  }, deterministicGrowthEventId(`product.signup_completed:${workspaceId}`));
+  captureAuthGrowth(req, "product.workspace_created", data, {
+    feature_name: "Workspace",
+    method,
+    outcome: "success",
+  }, deterministicGrowthEventId(`product.workspace_created:${workspaceId}`));
+}
+
 router.post("/signup/workspace", async (req, res) => {
   try {
     const { workspaceName, name, email, password } = req.body || {};
@@ -166,6 +201,7 @@ router.post("/signup/workspace", async (req, res) => {
       req.ip,
       req.headers["user-agent"]
     );
+    captureCompletedSignup(req, data, "email");
 
     logAudit({
       workspaceId: data.user.workspaceId || data.user.workspace_id,
@@ -209,6 +245,7 @@ router.get("/signup/workspace/complete", async (req, res) => {
       req.ip,
       req.headers["user-agent"]
     );
+    captureCompletedSignup(req, data, "stripe_checkout");
 
     logAudit({
       workspaceId: data.user.workspaceId || data.user.workspace_id,
@@ -255,6 +292,7 @@ router.post("/signup/workspace/complete/razorpay", async (req, res) => {
       req.ip,
       req.headers["user-agent"]
     );
+    captureCompletedSignup(req, data, "razorpay_checkout");
 
     logAudit({
       workspaceId: data.user.workspaceId || data.user.workspace_id,
@@ -288,6 +326,7 @@ router.get("/signup/workspace/complete/redirect", async (req, res) => {
       req.ip,
       req.headers["user-agent"]
     );
+    captureCompletedSignup(req, data, "stripe_redirect");
 
     logAudit({
       workspaceId: data.user.workspaceId || data.user.workspace_id,
@@ -340,8 +379,26 @@ router.post("/login", async (req, res) => {
       });
     }
 
+    captureAuthGrowth(req, "product.login_attempt", data, {
+      feature_name: "Authentication",
+      method: "email",
+      outcome: data.mfa_required ? "mfa_required" : "success",
+    });
+    if (!data.mfa_required && data.user) {
+      captureAuthGrowth(req, "product.login_succeeded", data, {
+        feature_name: "Authentication",
+        method: "email",
+        outcome: "success",
+      });
+    }
+
     res.json(data);
   } catch (err) {
+    captureAuthGrowth(req, "product.login_attempt", {}, {
+      feature_name: "Authentication",
+      method: "email",
+      outcome: "failed",
+    });
     // Audit failed login attempt
     logAudit({
       workspaceId: null,
@@ -384,6 +441,11 @@ router.post("/mfa/verify", async (req, res) => {
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
         metadata: { method: "mfa" },
+      });
+      captureAuthGrowth(req, "product.login_succeeded", data, {
+        feature_name: "Authentication",
+        method: "mfa",
+        outcome: "success",
       });
     }
 
@@ -606,7 +668,6 @@ router.get("/google/callback", async (req, res) => {
         userAgent: req.headers["user-agent"],
         consentAccepted: googleState.trialBillingConsent === true,
       });
-
       logAudit({
         workspaceId: null,
         userId: null,
@@ -646,6 +707,21 @@ router.get("/google/callback", async (req, res) => {
       req.ip,
       req.headers["user-agent"]
     );
+
+    if (isSignup) {
+      captureCompletedSignup(req, data, "google");
+    } else {
+      captureAuthGrowth(req, "product.login_attempt", data, {
+        feature_name: "Authentication",
+        method: "google",
+        outcome: "success",
+      });
+      captureAuthGrowth(req, "product.login_succeeded", data, {
+        feature_name: "Authentication",
+        method: "google",
+        outcome: "success",
+      });
+    }
 
     logAudit({
       workspaceId: data.user.workspaceId || data.user.workspace_id,
