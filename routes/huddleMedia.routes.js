@@ -171,18 +171,33 @@ function createProviderIdentity({
   workspaceId,
   sessionId,
   userId,
-  deviceId = null,
+  guestId = null,
 } = {}) {
+  // The LiveKit identity is the AUTHORITATIVE key for a logical participant and
+  // MUST be deterministic per (workspace, session, principal). It must NOT embed
+  // a per-connection/device value.
+  //
+  // Why: LiveKit enforces exactly one live connection per identity — when a
+  // second connection joins with an identity that is already present, the SFU
+  // disconnects the prior one. A stable identity therefore guarantees at most
+  // one active participant per logical user, and makes duplicate joins/reconnects
+  // idempotent (the new connection replaces the old at the same identity key on
+  // every observer's room map). Previously the identity embedded a volatile
+  // deviceId, so the same user could produce multiple distinct identities
+  // (different device UUIDs, or "device:default" when the deviceId was missing),
+  // which defeated LiveKit's uniqueness guarantee and let one user appear as two
+  // simultaneous participants. The deviceId still travels in the token metadata
+  // for per-device diagnostics; it no longer participates in identity.
+  const principal = safeString(userId)
+    ? ["user", userId]
+    : ["guest", safeString(guestId) || "anonymous"];
   return [
     "livekit",
     "workspace",
     workspaceId,
     "session",
     sessionId,
-    "user",
-    userId,
-    "device",
-    safeString(deviceId) || "default",
+    ...principal,
   ].map((part) => String(part).replace(/[^a-zA-Z0-9:_-]/g, "_")).join(":");
 }
 
@@ -801,11 +816,13 @@ router.post("/livekit/token", async (req, res) => {
     }
 
     const { providerRoomId } = buildRoomPayload(authz, req.body);
+    // Identity is keyed on the logical participant only (no deviceId) so LiveKit
+    // can enforce exactly one connection per user. deviceId still flows into the
+    // token metadata below for per-device diagnostics.
     const providerIdentity = createProviderIdentity({
       workspaceId: authz.workspaceId,
       sessionId: authz.sessionId,
       userId: authz.userId,
-      deviceId: authz.deviceId,
     });
     const displayName = safeDisplayName(
       req.user?.username ||
