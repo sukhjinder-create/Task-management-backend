@@ -5,8 +5,17 @@ import { getWorkspaceIntelligence } from "../../intelligence/repositories/unifie
 import { getOperationsCommandCenter } from "../../services/operationsCommandCenter.service.js";
 import { registerContextProvider } from "./contextRegistry.js";
 import { isUuid } from "../shared/runtimeUtils.js";
+import { buildOperationalContextGraph } from "./operationalContextGraph.service.js";
 
 export function registerDefaultContextProviders() {
+  registerContextProvider({
+    key: "operationalGraph",
+    description: "Relevant tenant-scoped delivery, people, meeting, knowledge, outcome and policy graph",
+    priority: 85,
+    timeoutMs: 5000,
+    load: buildOperationalContextGraph,
+  });
+
   registerContextProvider({
     key: "event",
     description: "Versioned operational event and permission context",

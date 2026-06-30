@@ -64,6 +64,7 @@ router.post("/meeting-notes", async (req, res) => {
       });
     }
 
+    res.locals.domainEvent = { eventType: "MEETING_INTELLIGENCE_UPDATED", entityType: "meeting" };
     res.json({ tasks, created: autoCreate ? created : [], total: tasks.length });
   } catch (err) {
     console.error("Meeting notes error:", err);

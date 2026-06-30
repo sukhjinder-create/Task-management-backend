@@ -1,4 +1,5 @@
 import { clamp, stableHash } from "../shared/runtimeUtils.js";
+import { buildExecutionPlan } from "../planning/planningEngine.service.js";
 
 function normalizeStatus(value) {
   return String(value || "").trim().toLowerCase().replace(/[-\s]+/g, "_");
@@ -47,6 +48,9 @@ function reasonAboutTask({ event, context, now }) {
   if (!task) return [];
   const recommendations = [];
   const taskLabel = task.display_id || task.task || "task";
+  const graph = context.data.operationalGraph || {};
+  const blockingLinks = (graph.dependencies || []).filter((link) => ["blocks", "is_blocked_by"].includes(link.link_type));
+  const activeLeave = graph.availability?.leave || [];
 
   if (taskIsOverdue(task, now)) {
     const days = Math.max(1, Math.floor((now.getTime() - new Date(task.due_date).getTime()) / 86400000));
@@ -57,7 +61,7 @@ function reasonAboutTask({ event, context, now }) {
         ruleKey: "overdue_task_review",
         title: `Review overdue task: ${taskLabel}`,
         summary: `${task.task || "This task"} is incomplete and ${days} day(s) past its due date.`,
-        explanation: "The recommendation is based on the current task status and due date from the task service. No external assumptions were used.",
+        explanation: `The recommendation uses the recorded task status and due date${blockingLinks.length ? `, plus ${blockingLinks.length} recorded dependency link(s)` : ""}${activeLeave.length ? ", and the assignee's recorded approved leave window" : ""}. No external assumptions were used.`,
         confidence: 0.93,
         riskLevel: days >= 7 ? "high" : "medium",
       }),
@@ -70,6 +74,8 @@ function reasonAboutTask({ event, context, now }) {
       evidence: [
         evidence("task_status", `status=${task.status}`, "task.service", task.id),
         evidence("task_due_date", `due_date=${task.due_date}`, "task.service", task.id),
+        ...blockingLinks.slice(0, 3).map((link) => evidence("task_dependency", `${link.link_type}:${link.source_title}->${link.target_title}`, "task_links", link.id)),
+        ...activeLeave.slice(0, 1).map((leave) => evidence("assignee_availability", `approved_leave=${leave.start_date}..${leave.end_date}`, "leave.service", leave.id)),
       ],
     });
   }
@@ -82,7 +88,9 @@ function reasonAboutTask({ event, context, now }) {
         ruleKey: "blocked_task_escalation",
         title: `Resolve blocker: ${taskLabel}`,
         summary: `${task.task || "This task"} is currently blocked and may affect delivery.`,
-        explanation: "The current task status is explicitly blocked. The runtime recommends review; it does not infer an unrecorded blocker cause.",
+        explanation: blockingLinks.length
+          ? `The task is explicitly blocked and ${blockingLinks.length} recorded dependency link(s) identify the verified delivery chain.`
+          : "The current task status is explicitly blocked. The runtime recommends review; it does not infer an unrecorded blocker cause.",
         confidence: 0.9,
         riskLevel: "high",
       }),
@@ -92,7 +100,10 @@ function reasonAboutTask({ event, context, now }) {
         taskId: task.id,
         projectId: task.project_id,
       },
-      evidence: [evidence("task_status", `status=${task.status}`, "task.service", task.id)],
+      evidence: [
+        evidence("task_status", `status=${task.status}`, "task.service", task.id),
+        ...blockingLinks.slice(0, 3).map((link) => evidence("task_dependency", `${link.link_type}:${link.source_title}->${link.target_title}`, "task_links", link.id)),
+      ],
     });
   }
 
@@ -152,10 +163,11 @@ function reasonAboutWorkspaceSignal({ event, context }) {
 }
 
 export function reasonFromOperationalContext({ event, context, now = new Date() }) {
-  const recommendations = [
+  const baseRecommendations = [
     ...reasonAboutTask({ event, context, now }),
     ...reasonAboutWorkspaceSignal({ event, context }),
   ];
+  const recommendations = buildExecutionPlan({ event, context, recommendations: baseRecommendations });
   const evidence = recommendations.flatMap((item) => item.evidence || []);
   return {
     recommendations,
@@ -163,7 +175,7 @@ export function reasonFromOperationalContext({ event, context, now = new Date() 
     summary: recommendations.length
       ? `${recommendations.length} evidence-backed recommendation(s) produced from ${context.sources.filter((source) => source.status === "available").length} available context source(s).`
       : `No actionable recommendation met the deterministic evidence threshold for ${event.eventType}.`,
-    model: "deterministic_operational_reasoner_v1",
+    model: "evidence_constrained_operational_planner_v2",
     explainable: true,
   };
 }

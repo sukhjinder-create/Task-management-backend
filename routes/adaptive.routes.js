@@ -2,9 +2,9 @@ import express from "express";
 import { getRuntimeSettings, updateRuntimeSettings } from "../adaptive/config/runtimeSettings.service.js";
 import { listCapabilities } from "../adaptive/capabilities/capabilityRegistry.js";
 import { listContextProviders } from "../adaptive/context/contextRegistry.js";
-import { replayWorkspaceEvents } from "../adaptive/events/eventQueue.repository.js";
+import { replayWorkspaceEvents, retryFailedAdaptiveEvents } from "../adaptive/events/eventQueue.repository.js";
 import { recordLearningSignal, listLearningSignals, reverseLearningSignal } from "../adaptive/learning/learningEngine.service.js";
-import { getAdaptivePlatformHealth, getRuntimeRun, listAdaptiveRecommendations, listRuntimeRuns } from "../adaptive/observability/observability.service.js";
+import { getAdaptivePlatformHealth, getExecutionPlan, getRuntimeRun, listAdaptiveRecommendations, listExecutionPlans, listPredictionHistory, listRuntimeRuns } from "../adaptive/observability/observability.service.js";
 import { processAdaptiveWorkerBatch } from "../adaptive/runtime/adaptiveWorker.service.js";
 import { listWorkflowDefinitions, saveWorkflowDefinition, setWorkflowStatus } from "../adaptive/workflows/workflowEngine.service.js";
 import {
@@ -168,6 +168,22 @@ router.get("/observability/runs/:id", requirePrivileged, async (req, res) => {
   res.json(run);
 });
 
+router.get("/observability/plans", requirePrivileged, async (req, res) => {
+  const plans = await listExecutionPlans({ workspaceId: req.workspaceId, status: req.query.status || null, limit: req.query.limit });
+  res.json({ plans });
+});
+
+router.get("/observability/plans/:id", requirePrivileged, async (req, res) => {
+  const plan = await getExecutionPlan({ workspaceId: req.workspaceId, planId: req.params.id });
+  if (!plan) return res.status(404).json({ error: "Execution plan not found" });
+  res.json(plan);
+});
+
+router.get("/observability/predictions", requirePrivileged, async (req, res) => {
+  const predictions = await listPredictionHistory({ workspaceId: req.workspaceId, limit: req.query.limit });
+  res.json({ predictions });
+});
+
 router.get("/learning", requirePrivileged, async (req, res) => {
   const signals = await listLearningSignals({ workspaceId: req.workspaceId, scopeType: req.query.scopeType || null, scopeId: req.query.scopeId || null, limit: req.query.limit });
   res.json({ signals });
@@ -183,6 +199,12 @@ router.post("/events/replay", requireAdministrator, async (req, res) => {
   try {
     const result = await replayWorkspaceEvents({ workspaceId: req.workspaceId, eventIds: req.body?.eventIds || [], since: req.body?.since || null, limit: req.body?.limit });
     res.json(result);
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+router.post("/events/dead-letters/retry", requireAdministrator, async (req, res) => {
+  try {
+    res.json(await retryFailedAdaptiveEvents({ workspaceId: req.workspaceId, limit: req.body?.limit }));
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 

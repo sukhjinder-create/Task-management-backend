@@ -113,6 +113,57 @@ export async function failAdaptiveEvent(queueItem, error) {
   );
 }
 
+export async function getAdaptiveQueueMetrics(workspaceId) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+      COUNT(*) FILTER (WHERE status = 'processing')::int AS processing,
+      COUNT(*) FILTER (WHERE status = 'failed')::int AS dead_letters,
+      COUNT(*) FILTER (WHERE status = 'pending' AND attempts > 0)::int AS retry_backlog,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)
+        FILTER (WHERE status IN ('pending','processing')))), 0)::int AS oldest_lag_seconds,
+      MAX(processed_at) AS last_processed_at,
+      COUNT(*) FILTER (WHERE processed_at >= NOW() - INTERVAL '5 minutes')::int AS processed_5m
+    FROM adaptive_event_queue
+    WHERE workspace_id = $1
+    `,
+    [workspaceId]
+  );
+  const metrics = rows[0] || {};
+  return {
+    pending: Number(metrics.pending || 0),
+    processing: Number(metrics.processing || 0),
+    deadLetters: Number(metrics.dead_letters || 0),
+    retryBacklog: Number(metrics.retry_backlog || 0),
+    oldestLagSeconds: Number(metrics.oldest_lag_seconds || 0),
+    lastProcessedAt: metrics.last_processed_at || null,
+    processingRatePerMinute: Number(metrics.processed_5m || 0) / 5,
+  };
+}
+
+export async function retryFailedAdaptiveEvents({ workspaceId, limit = 100 }) {
+  const { rows } = await pool.query(
+    `
+    WITH failed AS (
+      SELECT id FROM adaptive_event_queue
+      WHERE workspace_id = $1 AND status = 'failed'
+      ORDER BY created_at ASC
+      LIMIT $2
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE adaptive_event_queue q
+    SET status = 'pending', attempts = 0, available_at = NOW(), last_error = NULL,
+        locked_at = NULL, locked_by = NULL, lease_expires_at = NULL, processed_at = NULL
+    FROM failed
+    WHERE q.id = failed.id
+    RETURNING q.id
+    `,
+    [workspaceId, Math.min(Math.max(Number(limit) || 100, 1), 500)]
+  );
+  return { retried: rows.length, queueIds: rows.map((row) => row.id) };
+}
+
 export async function replayWorkspaceEvents({ workspaceId, eventIds = [], since = null, limit = 100 }) {
   const params = [workspaceId];
   const where = ["workspace_id = $1"];

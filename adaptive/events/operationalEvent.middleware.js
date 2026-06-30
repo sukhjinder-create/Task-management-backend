@@ -8,7 +8,7 @@ const EVENT_RULES = [
   { method: "POST", pattern: /^\/projects\/?$/, eventType: "PROJECT_CREATED", entityType: "project" },
   { method: "DELETE", pattern: /^\/projects\/[^/]+\/?$/, eventType: "PROJECT_ARCHIVED", entityType: "project" },
   { methods: ["PUT", "PATCH"], pattern: /^\/projects\/[^/]+/, eventType: "PROJECT_UPDATED", entityType: "project" },
-  { method: "POST", pattern: /^\/tasks\/?$/, eventType: "TASK_CREATED", entityType: "task" },
+  { method: "POST", pattern: /^\/tasks(?:\/[0-9a-f-]{36})?\/?$/i, eventType: "TASK_CREATED", entityType: "task" },
   { method: "DELETE", pattern: /^\/tasks\/[^/]+\/?$/, eventType: "TASK_DELETED", entityType: "task" },
   { methods: ["PUT", "PATCH"], pattern: /^\/tasks\/[^/]+\/status/, eventType: "TASK_STATUS_CHANGED", entityType: "task" },
   { methods: ["PUT", "PATCH"], pattern: /^\/tasks\/[^/]+\/(assign|assignee)/, eventType: "TASK_ASSIGNED", entityType: "task" },
@@ -65,18 +65,19 @@ export function deriveEventDescriptor(method, originalUrl) {
     : genericDescriptor(normalizedMethod, path);
 }
 
-function findEntityId(req, responseBody) {
+function findEntityId(req, responseBody, descriptor) {
+  if (descriptor?.entityType === "meeting" && isUuid(req.params?.sessionId)) return req.params.sessionId;
   const candidates = [
+    responseBody?.task?.id,
+    responseBody?.project?.id,
+    responseBody?.action?.id,
+    responseBody?.data?.id,
+    responseBody?.id,
     req.params?.id,
     req.params?.taskId,
     req.params?.projectId,
     req.params?.sessionId,
     req.params?.actionId,
-    responseBody?.id,
-    responseBody?.data?.id,
-    responseBody?.task?.id,
-    responseBody?.project?.id,
-    responseBody?.action?.id,
     responseBody?.message?.id,
   ];
   return candidates.find(isUuid) || null;
@@ -110,8 +111,8 @@ export function attachOperationalEventCapture(req, res) {
 
   res.once("finish", () => {
     if (res.statusCode < 200 || res.statusCode >= 400) return;
-    const descriptor = deriveEventDescriptor(method, req.originalUrl);
-    const entityId = findEntityId(req, responseBody);
+    const descriptor = res.locals?.domainEvent || deriveEventDescriptor(method, req.originalUrl);
+    const entityId = findEntityId(req, responseBody, descriptor);
     const metadata = {
       path: canonicalPath(req.originalUrl),
       method,

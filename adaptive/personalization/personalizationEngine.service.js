@@ -84,20 +84,37 @@ export async function refreshRecommendationProfile({ workspaceId, scopeType, sco
   return updated[0] || null;
 }
 
-export async function recommendationAcceptancePrior({ workspaceId, userId = null }) {
-  const profile = userId
-    ? await getPreferenceProfile({ workspaceId, scopeType: "user", scopeId: userId, profileKey: "recommendation_behavior" })
-    : null;
-  const workspaceProfile = await getPreferenceProfile({
-    workspaceId,
-    scopeType: "workspace",
-    scopeId: null,
-    profileKey: "recommendation_behavior",
-  });
-  const selected = profile?.sample_count >= 3 ? profile : workspaceProfile;
+export async function recommendationAcceptancePrior({
+  workspaceId,
+  userId = null,
+  teamId = null,
+  projectId = null,
+  departmentId = null,
+  enterpriseId = null,
+}) {
+  const scopes = [
+    ["user", userId],
+    ["team", teamId],
+    ["project", projectId],
+    ["department", departmentId],
+    ["workspace", null],
+    ["enterprise", enterpriseId],
+  ];
+  const profiles = await Promise.all(scopes.map(([scopeType, scopeId]) => (
+    scopeId || scopeType === "workspace"
+      ? getPreferenceProfile({ workspaceId, scopeType, scopeId, profileKey: "recommendation_behavior" })
+      : null
+  )));
+  const selected = profiles.find((profile) => Number(profile?.sample_count || 0) >= 3)
+    || profiles.find(Boolean)
+    || null;
   return {
     probability: clamp(selected?.profile_value?.acceptanceRate ?? 0.65, 0.05, 0.95),
     source: selected ? `${selected.scope_type}_profile_v${selected.version}` : "neutral_prior",
     explanation: selected?.explanation || "No sufficient scoped feedback; using a conservative prior.",
+    scopeType: selected?.scope_type || "default",
+    scopeId: selected?.scope_id || null,
+    sampleCount: Number(selected?.sample_count || 0),
+    hierarchy: scopes.map(([scopeType]) => scopeType),
   };
 }

@@ -4,6 +4,7 @@ import { buildOperationalContext, summarizeOperationalContext } from "../context
 import { routeRecommendation } from "../approvals/approvalEngine.service.js";
 import { reasonFromOperationalContext } from "../reasoning/reasoningEngine.service.js";
 import { startMatchingWorkflows } from "../workflows/workflowEngine.service.js";
+import { applyAdaptivePolicy } from "../personalization/adaptivePolicy.service.js";
 
 async function startRun({ event, queueItem, settings }) {
   const { rows } = await pool.query(
@@ -19,8 +20,8 @@ async function startRun({ event, queueItem, settings }) {
   return rows[0];
 }
 
-async function completeRun({ runId, context, reasoning, routed, workflows, startedAt }) {
-  const selectedCapabilities = Array.from(new Set(reasoning.recommendations.map((item) => item.capabilityKey)));
+async function completeRun({ runId, context, reasoning, policy, routed, workflows, startedAt }) {
+  const selectedCapabilities = Array.from(new Set(policy.proposed.map((item) => item.capabilityKey)));
   const timings = {
     totalMs: Date.now() - startedAt,
     contextMs: context.durationMs,
@@ -41,11 +42,11 @@ async function completeRun({ runId, context, reasoning, routed, workflows, start
     RETURNING *
     `,
     [
-      JSON.stringify({ ...summarizeOperationalContext(context), workflows }),
+      JSON.stringify({ ...summarizeOperationalContext(context), workflows, suppressed: policy.suppressed.map((item) => ({ ruleKey: item.ruleKey, explanation: item.policyExplanation })) }),
       JSON.stringify(selectedCapabilities),
       reasoning.summary,
       JSON.stringify(reasoning.evidence),
-      reasoning.recommendations.length,
+      policy.proposed.length,
       JSON.stringify(timings),
       runId,
     ]
@@ -87,16 +88,17 @@ export async function processAdaptiveEvent({ event, queueItem = null }) {
 
     const context = await buildOperationalContext({ event, settings });
     const reasoning = reasonFromOperationalContext({ event, context });
+    const policy = await applyAdaptivePolicy({ event, context, recommendations: reasoning.recommendations });
     const routed = [];
 
     if (["assist", "auto"].includes(settings.mode)) {
-      for (const recommendation of reasoning.recommendations) {
+      for (const recommendation of policy.proposed) {
         routed.push(await routeRecommendation({ recommendation, event, runtimeRunId: run.id, settings }));
       }
     }
 
     const workflows = await startMatchingWorkflows({ event, runtimeRunId: run.id, context, settings });
-    return completeRun({ runId: run.id, context, reasoning, routed, workflows, startedAt });
+    return completeRun({ runId: run.id, context, reasoning, policy, routed, workflows, startedAt });
   } catch (error) {
     await failRun(run.id, error, startedAt);
     throw error;

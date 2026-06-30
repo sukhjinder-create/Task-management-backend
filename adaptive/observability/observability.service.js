@@ -4,6 +4,7 @@ import { listContextProviders } from "../context/contextRegistry.js";
 import { getEvaluationSummary } from "../evaluation/evaluationEngine.service.js";
 import { getAdaptiveWorkerDiagnostics } from "../runtime/adaptiveWorker.service.js";
 import { listObservers } from "../../events/eventBus.js";
+import { getAdaptiveQueueMetrics } from "../events/eventQueue.repository.js";
 
 export async function listRuntimeRuns({ workspaceId, status = null, limit = 50 }) {
   const params = [workspaceId];
@@ -30,13 +31,54 @@ export async function getRuntimeRun({ workspaceId, runId }) {
   return { ...runResult.rows[0], invocations: invocationResult.rows, workflows: workflowResult.rows };
 }
 
+export async function listExecutionPlans({ workspaceId, status = null, limit = 50 }) {
+  const params = [workspaceId];
+  const where = ["workspace_id = $1"];
+  if (status) { params.push(status); where.push(`status = $${params.length}`); }
+  params.push(Math.min(Math.max(Number(limit) || 50, 1), 200));
+  const { rows } = await pool.query(
+    `SELECT * FROM adaptive_execution_plans WHERE ${where.join(" AND ")}
+     ORDER BY created_at DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows;
+}
+
+export async function getExecutionPlan({ workspaceId, planId }) {
+  const [plan, steps] = await Promise.all([
+    pool.query(`SELECT * FROM adaptive_execution_plans WHERE id = $1 AND workspace_id = $2`, [planId, workspaceId]),
+    pool.query(
+      `SELECT s.*, a.title, a.summary, a.explanation, a.evidence, a.approval_mode,
+              a.approved_by, a.approved_at, a.executed_at, a.result
+       FROM adaptive_execution_plan_steps s
+       LEFT JOIN operations_ai_actions a ON a.id = s.action_id AND a.workspace_id = s.workspace_id
+       WHERE s.plan_id = $1 AND s.workspace_id = $2 ORDER BY s.step_index`,
+      [planId, workspaceId]
+    ),
+  ]);
+  return plan.rows[0] ? { ...plan.rows[0], steps: steps.rows } : null;
+}
+
+export async function listPredictionHistory({ workspaceId, limit = 100 }) {
+  const { rows } = await pool.query(
+    `SELECT p.*, a.title AS action_title, a.action_type, a.capability_key,
+            a.rule_confidence, a.outcome_confidence, a.acceptance_probability
+     FROM adaptive_predictions p
+     LEFT JOIN operations_ai_actions a ON a.id = p.action_id AND a.workspace_id = p.workspace_id
+     WHERE p.workspace_id = $1 ORDER BY p.predicted_at DESC LIMIT $2`,
+    [workspaceId, Math.min(Math.max(Number(limit) || 100, 1), 250)]
+  );
+  return rows;
+}
+
 export async function getAdaptivePlatformHealth({ workspaceId, settings }) {
-  const [queueResult, runResult, actionResult, evaluation] = await Promise.all([
+  const [queueResult, queueMetrics, runResult, actionResult, distributedWorkers, evaluation] = await Promise.all([
     pool.query(
       `SELECT status, COUNT(*)::int AS count FROM adaptive_event_queue
        WHERE workspace_id = $1 GROUP BY status`,
       [workspaceId]
     ),
+    getAdaptiveQueueMetrics(workspaceId),
     pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE started_at >= NOW() - INTERVAL '24 hours')::int AS runs_24h,
@@ -51,17 +93,36 @@ export async function getAdaptivePlatformHealth({ workspaceId, settings }) {
        WHERE workspace_id = $1 AND source = 'adaptive_runtime' GROUP BY status`,
       [workspaceId]
     ),
+    pool.query(
+      `SELECT worker_id, started_at, heartbeat_at, status, cycles, processed, failed, diagnostics
+       FROM adaptive_worker_heartbeats
+       WHERE heartbeat_at >= NOW() - INTERVAL '30 seconds'
+       ORDER BY heartbeat_at DESC`
+    ).catch((error) => error?.code === "42P01" ? { rows: [] } : Promise.reject(error)),
     getEvaluationSummary(workspaceId),
   ]);
+  const worker = getAdaptiveWorkerDiagnostics();
+  const lagSloSeconds = Math.max(Number(settings?.policy?.queueLagSloSeconds) || 60, 10);
+  const workerRequired = ["assist", "auto"].includes(settings.mode);
+  const degradedReasons = [];
+  const activeDistributedWorkers = distributedWorkers.rows || [];
+  if (workerRequired && !worker.enabled && activeDistributedWorkers.length === 0) degradedReasons.push("worker_disabled");
+  if (queueMetrics.oldestLagSeconds > lagSloSeconds) degradedReasons.push("queue_lag_slo_exceeded");
+  if (queueMetrics.deadLetters > 0) degradedReasons.push("dead_letters_present");
   return {
-    status: "available",
+    status: degradedReasons.length ? "degraded" : "available",
+    degradedReasons,
     mode: settings.mode,
     settingsVersion: settings.version,
-    eventQueue: Object.fromEntries(queueResult.rows.map((row) => [row.status, row.count])),
+    eventQueue: {
+      ...Object.fromEntries(queueResult.rows.map((row) => [row.status, row.count])),
+      ...queueMetrics,
+      lagSloSeconds,
+    },
     runs: runResult.rows[0] || {},
     recommendations: Object.fromEntries(actionResult.rows.map((row) => [row.status, row.count])),
     evaluation,
-    worker: getAdaptiveWorkerDiagnostics(),
+    worker: { ...worker, activeDistributedWorkers },
     registry: {
       capabilities: listCapabilities(),
       contextProviders: listContextProviders(),

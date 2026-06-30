@@ -1,4 +1,5 @@
 import { publishEvent } from "./eventBus.js";
+import { assertDomainEvent } from "../adaptive/events/domainEventContracts.js";
 import { v4 as uuid } from "uuid";
 
 /**
@@ -42,6 +43,7 @@ export async function emitWorkspaceEvent({
     metadata,
     timestamp: timestamp || new Date().toISOString(),
   };
+  assertDomainEvent(event, { allowUnknown: true });
 
   await publishEvent(event);
   return event;

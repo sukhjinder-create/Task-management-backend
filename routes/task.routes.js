@@ -4,6 +4,7 @@ import multer from "multer";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import { deleteFile, uploadFile } from "../services/storage.service.js";
+import { getDomainEventContract } from "../adaptive/events/domainEventContracts.js";
 
 // Multer setup for task attachments
 const taskAttachmentUpload = multer({
@@ -319,7 +320,7 @@ router.post("/:projectId", async (req, res) => {
       added_by: req.user.id,
       workspaceId: req.workspaceId, // 🔐 enforced
     });
-
+    res.locals.domainEvent = getDomainEventContract("TASK_CREATED");
     res.status(201).json(created);
   } catch (err) {
     console.error("Error creating task:", err);
@@ -382,7 +383,7 @@ router.post("/", async (req, res) => {
       added_by: req.user.id,
       workspaceId: req.workspaceId, // 🔐 enforced
     });
-
+    res.locals.domainEvent = getDomainEventContract("TASK_CREATED");
     res.status(201).json(created);
   } catch (err) {
     console.error("Error creating task:", err);
@@ -418,6 +419,7 @@ router.put("/:id", async (req, res) => {
   status
 );
 
+      res.locals.domainEvent = getDomainEventContract("TASK_STATUS_CHANGED");
       return res.json(updated);
     }
 
@@ -430,6 +432,9 @@ router.put("/:id", async (req, res) => {
   }
 );
 
+    res.locals.domainEvent = getDomainEventContract(
+      Object.prototype.hasOwnProperty.call(req.body || {}, "assigned_to") ? "TASK_ASSIGNED" : "TASK_UPDATED"
+    );
     res.json(updated);
   } catch (err) {
     console.error("Error updating task:", err);

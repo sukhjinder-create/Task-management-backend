@@ -39,12 +39,24 @@ export async function buildOperationalContext({ event, settings }) {
   const data = Object.fromEntries(settled.map((result) => [result.key, result.value]));
   const sources = settled.map(({ key, status, durationMs, error }) => ({ key, status, durationMs, error }));
   const available = sources.filter((source) => source.status === "available").length;
+  const graph = data.operationalGraph;
+  const expectedEvidence = ["project", "dependencies", "previousRecommendations", "previousOutcomes"];
+  if (["MEETING_ENDED", "MEETING_INTELLIGENCE_UPDATED"].includes(event.eventType)) expectedEvidence.push("meetings");
+  if (data.task?.assigned_to || graph?.task?.assigned_to) expectedEvidence.push("availability", "workload");
+  const presentEvidence = expectedEvidence.filter((key) => {
+    const value = graph?.[key];
+    if (Array.isArray(value)) return value.length > 0;
+    if (value && typeof value === "object") return Object.values(value).some((item) => Array.isArray(item) ? item.length : item != null);
+    return value != null;
+  });
 
   return {
     event,
     data,
     sources,
-    coverage: providers.length ? available / providers.length : 1,
+    providerCoverage: providers.length ? available / providers.length : 1,
+    coverage: expectedEvidence.length ? presentEvidence.length / expectedEvidence.length : 1,
+    evidenceCoverage: { expected: expectedEvidence, present: presentEvidence, missing: expectedEvidence.filter((key) => !presentEvidence.includes(key)) },
     durationMs: Date.now() - startedAt,
   };
 }
@@ -73,5 +85,12 @@ export function summarizeOperationalContext(context) {
       updatedAt: intelligence.updated_at,
     } : null,
     memoryCount: Array.isArray(context?.data?.workspaceMemory) ? context.data.workspaceMemory.length : 0,
+    operationalGraph: context?.data?.operationalGraph ? {
+      relevance: context.data.operationalGraph.relevance,
+      evidenceCoverage: context.evidenceCoverage,
+      dependencyCount: context.data.operationalGraph.dependencies?.length || 0,
+      meetingCount: context.data.operationalGraph.meetings?.length || 0,
+      priorOutcomeCount: context.data.operationalGraph.previousOutcomes?.length || 0,
+    } : null,
   });
 }
