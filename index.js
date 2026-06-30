@@ -272,7 +272,11 @@ app.use("/upload", uploadRoutes);
 app.get("/", (req, res) => {
   res.send("Task Management API is running 🚀");
 });
-app.get("/version", (req, res) => res.json({ commit: "1aa8be5", built: "2026-04-30" }));
+app.get("/version", (req, res) => res.json({
+  commit: process.env.RELEASE_COMMIT || "unknown",
+  built: process.env.RELEASE_BUILT_AT || null,
+  service: "asystence-api",
+}));
 
 app.use("/auth", authRoutes);
 app.use("/growth", growthRoutes);
