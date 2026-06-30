@@ -81,13 +81,11 @@ export async function routeRecommendation({ recommendation, event, runtimeRunId,
   const existing = await findOperationsActionByIdempotencyKey({
     workspaceId: event.workspaceId,
     idempotencyKey: recommendation.idempotencyKey,
-    confidenceModel: recommendation.confidenceModel || {},
-    personalization: recommendation.personalization || {},
-    executionPlanId: recommendation.plan?.id || null,
   });
-
-  await persistPlanStep({ event, runtimeRunId, recommendation, action });
-  if (existing) return { action: existing, approvalMode, duplicate: true };
+  if (existing) {
+    await persistPlanStep({ event, runtimeRunId, recommendation, action: existing });
+    return { action: existing, approvalMode, duplicate: true };
+  }
 
   const prior = await recommendationAcceptancePrior({
     workspaceId: event.workspaceId,
@@ -116,7 +114,12 @@ export async function routeRecommendation({ recommendation, event, runtimeRunId,
     approvalMode,
     correlationId: event.correlationId || null,
     idempotencyKey: recommendation.idempotencyKey,
+    confidenceModel: recommendation.confidenceModel || {},
+    personalization: recommendation.personalization || {},
+    executionPlanId: recommendation.plan?.id || null,
   });
+
+  await persistPlanStep({ event, runtimeRunId, recommendation, action });
 
   await recordProposedInvocation({
     workspaceId: event.workspaceId,
