@@ -2,6 +2,8 @@ import pool from "../db.js";
 import { notifyUser } from "./notification.service.js";
 import { createTask } from "./task.service.js";
 import { createWorkspaceMemoryEntry } from "./workspaceMemory.service.js";
+import { recordActionDecisionLearning } from "../adaptive/learning/learningEngine.service.js";
+import { evaluateActionPredictions } from "../adaptive/evaluation/evaluationEngine.service.js";
 
 async function recordDecision({
   actionId,
@@ -75,51 +77,85 @@ export async function createOperationsAction({
   payload = {},
   evidence = [],
   generatedBy = "system",
+  adaptiveRuntimeRunId = null,
+  capabilityKey = null,
+  approvalMode = "approval_required",
+  correlationId = null,
+  idempotencyKey = null,
 }) {
-  const { rows } = await pool.query(
-    `
-    INSERT INTO operations_ai_actions (
-      workspace_id,
-      source,
-      role_scope,
-      title,
-      summary,
-      explanation,
-      confidence,
-      risk_level,
-      action_type,
-      created_by,
-      target_user_id,
-      project_id,
-      task_id,
-      payload,
-      evidence,
-      generated_by
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16)
-    RETURNING *
-    `,
-    [
-      workspaceId,
-      source,
-      roleScope,
-      title,
-      summary,
-      explanation,
-      confidence,
-      riskLevel,
-      actionType,
-      createdBy,
-      targetUserId,
-      projectId,
-      taskId,
-      JSON.stringify(payload || {}),
-      JSON.stringify(Array.isArray(evidence) ? evidence : []),
-      generatedBy,
-    ]
-  );
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `
+      INSERT INTO operations_ai_actions (
+        workspace_id,
+        source,
+        role_scope,
+        title,
+        summary,
+        explanation,
+        confidence,
+        risk_level,
+        action_type,
+        created_by,
+        target_user_id,
+        project_id,
+        task_id,
+        payload,
+        evidence,
+        generated_by,
+        adaptive_runtime_run_id,
+        capability_key,
+        approval_mode,
+        correlation_id,
+        idempotency_key
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21)
+      RETURNING *
+      `,
+      [
+        workspaceId,
+        source,
+        roleScope,
+        title,
+        summary,
+        explanation,
+        confidence,
+        riskLevel,
+        actionType,
+        createdBy,
+        targetUserId,
+        projectId,
+        taskId,
+        JSON.stringify(payload || {}),
+        JSON.stringify(Array.isArray(evidence) ? evidence : []),
+        generatedBy,
+        adaptiveRuntimeRunId,
+        capabilityKey,
+        approvalMode,
+        correlationId,
+        idempotencyKey,
+      ]
+    ));
+  } catch (error) {
+    if (error?.code !== "23505" || !idempotencyKey) throw error;
+    const existing = await findOperationsActionByIdempotencyKey({ workspaceId, idempotencyKey });
+    if (existing) return existing;
+    throw error;
+  }
 
   return rows[0];
+}
+
+export async function findOperationsActionByIdempotencyKey({ workspaceId, idempotencyKey }) {
+  if (!idempotencyKey) return null;
+  const { rows } = await pool.query(
+    `SELECT * FROM operations_ai_actions
+     WHERE workspace_id = $1 AND idempotency_key = $2
+     ORDER BY created_at DESC LIMIT 1`,
+    [workspaceId, idempotencyKey]
+  );
+  return rows[0] || null;
 }
 
 export async function findRecentMatchingAction({
@@ -383,6 +419,17 @@ export async function executeOperationsAction({ id, workspaceId, actorId, role }
     outcome: result,
   });
 
+  await recordActionDecisionLearning({
+    action: rows[0],
+    decision: "executed",
+    actorUserId: actorId,
+    outcome: result,
+  });
+  if (rows[0]?.source === "adaptive_runtime") {
+    const { completeWorkflowApprovalOutcome } = await import("../adaptive/workflows/workflowOutcome.service.js");
+    await completeWorkflowApprovalOutcome({ workspaceId, actionId: id, executed: true });
+  }
+
   return rows[0];
 }
 
@@ -430,6 +477,19 @@ export async function approveOperationsAction({
     decision: "approved",
     decisionBy: actorId,
     notes,
+  });
+
+  await recordActionDecisionLearning({
+    action: rows[0],
+    decision: "approved",
+    actorUserId: actorId,
+    notes,
+  });
+  await evaluateActionPredictions({
+    workspaceId,
+    actionId: id,
+    accepted: true,
+    actorUserId: actorId,
   });
 
   if (execute) {
@@ -482,6 +542,23 @@ export async function rejectOperationsAction({
     decision: "rejected",
     decisionBy: actorId,
     notes,
+  });
+
+  await recordActionDecisionLearning({
+    action: rows[0],
+    decision: "rejected",
+    actorUserId: actorId,
+    notes,
+  });
+  if (rows[0]?.source === "adaptive_runtime") {
+    const { rejectWorkflowApprovalOutcome } = await import("../adaptive/workflows/workflowOutcome.service.js");
+    await rejectWorkflowApprovalOutcome({ workspaceId, actionId: id, reason: notes });
+  }
+  await evaluateActionPredictions({
+    workspaceId,
+    actionId: id,
+    accepted: false,
+    actorUserId: actorId,
   });
 
   return rows[0];

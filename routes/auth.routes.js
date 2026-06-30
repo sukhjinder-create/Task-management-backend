@@ -27,6 +27,7 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 import { logAudit } from "../services/audit.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
+import { getJwtSecret } from "../config/secrets.js";
 
 const router = express.Router();
 
@@ -35,7 +36,7 @@ const MOBILE_APP_AUTH_CALLBACK =
   process.env.MOBILE_APP_AUTH_CALLBACK || "asystence://auth/callback";
 const GOOGLE_CLIENT_ID    = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL;
-const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
+const JWT_SECRET = getJwtSecret();
 const GOOGLE_STATE_TTL_MS = 15 * 60 * 1000;
 
 function getRequestIpHash(req) {

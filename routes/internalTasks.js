@@ -1,15 +1,10 @@
 import express from "express";
 import pool from "../db.js";
+import { requireInternalServiceSecret } from "../config/secrets.js";
 
 const router = express.Router();
 
-router.post("/internal/tasks/create-from-ai", async (req, res) => {
-  const auth = req.headers.authorization?.replace("Bearer ", "");
-
-  if (auth !== process.env.AI_SERVICE_SECRET) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-
+router.post("/internal/tasks/create-from-ai", requireInternalServiceSecret, async (req, res) => {
   const { workspaceId, userId, task } = req.body || {};
 
   // 🛑 BASIC VALIDATION

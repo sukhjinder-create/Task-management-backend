@@ -2,15 +2,17 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import { enqueueGrowthEvent } from "../growth/growthCollector.js";
 import { normalizeGrowthEvent, requestGrowthContext } from "../growth/growthEvent.js";
+import { getJwtSecret } from "../config/secrets.js";
 
 const router = express.Router();
 const rateBuckets = new Map();
+const JWT_SECRET = getJwtSecret();
 
 function optionalUser(req, _res, next) {
   const auth = req.headers.authorization;
   if (auth?.startsWith("Bearer ")) {
     try {
-      const decoded = jwt.verify(auth.slice(7), process.env.JWT_SECRET || "task_management_secret");
+      const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
       if (decoded?.role !== "superadmin") {
         req.user = {
           ...decoded,

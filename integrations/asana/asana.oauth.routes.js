@@ -6,6 +6,7 @@ import {
   resolveIntegrationWebhookBaseUrl,
   setupAsanaWebhooks,
 } from "../webhooks/integration.webhook.service.js";
+import { getJwtSecret } from "../../config/secrets.js";
 
 const router = express.Router();
 
@@ -28,10 +29,7 @@ router.get("/connect", async (req, res) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || "task_management_secret"
-    );
+    decoded = jwt.verify(token, getJwtSecret());
   } catch {
     return res.status(401).send("Invalid token");
   }

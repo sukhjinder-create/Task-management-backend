@@ -49,6 +49,7 @@ import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
 import { getWorkspaceHealthScore } from "../services/workspaceHealth.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId } from "../growth/growthEvent.js";
+import { getJwtSecret } from "../config/secrets.js";
 
 let io;
 let socketRealtimeDiagnostics = {
@@ -63,7 +64,7 @@ let socketRealtimeDiagnostics = {
 function traceHuddleCallStep(input = {}) {
   recordHuddleCallStep(input).catch(() => {});
 }
-const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
+const JWT_SECRET = getJwtSecret();
 const WORKSPACE_GLOBAL = "GLOBAL";
 const parsedHuddleDisconnectGraceMs = Number(process.env.HUDDLE_DISCONNECT_GRACE_MS || 15000);
 const HUDDLE_DISCONNECT_GRACE_MS = Number.isFinite(parsedHuddleDisconnectGraceMs)

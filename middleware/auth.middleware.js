@@ -1,6 +1,8 @@
 import jwt from "jsonwebtoken";
+import { attachOperationalEventCapture } from "../adaptive/events/operationalEvent.middleware.js";
+import { getJwtSecret } from "../config/secrets.js";
 
-const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
+const JWT_SECRET = getJwtSecret();
 const WORKSPACE_GLOBAL = "GLOBAL";
 
 export function authMiddleware(req, res, next) {
@@ -70,6 +72,8 @@ if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) {
 
     // Canonical workspace source
     req.workspaceId = workspaceId;
+
+    attachOperationalEventCapture(req, res);
 
     next();
   } catch (err) {

@@ -26,9 +26,17 @@ replay-*.js
 # Dev tools
 .git
 .gitignore
+.github
+.claude
+.codex
 .vscode
 .idea
+freelance-profile-kit/
+tmp-huddle-cert/
 
 # Temp
 tmp/
 temp/
+coverage/
+dist/
+release/

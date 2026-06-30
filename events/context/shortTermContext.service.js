@@ -1,47 +1,38 @@
 import { upsertShortTermContext } from "./shortTermContext.store.js";
 
-/**
- * Builds rolling 3-day context from events
- * This is deterministic, explainable logic (NOT LLM)
- */
-export async function updateShortTermContext(event) {
-  const { workspaceId, actorUserId, entityType, entityId, eventType } = event;
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || "")
+  );
+}
 
-  // ---- USER CONTEXT ----
-  if (actorUserId) {
+/** Builds deterministic rolling context from persisted events. */
+export async function updateShortTermContext(event) {
+  const { workspaceId, actorUserId, entityType, entityId } = event;
+
+  if (isUuid(actorUserId)) {
     await upsertShortTermContext({
       workspaceId,
       subjectType: "user",
       subjectId: actorUserId,
-      context: buildUserContext(event),
+      context: {
+        lastEventType: event.eventType,
+        lastActionAt: event.timestamp,
+        recentActivity: true,
+      },
     });
   }
 
-  // ---- ENTITY CONTEXT (task / project) ----
-  if (entityType && entityId) {
+  if (entityType && isUuid(entityId)) {
     await upsertShortTermContext({
       workspaceId,
       subjectType: entityType,
       subjectId: entityId,
-      context: buildEntityContext(event),
+      context: {
+        lastEventType: event.eventType,
+        lastUpdatedAt: event.timestamp,
+        touchedBy: isUuid(actorUserId) ? actorUserId : null,
+      },
     });
   }
-}
-
-// ---------------- HELPERS ----------------
-
-function buildUserContext(event) {
-  return {
-    lastEventType: event.eventType,
-    lastActionAt: event.timestamp,
-    recentActivity: true,
-  };
-}
-
-function buildEntityContext(event) {
-  return {
-    lastEventType: event.eventType,
-    lastUpdatedAt: event.timestamp,
-    touchedBy: event.actorUserId,
-  };
 }

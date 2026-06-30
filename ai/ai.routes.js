@@ -5,6 +5,7 @@ import { ensureSystemUser } from "../services/ai.system.service.js";
 import { runAIIntelligenceQuery } from "./ai.intelligence.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+import { requireInternalServiceSecret } from "../config/secrets.js";
 
 const router = express.Router();
 
@@ -12,7 +13,7 @@ const router = express.Router();
  * 🔐 Resolve AI system user for a workspace
  * Used by AI service (stateless)
  */
-router.get("/system-user/:workspaceId", async (req, res) => {
+router.get("/system-user/:workspaceId", requireInternalServiceSecret, async (req, res) => {
   try {
     const { workspaceId } = req.params;
 
@@ -37,11 +38,17 @@ router.get("/system-user/:workspaceId", async (req, res) => {
   }
 });
 
-router.post("/message", async (req, res) => {
+router.post("/message", requireInternalServiceSecret, async (req, res) => {
   try {
     const { channelKey, text, workspaceId, channelType, senderUserId } = req.body;
 
-    console.log("Received AI message request:", req.body);
+    console.log("[ai:message] internal request", {
+      workspaceId,
+      channelKey,
+      channelType,
+      senderUserId,
+      textLength: String(text || "").length,
+    });
 
     // 1️⃣ Permission check
     const allowed = await canAIRespond({

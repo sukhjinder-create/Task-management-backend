@@ -17,6 +17,10 @@ router.options("*", (req, res) => {
 
 router.use(authMiddleware, requireWorkspaceForUser, allowRoles("admin"));
 
+function isAsanaConnectionError(err) {
+  return ["ASANA_NOT_CONNECTED", "ASANA_TOKEN_MISSING"].includes(err?.code);
+}
+
 /**
  * GET projects
  */
@@ -28,6 +32,9 @@ router.get("/projects", async (req, res) => {
 
     res.json(projects);
   } catch (err) {
+    if (isAsanaConnectionError(err)) {
+      return res.json([]);
+    }
     console.error(err);
     res.status(500).json({ error: "Failed to load projects" });
   }
@@ -53,6 +60,12 @@ router.get("/projects/:projectId/tasks", async (req, res) => {
     res.json(result);
 
   } catch (err) {
+    if (isAsanaConnectionError(err)) {
+      return res.status(409).json({
+        error: "Asana is not connected for this workspace",
+        code: err.code,
+      });
+    }
     console.error(err);
     res.status(500).json({ error: "Failed to load tasks" });
   }
@@ -81,6 +94,12 @@ router.patch("/tasks/:taskId/status", async (req, res) => {
 
     res.json(result);
   } catch (err) {
+    if (isAsanaConnectionError(err)) {
+      return res.status(409).json({
+        error: "Asana is not connected for this workspace",
+        code: err.code,
+      });
+    }
     console.error("Asana status update failed:", err.response?.data || err.message);
     res.status(500).json({ error: "Failed to update task status" });
   }

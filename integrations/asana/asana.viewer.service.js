@@ -9,7 +9,6 @@ import { hashIntegrationState } from "../../events/utils/hashState.js";
  * Get Asana access token for workspace
  */
 async function getToken(workspaceId) {
-    console.log("VIEWER workspaceId:", workspaceId);
   const result = await pool.query(
     `
     SELECT config
@@ -20,10 +19,11 @@ async function getToken(workspaceId) {
   `,
     [workspaceId]
   );
-  console.log("Integration rows found:", result.rows.length);
 
   if (!result.rows.length) {
-    throw new Error("Asana not connected for workspace");
+    const error = new Error("Asana not connected for workspace");
+    error.code = "ASANA_NOT_CONNECTED";
+    throw error;
   }
 
   const config = result.rows[0].config ?? {};
@@ -31,8 +31,9 @@ async function getToken(workspaceId) {
   const accessToken = config.access_token;
 
 if (!accessToken) {
-  console.error("Invalid Asana config:", config);
-  throw new Error("Asana access token missing");
+  const error = new Error("Asana access token missing");
+  error.code = "ASANA_TOKEN_MISSING";
+  throw error;
 }
 
 return accessToken;

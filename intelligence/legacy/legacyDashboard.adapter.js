@@ -101,12 +101,15 @@ export async function getLegacyDashboardOverview({ workspaceId, userId, role }) 
   const month = currentMonth();
   const projectIds = scope.projectIds;
 
-  const scopedTaskFilter = projectIds.length
+  const hasScopedProjects = projectIds.length > 0;
+  const scopedTaskFilter = hasScopedProjects
     ? "t.workspace_id = $1 AND t.project_id = ANY($2::uuid[])"
-    : "FALSE";
-  const scopedParams = [workspaceId, projectIds];
-  const assignedClause = role === "user" ? "AND t.assigned_to = $3" : "";
-  const scopedParamsMaybeUser = role === "user" ? [workspaceId, projectIds, userId] : scopedParams;
+    : "t.workspace_id = $1 AND FALSE";
+  const scopedParams = hasScopedProjects ? [workspaceId, projectIds] : [workspaceId];
+  const assignedParamIndex = scopedParams.length + 1;
+  const assignedClause = role === "user" ? `AND t.assigned_to = $${assignedParamIndex}` : "";
+  const scopedParamsMaybeUser = role === "user" ? [...scopedParams, userId] : scopedParams;
+  const projectScopeParams = [workspaceId, projectIds];
 
   const [
     { rows: summaryRows },
@@ -180,7 +183,7 @@ export async function getLegacyDashboardOverview({ workspaceId, userId, role }) 
        GROUP BY p.id, p.name
        ORDER BY completion_rate DESC, overdue_tasks ASC
        LIMIT 10`,
-      scopedParams
+      projectScopeParams
     ),
     pool.query(
       `SELECT

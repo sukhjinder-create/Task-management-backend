@@ -1249,7 +1249,7 @@ class LiveKitHuddleMediaProvider extends HuddleMediaProvider {
             maxFramerate: maxFramerate,
           ),
         ),
-        maxFrameRate: maxFramerate,
+        maxFrameRate: maxFramerate.toDouble(),
       ),
       defaultVideoPublishOptions: lk.VideoPublishOptions(
         videoEncoding: lk.VideoEncoding(

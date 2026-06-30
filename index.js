@@ -1,13 +1,8 @@
 import "dotenv/config";
-console.log("ENV CHECK", {
-  AI_SERVICE_URL: process.env.AI_SERVICE_URL,
-  AI_SERVICE_SECRET: process.env.AI_SERVICE_SECRET,
-});
 import express from "express";
 import http from "http";
 import cors from "cors";
-import dotenv from "dotenv";
-import axios from "axios";  // Add axios to your imports
+import helmet from "helmet";
 
 // ---------------- ROUTES (UNCHANGED) ----------------
 import projectRoutes from "./routes/project.routes.js";
@@ -67,17 +62,14 @@ import reportsRouter from "./routes/reports.js";
 import intelligenceRoutes from "./intelligence/intelligence.routes.js";
 // 🤖 Autopilot AI
 import autopilotRoutes from "./routes/autopilot.routes.js";
+import adaptiveRoutes from "./routes/adaptive.routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
-import { registerObserver } from "./events/eventBus.js";
-import { aiObserver } from "./events/observers/aiObserver.js";
+import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
-import { observeService } from "./events/observers/serviceObserver.js";
 
 // 🔥 NEW: Import services ONLY to wrap them (no logic change)
-import projectService from "./services/project.service.js";
-import * as taskService from "./services/task.service.js";
 import huddleIceService from "./services/huddleIce.service.js";
 import universalIntegrationRoutes from "./integrations/core/integration.routes.js";
 import integrationRoutes from "./routes/integration.routes.js";
@@ -139,6 +131,7 @@ const app = express();
 
 app.set("etag", false);
 app.set("trust proxy", true);
+app.disable("x-powered-by");
 
 app.use((req, res, next) => {
   console.log("🌍 GLOBAL REQUEST:", req.method, req.originalUrl);
@@ -147,20 +140,41 @@ app.use((req, res, next) => {
 
 // ---------------- MIDDLEWARE ----------------
 app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+function configuredCorsOrigins() {
+  const defaults = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost",
+    "capacitor://localhost",
+    "ionic://localhost",
+    process.env.FRONTEND_URL,
+    process.env.FRONTEND_BASE_URL,
+    "https://app.asystence.com",
+  ];
+  const extra = String(process.env.CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  return new Set([...defaults, ...extra].filter(Boolean));
+}
+
+app.use(
   cors({
     origin: (origin, callback) => {
       // Allow web dev server, Electron, Capacitor (Android/iOS), and direct API calls
-      const allowed = [
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost",
-        "capacitor://localhost",
-        "ionic://localhost",
-      ];
-      if (!origin || allowed.includes(origin)) {
+      const allowed = configuredCorsOrigins();
+      if (!origin || allowed.has(origin)) {
+        callback(null, true);
+      } else if (process.env.NODE_ENV !== "production") {
         callback(null, true);
       } else {
-        callback(null, true); // allow all origins in dev — restrict in production
+        callback(null, false);
       }
     },
     credentials: true,
@@ -171,6 +185,9 @@ app.use(
       "x-workspace-id",
       "x-growth-anonymous-id",
       "x-growth-session-id",
+      "x-correlation-id",
+      "x-internal-service-secret",
+      "x-ai-service-secret",
       "Cache-Control"
     ],
   })
@@ -287,6 +304,7 @@ app.use(
 );
 // 🤖 Autopilot AI — plan-gated
 app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
+app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoutes);
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
 // 🧪 Testing Agent — plan-gated
@@ -373,7 +391,7 @@ app.use("/payments",  authMiddleware, requireWorkspaceForUser, paymentsRoutes);
 app.use("/push",       pushRoutes);
 
 
-app.use("/integration-debug", integrationDebugRoutes);
+app.use("/integration-debug", authMiddleware, requireWorkspaceForUser, allowRoles("admin"), integrationDebugRoutes);
 app.use("/integrations/git", authMiddleware, requireWorkspaceForUser, gitAutomationRoutes);
 app.use("/webhooks/git", gitAutomationWebhookRoutes);
 
@@ -416,12 +434,9 @@ server.listen(PORT, "0.0.0.0", () => {
 
 // ---------------- EVENT SYSTEM BOOTSTRAP ----------------
 
-import { executionSignalObserver } from "./events/observers/executionSignal.observer.js";
-registerObserver(executionSignalObserver);
+bootstrapAdaptivePlatform();
 
 // 2️⃣ Wrap services AFTER observers exist
-observeService(projectService, "project");
-observeService(taskService, "task");
 
 // 3️⃣ NOW start integrations (AFTER observers ready)
 await import("./integrations/integration.bootstrap.js");

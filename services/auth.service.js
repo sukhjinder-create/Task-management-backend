@@ -35,8 +35,9 @@ import { verifyMagicToken } from "./magicLink.service.js";
 import { verifyMfaToken } from "./mfa.service.js";
 import { sendPasswordResetEmail } from "./email.service.js";
 import pool from "../db.js";
+import { getJwtSecret } from "../config/secrets.js";
 
-const JWT_SECRET = process.env.JWT_SECRET || "task_management_secret";
+const JWT_SECRET = getJwtSecret();
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
 const WORKSPACE_GLOBAL = "GLOBAL";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";

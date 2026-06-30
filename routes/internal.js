@@ -21,27 +21,36 @@ import {
   upsertWorkspaceScoringConfig,
 } from "../intelligence/repositories/scoringConfig.repository.js";
 import { adminScoringConfigSurface } from "../intelligence/config/scoringConfig.model.js";
+import {
+  internalServiceSecretMatches,
+  requireInternalServiceSecret,
+} from "../config/secrets.js";
+import { authMiddleware } from "../middleware/auth.middleware.js";
+import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 
 console.log("🔥 INTERNAL ROUTES LOADED");
 
 const router = express.Router();
 const EXECUTIVE_SUMMARY_VALIDATION_RANGES = Object.freeze(["30d", "90d", "6m", "1y", "all"]);
 
-router.post("/dashboard-history/materialize", materializeDashboardHistoryInternal);
-
-function internalToken(req) {
-  return (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-}
+router.post("/dashboard-history/materialize", requireInternalServiceSecret, materializeDashboardHistoryInternal);
 
 function internalSecretMatches(req) {
-  const expected = process.env.INTERNAL_SERVICE_SECRET || process.env.AI_SERVICE_SECRET || "";
-  const provided =
-    internalToken(req) ||
-    req.headers["x-internal-service-secret"] ||
-    req.headers["x-ai-service-secret"] ||
-    req.body?.secret ||
-    "";
-  return Boolean(expected && provided === expected);
+  return internalServiceSecretMatches(req);
+}
+
+function rejectUnlessInternal(req, res) {
+  if (internalSecretMatches(req)) return false;
+  res.status(401).json({ error: "Unauthorized" });
+  return true;
+}
+
+function allowInternalOrAuthenticated(req, res, next) {
+  if (internalSecretMatches(req)) {
+    req.internalService = true;
+    return next();
+  }
+  return authMiddleware(req, res, () => requireWorkspaceForUser(req, res, next));
 }
 
 async function findInternalWorkspaceAdmin(workspaceId) {
@@ -792,12 +801,7 @@ router.post("/enterprise-intelligence/final-production-certification", async (re
 router.post("/ai/reply", async (req, res) => {
   try {
     // 🔐 Shared-secret auth
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const {
       channelKey,
@@ -839,12 +843,7 @@ router.post("/ai/reply", async (req, res) => {
  */
 router.get("/workspace-ai-settings/:workspaceId", async (req, res) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { workspaceId } = req.params;
 
@@ -877,11 +876,7 @@ router.get("/workspace-ai-settings/:workspaceId", async (req, res) => {
  */
 router.post("/ai/ensure-notify-channel", async (req, res) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { userId, workspaceId } = req.body || {};
     if (!userId || !workspaceId) {
@@ -956,12 +951,7 @@ router.post("/ai/ensure-notify-channel", async (req, res) => {
 router.post("/ai/memory", async (req, res) => {
   try {
     // 🔐 Shared-secret auth (same as other internal AI routes)
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { workspaceId, type, payload } = req.body || {};
 
@@ -991,11 +981,7 @@ router.post("/ai/memory", async (req, res) => {
 // Fetch all DM conversations for a specific user (used for away summary on disable)
 router.get("/ai/conversations/:userId", async (req, res) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { userId } = req.params;
     const { workspaceId } = req.query;
@@ -1032,12 +1018,7 @@ router.get("/ai/conversations/:userId", async (req, res) => {
 router.get("/ai/memory", async (req, res) => {
   try {
     // 🔐 Shared-secret auth
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { workspaceId, type } = req.query;
 
@@ -1072,12 +1053,7 @@ router.get("/ai/memory", async (req, res) => {
 router.get("/workspace-history/:workspaceId", async (req, res) => {
   try {
     // 🔐 Shared-secret auth
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { workspaceId } = req.params;
 
@@ -1115,21 +1091,36 @@ LIMIT 200
  * 🧠 Explain why AI replied to a message
  * Used by frontend (authenticated users)
  */
-router.get("/ai/explain/:messageId", async (req, res) => {
+router.get("/ai/explain/:messageId", allowInternalOrAuthenticated, async (req, res) => {
   try {
     const { messageId } = req.params;
-    const workspaceId = req.workspaceId || req.headers["x-workspace-id"];
+    const workspaceId = req.internalService
+      ? (req.query?.workspaceId || req.headers["x-workspace-id"] || null)
+      : req.workspaceId;
 
-    const { rows } = await pool.query(
-      `
-      SELECT explanation, confidence, model, context, created_at
-      FROM ai_decision_provenance
-      WHERE message_id = $1 AND workspace_id = $2
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [messageId, workspaceId]
-    );
+    const query = workspaceId
+      ? {
+          text: `
+            SELECT explanation, confidence, model, context, created_at
+            FROM ai_decision_provenance
+            WHERE message_id = $1 AND workspace_id = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+          `,
+          values: [messageId, workspaceId],
+        }
+      : {
+          text: `
+            SELECT explanation, confidence, model, context, created_at
+            FROM ai_decision_provenance
+            WHERE message_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+          `,
+          values: [messageId],
+        };
+
+    const { rows } = await pool.query(query.text, query.values);
 
     if (!rows.length) {
   return res.json({
@@ -1176,6 +1167,8 @@ return res.json({
 
 router.post("/ai/provenance", async (req, res) => {
   try {
+    if (rejectUnlessInternal(req, res)) return;
+
     const {
       workspaceId,
       messageId,
@@ -1235,11 +1228,7 @@ router.post("/ai/provenance", async (req, res) => {
  */
 router.get("/user-ai-preference/:userId", async (req, res) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { userId } = req.params;
 
@@ -1275,11 +1264,7 @@ router.get("/user-ai-preference/:userId", async (req, res) => {
  */
 router.get("/user-context/:awayUserId", async (req, res) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { awayUserId } = req.params;
     const { workspaceId, projectIds } = req.query;
@@ -1418,11 +1403,7 @@ router.get("/user-context/:awayUserId", async (req, res) => {
  */
 router.get("/association", async (req, res) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.replace("Bearer ", "");
-    if (token !== process.env.AI_SERVICE_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (rejectUnlessInternal(req, res)) return;
 
     const { awayUserId, askingUserId, workspaceId } = req.query;
 
@@ -1461,9 +1442,10 @@ router.get("/association", async (req, res) => {
 /**
  * 🔒 Internal: Fetch project reports (used by frontend)
  */
-router.get("/reports/project", async (req, res) => {
+router.get("/reports/project", allowInternalOrAuthenticated, async (req, res) => {
   try {
-    const { workspaceId, projectName, fromDate, toDate } = req.query;
+    const { projectName, fromDate, toDate } = req.query;
+    const workspaceId = req.internalService ? req.query.workspaceId : req.workspaceId;
 
     if (!workspaceId || !projectName || !fromDate || !toDate) {
       return res.status(400).json({
