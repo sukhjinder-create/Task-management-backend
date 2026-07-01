@@ -25,6 +25,7 @@
     "migrate:superadmin-password-recovery": "node --import ./scripts/database-safety-guard.js run-superadmin-password-recovery-migration.js",
     "migrate:adaptive-runtime": "node --import ./scripts/database-safety-guard.js run-adaptive-runtime-migration.js",
     "migrate:adaptive-orchestrator": "node --import ./scripts/database-safety-guard.js run-adaptive-enterprise-orchestrator-migration.js",
+    "migrate:adaptive-pilot-maturity": "node --import ./scripts/database-safety-guard.js run-adaptive-pilot-maturity-migration.js",
     "verify:adaptive-runtime": "node scripts/verify-adaptive-runtime.js",
     "test:adaptive-runtime": "node --test tests/adaptive-runtime.test.js",
     "worker:adaptive-runtime": "node scripts/run-adaptive-runtime-worker.js",
