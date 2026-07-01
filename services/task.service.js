@@ -184,12 +184,13 @@ export async function createTask({
   const assigned = assigned_to || null;
 
   let created;
+  const client = await pool.connect();
 
 try {
-  await pool.query("BEGIN");
+  await client.query("BEGIN");
 
   // 1️⃣ Increment project ticket sequence safely
-  const seqRes = await pool.query(
+  const seqRes = await client.query(
     `
     INSERT INTO project_ticket_sequences (project_id, last_number)
     VALUES ($1, 1)
@@ -203,7 +204,7 @@ try {
   const ticketNumber = seqRes.rows[0].last_number;
 
   // 2️⃣ Insert task with ticket_number and workspace_id
-  const insertRes = await pool.query(
+  const insertRes = await client.query(
     `
     INSERT INTO tasks
     (task, project_id, status, priority, added_by, assigned_to, due_date, description, ticket_number, workspace_id)
@@ -246,7 +247,7 @@ await pool.query(`
 ]);
 
   // Optional: prepend project code visually (does not affect numbering)
-const projectRes = await pool.query(
+const projectRes = await client.query(
   `SELECT project_code FROM projects WHERE id = $1`,
   [project_id]
 );
@@ -255,11 +256,13 @@ if (projectRes.rows[0]?.project_code) {
   created.display_id = `${projectRes.rows[0].project_code}-${created.ticket_number}`;
 }
 
-  await pool.query("COMMIT");
+  await client.query("COMMIT");
 
 } catch (err) {
-  await pool.query("ROLLBACK");
+  await client.query("ROLLBACK");
   throw err;
+} finally {
+  client.release();
 }
   // 🧠 workspace intelligence update
 emitWorkspaceIntelligenceUpdate(workspaceId, {
@@ -865,7 +868,7 @@ export async function updateTaskStatusAsUser(
   }
 
   // 📝 Log: Status Changed
-await pool.query(`
+await client.query(`
   INSERT INTO task_activity_logs
   (task_id, workspace_id, actor_id, action_type, old_value, new_value)
   VALUES ($1,$2,$3,$4,$5,$6)

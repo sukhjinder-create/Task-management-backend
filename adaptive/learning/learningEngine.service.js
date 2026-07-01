@@ -1,5 +1,5 @@
 import pool from "../../db.js";
-import { refreshRecommendationProfile } from "../personalization/personalizationEngine.service.js";
+import { refreshAdaptiveStrategyProfile, refreshRecommendationProfile } from "../personalization/personalizationEngine.service.js";
 
 const FEEDBACK_SIGNALS = new Set([
   "recommendation.accepted",
@@ -7,6 +7,28 @@ const FEEDBACK_SIGNALS = new Set([
   "recommendation.ignored",
   "recommendation.edited",
 ]);
+
+const STRATEGY_SIGNALS = new Set([
+  ...FEEDBACK_SIGNALS,
+  "execution.succeeded",
+  "execution.failed",
+  "prediction.accuracy",
+]);
+
+async function refreshLearningProfiles({ workspaceId, scopeType, scopeId, signalKey }) {
+  if (FEEDBACK_SIGNALS.has(signalKey)) {
+    await refreshRecommendationProfile({ workspaceId, scopeType, scopeId });
+    if (scopeType !== "workspace") {
+      await refreshRecommendationProfile({ workspaceId, scopeType: "workspace", scopeId: null });
+    }
+  }
+  if (STRATEGY_SIGNALS.has(signalKey)) {
+    await refreshAdaptiveStrategyProfile({ workspaceId, scopeType, scopeId });
+    if (scopeType !== "workspace") {
+      await refreshAdaptiveStrategyProfile({ workspaceId, scopeType: "workspace", scopeId: null });
+    }
+  }
+}
 
 export async function recordLearningSignal({
   workspaceId,
@@ -38,11 +60,8 @@ export async function recordLearningSignal({
     ]
   );
   const signal = rows[0] || null;
-  if (signal && FEEDBACK_SIGNALS.has(signalKey)) {
-    await refreshRecommendationProfile({ workspaceId, scopeType, scopeId });
-    if (scopeType !== "workspace") {
-      await refreshRecommendationProfile({ workspaceId, scopeType: "workspace", scopeId: null });
-    }
+  if (signal && STRATEGY_SIGNALS.has(signalKey)) {
+    await refreshLearningProfiles({ workspaceId, scopeType, scopeId, signalKey });
   }
   return signal;
 }
@@ -60,6 +79,13 @@ export async function reverseLearningSignal({ workspaceId, signalId, actorUserId
   const signal = rows[0] || null;
   if (signal && FEEDBACK_SIGNALS.has(signal.signal_key)) {
     await refreshRecommendationProfile({
+      workspaceId,
+      scopeType: signal.scope_type,
+      scopeId: signal.scope_id,
+    });
+  }
+  if (signal && STRATEGY_SIGNALS.has(signal.signal_key)) {
+    await refreshAdaptiveStrategyProfile({
       workspaceId,
       scopeType: signal.scope_type,
       scopeId: signal.scope_id,

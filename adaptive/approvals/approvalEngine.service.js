@@ -10,7 +10,7 @@ import {
 } from "../../services/operationsAction.service.js";
 import pool from "../../db.js";
 
-async function persistPlanStep({ event, runtimeRunId, recommendation, action }) {
+async function persistPlanHeader({ event, runtimeRunId, recommendation }) {
   const plan = recommendation.plan;
   if (!plan?.id) return;
   await pool.query(
@@ -20,6 +20,12 @@ async function persistPlanStep({ event, runtimeRunId, recommendation, action }) 
      ON CONFLICT (id) DO UPDATE SET total_steps = GREATEST(adaptive_execution_plans.total_steps, EXCLUDED.total_steps), updated_at = NOW()`,
     [plan.id, event.workspaceId, runtimeRunId, event.eventId, plan.objective, plan.totalSteps || 1]
   );
+}
+
+async function persistPlanStep({ event, runtimeRunId, recommendation, action }) {
+  const plan = recommendation.plan;
+  if (!plan?.id) return;
+  await persistPlanHeader({ event, runtimeRunId, recommendation });
   await pool.query(
     `INSERT INTO adaptive_execution_plan_steps
       (workspace_id, plan_id, step_index, capability_key, action_id, depends_on, status)
@@ -47,6 +53,8 @@ function operationsPayload(recommendation) {
     personalization: recommendation.personalization || null,
     policyExplanation: recommendation.policyExplanation || null,
     plan: recommendation.plan || null,
+    planningDecision: recommendation.planningDecision || null,
+    recommendedTiming: recommendation.recommendedTiming || null,
   };
   if (recommendation.actionType === "create_followup_task") {
     return {
@@ -92,6 +100,9 @@ export async function routeRecommendation({ recommendation, event, runtimeRunId,
     userId: recommendation.targetUserId || event.actorUserId || null,
     projectId: recommendation.projectId || null,
   });
+  // The action carries an FK to its plan. Persist the plan header before the
+  // action, then attach the action to its ordered step after creation.
+  await persistPlanHeader({ event, runtimeRunId, recommendation });
   const action = await createOperationsAction({
     workspaceId: event.workspaceId,
     source: "adaptive_runtime",

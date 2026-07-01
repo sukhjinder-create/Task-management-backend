@@ -15,6 +15,18 @@ export function registerDefaultCapabilities() {
     approvalMode: "approval_required",
     autoEligible: true,
     inputContract: { required: ["userId", "message"] },
+    planning: {
+      intents: ["notify", "escalate"], businessValue: 0.72, sequence: 90,
+      actionType: "notify_supervisors", contextTags: ["stakeholder", "risk"],
+      buildInput: ({ recommendation }) => ({
+        userId: recommendation.targetUserId || recommendation.actorUserId,
+        title: recommendation.input?.title || recommendation.title,
+        message: recommendation.input?.message || recommendation.summary,
+        taskId: recommendation.taskId || null,
+        projectId: recommendation.projectId || null,
+        metadata: { timing: recommendation.recommendedTiming || "immediate" },
+      }),
+    },
     validate: (input) => requireFields(input, ["userId", "message"]),
     execute: async ({ input, workspaceId }) => {
       const { notifyUser } = await import("../../services/notification.service.js");
@@ -38,6 +50,19 @@ export function registerDefaultCapabilities() {
     riskLevel: "medium",
     approvalMode: "approval_required",
     inputContract: { required: ["title", "projectId", "addedBy"] },
+    planning: {
+      intents: ["create_work", "assign_accountability"], businessValue: 0.9, sequence: 30,
+      actionType: "create_followup_task", contextTags: ["meeting", "decision", "blocker"],
+      buildInput: ({ recommendation, event }) => ({
+        title: recommendation.followupTitle || recommendation.input?.title || recommendation.title,
+        projectId: recommendation.projectId,
+        addedBy: event.actorUserId,
+        assignedTo: recommendation.input?.assignedTo || recommendation.targetUserId || null,
+        dueDate: recommendation.input?.dueDate || null,
+        description: recommendation.input?.description || recommendation.summary,
+        priority: recommendation.adjustedPriority || recommendation.input?.priority || "high",
+      }),
+    },
     validate: (input) => {
       requireFields(input, ["title", "projectId", "addedBy"]);
       if (!isUuid(input.projectId) || !isUuid(input.addedBy)) throw new Error("Invalid task capability identity");
@@ -65,6 +90,19 @@ export function registerDefaultCapabilities() {
     riskLevel: "medium",
     approvalMode: "approval_required",
     inputContract: { required: ["title", "content", "userId"] },
+    planning: {
+      intents: ["preserve_knowledge", "record_decision"], businessValue: 0.78, sequence: 10,
+      actionType: "save_memory_entry", contextTags: ["meeting", "history", "knowledge"],
+      buildInput: ({ recommendation, event }) => ({
+        title: recommendation.memoryTitle || recommendation.title,
+        content: recommendation.memoryContent || recommendation.summary,
+        userId: event.actorUserId,
+        tags: ["adaptive-runtime", ...(recommendation.contextTags || [])],
+        sourceEntityType: event.entityType || null,
+        sourceEntityId: event.entityId || null,
+        metadata: { evidence: recommendation.evidence || [] },
+      }),
+    },
     validate: (input) => requireFields(input, ["title", "content", "userId"]),
     execute: async ({ input, workspaceId, actor }) => {
       const { createWorkspaceMemoryEntry } = await import("../../services/workspaceMemory.service.js");
@@ -90,6 +128,11 @@ export function registerDefaultCapabilities() {
     riskLevel: "medium",
     approvalMode: "manual_only",
     allowedRoles: ["admin", "owner", "manager"],
+    planning: {
+      intents: ["analyze_risk", "diagnose"], businessValue: 0.82, sequence: 50,
+      actionType: "run_autopilot", contextTags: ["delivery", "project", "blocker"],
+      buildInput: ({ recommendation }) => ({ projectId: recommendation.projectId }),
+    },
     execute: async ({ input, workspaceId }) => {
       const { runAutopilot } = await import("../../services/autopilot.service.js");
       return runAutopilot(workspaceId, input?.projectId || null);
@@ -102,6 +145,11 @@ export function registerDefaultCapabilities() {
     riskLevel: "high",
     approvalMode: "manual_only",
     allowedRoles: ["admin", "owner", "manager"],
+    planning: {
+      intents: ["validate", "test_change"], businessValue: 0.88, sequence: 60,
+      actionType: "run_testing_agent", contextTags: ["security", "release", "incident"],
+      buildInput: ({ recommendation }) => ({ taskId: recommendation.taskId }),
+    },
     validate: (input) => requireFields(input, ["taskId"]),
     execute: async ({ input, workspaceId, actor }) => {
       const { runTaskTests } = await import("../../services/testingAgent.service.js");
@@ -120,6 +168,11 @@ export function registerDefaultCapabilities() {
     riskLevel: "low",
     approvalMode: "manual_only",
     allowedRoles: ["admin", "owner", "manager"],
+    planning: {
+      intents: ["refresh_executive", "analyze_risk"], businessValue: 0.76, sequence: 80,
+      actionType: "generate_executive_summary", contextTags: ["executive", "portfolio", "business_priority"],
+      buildInput: ({ recommendation }) => ({ range: recommendation.input?.range || "30d" }),
+    },
     execute: async ({ input, workspaceId, actor }) => {
       const { getDashboardExecutiveDetail } = await import("../../services/dashboard.service.js");
       return getDashboardExecutiveDetail({

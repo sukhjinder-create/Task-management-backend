@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: asystence-local-postgres
+    environment:
+      POSTGRES_DB: asystence_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - asystence_local_postgres:/var/lib/postgresql
+      - ./docker/local-postgres/00-reset-public.sql:/docker-entrypoint-initdb.d/00-reset-public.sql:ro
+      - ./schema_dump.sql:/docker-entrypoint-initdb.d/01-schema_dump.sql:ro
+      - ./migrations/20260327_trial_ip_protection.sql:/docker-entrypoint-initdb.d/02-trial-ip-protection.sql:ro
+      - ./migrations/20260630_adaptive_agent_runtime.sql:/docker-entrypoint-initdb.d/03-adaptive-agent-runtime.sql:ro
+      - ./migrations/20260630_adaptive_enterprise_orchestrator.sql:/docker-entrypoint-initdb.d/04-adaptive-enterprise-orchestrator.sql:ro
+      - ./migrations/20260630_projects_description_column.sql:/docker-entrypoint-initdb.d/05-projects-description-column.sql:ro
+      - ./migrations/20260603_huddle_sessions.sql:/docker-entrypoint-initdb.d/06-huddle-sessions.sql:ro
+      - ./migrations/20260604_huddle_production_readiness.sql:/docker-entrypoint-initdb.d/07-huddle-production-readiness.sql:ro
+      - ./migrations/20260604_huddle_restoration_readiness.sql:/docker-entrypoint-initdb.d/08-huddle-restoration-readiness.sql:ro
+      - ./migrations/20260605_huddle_media_sessions.sql:/docker-entrypoint-initdb.d/09-huddle-media-sessions.sql:ro
+      - ./migrations/20260609_huddle_transcript_segments.sql:/docker-entrypoint-initdb.d/10-huddle-transcript-segments.sql:ro
+      - ./migrations/20260609_huddle_z_artifact_service.sql:/docker-entrypoint-initdb.d/11-huddle-artifact-service.sql:ro
+      - ./migrations/20260609_huddle_zz_intelligence_core.sql:/docker-entrypoint-initdb.d/12-huddle-intelligence-core.sql:ro
+      - ./migrations/20260609_huddle_zzz_transcription_caption_foundation.sql:/docker-entrypoint-initdb.d/13-huddle-transcription.sql:ro
+      - ./migrations/20260611_huddle_intelligence_worker_framework.sql:/docker-entrypoint-initdb.d/14-huddle-worker.sql:ro
+      - ./migrations/20260611_huddle_product_quality.sql:/docker-entrypoint-initdb.d/15-huddle-product-quality.sql:ro
+      - ./migrations/20260612_huddle_vision_completion.sql:/docker-entrypoint-initdb.d/16-huddle-vision.sql:ro
+      - ./migrations/20260622_huddle_call_delivery_trace.sql:/docker-entrypoint-initdb.d/17-huddle-call-delivery.sql:ro
+      - ./migrations/20260627_huddle_intelligence_v2.sql:/docker-entrypoint-initdb.d/18-huddle-intelligence-v2.sql:ro
+      - ./migrations/20260624_enterprise_intelligence_rearchitecture.sql:/docker-entrypoint-initdb.d/19-enterprise-intelligence.sql:ro
+      - ./migrations/20260624_enterprise_intelligence_cutover_controls.sql:/docker-entrypoint-initdb.d/20-enterprise-intelligence-cutover.sql:ro
+      - ./migrations/20260625_enterprise_intelligence_scoring_configs.sql:/docker-entrypoint-initdb.d/21-enterprise-intelligence-scoring.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d asystence_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  asystence_local_postgres:

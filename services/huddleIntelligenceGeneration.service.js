@@ -14,6 +14,7 @@ import {
 
 const GENERATION_VERSION = 4;
 const PROMPT_VERSION = "huddle-intelligence-executive-synthesis-v5";
+const SUMMARY_REPORT_SCHEMA = "huddle-intelligence-report-v4";
 const DEFAULT_MAX_TRANSCRIPT_CHARACTERS = 12000;
 const HARD_MAX_TRANSCRIPT_CHARACTERS = 12000;
 // The executive synthesis summary (purpose, business context, multi-paragraph
@@ -476,12 +477,21 @@ function normalizeSummary(raw, context) {
   const root = objectOrEmpty(raw);
 
   const discussionThemes = arrayOrEmpty(
-    root.discussionThemes || root.discussion_themes || root.themes
+    root.discussionThemes ||
+      root.discussion_themes ||
+      root.themes ||
+      root.discussionHighlights ||
+      root.discussion_highlights ||
+      root.keyPoints ||
+      root.key_points
   )
     .slice(0, 12)
     .map((item, index) => {
       const normalized = typeof item === "string" ? { theme: item } : objectOrEmpty(item);
-      const theme = stripSegmentIds(normalizeTextItem(normalized.theme || normalized.title, 300));
+      const theme = stripSegmentIds(normalizeTextItem(
+        normalized.theme || normalized.title || normalized.speaker,
+        300
+      ));
       const detail = stripSegmentIds(normalizeTextItem(
         normalized.detail || normalized.text || normalized.description || normalized.summary,
         2200
@@ -496,6 +506,32 @@ function normalizeSummary(raw, context) {
         theme: theme || `Theme ${index + 1}`,
         detail: detail || theme,
         evidenceSegmentIds,
+      };
+    })
+    .filter(Boolean);
+
+  const explicitDiscussionHighlights = arrayOrEmpty(
+    root.discussionHighlights || root.discussion_highlights
+  )
+    .slice(0, 12)
+    .map((item, index) => {
+      const normalized = typeof item === "string" ? { text: item } : objectOrEmpty(item);
+      const text = stripSegmentIds(normalizeTextItem(
+        normalized.text || normalized.detail || normalized.summary || normalized.theme,
+        1600
+      ));
+      if (!text) return null;
+      return {
+        id: `discussion-highlight-${index + 1}`,
+        speaker: normalizeParticipantLabel(
+          normalized.speaker || normalized.participant || normalized.raisedBy || normalized.raised_by,
+          context.participants
+        ),
+        text,
+        evidenceSegmentIds: normalizeEvidenceIds(
+          normalized.evidenceSegmentIds || normalized.evidence_segment_ids,
+          context.knownSegmentIds
+        ),
       };
     })
     .filter(Boolean);
@@ -572,14 +608,30 @@ function normalizeSummary(raw, context) {
     context.knownSegmentIds
   );
 
+  const explicitKeyPoints = normalizeEvidenceItems(
+    root.keyPoints || root.key_points,
+    context,
+    { maxItems: 12, textFields: ["text", "point", "detail", "summary"], textLength: 1600, idPrefix: "summary-point" }
+  );
   // Backward-compat keyPoints: every legacy consumer (digest, copilot, the
-  // report builder) reads keyPoints. Derive them from the themes so nothing
-  // downstream breaks while the new executive fields drive the UI.
-  const keyPoints = discussionThemes.map((theme, index) => ({
-    id: `summary-point-${index + 1}`,
-    text: theme.detail || theme.theme,
-    evidenceSegmentIds: theme.evidenceSegmentIds,
-  }));
+  // report builder) reads keyPoints. Preserve explicit legacy key points when
+  // provided; otherwise derive them from the themes so nothing downstream
+  // breaks while the new executive fields drive the UI.
+  const keyPoints = explicitKeyPoints.length > 0
+    ? explicitKeyPoints
+    : discussionThemes.map((theme, index) => ({
+      id: `summary-point-${index + 1}`,
+      text: theme.detail || theme.theme,
+      evidenceSegmentIds: theme.evidenceSegmentIds,
+    }));
+  const discussionHighlights = explicitDiscussionHighlights.length > 0
+    ? explicitDiscussionHighlights
+    : discussionThemes.map((theme, index) => ({
+      id: `discussion-highlight-${index + 1}`,
+      speaker: null,
+      text: theme.detail || theme.theme,
+      evidenceSegmentIds: theme.evidenceSegmentIds,
+    }));
 
   // The executive narrative is the core deliverable; require it plus at least
   // one synthesized theme. Evidence is preferred but not hard-required here,
@@ -594,6 +646,7 @@ function normalizeSummary(raw, context) {
 
   return {
     schemaVersion: 4,
+    reportSchema: SUMMARY_REPORT_SCHEMA,
     title: normalizeTextItem(root.title, 300) || "Meeting summary",
     purpose: purpose || normalizeTextItem(root.title, 300) || "Meeting discussion",
     purposeEvidenceSegmentIds:
@@ -606,6 +659,9 @@ function normalizeSummary(raw, context) {
     overview: executiveSummary,
     overviewEvidenceSegmentIds,
     discussionThemes,
+    // Compatibility: older report/export consumers still read
+    // speaker-attributed `discussionHighlights`; new synthesis uses themes.
+    discussionHighlights,
     recommendations,
     keyPoints,
     openQuestions,
@@ -752,6 +808,9 @@ function evidenceIdsFromContent(artifactType, content) {
       ...arrayOrEmpty(content.overviewEvidenceSegmentIds),
       ...arrayOrEmpty(content.purposeEvidenceSegmentIds),
       ...arrayOrEmpty(content.discussionThemes).flatMap((item) =>
+        arrayOrEmpty(item.evidenceSegmentIds)
+      ),
+      ...arrayOrEmpty(content.discussionHighlights).flatMap((item) =>
         arrayOrEmpty(item.evidenceSegmentIds)
       ),
       ...arrayOrEmpty(content.keyPoints).flatMap((item) => arrayOrEmpty(item.evidenceSegmentIds)),
@@ -974,6 +1033,10 @@ export async function generateHuddleArtifact({
       contentJson: {
         generationState: "processing",
         generationVersion: GENERATION_VERSION,
+        reportSchema:
+          artifact.artifactType === HUDDLE_GENERATION_TYPES.SUMMARY
+            ? SUMMARY_REPORT_SCHEMA
+            : null,
       },
       provenance: {
         ...artifact.provenance,
@@ -983,6 +1046,10 @@ export async function generateHuddleArtifact({
         orchestrationOnly: false,
         generationImplemented: true,
         generationVersion: GENERATION_VERSION,
+        reportSchema:
+          artifact.artifactType === HUDDLE_GENERATION_TYPES.SUMMARY
+            ? SUMMARY_REPORT_SCHEMA
+            : null,
         promptVersion: PROMPT_VERSION,
         promptHash,
         transcriptHash: packet.transcriptHash,
@@ -993,6 +1060,10 @@ export async function generateHuddleArtifact({
         orchestrationOnly: false,
         generationState: "processing",
         generationImplemented: true,
+        reportSchema:
+          artifact.artifactType === HUDDLE_GENERATION_TYPES.SUMMARY
+            ? SUMMARY_REPORT_SCHEMA
+            : null,
         includedSegmentCount: packet.includedSegmentCount,
         totalSegmentCount: packet.totalSegmentCount,
         transcriptTruncated: packet.truncated,
@@ -1035,6 +1106,10 @@ export async function generateHuddleArtifact({
           generationState: "generated_pending_approval",
           generatedAt,
           evidenceSegmentIds,
+          reportSchema:
+            artifact.artifactType === HUDDLE_GENERATION_TYPES.SUMMARY
+              ? SUMMARY_REPORT_SCHEMA
+              : content.reportSchema,
         },
         contentText: contentText(artifact.artifactType, content),
         provenance: {
@@ -1045,6 +1120,10 @@ export async function generateHuddleArtifact({
           orchestrationOnly: false,
           generationImplemented: true,
           generationVersion: GENERATION_VERSION,
+          reportSchema:
+            artifact.artifactType === HUDDLE_GENERATION_TYPES.SUMMARY
+              ? SUMMARY_REPORT_SCHEMA
+              : null,
           promptVersion: PROMPT_VERSION,
           promptHash,
           transcriptHash: packet.transcriptHash,
@@ -1056,6 +1135,10 @@ export async function generateHuddleArtifact({
           orchestrationOnly: false,
           generationState: "generated_pending_approval",
           generationImplemented: true,
+          reportSchema:
+            artifact.artifactType === HUDDLE_GENERATION_TYPES.SUMMARY
+              ? SUMMARY_REPORT_SCHEMA
+              : null,
           evidenceSegmentCount: evidenceSegmentIds.length,
           includedSegmentCount: packet.includedSegmentCount,
           totalSegmentCount: packet.totalSegmentCount,

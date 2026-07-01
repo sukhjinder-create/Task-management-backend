@@ -5,6 +5,7 @@ import { getEvaluationSummary } from "../evaluation/evaluationEngine.service.js"
 import { getAdaptiveWorkerDiagnostics } from "../runtime/adaptiveWorker.service.js";
 import { listObservers } from "../../events/eventBus.js";
 import { getAdaptiveQueueMetrics } from "../events/eventQueue.repository.js";
+import { validateContextProviderContracts } from "../context/contextHealth.service.js";
 
 export async function listRuntimeRuns({ workspaceId, status = null, limit = 50 }) {
   const params = [workspaceId];
@@ -72,7 +73,7 @@ export async function listPredictionHistory({ workspaceId, limit = 100 }) {
 }
 
 export async function getAdaptivePlatformHealth({ workspaceId, settings }) {
-  const [queueResult, queueMetrics, runResult, actionResult, distributedWorkers, evaluation] = await Promise.all([
+  const [queueResult, queueMetrics, runResult, actionResult, distributedWorkers, evaluation, contextHealth] = await Promise.all([
     pool.query(
       `SELECT status, COUNT(*)::int AS count FROM adaptive_event_queue
        WHERE workspace_id = $1 GROUP BY status`,
@@ -100,6 +101,7 @@ export async function getAdaptivePlatformHealth({ workspaceId, settings }) {
        ORDER BY heartbeat_at DESC`
     ).catch((error) => error?.code === "42P01" ? { rows: [] } : Promise.reject(error)),
     getEvaluationSummary(workspaceId),
+    validateContextProviderContracts(),
   ]);
   const worker = getAdaptiveWorkerDiagnostics();
   const lagSloSeconds = Math.max(Number(settings?.policy?.queueLagSloSeconds) || 60, 10);
@@ -109,6 +111,7 @@ export async function getAdaptivePlatformHealth({ workspaceId, settings }) {
   if (workerRequired && !worker.enabled && activeDistributedWorkers.length === 0) degradedReasons.push("worker_disabled");
   if (queueMetrics.oldestLagSeconds > lagSloSeconds) degradedReasons.push("queue_lag_slo_exceeded");
   if (queueMetrics.deadLetters > 0) degradedReasons.push("dead_letters_present");
+  if (contextHealth.status !== "available") degradedReasons.push("context_providers_degraded");
   return {
     status: degradedReasons.length ? "degraded" : "available",
     degradedReasons,
@@ -122,6 +125,7 @@ export async function getAdaptivePlatformHealth({ workspaceId, settings }) {
     runs: runResult.rows[0] || {},
     recommendations: Object.fromEntries(actionResult.rows.map((row) => [row.status, row.count])),
     evaluation,
+    contextHealth,
     worker: { ...worker, activeDistributedWorkers },
     registry: {
       capabilities: listCapabilities(),

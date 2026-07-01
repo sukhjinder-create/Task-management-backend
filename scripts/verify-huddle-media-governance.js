@@ -70,6 +70,7 @@ function select(params = {}) {
       workspace_id: "workspace-a",
     },
     ...livekitReadyConfig(),
+    env: env(),
     ...params,
   });
 }

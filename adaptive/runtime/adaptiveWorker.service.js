@@ -2,6 +2,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { claimAdaptiveEvents, completeAdaptiveEvent, failAdaptiveEvent, loadQueuedEvent } from "../events/eventQueue.repository.js";
 import { getRuntimeSettings } from "../config/runtimeSettings.service.js";
+import { evaluateDueOutcomePredictions } from "../evaluation/evaluationEngine.service.js";
 import { processAdaptiveEvent } from "./adaptiveRuntime.service.js";
 import { resumeDueWorkflowRuns } from "../workflows/workflowEngine.service.js";
 import pool from "../../db.js";
@@ -72,11 +73,16 @@ export async function processAdaptiveWorkerBatch({ limit = 10 } = {}) {
     diagnostics.lastErrorAt = new Date().toISOString();
     return [];
   });
+  const evaluatedPredictions = await evaluateDueOutcomePredictions({ limit }).catch((error) => {
+    diagnostics.lastError = error?.message || String(error);
+    diagnostics.lastErrorAt = new Date().toISOString();
+    return [];
+  });
   diagnostics.cycles += 1;
   diagnostics.lastCycleAt = new Date().toISOString();
   diagnostics.cycleDurationMs = Date.now() - batchStartedAt;
   await persistHeartbeat(diagnostics.lastError ? "degraded" : "healthy");
-  return { events: results, workflows: workflowResults };
+  return { events: results, workflows: workflowResults, evaluatedPredictions };
 }
 
 async function cycle() {

@@ -6,7 +6,7 @@
 
 import axios from "axios";
 
-const BASE_URL = "http://localhost:3000";
+const BASE_URL = process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 5000}`;
 
 // Replace with your actual JWT token
 const TOKEN = "YOUR_JWT_TOKEN_HERE";

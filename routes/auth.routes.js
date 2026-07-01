@@ -3,6 +3,7 @@ import express from "express";
 import crypto from "crypto";
 import {
   loginWithEmail,
+  loginWithDevelopmentUser,
   loginWithMagicToken,
   loginWithGoogle,
   signupWorkspaceWithEmail,
@@ -28,14 +29,18 @@ import { logAudit } from "../services/audit.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
 import { getJwtSecret } from "../config/secrets.js";
+import {
+  getFrontendBaseUrl,
+  getGoogleCallbackUrl,
+  getMobileAuthCallbackUrl,
+} from "../config/environment.js";
 
 const router = express.Router();
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
-const MOBILE_APP_AUTH_CALLBACK =
-  process.env.MOBILE_APP_AUTH_CALLBACK || "asystence://auth/callback";
+const FRONTEND_URL = getFrontendBaseUrl();
+const MOBILE_APP_AUTH_CALLBACK = getMobileAuthCallbackUrl();
 const GOOGLE_CLIENT_ID    = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL;
+const GOOGLE_CALLBACK_URL = getGoogleCallbackUrl();
 const JWT_SECRET = getJwtSecret();
 const GOOGLE_STATE_TTL_MS = 15 * 60 * 1000;
 
@@ -416,6 +421,46 @@ router.post("/login", async (req, res) => {
 });
 
 // ─── MFA SECOND FACTOR ────────────────────────────────────────────────────────
+router.post("/dev-login", async (req, res) => {
+  try {
+    const data = await loginWithDevelopmentUser({
+      email: req.body?.email,
+      name: req.body?.name,
+      workspaceName: req.body?.workspaceName,
+    });
+
+    data.refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId || data.user.workspace_id,
+      req.ip,
+      req.headers["user-agent"]
+    );
+
+    captureAuthGrowth(req, "product.login_succeeded", data, {
+      feature_name: "Authentication",
+      method: "developer",
+      outcome: "success",
+    });
+
+    logAudit({
+      workspaceId: data.user.workspaceId || data.user.workspace_id,
+      userId: data.user.id,
+      action: "user.login",
+      entityType: "user",
+      entityId: data.user.id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "developer" },
+    });
+
+    res.json(data);
+  } catch (err) {
+    const status = err.statusCode || 500;
+    if (status >= 500) console.error("Developer login error:", err);
+    res.status(status).json({ error: err.message });
+  }
+});
+
 router.post("/mfa/verify", async (req, res) => {
   try {
     const { mfa_session_token, code } = req.body;

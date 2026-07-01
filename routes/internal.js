@@ -27,6 +27,7 @@ import {
 } from "../config/secrets.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
+import { validateContextProviderContracts } from "../adaptive/context/contextHealth.service.js";
 
 console.log("🔥 INTERNAL ROUTES LOADED");
 
@@ -34,6 +35,123 @@ const router = express.Router();
 const EXECUTIVE_SUMMARY_VALIDATION_RANGES = Object.freeze(["30d", "90d", "6m", "1y", "all"]);
 
 router.post("/dashboard-history/materialize", requireInternalServiceSecret, materializeDashboardHistoryInternal);
+
+function validUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+async function requireInternalWorkspace(req, res) {
+  const workspaceId = req.query?.workspaceId || req.body?.workspaceId || req.params?.workspaceId;
+  if (!validUuid(workspaceId)) {
+    res.status(400).json({ error: "Valid workspaceId is required" });
+    return null;
+  }
+  const { rows } = await pool.query(`SELECT id FROM workspaces WHERE id = $1 AND is_active IS NOT FALSE`, [workspaceId]);
+  if (!rows[0]) {
+    res.status(404).json({ error: "Workspace not found" });
+    return null;
+  }
+  return workspaceId;
+}
+
+router.get("/readiness", requireInternalServiceSecret, async (_req, res) => {
+  try {
+    const contextHealth = await validateContextProviderContracts({ force: true });
+    const contracts = [
+      "GET /internal/chat/context",
+      "GET /internal/tasks/context",
+      "GET /internal/attendance/summary",
+    ];
+    const ready = contextHealth.status === "available";
+    return res.status(ready ? 200 : 503).json({
+      status: ready ? "ready" : "degraded",
+      service: "asystence-api",
+      database: contextHealth.database,
+      contextHealth,
+      contracts,
+    });
+  } catch (error) {
+    return res.status(503).json({ status: "unavailable", service: "asystence-api", error: error.message });
+  }
+});
+
+router.get("/chat/context", requireInternalServiceSecret, async (req, res) => {
+  try {
+    const workspaceId = await requireInternalWorkspace(req, res);
+    if (!workspaceId) return;
+    const channelId = String(req.query?.channelId || "").trim();
+    const params = [workspaceId];
+    let channelClause = "";
+    if (channelId) {
+      params.push(channelId);
+      channelClause = "AND (m.channel_key = $2 OR m.channel_key IN (SELECT key FROM chat_channels WHERE id::text = $2 AND workspace_id = $1))";
+    }
+    const { rows } = await pool.query(
+      `SELECT m.id, m.channel_key, m.user_id, u.username, m.fallback_text,
+              CASE WHEN COALESCE(m.is_encrypted, false) THEN NULL ELSE m.text_html END AS text_html,
+              m.created_at
+       FROM chat_messages m
+       LEFT JOIN users u ON u.id = m.user_id AND u.workspace_id = m.workspace_id
+       WHERE m.workspace_id = $1 AND m.deleted_at IS NULL ${channelClause}
+       ORDER BY m.created_at DESC LIMIT 50`,
+      params
+    );
+    return res.json({ workspaceId, channelId: channelId || null, messages: rows.reverse(), count: rows.length });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to assemble chat context", detail: error.message });
+  }
+});
+
+router.get("/tasks/context", requireInternalServiceSecret, async (req, res) => {
+  try {
+    const workspaceId = await requireInternalWorkspace(req, res);
+    if (!workspaceId) return;
+    const { rows } = await pool.query(
+      `SELECT t.id, t.task AS title, t.status, t.priority, t.due_date, t.progress,
+              t.is_blocked, t.assigned_to, u.username AS assignee_name,
+              t.project_id, p.name AS project_name, t.updated_at
+       FROM tasks t
+       JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
+       LEFT JOIN users u ON u.id = t.assigned_to AND u.workspace_id = t.workspace_id
+       WHERE t.workspace_id = $1
+       ORDER BY t.is_blocked DESC, t.due_date ASC NULLS LAST, t.updated_at DESC
+       LIMIT 100`,
+      [workspaceId]
+    );
+    return res.json({ workspaceId, tasks: rows, count: rows.length });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to assemble task context", detail: error.message });
+  }
+});
+
+router.get("/attendance/summary", requireInternalServiceSecret, async (req, res) => {
+  try {
+    const workspaceId = await requireInternalWorkspace(req, res);
+    if (!workspaceId) return;
+    const { rows } = await pool.query(
+      `SELECT a.user_id, u.username,
+              COUNT(*)::int AS recorded_days,
+              ROUND(AVG(a.signed_in_minutes))::int AS avg_signed_in_minutes,
+              ROUND(AVG(a.available_minutes))::int AS avg_available_minutes,
+              MAX(a.date) AS latest_date
+       FROM attendance_daily a
+       JOIN users u ON u.id = a.user_id AND u.workspace_id = a.workspace_id
+       WHERE a.workspace_id = $1 AND a.date >= CURRENT_DATE - 30
+       GROUP BY a.user_id, u.username
+       ORDER BY u.username LIMIT 200`,
+      [workspaceId]
+    );
+    const totals = rows.reduce((result, row) => ({
+      people: result.people + 1,
+      recordedDays: result.recordedDays + Number(row.recorded_days || 0),
+      averageAvailabilityMinutes: result.averageAvailabilityMinutes + Number(row.avg_available_minutes || 0),
+    }), { people: 0, recordedDays: 0, averageAvailabilityMinutes: 0 });
+    if (totals.people) totals.averageAvailabilityMinutes = Math.round(totals.averageAvailabilityMinutes / totals.people);
+    return res.json({ workspaceId, summary: totals, people: rows });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to assemble attendance context", detail: error.message });
+  }
+});
 
 function internalSecretMatches(req) {
   return internalServiceSecretMatches(req);

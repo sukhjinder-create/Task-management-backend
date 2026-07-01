@@ -335,3 +335,56 @@ export function assertDatabaseScriptSafety({
 export function assertDatabaseScriptSafetyIfNeeded() {
   return assertDatabaseScriptSafety();
 }
+
+export function assertApplicationDatabaseSafety({
+  operation = "application runtime",
+} = {}) {
+  const entrypoint = currentEntrypoint();
+  if (isDatabaseScriptEntrypoint(entrypoint)) {
+    return { skipped: true, reason: "database_script_guard_handles_entrypoint" };
+  }
+
+  dotenv.config({ quiet: true });
+
+  const envName = (
+    safeTrim(process.env.DATABASE_ENV) ||
+    safeTrim(process.env.APP_ENV) ||
+    safeTrim(process.env.NODE_ENV) ||
+    "development"
+  ).toLowerCase();
+  const isProductionLike = ["production", "staging", "stage", "preview", "preprod"].includes(envName);
+  if (isProductionLike) {
+    return { skipped: true, reason: "production_like_runtime", envName };
+  }
+
+  const targets = [primaryDbTarget()].map((target) => ({
+    ...target,
+    classification: classifyTarget(target),
+    supabaseProjectIds: supabaseProjectIdsFromTarget(target),
+  }));
+  const productionTargets = targets.filter((target) => target.classification === "production");
+  if (productionTargets.length === 0) {
+    return { skipped: false, targets, production: false };
+  }
+
+  if (safeTrim(process.env.ALLOW_LOCAL_PRODUCTION_DATABASE) === "true") {
+    console.warn("[db-safety] Local production database override accepted.");
+    return { skipped: false, targets, production: true, override: true };
+  }
+
+  const summary = productionTargets
+    .map((target) => `${target.source} -> ${target.host || "(unset)"}/${target.database || "(unset)"}`)
+    .join(", ");
+  const error = new Error(
+    `database_safety_guard_blocked: ${operation} cannot use a production database in ${envName} runtime (${summary}). ` +
+      "Set DATABASE_URL/DB_HOST to a local or staging database, or explicitly set ALLOW_LOCAL_PRODUCTION_DATABASE=true only for intentional read/write testing."
+  );
+  error.code = "DATABASE_SAFETY_GUARD_BLOCKED";
+  error.targets = productionTargets.map((target) => ({
+    source: target.source,
+    host: target.host,
+    database: target.database,
+    classification: target.classification,
+  }));
+  throw error;
+}

@@ -21,7 +21,12 @@ class AppConfig {
 
   static const apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://asystence-api-616077735050.asia-south1.run.app',
+    defaultValue: 'http://10.0.2.2:5000',
+  );
+
+  static const webAppUrl = String.fromEnvironment(
+    'WEB_APP_URL',
+    defaultValue: 'http://localhost:5173',
   );
 
   static const version = String.fromEnvironment(

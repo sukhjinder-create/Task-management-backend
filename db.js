@@ -1,16 +1,34 @@
 // db.js
-import { assertDatabaseScriptSafetyIfNeeded } from "./utils/databaseSafety.js";
+import {
+  assertApplicationDatabaseSafety,
+  assertDatabaseScriptSafetyIfNeeded,
+} from "./utils/databaseSafety.js";
 import pkg from "pg";
 import dotenv from "dotenv";
 
 assertDatabaseScriptSafetyIfNeeded();
 dotenv.config();
+assertApplicationDatabaseSafety();
 
 const { Pool, types } = pkg;
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
-const DB_SSL_ENABLED = ["true", "1", "require"].includes(
-  String(process.env.DB_SSL || "").trim().toLowerCase()
-);
+const DB_SSL_VALUE = String(process.env.DB_SSL || "").trim().toLowerCase();
+const DB_SSL_IS_EXPLICIT = DB_SSL_VALUE !== "";
+
+function databaseUrlIsLocal(url) {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return ["localhost", "127.0.0.1", "::1"].includes(host) || host.endsWith(".local");
+  } catch {
+    return false;
+  }
+}
+
+const DB_SSL_ENABLED = DB_SSL_IS_EXPLICIT
+  ? ["true", "1", "require"].includes(DB_SSL_VALUE)
+  : Boolean(DATABASE_URL && !databaseUrlIsLocal(DATABASE_URL));
+const sslOptions = DB_SSL_ENABLED ? { ssl: { rejectUnauthorized: false } } : {};
 
 // Prevent node-postgres from converting DATE columns to JS Date objects.
 // Without this, "2026-03-26" becomes "2026-03-25T18:30:00.000Z" in IST (UTC+5:30),
@@ -19,14 +37,14 @@ types.setTypeParser(1082, val => val); // 1082 = PostgreSQL DATE oid
 
 const pool = new Pool({
   ...(DATABASE_URL
-    ? { connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    ? { connectionString: DATABASE_URL, ...sslOptions }
     : {
         host: process.env.DB_HOST?.trim(),
         user: process.env.DB_USER?.trim(),
         password: process.env.DB_PASSWORD,
         database: process.env.DB_NAME?.trim(),
         port: process.env.DB_PORT?.trim(),
-        ...(DB_SSL_ENABLED ? { ssl: { rejectUnauthorized: false } } : {}),
+        ...sslOptions,
       }),
 
   // Production-grade pool — sized for high concurrency via a connection pooler

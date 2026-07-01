@@ -2,14 +2,7 @@ import pool from "../../db.js";
 import { isUuid } from "../shared/runtimeUtils.js";
 
 async function rows(sql, params = []) {
-  try {
-    return (await pool.query(sql, params)).rows;
-  } catch (error) {
-    // Context is best-effort and additive across installations with different
-    // migration histories. Missing optional relations must not stop the runtime.
-    if (["42P01", "42703"].includes(error?.code)) return [];
-    throw error;
-  }
+  return (await pool.query(sql, params)).rows;
 }
 
 function first(items) { return items?.[0] || null; }
@@ -28,11 +21,16 @@ export async function buildOperationalContextGraph({ event, settings }) {
   const project = projectId
     ? first(await rows(`SELECT * FROM projects WHERE id = $1 AND workspace_id = $2`, [projectId, workspaceId]))
     : null;
-  const userId = task?.assigned_to || (isUuid(event.actorUserId) ? event.actorUserId : null);
+  const userId = task?.assigned_to
+    || (isUuid(event.metadata?.userId) ? event.metadata.userId : null)
+    || (isUuid(event.actorUserId) ? event.actorUserId : null);
+  const scopedIds = [
+    userId, projectId, event.metadata?.teamId, event.metadata?.departmentId, event.metadata?.enterpriseId,
+  ].filter(isUuid);
   const limit = Math.min(Math.max(Number(settings?.context_limits?.relatedEntities) || 20, 5), 50);
 
   const [dependencies, sprint, leave, attendance, recommendations, outcomes, meetings,
-    goals, reviews, knowledge, workload, riskHistory, summaries, policies] = await Promise.all([
+    goals, reviews, knowledge, workload, riskHistory, summaries, policies, behaviourProfiles] = await Promise.all([
     task?.id ? rows(
       `SELECT l.id, l.link_type, l.source_task_id, l.target_task_id,
               s.task AS source_title, s.status AS source_status,
@@ -91,12 +89,29 @@ export async function buildOperationalContextGraph({ event, settings }) {
          AND ($2::uuid IS NULL OR entity_id = $2 OR metadata->>'projectId' = $2::text)
        ORDER BY occurred_at DESC LIMIT $3`, [workspaceId, task?.id || projectId, limit]),
     rows(
-      `SELECT id, digest_type, status, period_start, period_end, digest, generated_at
-       FROM workspace_digest_runs WHERE workspace_id = $1 ORDER BY generated_at DESC LIMIT 5`, [workspaceId]),
+      `SELECT * FROM (
+         SELECT id, digest_type, status, NULL::text AS period, summary,
+                content AS source_data, created_at AS generated_at, 'workspace_digest'::text AS source
+         FROM workspace_digest_runs WHERE workspace_id = $1
+         UNION ALL
+         SELECT id, 'executive_summary'::text AS digest_type, status, period, summary,
+                source_data, created_at AS generated_at, 'executive_summary'::text AS source
+         FROM workspace_executive_summaries WHERE workspace_id = $1
+       ) summaries ORDER BY generated_at DESC LIMIT 10`, [workspaceId]),
     rows(
       `SELECT wu.user_id, u.role, wu.billing_status
        FROM workspace_users wu JOIN users u ON u.id = wu.user_id
        WHERE wu.workspace_id = $1 AND wu.user_id = $2 LIMIT 1`, [workspaceId, event.actorUserId || null]),
+    rows(
+      `SELECT scope_type, scope_id, profile_key, profile_value, confidence,
+              sample_count, version, explanation, last_signal_at
+       FROM adaptive_preference_profiles
+       WHERE workspace_id = $1
+         AND (scope_id IS NULL OR scope_id = ANY($2::uuid[]))
+       ORDER BY CASE scope_type
+         WHEN 'user' THEN 1 WHEN 'team' THEN 2 WHEN 'project' THEN 3
+         WHEN 'department' THEN 4 WHEN 'workspace' THEN 5 WHEN 'enterprise' THEN 6 ELSE 7 END,
+         sample_count DESC`, [workspaceId, scopedIds]),
   ]);
 
   const graph = {
@@ -115,6 +130,7 @@ export async function buildOperationalContextGraph({ event, settings }) {
     riskHistory,
     executiveSummaries: summaries,
     permissions: first(policies),
+    behaviourProfiles,
   };
   const populated = Object.entries(graph)
     .filter(([, value]) => Array.isArray(value) ? value.length : value != null)

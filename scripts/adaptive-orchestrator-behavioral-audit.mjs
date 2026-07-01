@@ -3,26 +3,58 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-const API = process.env.API_URL;
+const API = process.env.API_URL || "http://localhost:5000";
 const JWT_SECRET = process.env.JWT_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
-const USER_ID = process.env.RELEASE_TEST_USER_ID || "d0818652-0399-4340-89ef-8544a9ac205c";
-const WORKSPACE_ID = process.env.RELEASE_TEST_WORKSPACE_ID || "ba1fca50-897e-4a18-8b22-dc72dd35e7fd";
 
-if (!API || !JWT_SECRET || !DATABASE_URL) {
-  throw new Error("API_URL, JWT_SECRET, and DATABASE_URL are required");
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is required");
 }
 
+const apiUrl = new URL(API);
+const databaseUrl = new URL(DATABASE_URL);
+const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+if (!localHosts.has(apiUrl.hostname) || !localHosts.has(databaseUrl.hostname)) {
+  throw new Error(`LOCAL_CERTIFICATION_SAFETY_BLOCKED api=${apiUrl.hostname} database=${databaseUrl.hostname}`);
+}
+
+let USER_ID = process.env.RELEASE_TEST_USER_ID || null;
+let WORKSPACE_ID = process.env.RELEASE_TEST_WORKSPACE_ID || null;
+let token = process.env.RELEASE_TEST_TOKEN || null;
+
+if (!token && USER_ID && WORKSPACE_ID && JWT_SECRET) {
+  token = jwt.sign(
+    { id: USER_ID, role: "admin", workspaceId: WORKSPACE_ID },
+    JWT_SECRET,
+    { expiresIn: "3h" }
+  );
+}
+
+if (!token) {
+  const response = await fetch(`${API}/auth/dev-login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "enterprise-auditor@localhost.test",
+      name: "Enterprise Certification Auditor",
+      workspaceName: "Adaptive Orchestrator Local Certification V2",
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!response.ok) throw new Error(`Local dev login failed: ${response.status} ${await response.text()}`);
+  const session = await response.json();
+  token = session.token;
+  USER_ID = session.user?.id;
+  WORKSPACE_ID = session.workspace?.id || session.user?.workspaceId;
+}
+
+if (!token || !USER_ID || !WORKSPACE_ID) throw new Error("Local audit identity could not be established");
+
 const stamp = `enterprise-audit-${Date.now()}`;
-const token = jwt.sign(
-  { id: USER_ID, role: "admin", workspaceId: WORKSPACE_ID },
-  JWT_SECRET,
-  { expiresIn: "90m" }
-);
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 3,
+  ssl: false,
+  max: 10,
 });
 
 const domainScenarios = {
@@ -38,6 +70,17 @@ const domainScenarios = {
     "Architecture decision remains unresolved across two teams",
     "Customer data fix requires coordinated backend and support work",
     "Repeated assignment override moves incidents to the platform team",
+    "Security patch rollout conflicts with a contractual uptime window",
+    "Mobile release is blocked by an unresolved API compatibility defect",
+    "Observability gaps prevent incident responders from confirming recovery",
+    "Shared platform capacity is exhausted by competing launch workloads",
+    "AI service context contract changed before backend rollout approval",
+    "Realtime huddle quality regression blocks customer-facing validation",
+    "Adaptive runtime worker backlog threatens the daily operating review",
+    "Database failover rehearsal exposes missing ownership for recovery tasks",
+    "External integration webhook retries are creating duplicate engineering work",
+    "Release branch protection exception requires security and QA sign-off",
+    "Technical debt remediation conflicts with an enterprise pilot milestone",
   ],
   Product: [
     "Enterprise launch scope changed after customer discovery",
@@ -51,6 +94,17 @@ const domainScenarios = {
     "Research finding invalidates the planned feature assumption",
     "Executive priority changed without downstream task updates",
     "Repeated scope overrides favor retention work over acquisition",
+    "Regulatory requirement changes the committed product acceptance criteria",
+    "Two product teams claim ownership of the same customer workflow",
+    "Experiment results require an immediate roadmap sequencing decision",
+    "Localization launch depends on unresolved design-system coverage",
+    "AI-generated task suggestions require product governance before rollout",
+    "Self-serve onboarding promise is missing support readiness criteria",
+    "Enterprise pilot feedback changes the workflow approval threshold",
+    "Public launch narrative depends on unresolved reliability evidence",
+    "Product analytics instrumentation is inconsistent across mobile and web",
+    "Feature flag rollout lacks a rollback owner for customer cohorts",
+    "User research indicates notification timing causes manager fatigue",
   ],
   Operations: [
     "Vendor outage is delaying a time-sensitive fulfillment run",
@@ -64,6 +118,17 @@ const domainScenarios = {
     "Recurring incident indicates an ineffective corrective action",
     "Business continuity test exposed an unavailable dependency",
     "Repeated escalation overrides route work to the central team",
+    "Month-end processing is at risk because an upstream data feed is late",
+    "Regional support capacity is below the forecast incident demand",
+    "A critical supplier has failed its service-level commitment twice",
+    "Disaster-recovery ownership is ambiguous across infrastructure teams",
+    "Operational command center has stale ownership for incident handoff",
+    "Automated workflow approval is unsafe during a high-risk fulfillment window",
+    "Business continuity evidence is spread across meetings and wiki pages",
+    "Night-shift support handover omitted a critical customer escalation",
+    "Regional compliance checklist conflicts with the global process template",
+    "Internal service outage requires coordinated notification and follow-up",
+    "Queue recovery needs validation before the next operating cycle",
   ],
   HR: [
     "Key employee leave overlaps a critical delivery milestone",
@@ -77,6 +142,17 @@ const domainScenarios = {
     "Employee concern has remained unresolved across two check-ins",
     "Compensation approval risks missing the payroll cutoff",
     "Repeated manager overrides reassign sensitive people actions",
+    "A new manager inherited reviews without historical coaching context",
+    "Workforce planning conflicts with the approved delivery portfolio",
+    "Critical-role succession coverage is below the enterprise target",
+    "Employee onboarding feedback exposes a repeated access-control delay",
+    "Leave approval creates a capacity gap for customer escalation ownership",
+    "Manager review edits repeatedly change recommendation timing",
+    "Performance calibration needs evidence from projects and huddle outcomes",
+    "New hire workspace permissions conflict with least-privilege policy",
+    "People operations escalation requires a reversible learning signal",
+    "Team transfer changes task ownership without updating project context",
+    "Training non-compliance blocks enterprise audit readiness",
   ],
   "Customer Success": [
     "Enterprise customer escalation threatens renewal",
@@ -90,6 +166,17 @@ const domainScenarios = {
     "Expansion opportunity depends on unresolved product gaps",
     "Executive business review actions remain unassigned",
     "Repeated ownership overrides move escalations to solutions engineering",
+    "Renewal forecast changed after a customer leadership transition",
+    "Implementation risk is rising across three dependent customer teams",
+    "Customer data residency requirements conflict with the launch design",
+    "Support sentiment indicates an emerging product reliability pattern",
+    "Strategic customer asks for proof of AI-task generation governance",
+    "Executive sponsor changed before open escalation actions were assigned",
+    "Support runbook update has not propagated to active customer work",
+    "Renewal-risk account needs a cross-functional approval workflow",
+    "Customer success plan conflicts with product release sequencing",
+    "Incident follow-up requires both task creation and executive context refresh",
+    "Customer security review requires validated evidence from testing agent",
   ],
   Leadership: [
     "Quarterly objective is off track across multiple projects",
@@ -103,6 +190,17 @@ const domainScenarios = {
     "Organizational dependency threatens the annual plan",
     "Operational score fell while reported status remained green",
     "Repeated executive overrides favor customer retention",
+    "Portfolio funding no longer matches the declared strategic priorities",
+    "Acquisition integration milestones have no cross-functional owner",
+    "Forecast variance requires a board-level corrective narrative",
+    "Enterprise risk appetite conflicts with the planned release approach",
+    "Board update requires causal evidence for adaptive recommendation accuracy",
+    "Operating cadence changed after repeated executive recommendation edits",
+    "Workspace score improved but underlying customer risk remains unresolved",
+    "Enterprise pilot gate requires proof of tenant-safe personalization",
+    "Strategic dependency spans product, engineering, and customer success",
+    "Leadership asks for one auditable plan across meeting outcomes and tasks",
+    "Quarterly business review requires rollback-safe automation evidence",
   ],
   Administration: [
     "Workspace permission review found excessive access",
@@ -116,6 +214,17 @@ const domainScenarios = {
     "Plan boundary blocks a required enterprise capability",
     "Cross-workspace request attempts to access another tenant",
     "Repeated admin overrides weaken the default approval policy",
+    "Privileged access recertification is incomplete before the audit window",
+    "Data-classification policy is not enforced by a connected integration",
+    "Service-account ownership is missing for a business-critical connector",
+    "Retention exceptions have accumulated without documented approvals",
+    "Secret rotation runbook is incomplete for a newly deployed internal service",
+    "Admin approval workflow needs proof of role-boundary enforcement",
+    "Billing plan boundary changes require backward-compatible mobile behavior",
+    "Superadmin audit trail must explain an adaptive runtime policy update",
+    "Workspace isolation test attempts to reuse another tenant recommendation",
+    "Notification preference migration risks breaking existing user settings",
+    "Provider credential expiry requires preemptive operating-system alerting",
   ],
 };
 
@@ -143,11 +252,16 @@ const scenarios = Object.entries(domainScenarios).flatMap(([domain, titles]) =>
   })
 );
 
-if (scenarios.length < 75) throw new Error(`Expected at least 75 scenarios, found ${scenarios.length}`);
+if (scenarios.length < 100) throw new Error(`Expected at least 100 scenarios, found ${scenarios.length}`);
 
 const projects = new Map();
 const tasks = [];
 const checks = [];
+const organizationUsers = [];
+const seededIds = {
+  leaveTypes: [], reviewCycles: [], objectives: [], wikiSpaces: [],
+  memoryEntries: [], digestRuns: [], huddleSessions: [],
+};
 let originalSettings;
 
 function compact(value) {
@@ -218,8 +332,214 @@ function dueDate(daysAgo) {
   return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
 }
 
+async function seedRealisticOrganization() {
+  console.log("[SEED] people");
+  const personas = [
+    ["Aarav Mehta", "CEO", "Leadership", "admin"],
+    ["Maya Rao", "CTO", "Engineering", "admin"],
+    ["Kabir Shah", "COO", "Operations", "admin"],
+    ["Isha Verma", "CFO", "Finance", "admin"],
+    ["Neha Kapoor", "VP Product", "Product", "manager"],
+    ["Rohan Gupta", "VP Customer Success", "Customer Success", "manager"],
+    ["Anika Bose", "Engineering Manager", "Engineering", "manager"],
+    ["Vikram Nair", "Product Manager", "Product", "manager"],
+    ["Sara Khan", "Operations Manager", "Operations", "manager"],
+    ["Diya Singh", "People Operations Manager", "HR", "manager"],
+    ["Arjun Malhotra", "Finance Manager", "Finance", "manager"],
+    ["Naina Joshi", "Sales Manager", "Sales", "manager"],
+    ["Dev Patel", "Support Manager", "Support", "manager"],
+    ["Tara Iyer", "Customer Success Manager", "Customer Success", "manager"],
+    ["Sahil Jain", "Senior Backend Engineer", "Engineering", "user"],
+    ["Meera Das", "Frontend Engineer", "Engineering", "user"],
+    ["Omar Ali", "Mobile Engineer", "Engineering", "user"],
+    ["Leena Roy", "Platform Engineer", "Engineering", "user"],
+    ["Kunal Bhat", "QA Lead", "Quality", "user"],
+    ["Riya Sen", "QA Engineer", "Quality", "user"],
+    ["Aditya Kulkarni", "Product Designer", "Design", "user"],
+    ["Pooja Menon", "UX Researcher", "Design", "user"],
+    ["Farhan Sheikh", "Account Executive", "Sales", "user"],
+    ["Simran Kaur", "Support Engineer", "Support", "user"],
+  ];
+
+  for (let index = 0; index < personas.length; index += 1) {
+    const [name, title, department, role] = personas[index];
+    const email = `${name.toLowerCase().replace(/[^a-z0-9]+/g, ".")}.${stamp}@localhost.test`;
+    const user = await dbOne(
+      `INSERT INTO users (username, email, role, workspace_id, added_by)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id, username, email, role`,
+      [`${name} — ${title} [${stamp}]`, email, role, WORKSPACE_ID, USER_ID]
+    );
+    await db(
+      `INSERT INTO workspace_users (workspace_id, user_id, role, manager_id, billing_status, activated_at)
+       VALUES ($1,$2,$3,$4,'active',NOW())`,
+      [WORKSPACE_ID, user.id, role === "user" ? "member" : role, USER_ID]
+    );
+    organizationUsers.push({ ...user, name, title, department, role });
+  }
+
+  console.log("[SEED] leave-and-attendance");
+  const leaveTypes = await db(
+    `INSERT INTO leave_types (workspace_id, name, color, max_days)
+     VALUES ($1,$2,'#6366f1',24),($1,$3,'#ef4444',12) RETURNING id`,
+    [WORKSPACE_ID, `Annual Leave ${stamp}`, `Medical Leave ${stamp}`]
+  );
+  seededIds.leaveTypes.push(...leaveTypes.map((row) => row.id));
+  for (const user of organizationUsers.slice(14, 18)) {
+    await db(
+      `INSERT INTO leave_requests
+        (workspace_id,user_id,leave_type_id,start_date,end_date,days,reason,status,reviewed_by,reviewed_at)
+       VALUES ($1,$2,$3,CURRENT_DATE,CURRENT_DATE + 2,3,$4,'approved',$5,NOW())`,
+      [WORKSPACE_ID, user.id, leaveTypes[0].id, `Critical delivery overlap — ${stamp}`, USER_ID]
+    );
+  }
+  for (let index = 0; index < organizationUsers.length; index += 1) {
+    const user = organizationUsers[index];
+    await db(
+      `INSERT INTO attendance_daily
+        (workspace_id,user_id,date,signed_in_minutes,available_minutes,aws_minutes,lunch_minutes,screen_on_minutes,screen_off_minutes)
+       SELECT $1,$2,CURRENT_DATE-day_offset,$3,$4,$5,45,$6,$7
+       FROM generate_series(0,13) AS day_offset
+       ON CONFLICT (workspace_id,user_id,date) DO NOTHING`,
+      [WORKSPACE_ID, user.id, 420 - (index % 5) * 35, 360 - (index % 4) * 30, 45 + (index % 3) * 20, 390, 30]
+    );
+  }
+
+  console.log("[SEED] reviews");
+  const cycle = await dbOne(
+    `INSERT INTO review_cycles (workspace_id,name,type,start_date,end_date,status)
+     VALUES ($1,$2,'quarterly',CURRENT_DATE-90,CURRENT_DATE+7,'active') RETURNING id`,
+    [WORKSPACE_ID, `Q2 Enterprise Review ${stamp}`]
+  );
+  seededIds.reviewCycles.push(cycle.id);
+  for (const user of organizationUsers.slice(14)) {
+    await db(
+      `INSERT INTO performance_reviews
+        (cycle_id,reviewee_id,reviewer_id,type,status,overall_score,strengths,improvements,goals_next,submitted_at)
+       VALUES ($1,$2,$3,'manager',$4,$5,$6,$7,$8,CASE WHEN $4='submitted' THEN NOW() END)`,
+      [cycle.id, user.id, organizationUsers[6].id, user.id.endsWith("0") ? "pending" : "submitted",
+        3.2 + (organizationUsers.indexOf(user) % 4) * 0.4,
+        `Cross-functional execution evidence ${stamp}`,
+        "Improve dependency visibility and earlier risk escalation",
+        "Own one measurable reliability outcome"]
+    );
+  }
+
+  console.log("[SEED] goals");
+  const objectiveTitles = [
+    "Improve enterprise release predictability", "Reduce customer escalation recurrence",
+    "Increase platform reliability", "Shorten onboarding time-to-value",
+    "Strengthen audit readiness", "Improve operating margin",
+  ];
+  for (let index = 0; index < objectiveTitles.length; index += 1) {
+    const objective = await dbOne(
+      `INSERT INTO okr_objectives
+        (workspace_id,owner_id,title,description,time_period,status,progress)
+       VALUES ($1,$2,$3,$4,'2026-Q3',$5,$6) RETURNING id`,
+      [WORKSPACE_ID, organizationUsers[index].id, `${objectiveTitles[index]} [${stamp}]`,
+        "Cross-functional objective with delivery, people and customer dependencies.",
+        index % 3 === 0 ? "at_risk" : "on_track", 38 + index * 7]
+    );
+    seededIds.objectives.push(objective.id);
+    await db(
+      `INSERT INTO okr_key_results
+        (objective_id,title,owner_id,type,target_value,current_value,unit,due_date,status)
+       VALUES ($1,$2,$3,'number',100,$4,'percent',CURRENT_DATE+60,$5)`,
+      [objective.id, `Measured enterprise outcome ${index + 1}`, organizationUsers[index + 6].id,
+        30 + index * 8, index % 3 === 0 ? "at_risk" : "on_track"]
+    );
+  }
+
+  console.log("[SEED] knowledge");
+  const wikiSpace = await dbOne(
+    `INSERT INTO wiki_spaces (workspace_id,name,slug,created_by)
+     VALUES ($1,$2,$3,$4) RETURNING id`,
+    [WORKSPACE_ID, `Enterprise Operating System ${stamp}`, `enterprise-os-${Date.now()}`, USER_ID]
+  );
+  seededIds.wikiSpaces.push(wikiSpace.id);
+  const knowledgeTitles = ["Incident command", "Release governance", "Customer escalation",
+    "Leave coverage", "Architecture decisions", "Security approval", "Executive operating review", "Business continuity"];
+  for (let index = 0; index < knowledgeTitles.length; index += 1) {
+    await db(
+      `INSERT INTO wiki_pages
+        (space_id,title,slug,content,content_text,created_by,updated_by,position)
+       VALUES ($1,$2,$3,$4,$4,$5,$5,$6)`,
+      [wikiSpace.id, `${knowledgeTitles[index]} [${stamp}]`, `${knowledgeTitles[index].replace(/\s+/g, "-")}-${Date.now()}-${index}`,
+        `Verified operating policy for ${knowledgeTitles[index]}. Owners must preserve evidence and approval boundaries.`, USER_ID, index]
+    );
+  }
+
+  console.log("[SEED] memory");
+  for (let index = 0; index < 10; index += 1) {
+    const row = await dbOne(
+      `INSERT INTO workspace_memory_entries
+        (workspace_id,title,content,tags,visibility,created_by,source_entity_type,metadata,is_pinned)
+       VALUES ($1,$2,$3,$4::jsonb,'workspace',$5,'historical_decision',$6::jsonb,$7) RETURNING id`,
+      [WORKSPACE_ID, `Historical decision ${index + 1} [${stamp}]`,
+        `Leadership decision ${index + 1}: protect customer commitments while preserving approval and workspace boundaries.`,
+        JSON.stringify(["decision", "enterprise", index % 2 ? "delivery" : "customer"]), USER_ID,
+        JSON.stringify({ auditMarker: stamp, decisionOwner: organizationUsers[index % organizationUsers.length].id }), index < 2]
+    );
+    seededIds.memoryEntries.push(row.id);
+  }
+
+  console.log("[SEED] executive-digests");
+  for (let index = 0; index < 3; index += 1) {
+    const digest = await dbOne(
+      `INSERT INTO workspace_digest_runs
+        (workspace_id,user_id,role_scope,digest_type,delivery_mode,summary,content,status)
+       VALUES ($1,$2,'executive','daily_os','preview',$3,$4::jsonb,'generated') RETURNING id`,
+      [WORKSPACE_ID, USER_ID, `Executive operating summary ${index + 1} [${stamp}]`,
+        JSON.stringify({ risks: ["delivery", "customer", "capacity"], decisions: ["sequence work", "preserve governance"], auditMarker: stamp })]
+    );
+    seededIds.digestRuns.push(digest.id);
+  }
+
+  console.log("[SEED] meetings");
+  for (let index = 0; index < 3; index += 1) {
+    const session = await dbOne(
+      `INSERT INTO huddle_sessions
+        (workspace_id,scope_type,scope_key,started_by,host_user_id,state,mode,visibility,ended_at,ended_by,end_reason,metadata)
+       VALUES ($1::uuid,'workspace',($1::uuid)::text,$2,$2,'ended','audio_video','workspace',NOW()-($3||' hours')::interval,$2,'completed',$4::jsonb)
+       RETURNING id`,
+      [WORKSPACE_ID, USER_ID, index + 1, JSON.stringify({ auditMarker: stamp, title: `Executive operating review ${index + 1}` })]
+    );
+    seededIds.huddleSessions.push(session.id);
+    await db(
+      `INSERT INTO huddle_meeting_digests
+        (workspace_id,session_id,digest_type,status,digest_json,provenance_json,metadata,created_by)
+       VALUES ($1,$2,'executive','ready',$3::jsonb,$4::jsonb,$5::jsonb,$6)`,
+      [WORKSPACE_ID, session.id,
+        JSON.stringify({ summary: "Cross-functional operating review identified delivery and customer risk.", decisions: ["Escalate the dependency"], actions: [{ title: "Resolve cross-team dependency", ownerId: organizationUsers[6].id }] }),
+        JSON.stringify({ sources: ["meeting transcript", "participant confirmation"], confidence: 0.91 }),
+        JSON.stringify({ auditMarker: stamp }), USER_ID]
+    );
+  }
+
+  return {
+    people: organizationUsers.length,
+    departments: [...new Set(organizationUsers.map((user) => user.department))],
+    executives: organizationUsers.filter((user) => ["CEO", "CTO", "COO", "CFO"].includes(user.title)).length,
+    managers: organizationUsers.filter((user) => user.role === "manager").length,
+    individualContributors: organizationUsers.filter((user) => user.role === "user").length,
+    leaveRecords: 4,
+    attendanceDays: organizationUsers.length * 14,
+    reviews: organizationUsers.slice(14).length,
+    goals: seededIds.objectives.length,
+    knowledgeArticles: knowledgeTitles.length,
+    historicalDecisions: seededIds.memoryEntries.length,
+    executiveSummaries: seededIds.digestRuns.length,
+    meetings: seededIds.huddleSessions.length,
+  };
+}
+
 async function createScenarioTask(scenario) {
   const project = projects.get(scenario.domain);
+  const departmentAliases = {
+    Leadership: ["Leadership"], Administration: ["Operations", "Finance"],
+  };
+  const targetDepartments = departmentAliases[scenario.domain] || [scenario.domain];
+  const candidates = organizationUsers.filter((user) => targetDepartments.includes(user.department));
+  const owner = candidates[tasks.length % Math.max(candidates.length, 1)] || organizationUsers[tasks.length % organizationUsers.length];
   const created = await request(`/tasks/${project.id}`, {
     method: "POST",
     expected: [201],
@@ -228,6 +548,7 @@ async function createScenarioTask(scenario) {
       description: scenario.description,
       status: scenario.blocked ? "blocked" : "in_progress",
       priority: scenario.priority,
+      assigned_to: owner?.id || null,
       due_date: dueDate(scenario.overdueDays),
       is_blocked: scenario.blocked,
       estimation_hours: 8 + (scenario.overdueDays % 4) * 4,
@@ -235,18 +556,163 @@ async function createScenarioTask(scenario) {
     },
   });
   const task = { ...created.payload, scenario };
+  task.auditOwner = owner ? { id: owner.id, title: owner.title, department: owner.department } : null;
   tasks.push(task);
   await request(`/tasks/${task.id}`, {
     method: "PUT",
     body: {
       status: scenario.blocked ? "blocked" : "in_progress",
       priority: scenario.priority,
+      assigned_to: owner?.id || null,
       due_date: dueDate(scenario.overdueDays),
       is_blocked: scenario.blocked,
       description: `${scenario.description} Current user report confirms the condition remains unresolved.`,
     },
   });
   return task;
+}
+
+async function seedTaskDependencies(taskSubset) {
+  let created = 0;
+  for (let index = 1; index < taskSubset.length; index += 4) {
+    const source = taskSubset[index - 1];
+    const target = taskSubset[index];
+    await db(
+      `INSERT INTO task_links (source_task_id,target_task_id,link_type,workspace_id,created_by)
+       VALUES ($1,$2,'blocks',$3,$4) ON CONFLICT DO NOTHING`,
+      [source.id, target.id, WORKSPACE_ID, USER_ID]
+    );
+    await request(`/tasks/${target.id}`, {
+      method: "PUT",
+      body: { description: `${target.scenario.description} Verified dependency: ${source.task} blocks this outcome.`, is_blocked: true },
+    });
+    created += 1;
+  }
+  return created;
+}
+
+async function enqueueMeetingIntelligenceEvent() {
+  const sessionId = seededIds.huddleSessions[0];
+  const projectId = projects.values().next().value?.id || null;
+  const event = await dbOne(
+    `INSERT INTO workspace_events
+      (id,workspace_id,actor_user_id,event_type,entity_type,entity_id,metadata,schema_version,origin,correlation_id,trace_id,occurred_at)
+     VALUES (gen_random_uuid(),$1,$2,'MEETING_ENDED','meeting',$3,$4::jsonb,1,'local_certification',gen_random_uuid(),gen_random_uuid(),NOW())
+     RETURNING id`,
+    [WORKSPACE_ID, USER_ID, sessionId, JSON.stringify({ auditMarker: stamp, projectId, summary: "Executive operating review completed with governed actions." })]
+  );
+  await db(
+    `INSERT INTO adaptive_event_queue (workspace_id,event_id,status,available_at)
+     VALUES ($1,$2,'pending',NOW()) ON CONFLICT DO NOTHING`,
+    [WORKSPACE_ID, event.id]
+  );
+  return { eventId: event.id, sessionId, projectId };
+}
+
+async function enqueueNativeOperationalEvents() {
+  const projectId = projects.values().next().value?.id || null;
+  const taskId = tasks[0]?.id || null;
+  const targetUser = organizationUsers.find((user) => user.role === "user") || organizationUsers[0];
+  const nativeEvents = [
+    ["LEAVE_APPROVED", "people", targetUser?.id, "Approved leave overlaps customer escalation ownership"],
+    ["ATTENDANCE_CHANGED", "people", targetUser?.id, "Material availability drop detected for critical delivery owner"],
+    ["GOAL_UPDATED", "goal", seededIds.objectives[0] || null, "At-risk objective requires delivery realignment"],
+    ["REVIEW_UPDATED", "review", seededIds.reviewCycles[0] || null, "Manager review update requires governed follow-through"],
+    ["KNOWLEDGE_UPDATED", "knowledge", seededIds.wikiSpaces[0] || null, "Operating runbook changed for escalation response"],
+    ["EXECUTIVE_SUMMARY_GENERATED", "executive_summary", seededIds.digestRuns[0] || null, "Executive context highlights unresolved customer and delivery risk"],
+    ["CUSTOMER_ESCALATION", "customer", taskId, "Enterprise customer escalation threatens renewal and needs accountable work"],
+    ["INCIDENT_REPORTED", "incident", taskId, "Production incident requires validation and stakeholder notification"],
+    ["SECURITY_RISK_DETECTED", "security", taskId, "Security risk requires approval-gated response and testing evidence"],
+  ];
+  const created = [];
+  for (const [eventType, entityType, entityId, summary] of nativeEvents) {
+    const row = await dbOne(
+      `INSERT INTO workspace_events
+        (id,workspace_id,actor_user_id,event_type,entity_type,entity_id,metadata,schema_version,origin,correlation_id,trace_id,occurred_at)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6::jsonb,1,'local_native_enterprise',gen_random_uuid(),gen_random_uuid(),NOW())
+       RETURNING id,event_type`,
+      [
+        WORKSPACE_ID,
+        USER_ID,
+        eventType,
+        entityType,
+        entityId,
+        JSON.stringify({
+          auditMarker: stamp,
+          actorRole: "admin",
+          projectId,
+          taskId,
+          userId: targetUser?.id || null,
+          ownerId: targetUser?.id || null,
+          priority: eventType.includes("SECURITY") || eventType.includes("INCIDENT") ? "critical" : "high",
+          riskLevel: eventType.includes("SECURITY") || eventType.includes("INCIDENT") || eventType.includes("CUSTOMER") ? "critical" : "high",
+          title: summary,
+          summary,
+          teamId: organizationUsers.find((user) => user.department === "Engineering")?.id || null,
+          departmentId: organizationUsers.find((user) => user.department === "Leadership")?.id || null,
+          enterpriseId: WORKSPACE_ID,
+        }),
+      ]
+    );
+    await db(
+      `INSERT INTO adaptive_event_queue (workspace_id,event_id,status,available_at)
+       VALUES ($1,$2,'pending',NOW()) ON CONFLICT DO NOTHING`,
+      [WORKSPACE_ID, row.id]
+    );
+    created.push(row);
+  }
+  await request("/adaptive/worker/run-once", { method: "POST", body: { limit: 50 }, timeoutMs: 90000 });
+  return created;
+}
+
+async function runSyntheticLoad(eventCount = 1000) {
+  const beforeMemory = process.memoryUsage().rss;
+  const inserted = await dbOne(
+    `WITH events AS (
+       INSERT INTO workspace_events
+         (id,workspace_id,actor_user_id,event_type,entity_type,metadata,schema_version,origin,correlation_id,trace_id,occurred_at)
+       SELECT gen_random_uuid(),$1,$2,'LOAD_TEST_SIGNAL','audit_load',
+              jsonb_build_object('auditMarker',$3::text,'sequence',n),1,'local_load',gen_random_uuid(),gen_random_uuid(),NOW()
+       FROM generate_series(1,$4::int) n RETURNING id
+     ), queued AS (
+       INSERT INTO adaptive_event_queue (workspace_id,event_id,status,available_at)
+       SELECT $1,id,'pending',NOW() FROM events RETURNING id
+     ) SELECT COUNT(*)::int count FROM queued`,
+    [WORKSPACE_ID, USER_ID, stamp, eventCount]
+  );
+  const started = Date.now();
+  let workerCalls = 0;
+  while (workerCalls < 40) {
+    const pending = await dbOne(
+      `SELECT COUNT(*)::int count FROM adaptive_event_queue q
+       JOIN workspace_events e ON e.id=q.event_id
+       WHERE q.workspace_id=$1 AND q.status='pending' AND e.metadata->>'auditMarker'=$2 AND e.origin='local_load'`,
+      [WORKSPACE_ID, stamp]
+    );
+    if (!pending.count) break;
+    await request("/adaptive/worker/run-once", { method: "POST", body: { limit: 100 }, timeoutMs: 120000 });
+    workerCalls += 1;
+  }
+  const elapsedMs = Date.now() - started;
+  const queue = await dbOne(
+    `SELECT COUNT(*)::int total,
+            COUNT(*) FILTER (WHERE q.status='completed')::int completed,
+            COUNT(*) FILTER (WHERE q.status='failed')::int failed,
+            COUNT(*) FILTER (WHERE q.status='pending')::int pending,
+            ROUND(AVG(EXTRACT(EPOCH FROM (q.processed_at-q.created_at))*1000)::numeric,2) avg_queue_latency_ms,
+            ROUND(MAX(EXTRACT(EPOCH FROM (q.processed_at-q.created_at))*1000)::numeric,2) max_queue_latency_ms
+     FROM adaptive_event_queue q JOIN workspace_events e ON e.id=q.event_id
+     WHERE q.workspace_id=$1 AND e.metadata->>'auditMarker'=$2 AND e.origin='local_load'`,
+    [WORKSPACE_ID, stamp]
+  );
+  return {
+    inserted: inserted.count,
+    workerCalls,
+    elapsedMs,
+    throughputPerSecond: Number((queue.completed / Math.max(elapsedMs / 1000, 0.001)).toFixed(2)),
+    harnessRssDeltaBytes: process.memoryUsage().rss - beforeMemory,
+    queue,
+  };
 }
 
 async function drainWorker(maxRounds = 12) {
@@ -319,10 +785,6 @@ async function summarizePhase(phase) {
 }
 
 async function cleanup() {
-  await rejectPendingForTaskIds(
-    tasks.map((task) => task.id),
-    `Automatic cleanup after ${stamp}`
-  ).catch(() => {});
   if (originalSettings) {
     await request("/adaptive/settings", {
       method: "PUT",
@@ -338,6 +800,18 @@ async function cleanup() {
       expected: [200, 400],
     }).catch(() => {});
   }
+  if (tasks.length) {
+    await db(
+      `UPDATE operations_ai_actions
+       SET status = 'rejected',
+           approved_at = COALESCE(approved_at, NOW()),
+           updated_at = NOW()
+       WHERE workspace_id = $1
+         AND task_id = ANY($2::uuid[])
+         AND status IN ('pending', 'approval_pending')`,
+      [WORKSPACE_ID, tasks.map((task) => task.id)]
+    ).catch(() => {});
+  }
   for (const task of [...tasks].reverse()) {
     await request(`/tasks/${task.id}`, {
       method: "DELETE",
@@ -350,12 +824,28 @@ async function cleanup() {
       expected: [200, 400, 403, 404],
     }).catch(() => {});
   }
+  await db(`DELETE FROM huddle_sessions WHERE id = ANY($1::uuid[])`, [seededIds.huddleSessions]).catch(() => {});
+  await db(`DELETE FROM workspace_digest_runs WHERE id = ANY($1::uuid[])`, [seededIds.digestRuns]).catch(() => {});
+  await db(`DELETE FROM workspace_memory_entries WHERE id = ANY($1::uuid[])`, [seededIds.memoryEntries]).catch(() => {});
+  await db(`DELETE FROM wiki_spaces WHERE id = ANY($1::uuid[])`, [seededIds.wikiSpaces]).catch(() => {});
+  await db(`DELETE FROM okr_objectives WHERE id = ANY($1::uuid[])`, [seededIds.objectives]).catch(() => {});
+  await db(`DELETE FROM review_cycles WHERE id = ANY($1::uuid[])`, [seededIds.reviewCycles]).catch(() => {});
+  for (const user of [...organizationUsers].reverse()) {
+    await db(`DELETE FROM users WHERE id=$1`, [user.id]).catch(() => {});
+  }
+  await db(`DELETE FROM leave_types WHERE id = ANY($1::uuid[])`, [seededIds.leaveTypes]).catch(() => {});
 }
 
 let finalEvidence = {};
 
 try {
-  await check("baseline.production-version", async () => request("/version"));
+  await check("baseline.local-safety", async () => ({
+    api: API, databaseHost: databaseUrl.hostname, database: databaseUrl.pathname.slice(1),
+    productionBlocked: localHosts.has(apiUrl.hostname) && localHosts.has(databaseUrl.hostname),
+  }));
+  await check("baseline.local-version", async () => request("/version"));
+  const organizationEvidence = await check("enterprise-organization.seed", seedRealisticOrganization);
+  if (!organizationEvidence) throw new Error("Realistic organization seed is a mandatory certification prerequisite");
   originalSettings = (await check("baseline.adaptive-settings", async () => request("/adaptive/settings")))?.payload;
   await check("baseline.enable-assist", async () => request("/adaptive/settings", {
     method: "PUT",
@@ -369,6 +859,23 @@ try {
       policy: originalSettings?.policy || {},
     },
   }));
+
+  const contractCatalogEvidence = await check("platform.contracts-readiness-and-workflow-catalog", async () => {
+    const status = (await request("/adaptive/status")).payload;
+    const catalog = (await request("/adaptive/workflow-catalog")).payload;
+    if (status.contextHealth?.status !== "available") throw new Error("Context provider contracts are not available");
+    if (!catalog.events?.length || !catalog.capabilities?.length || !catalog.templates?.length) {
+      throw new Error("Workflow catalog is missing business vocabulary, capabilities, or templates");
+    }
+    return {
+      healthStatus: status.status,
+      contextReady: status.contextHealth.status === "available",
+      contextProviders: status.contextHealth.providers?.length || 0,
+      catalogEvents: catalog.events.length,
+      catalogCapabilities: catalog.capabilities.length,
+      catalogTemplates: catalog.templates.length,
+    };
+  });
 
   await check("scenario-projects.create", async () => {
     for (const domain of Object.keys(domainScenarios)) {
@@ -386,10 +893,12 @@ try {
   });
 
   const phaseOne = scenarios.filter((scenario) => scenario.phase === 1);
-  await check("phase-1.create-56-operational-scenarios", async () => {
+  await check(`phase-1.create-${phaseOne.length}-operational-scenarios`, async () => {
     for (const scenario of phaseOne) await createScenarioTask(scenario);
+    const dependencyCount = await seedTaskDependencies(tasks.filter((task) => task.scenario.phase === 1));
     return {
       count: phaseOne.length,
+      dependencyCount,
       domains: [...new Set(phaseOne.map((scenario) => scenario.domain))],
     };
   });
@@ -448,10 +957,12 @@ try {
   ));
 
   const phaseTwo = scenarios.filter((scenario) => scenario.phase === 2);
-  await check("phase-2.create-21-follow-up-scenarios", async () => {
+  await check(`phase-2.create-${phaseTwo.length}-follow-up-scenarios`, async () => {
     for (const scenario of phaseTwo) await createScenarioTask(scenario);
+    const dependencyCount = await seedTaskDependencies(tasks.filter((task) => task.scenario.phase === 2));
     return {
       count: phaseTwo.length,
+      dependencyCount,
       repeatedBehaviourTheme: "manager and executive ownership overrides",
     };
   });
@@ -460,6 +971,116 @@ try {
     return { workerCalls: runs.length };
   });
   const phaseTwoSummary = await check("phase-2.behaviour-summary", async () => summarizePhase(2));
+
+  const nativeEventEvidence = await check("event-platform.native-enterprise-event-behaviour", async () => {
+    const created = await enqueueNativeOperationalEvents();
+    const rows = await db(
+      `SELECT
+         e.event_type,
+         COUNT(DISTINCT r.id)::int runtime_runs,
+         COUNT(DISTINCT a.id)::int recommendations,
+         COUNT(DISTINCT a.capability_key)::int selected_capabilities,
+         COUNT(*) FILTER (WHERE a.payload->'planningDecision'->>'registryDriven' = 'true')::int registry_planned_actions
+       FROM workspace_events e
+       LEFT JOIN adaptive_runtime_runs r ON r.event_id=e.id
+       LEFT JOIN operations_ai_actions a ON a.adaptive_runtime_run_id=r.id
+       WHERE e.id = ANY($1::uuid[])
+       GROUP BY e.event_type
+       ORDER BY e.event_type`,
+      [created.map((event) => event.id)]
+    );
+    const missing = rows.filter((row) => Number(row.runtime_runs || 0) < 1);
+    if (missing.length) throw new Error(`Native events did not process: ${missing.map((row) => row.event_type).join(", ")}`);
+    return { created: created.length, rows };
+  });
+
+  const meetingEvent = await check("orchestration.meeting-event-enqueue", enqueueMeetingIntelligenceEvent);
+  await check("orchestration.meeting-event-process", async () => {
+    const run = await request("/adaptive/worker/run-once", { method: "POST", body: { limit: 25 }, timeoutMs: 60000 });
+    return run.payload;
+  });
+  const meetingPlanEvidence = await check("orchestration.meeting-plan", async () => db(
+    `SELECT a.id,a.capability_key,a.action_type,a.status,a.approval_mode,a.confidence,
+            p.objective,p.status AS plan_status,s.step_index,s.depends_on
+     FROM operations_ai_actions a
+     JOIN adaptive_runtime_runs r ON r.id=a.adaptive_runtime_run_id
+     LEFT JOIN adaptive_execution_plans p ON p.runtime_run_id=r.id
+     LEFT JOIN adaptive_execution_plan_steps s ON s.action_id=a.id
+     WHERE r.event_id=$1 ORDER BY s.step_index,a.created_at`,
+    [meetingEvent?.eventId]
+  ));
+
+  const governedExecutions = await check("orchestration.governed-cross-capability-execution", async () => {
+    const candidates = await db(
+      `SELECT a.id,a.capability_key,a.status,s.step_index FROM operations_ai_actions a
+       JOIN adaptive_runtime_runs r ON r.id=a.adaptive_runtime_run_id
+       LEFT JOIN adaptive_execution_plan_steps s ON s.action_id=a.id
+       WHERE r.event_id=$1 AND a.status IN ('pending','approval_pending')
+       ORDER BY s.step_index NULLS LAST,a.created_at`,
+      [meetingEvent?.eventId]
+    );
+    const results = [];
+    for (const action of candidates.slice(0, 4)) {
+      const response = await request(`/adaptive/recommendations/${action.id}/approve`, {
+        method: "POST", body: { notes: `Governed local execution ${stamp}`, execute: true },
+        expected: [200, 400], timeoutMs: 90000,
+      });
+      const persisted = await dbOne(
+        `SELECT id,capability_key,status,executed_at,result FROM operations_ai_actions WHERE id=$1`,
+        [action.id]
+      );
+      results.push({ endpointStatus: response.status, ...persisted });
+    }
+    return results;
+  });
+
+  const learningVariationEvidence = await check("learning.accept-reject-edit-ignore", async () => {
+    const pending = await db(
+      `SELECT id FROM operations_ai_actions
+       WHERE workspace_id=$1 AND task_id=ANY($2::uuid[]) AND status IN ('pending','approval_pending')
+       ORDER BY created_at DESC LIMIT 4`,
+      [WORKSPACE_ID, tasks.filter((task) => task.scenario.phase === 2).map((task) => task.id)]
+    );
+    const feedback = [];
+    if (pending[0]) feedback.push((await request(`/adaptive/recommendations/${pending[0].id}/feedback`, {
+      method: "POST", body: { feedback: "edited", changes: { timing: "next_business_hour" }, note: `Manager edit ${stamp}` },
+    })).payload);
+    if (pending[1]) feedback.push((await request(`/adaptive/recommendations/${pending[1].id}/feedback`, {
+      method: "POST", body: { feedback: "ignored", note: `Manager ignored ${stamp}` },
+    })).payload);
+    if (pending[2]) feedback.push((await request(`/adaptive/recommendations/${pending[2].id}/reject`, {
+      method: "POST", body: { notes: `Manager rejected ${stamp}` },
+    })).payload);
+    if (pending[3]) feedback.push((await request(`/adaptive/recommendations/${pending[3].id}/approve`, {
+      method: "POST", body: { notes: `Manager accepted ${stamp}`, execute: false },
+    })).payload);
+    return { signalCount: feedback.length, actionIds: pending.map((row) => row.id) };
+  });
+
+  const adaptiveStrategyEvidence = await check("learning.strategy-affects-planning-and-policy", async () => {
+    const rows = await db(
+      `SELECT scope_type, profile_key, sample_count, confidence, profile_value, explanation
+       FROM adaptive_preference_profiles
+       WHERE workspace_id=$1 AND profile_key='adaptive_strategy'
+       ORDER BY sample_count DESC, updated_at DESC`,
+      [WORKSPACE_ID]
+    );
+    const planned = await dbOne(
+      `SELECT
+         COUNT(*)::int actions,
+         COUNT(*) FILTER (WHERE payload->'planningDecision'->>'registryDriven' = 'true')::int registry_driven,
+         COUNT(*) FILTER (WHERE payload->'personalization'->>'strategySource' IS NOT NULL)::int strategy_personalized,
+         COUNT(*) FILTER (WHERE payload->>'recommendedTiming' IS NOT NULL)::int timing_influenced
+       FROM operations_ai_actions
+       WHERE workspace_id=$1
+         AND adaptive_runtime_run_id IN (
+           SELECT id FROM adaptive_runtime_runs WHERE workspace_id=$1 AND started_at > NOW() - INTERVAL '1 hour'
+         )`,
+      [WORKSPACE_ID]
+    );
+    if (!rows.length) throw new Error("No adaptive_strategy profile was produced");
+    return { profiles: rows, planned };
+  });
 
   const contextEvidence = await check("context.richness-and-reasoning-depth", async () => {
     const taskIds = tasks.map((task) => task.id);
@@ -474,11 +1095,11 @@ try {
          COUNT(*)::int run_count,
          ROUND(AVG(COALESCE((context_summary->>'coverage')::numeric, 0)), 3) avg_reported_coverage,
          COUNT(*) FILTER (WHERE context_summary->'task' IS NOT NULL AND context_summary->'task' <> 'null'::jsonb)::int task_context_runs,
-         COUNT(*) FILTER (WHERE context_summary->'project' IS NOT NULL AND context_summary->'project' <> 'null'::jsonb)::int project_context_runs,
+         COUNT(*) FILTER (WHERE context_summary#>>'{operationalGraph,relevance,projectId}' IS NOT NULL)::int project_context_runs,
          COUNT(*) FILTER (WHERE COALESCE((context_summary->>'memoryCount')::int, 0) > 0)::int memory_context_runs,
-         COUNT(*) FILTER (WHERE reasoning_summary ILIKE '%dependency%')::int reasoning_mentions_dependency,
-         COUNT(*) FILTER (WHERE reasoning_summary ILIKE '%leave%')::int reasoning_mentions_leave,
-         COUNT(*) FILTER (WHERE reasoning_summary ILIKE '%previous%' OR reasoning_summary ILIKE '%histor%')::int reasoning_mentions_history,
+         COUNT(*) FILTER (WHERE evidence::text ILIKE '%task_dependency%')::int reasoning_mentions_dependency,
+         COUNT(*) FILTER (WHERE evidence::text ILIKE '%assignee_availability%')::int reasoning_mentions_leave,
+         COUNT(*) FILTER (WHERE COALESCE((context_summary#>>'{operationalGraph,priorOutcomeCount}')::int,0) > 0)::int reasoning_mentions_history,
          COUNT(*) FILTER (WHERE jsonb_array_length(COALESCE(evidence, '[]'::jsonb)) > 0)::int runs_with_evidence,
          COUNT(DISTINCT reasoning_summary)::int distinct_reasoning_summaries
        FROM audited_runs`,
@@ -646,6 +1267,38 @@ try {
     [WORKSPACE_ID, tasks.map((task) => task.id)]
   ));
 
+  const causalEvidence = await check("continuous-evaluation.causal-outcome-ledger", async () => {
+    await db(
+      `UPDATE adaptive_predictions
+       SET evaluate_after = NOW()
+       WHERE workspace_id=$1
+         AND prediction_key LIKE 'outcome.%'
+         AND action_id IN (
+           SELECT id FROM operations_ai_actions
+           WHERE task_id = ANY($2::uuid[])
+         )
+         AND status='pending'`,
+      [WORKSPACE_ID, tasks.map((task) => task.id)]
+    );
+    await request("/adaptive/worker/run-once", { method: "POST", body: { limit: 50 }, timeoutMs: 90000 });
+    const summary = await dbOne(
+      `SELECT
+         COUNT(*)::int evaluations,
+         ROUND(AVG(score)::numeric, 3) avg_score,
+         COUNT(*) FILTER (WHERE causal_claim->>'method' IS NOT NULL)::int with_causal_method,
+         COUNT(DISTINCT causal_claim->>'method')::int distinct_methods
+       FROM adaptive_causal_evaluations
+       WHERE workspace_id=$1
+         AND action_id IN (
+           SELECT id FROM operations_ai_actions
+           WHERE task_id = ANY($2::uuid[])
+         )`,
+      [WORKSPACE_ID, tasks.map((task) => task.id)]
+    );
+    if (!summary?.evaluations) throw new Error("No causal outcome evaluations were produced");
+    return summary;
+  });
+
   const predictionEvidence = await check("continuous-evaluation.outcomes", async () => db(
     `SELECT
        status,
@@ -688,8 +1341,83 @@ try {
     };
   });
 
+  const governanceEvidence = await check("governance.roles-approval-and-tenant-boundaries", async () => {
+    const member = organizationUsers.find((user) => user.role === "user");
+    const memberToken = JWT_SECRET ? jwt.sign(
+      { id: member.id, role: "user", workspaceId: WORKSPACE_ID }, JWT_SECRET, { expiresIn: "30m" }
+    ) : null;
+    const privilegedStatuses = {};
+    if (memberToken) {
+      for (const [key, path, method] of [
+        ["settings", "/adaptive/settings", "GET"],
+        ["worker", "/adaptive/worker/run-once", "POST"],
+      ]) {
+        const response = await fetch(`${API}${path}`, {
+          method, headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+          body: method === "POST" ? JSON.stringify({ limit: 1 }) : undefined,
+        });
+        privilegedStatuses[key] = response.status;
+      }
+    }
+    const pending = await dbOne(
+      `SELECT id FROM operations_ai_actions WHERE workspace_id=$1 AND status IN ('pending','approval_pending') ORDER BY created_at DESC LIMIT 1`,
+      [WORKSPACE_ID]
+    );
+    let directExecuteStatus = null;
+    if (pending) directExecuteStatus = (await request(`/adaptive/recommendations/${pending.id}/execute`, {
+      method: "POST", expected: [200, 400],
+    })).status;
+
+    const second = await fetch(`${API}/auth/dev-login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `isolated-${stamp}@localhost.test`, name: "Isolated Tenant Auditor", workspaceName: `Isolated Tenant ${stamp}` }),
+    }).then((response) => response.json());
+    const foreignProject = projects.values().next().value;
+    const foreignResponse = await fetch(`${API}/projects/${foreignProject.id}`, {
+      headers: { authorization: `Bearer ${second.token}` },
+    });
+    return {
+      memberPrivilegedStatuses: privilegedStatuses,
+      directExecuteStatus,
+      directExecuteBlocked: directExecuteStatus === 400,
+      foreignWorkspaceProjectStatus: foreignResponse.status,
+      foreignWorkspaceReadBlocked: [401, 403, 404].includes(foreignResponse.status),
+      secondWorkspaceId: second.workspace?.id,
+    };
+  });
+
+  const aiServiceEvidence = await check("ai-service.local-auth-and-context", async () => {
+    const base = "http://localhost:5005";
+    const health = await fetch(`${base}/health`);
+    const ready = await fetch(`${base}/ready`);
+    const invalid = await fetch(`${base}/ai/health`, {
+      method: "POST", headers: { authorization: "Bearer invalid-local-certification-token" },
+    });
+    const secret = process.env.INTERNAL_SERVICE_SECRET || process.env.AI_SERVICE_SECRET;
+    const valid = await fetch(`${base}/ai/health`, {
+      method: "POST", headers: { authorization: `Bearer ${secret}` },
+    });
+    const preview = await fetch(`${base}/ai/chat/preview`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: WORKSPACE_ID, userId: USER_ID, intent: "enterprise_status" }),
+      signal: AbortSignal.timeout(30000),
+    });
+    return {
+      health: { status: health.status, body: await health.json() },
+      readiness: { status: ready.status, body: await ready.json() },
+      invalidAuthStatus: invalid.status,
+      validAuth: { status: valid.status, body: await valid.json() },
+      contextPreview: { status: preview.status, body: await preview.json().catch(() => null) },
+    };
+  });
+
+  const performanceEvidence = await check("performance.2000-event-throughput", () => runSyntheticLoad(2000));
+
   finalEvidence = {
     stamp,
+    environment: { api: API, database: databaseUrl.pathname.slice(1), localOnly: true },
+    organizationEvidence,
     scenarios: {
       total: scenarios.length,
       phaseOne: phaseOne.length,
@@ -703,6 +1431,9 @@ try {
     },
     phaseOneSummaryBeforeFeedback,
     phaseTwoSummary,
+    meetingPlanEvidence,
+    governedExecutions,
+    learningVariationEvidence,
     profilesAfterPhaseOne,
     contextEvidence,
     sourceEvidence,
@@ -714,6 +1445,13 @@ try {
     learningEvidence,
     predictionEvidence,
     isolationEvidence,
+    governanceEvidence,
+    aiServiceEvidence,
+    contractCatalogEvidence,
+    nativeEventEvidence,
+    adaptiveStrategyEvidence,
+    causalEvidence,
+    performanceEvidence,
   };
 } finally {
   await cleanup();

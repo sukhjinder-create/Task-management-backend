@@ -1,10 +1,7 @@
 import crypto from "node:crypto";
+import { isProductionRuntime } from "./environment.js";
 
 const DEV_JWT_SECRET = "task_management_secret";
-
-export function isProductionRuntime() {
-  return String(process.env.NODE_ENV || "").toLowerCase() === "production";
-}
 
 export function getJwtSecret() {
   const configured = process.env.JWT_SECRET;

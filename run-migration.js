@@ -1,9 +1,17 @@
 import pg from "pg";
 import { readFileSync } from "fs";
+import { assertDatabaseScriptSafety } from "./utils/databaseSafety.js";
+
+assertDatabaseScriptSafety({ operation: "legacy migration runner" });
+
+const connectionString = process.env.DATABASE_URL?.trim();
+if (!connectionString) {
+  throw new Error("DATABASE_URL is required to run migrations");
+}
 
 const pool = new pg.Pool({
-  connectionString:
-    "postgres://apytask_manager_user:f3X9aT7zM1pQ8nR6wK2j@10.0.0.6:5432/apytask_manager",
+  connectionString,
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : undefined,
 });
 
 const migrations = [
@@ -25,12 +33,12 @@ for (const { file, label } of migrations) {
   const sql = readFileSync(file, "utf8");
   try {
     await pool.query(sql);
-    console.log(`✅ Migration complete — ${label}.`);
+    console.log(`Migration complete: ${label}.`);
   } catch (err) {
     if (err.message.includes("already exists")) {
-      console.log(`✅ Already applied — ${label}.`);
+      console.log(`Already applied: ${label}.`);
     } else {
-      console.error(`❌ Migration failed (${label}):`, err.message);
+      console.error(`Migration failed (${label}):`, err.message);
     }
   }
 }

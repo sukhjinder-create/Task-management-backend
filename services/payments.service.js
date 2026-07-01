@@ -40,10 +40,11 @@ import {
   normalizeSignupEmail,
   validateSignupPassword,
 } from "./auth.service.js";
+import { getBackendPublicUrl, getFrontendBaseUrl } from "../config/environment.js";
 
 const STRIPE_API_BASE = "https://api.stripe.com";
 const RAZORPAY_API_BASE = "https://api.razorpay.com/v1";
-const DEFAULT_FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const DEFAULT_FRONTEND_URL = getFrontendBaseUrl();
 const TRIAL_SIGNUP_SESSION_TYPE = "trial_signup";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -180,17 +181,6 @@ function stripeTimestampToIso(value) {
 function razorpayTimestampToIso(value) {
   if (!value) return null;
   return new Date(Number(value) * 1000).toISOString();
-}
-
-function getBackendPublicUrl() {
-  if (process.env.API_PUBLIC_URL) return process.env.API_PUBLIC_URL.replace(/\/+$/, "");
-  if (process.env.BACKEND_PUBLIC_URL) return process.env.BACKEND_PUBLIC_URL.replace(/\/+$/, "");
-  if (process.env.GOOGLE_CALLBACK_URL) {
-    try {
-      return new URL(process.env.GOOGLE_CALLBACK_URL).origin;
-    } catch {}
-  }
-  return "http://localhost:3000";
 }
 
 function resolveTrialSignupSuccessUrl(overrideUrl) {

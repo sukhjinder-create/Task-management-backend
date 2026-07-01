@@ -1,10 +1,11 @@
 // services/email.service.js
 // Centralised email notification system using nodemailer
 import nodemailer from "nodemailer";
+import { getFrontendBaseUrl } from "../config/environment.js";
 
 const FROM_NAME    = process.env.EMAIL_FROM_NAME  || "TaskManagement";
 const FROM_ADDRESS = process.env.EMAIL_FROM       || "noreply@taskmanagement.app";
-const APP_URL      = process.env.FRONTEND_URL     || "http://localhost:5173";
+const APP_URL      = getFrontendBaseUrl();
 
 let _transporter = null;
 

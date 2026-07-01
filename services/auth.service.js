@@ -36,11 +36,17 @@ import { verifyMfaToken } from "./mfa.service.js";
 import { sendPasswordResetEmail } from "./email.service.js";
 import pool from "../db.js";
 import { getJwtSecret } from "../config/secrets.js";
+import {
+  getFrontendBaseUrl,
+  getGoogleCallbackUrl,
+  isAuthDevModeEnabled,
+  isLocalRuntime,
+} from "../config/environment.js";
 
 const JWT_SECRET = getJwtSecret();
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
 const WORKSPACE_GLOBAL = "GLOBAL";
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_URL = getFrontendBaseUrl();
 
 /**
  * Helper: normalize DB user row to a safe user object
@@ -158,6 +164,41 @@ export async function loginWithMfa(mfaSessionToken, totpCode) {
   await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
   const token = generateToken(safeUser);
   return { token, user: safeUser };
+}
+
+export async function loginWithDevelopmentUser({
+  email = process.env.AUTH_DEV_EMAIL || "developer@localhost.test",
+  name = process.env.AUTH_DEV_NAME || "Asystence Developer",
+  workspaceName = process.env.AUTH_DEV_WORKSPACE || "Local Development",
+} = {}) {
+  if (!isAuthDevModeEnabled()) {
+    const error = new Error("Developer authentication is not enabled");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const normalizedEmail = normalizeSignupEmail(email);
+  const existing = await getUserByEmail(normalizedEmail);
+
+  if (existing) {
+    const safeUser = normalizeUserRow(existing);
+    await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
+    const token = generateToken(safeUser);
+    return { token, user: safeUser };
+  }
+
+  const passwordHash = await bcrypt.hash(
+    process.env.AUTH_DEV_PASSWORD || "local-development-password",
+    10
+  );
+
+  return createSelfServeTrialWorkspace({
+    workspaceName,
+    ownerName: name,
+    ownerEmail: normalizedEmail,
+    ownerPasswordHash: passwordHash,
+    skipTrialIpCheck: true,
+  });
 }
 
 /**
@@ -431,7 +472,7 @@ export function validateSignupPassword(password) {
 function getGoogleOAuthConfig() {
   const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
   const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-  const GOOGLE_CALLBACK_URL  = process.env.GOOGLE_CALLBACK_URL;
+  const GOOGLE_CALLBACK_URL  = getGoogleCallbackUrl();
 
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_CALLBACK_URL) {
     throw new Error("Google SSO is not configured on this server");
@@ -531,6 +572,7 @@ export async function signupWorkspaceWithEmail({
     ownerEmail: email,
     ownerPasswordHash: passwordHash,
     ipHash,
+    skipTrialIpCheck: isLocalRuntime(),
   });
 }
 
@@ -547,6 +589,7 @@ export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = 
     ownerPasswordHash: null,
     ipHash,
     avatarUrl: profile.picture,
+    skipTrialIpCheck: isLocalRuntime(),
   });
 }
 

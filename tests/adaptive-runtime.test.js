@@ -45,11 +45,14 @@ test("runtime redaction strips sensitive request data before events are stored",
 });
 
 test("evidence-constrained planner explains risk and selects coordinated capabilities", () => {
+  clearCapabilitiesForTests();
+  registerDefaultCapabilities();
   const event = {
     eventId: "22222222-2222-4222-8222-222222222222",
     workspaceId: "33333333-3333-4333-8333-333333333333",
     actorUserId: "44444444-4444-4444-8444-444444444444",
     eventType: "TASK_UPDATED",
+    metadata: { actorRole: "admin" },
   };
   const context = {
     coverage: 1,
@@ -68,8 +71,8 @@ test("evidence-constrained planner explains risk and selects coordinated capabil
   const reasoning = reasonFromOperationalContext({ event, context, now: new Date("2026-06-30T00:00:00Z") });
   assert.equal(reasoning.explainable, true);
   assert.equal(reasoning.model, "evidence_constrained_operational_planner_v2");
-  assert.ok(reasoning.recommendations.some((item) => item.ruleKey === "overdue_task_review"));
-  assert.ok(reasoning.recommendations.some((item) => item.ruleKey === "blocked_task_escalation"));
+  assert.ok(reasoning.recommendations.some((item) => item.ruleKey.startsWith("overdue_task_review")));
+  assert.ok(reasoning.recommendations.some((item) => item.ruleKey.startsWith("blocked_task_escalation")));
   assert.ok(reasoning.evidence.every((item) => item.source === "task.service"));
   assert.ok(reasoning.recommendations.some((item) => item.capabilityKey === "notification.send"));
   assert.ok(reasoning.recommendations.some((item) => item.capabilityKey === "autopilot.analyze"));
@@ -110,6 +113,8 @@ test("approval-required and manual-only actions cannot execute while pending", (
 });
 
 test("meeting completion creates a governed multi-capability execution plan", () => {
+  clearCapabilitiesForTests();
+  registerDefaultCapabilities();
   const reasoning = reasonFromOperationalContext({
     event: {
       eventId: "22222222-2222-4222-8222-222222222222",
@@ -118,7 +123,7 @@ test("meeting completion creates a governed multi-capability execution plan", ()
       eventType: "MEETING_ENDED",
       entityType: "meeting",
       entityId: "88888888-8888-4888-8888-888888888888",
-      metadata: { projectId: "77777777-7777-4777-8777-777777777777", summary: "Release decision recorded" },
+      metadata: { actorRole: "admin", projectId: "77777777-7777-4777-8777-777777777777", summary: "Release decision recorded" },
     },
     context: { coverage: 0.8, sources: [], data: { operationalGraph: { meetings: [{ session_id: "88888888-8888-4888-8888-888888888888", digest_json: { summary: "Release decision recorded" } }], relevance: { projectId: "77777777-7777-4777-8777-777777777777" } } } },
   });
@@ -145,6 +150,22 @@ test("repeated scoped rejection suppresses non-critical notification behaviour",
       scopeType: "project",
       scopeId: "77777777-7777-4777-8777-777777777777",
       sampleCount: 20,
+    }),
+    strategyLoader: async () => ({
+      source: "neutral_strategy",
+      scopeType: "default",
+      scopeId: null,
+      sampleCount: 0,
+      confidence: 0,
+      explanation: "Test neutral strategy.",
+      preferredCapabilities: [],
+      avoidedCapabilities: [],
+      preferredTiming: null,
+      approvalBias: "policy_default",
+      notificationCadence: "policy_default",
+      workflowPatterns: { preferred: [], avoided: [], scores: [] },
+      planningBias: {},
+      hierarchy: ["user", "team", "project", "department", "workspace", "enterprise"],
     }),
   });
   assert.equal(policy.proposed.length, 0);

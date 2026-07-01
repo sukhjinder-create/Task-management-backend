@@ -1,5 +1,6 @@
 import pool from "../../db.js";
 import { routeRecommendation, executeWorkflowCapability } from "../approvals/approvalEngine.service.js";
+import { adaptiveStrategyPrior } from "../personalization/personalizationEngine.service.js";
 import { compactSummary, getPath, stableHash } from "../shared/runtimeUtils.js";
 import { validateWorkflowDefinition } from "./workflowValidator.js";
 
@@ -149,6 +150,21 @@ function workflowActionType(capabilityKey, input) {
   return null;
 }
 
+async function workflowApprovalMode({ event, input, step, state }) {
+  if (state.approvalMode || step.approvalMode) return state.approvalMode || step.approvalMode;
+  const strategy = await adaptiveStrategyPrior({
+    workspaceId: event.workspaceId,
+    userId: input.userId || input.assignedTo || event.actorUserId || null,
+    teamId: event.metadata?.teamId || null,
+    projectId: input.projectId || event.metadata?.projectId || null,
+    departmentId: event.metadata?.departmentId || null,
+    enterpriseId: event.metadata?.enterpriseId || null,
+  });
+  if (strategy.approvalBias === "prefer_manual_review") return "manual_only";
+  if (strategy.approvalBias === "prefer_auto_when_safe" && step.autoEligible === true) return "automatic";
+  return "approval_required";
+}
+
 async function executeWorkflowRun({ run, workflow, event, context, settings }) {
   const steps = workflow.definition?.steps || [];
   const source = { event, context, state: run.state || {} };
@@ -190,7 +206,7 @@ async function executeWorkflowRun({ run, workflow, event, context, settings }) {
       }
     } else if (step.type === "THEN") {
       const input = interpolate(step.input || {}, source);
-      const approvalMode = state.approvalMode || step.approvalMode || "approval_required";
+      const approvalMode = await workflowApprovalMode({ event, input, step, state });
       const idempotencyKey = `workflow:${run.id}:step:${index}:${stableHash(input).slice(0, 16)}`;
       let output;
       const actionType = workflowActionType(step.capabilityKey, input);

@@ -16,6 +16,7 @@ export function registerCapability(capability) {
     autoEligible: false,
     allowedRoles: ["admin", "owner", "manager", "user"],
     validate: () => true,
+    planning: null,
     ...capability,
   };
   if (!APPROVAL_MODES.has(normalized.approvalMode)) throw new Error(`Invalid approval mode: ${normalized.key}`);
@@ -38,7 +39,20 @@ export function listCapabilities() {
     autoEligible: capability.autoEligible,
     allowedRoles: capability.allowedRoles,
     inputContract: capability.inputContract || null,
+    planning: capability.planning ? {
+      intents: capability.planning.intents || [],
+      businessValue: capability.planning.businessValue ?? 0.5,
+      sequence: capability.planning.sequence ?? 50,
+      actionType: capability.planning.actionType || null,
+      contextTags: capability.planning.contextTags || [],
+    } : null,
   }));
+}
+
+export function listPlannableCapabilities() {
+  return Array.from(capabilities.values()).filter((capability) => (
+    capability.planning?.actionType && Array.isArray(capability.planning?.intents)
+  ));
 }
 
 export function clearCapabilitiesForTests() {

@@ -6,6 +6,7 @@ import { replayWorkspaceEvents, retryFailedAdaptiveEvents } from "../adaptive/ev
 import { recordLearningSignal, listLearningSignals, reverseLearningSignal } from "../adaptive/learning/learningEngine.service.js";
 import { getAdaptivePlatformHealth, getExecutionPlan, getRuntimeRun, listAdaptiveRecommendations, listExecutionPlans, listPredictionHistory, listRuntimeRuns } from "../adaptive/observability/observability.service.js";
 import { processAdaptiveWorkerBatch } from "../adaptive/runtime/adaptiveWorker.service.js";
+import { getWorkflowCatalog } from "../adaptive/workflows/workflowCatalog.service.js";
 import { listWorkflowDefinitions, saveWorkflowDefinition, setWorkflowStatus } from "../adaptive/workflows/workflowEngine.service.js";
 import {
   approveOperationsAction,
@@ -121,6 +122,10 @@ router.post("/recommendations/:id/execute", requirePrivileged, async (req, res) 
 
 router.get("/capabilities", requirePrivileged, (_req, res) => {
   res.json({ capabilities: listCapabilities(), contextProviders: listContextProviders() });
+});
+
+router.get("/workflow-catalog", requirePrivileged, (_req, res) => {
+  res.json(getWorkflowCatalog());
 });
 
 router.get("/settings", requirePrivileged, async (req, res) => {

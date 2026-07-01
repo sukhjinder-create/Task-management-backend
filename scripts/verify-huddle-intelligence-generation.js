@@ -61,10 +61,12 @@ const summary = normalizeGenerationOutput({
     confidence: 0.94,
   },
 });
-assert.equal(summary.schemaVersion, 3);
+assert.equal(summary.schemaVersion, 4);
+assert.equal(summary.reportSchema, "huddle-intelligence-report-v4");
 assert.deepEqual(summary.overviewEvidenceSegmentIds, [segmentA]);
 assert.deepEqual(summary.keyPoints[0].evidenceSegmentIds, [segmentB]);
 assert.equal(summary.discussionHighlights[0].speaker, "Asha");
+assert.equal(summary.discussionThemes.length >= 1, true);
 
 const decisions = normalizeGenerationOutput({
   artifactType: "decision",

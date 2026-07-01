@@ -1,6 +1,13 @@
 import pool from "../../db.js";
 import { getRuntimeSettings } from "../config/runtimeSettings.service.js";
 
+function maxClaimLimit() {
+  return Math.min(
+    Math.max(Number(process.env.ADAPTIVE_EVENT_QUEUE_MAX_CLAIM) || 50, 10),
+    500
+  );
+}
+
 export async function enqueueAdaptiveEvent(event) {
   if (!event?.eventId || !event?.workspaceId) return null;
   if (String(event.eventType || "").startsWith("ADAPTIVE_")) return null;
@@ -8,16 +15,23 @@ export async function enqueueAdaptiveEvent(event) {
   const settings = await getRuntimeSettings(event.workspaceId);
   if (!settings.event_capture_enabled || settings.mode === "off") return null;
 
-  const { rows } = await pool.query(
-    `
-    INSERT INTO adaptive_event_queue (workspace_id, event_id)
-    VALUES ($1, $2)
-    ON CONFLICT (event_id) DO NOTHING
-    RETURNING *
-    `,
-    [event.workspaceId, event.eventId]
-  );
-  return rows[0] || null;
+  try {
+    const { rows } = await pool.query(
+      `
+      INSERT INTO adaptive_event_queue (workspace_id, event_id)
+      VALUES ($1, $2)
+      ON CONFLICT (event_id) DO NOTHING
+      RETURNING *
+      `,
+      [event.workspaceId, event.eventId]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    // Event capture is an observer layer. If a stale/deleted workspace emits a
+    // late event, drop it rather than breaking the originating product flow.
+    if (error?.code === "23503") return null;
+    throw error;
+  }
 }
 
 export async function claimAdaptiveEvents({ workerId, limit = 10, leaseSeconds = 120 }) {
@@ -49,7 +63,7 @@ export async function claimAdaptiveEvents({ workerId, limit = 10, leaseSeconds =
       WHERE q.id = c.id
       RETURNING q.*
       `,
-      [Math.min(Math.max(Number(limit) || 10, 1), 50), workerId, String(leaseSeconds)]
+      [Math.min(Math.max(Number(limit) || 10, 1), maxClaimLimit()), workerId, String(leaseSeconds)]
     );
     await client.query("COMMIT");
     return rows;
@@ -114,7 +128,8 @@ export async function failAdaptiveEvent(queueItem, error) {
 }
 
 export async function getAdaptiveQueueMetrics(workspaceId) {
-  const { rows } = await pool.query(
+  const [aggregateResult, latencyResult] = await Promise.all([
+    pool.query(
     `
     SELECT
       COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
@@ -123,22 +138,54 @@ export async function getAdaptiveQueueMetrics(workspaceId) {
       COUNT(*) FILTER (WHERE status = 'pending' AND attempts > 0)::int AS retry_backlog,
       COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)
         FILTER (WHERE status IN ('pending','processing')))), 0)::int AS oldest_lag_seconds,
+      MIN(created_at) FILTER (WHERE status IN ('pending','processing')) AS oldest_unprocessed_created_at,
       MAX(processed_at) AS last_processed_at,
+      COUNT(*) FILTER (WHERE processed_at >= NOW() - INTERVAL '1 minute')::int AS processed_1m,
       COUNT(*) FILTER (WHERE processed_at >= NOW() - INTERVAL '5 minutes')::int AS processed_5m
     FROM adaptive_event_queue
     WHERE workspace_id = $1
     `,
     [workspaceId]
-  );
-  const metrics = rows[0] || {};
+    ),
+    pool.query(
+      `
+      SELECT
+        COUNT(*)::int AS sample_count,
+        ROUND(AVG(EXTRACT(EPOCH FROM (processed_at - created_at)) * 1000)::numeric, 2) AS avg_latency_ms,
+        ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (processed_at - created_at)) * 1000)::numeric, 2) AS p50_latency_ms,
+        ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (processed_at - created_at)) * 1000)::numeric, 2) AS p95_latency_ms,
+        ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (processed_at - created_at)) * 1000)::numeric, 2) AS p99_latency_ms,
+        ROUND(MAX(EXTRACT(EPOCH FROM (processed_at - created_at)) * 1000)::numeric, 2) AS max_latency_ms
+      FROM adaptive_event_queue
+      WHERE workspace_id = $1
+        AND status = 'completed'
+        AND processed_at >= NOW() - INTERVAL '15 minutes'
+      `,
+      [workspaceId]
+    ),
+  ]);
+  const metrics = aggregateResult.rows[0] || {};
+  const latency = latencyResult.rows[0] || {};
   return {
     pending: Number(metrics.pending || 0),
     processing: Number(metrics.processing || 0),
     deadLetters: Number(metrics.dead_letters || 0),
     retryBacklog: Number(metrics.retry_backlog || 0),
     oldestLagSeconds: Number(metrics.oldest_lag_seconds || 0),
+    oldestUnprocessedCreatedAt: metrics.oldest_unprocessed_created_at || null,
     lastProcessedAt: metrics.last_processed_at || null,
+    processed1m: Number(metrics.processed_1m || 0),
+    processed5m: Number(metrics.processed_5m || 0),
     processingRatePerMinute: Number(metrics.processed_5m || 0) / 5,
+    claimLimitMax: maxClaimLimit(),
+    recentLatency: {
+      sampleCount: Number(latency.sample_count || 0),
+      avgMs: latency.avg_latency_ms == null ? null : Number(latency.avg_latency_ms),
+      p50Ms: latency.p50_latency_ms == null ? null : Number(latency.p50_latency_ms),
+      p95Ms: latency.p95_latency_ms == null ? null : Number(latency.p95_latency_ms),
+      p99Ms: latency.p99_latency_ms == null ? null : Number(latency.p99_latency_ms),
+      maxMs: latency.max_latency_ms == null ? null : Number(latency.max_latency_ms),
+    },
   };
 }
 

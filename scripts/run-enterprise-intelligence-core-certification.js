@@ -27,7 +27,7 @@ function defaultApiUrl() {
       return new URL(process.env.GOOGLE_CALLBACK_URL).origin;
     } catch {}
   }
-  return "http://localhost:3000";
+  return `http://localhost:${process.env.PORT || 5000}`;
 }
 
 const workspaceId = argValue("workspace-id");

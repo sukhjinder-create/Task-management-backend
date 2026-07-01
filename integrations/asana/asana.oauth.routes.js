@@ -7,6 +7,7 @@ import {
   setupAsanaWebhooks,
 } from "../webhooks/integration.webhook.service.js";
 import { getJwtSecret } from "../../config/secrets.js";
+import { getFrontendBaseUrl } from "../../config/environment.js";
 
 const router = express.Router();
 
@@ -136,7 +137,7 @@ router.get("/callback", async (req, res) => {
     }
 
     return res.redirect(
-      (process.env.FRONTEND_BASE_URL || "http://localhost:5173") +
+      getFrontendBaseUrl() +
         `/admin/migrations?source=asana&connected=true&webhooks=${webhookStatus}`
     );
 

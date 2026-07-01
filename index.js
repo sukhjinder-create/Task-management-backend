@@ -66,6 +66,7 @@ import adaptiveRoutes from "./routes/adaptive.routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
+import { getCorsAllowedOrigins, isProductionRuntime } from "./config/environment.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
 
@@ -146,32 +147,14 @@ app.use(
   })
 );
 
-function configuredCorsOrigins() {
-  const defaults = [
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost",
-    "capacitor://localhost",
-    "ionic://localhost",
-    process.env.FRONTEND_URL,
-    process.env.FRONTEND_BASE_URL,
-    "https://app.asystence.com",
-  ];
-  const extra = String(process.env.CORS_ALLOWED_ORIGINS || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-  return new Set([...defaults, ...extra].filter(Boolean));
-}
-
 app.use(
   cors({
     origin: (origin, callback) => {
       // Allow web dev server, Electron, Capacitor (Android/iOS), and direct API calls
-      const allowed = configuredCorsOrigins();
+      const allowed = getCorsAllowedOrigins();
       if (!origin || allowed.has(origin)) {
         callback(null, true);
-      } else if (process.env.NODE_ENV !== "production") {
+      } else if (!isProductionRuntime()) {
         callback(null, true);
       } else {
         callback(null, false);
@@ -430,7 +413,7 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-initSocket(server, process.env.FRONTEND_BASE_URL);
+initSocket(server, [...getCorsAllowedOrigins()]);
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://localhost:${PORT}`);

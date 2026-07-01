@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'dart:async';
 
+import '../config/app_config.dart';
 import 'models.dart';
 
 class NavigationIntentService {
@@ -246,7 +247,7 @@ class NavigationIntentService {
     final trimmed = rawUrl.trim();
     final absolute = Uri.tryParse(trimmed);
     if (absolute != null && absolute.hasScheme) return absolute;
-    return Uri.parse('https://app.asystence.com$trimmed');
+    return Uri.parse('${AppConfig.webAppUrl}$trimmed');
   }
 
   void _emit(AppNavigationIntent intent) {

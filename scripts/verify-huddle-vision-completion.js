@@ -103,9 +103,9 @@ assert.match(liveKitProvider, /setScreenShareEnabled\(\s*true,\s*captureOptions,
 assert.match(liveKitRenderTarget, /setVideoDimensions/);
 assert.match(liveKitRenderTarget, /setVideoFPS/);
 assert.match(callWindow, /presentingParticipant/);
-assert.match(callWindow, /object-contain bg-black/);
+assert.match(callWindow, /object-contain bg(?:-black|-\[#11151e\])/);
 assert.match(meetingView, /expectedRevision/);
-assert.match(meetingView, /Discussion highlights/);
+assert.match(meetingView, /Discussion [Hh]ighlights/);
 assert.match(meetingView, /Open questions/);
 assert.match(meetingView, /Promote to workspace memory/);
 assert.match(meetingView, /Create task/);

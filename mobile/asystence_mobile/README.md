@@ -6,7 +6,7 @@ This is intentionally **not** a Capacitor/WebView build. It is Flutter source th
 
 Production Android package: `com.proxima.app`
 
-Production API: `https://asystence-api-616077735050.asia-south1.run.app`
+Production API is supplied at build time with `--dart-define=API_BASE_URL=...`.
 
 ## Local Setup
 
@@ -22,10 +22,11 @@ C:\tmp\flutter\bin\flutter.bat test
 C:\tmp\flutter\bin\flutter.bat run
 ```
 
-The app defaults to the production API. Override it only for local backend testing:
+The app defaults to the Android emulator local backend. Override it for a real device,
+staging, or production:
 
 ```powershell
-C:\tmp\flutter\bin\flutter.bat run --dart-define=API_BASE_URL=http://192.168.x.x:3000
+C:\tmp\flutter\bin\flutter.bat run --dart-define=API_BASE_URL=http://192.168.x.x:5000 --dart-define=WEB_APP_URL=http://192.168.x.x:5173
 ```
 
 Validated Android artifacts:
@@ -57,10 +58,11 @@ settings remain available on the web application.
 
 ## Backend Contract
 
-Default production API base:
+API base is build-time configuration:
 
 ```text
-https://asystence-api-616077735050.asia-south1.run.app
+--dart-define=API_BASE_URL=<backend origin>
+--dart-define=WEB_APP_URL=<web app origin>
 ```
 
 The app expects the existing backend routes mounted in `index.js`, especially:

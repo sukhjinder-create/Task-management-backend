@@ -6,6 +6,7 @@ import { registerDefaultCapabilities } from "./capabilities/defaultCapabilities.
 import { registerDefaultContextProviders } from "./context/defaultContextProviders.js";
 import { adaptiveEventQueueObserver } from "./events/adaptiveEventQueue.observer.js";
 import { startAdaptiveRuntimeWorker } from "./runtime/adaptiveWorker.service.js";
+import { startContextProviderValidation } from "./context/contextHealth.service.js";
 
 let bootstrapped = false;
 
@@ -17,6 +18,7 @@ export function bootstrapAdaptivePlatform() {
   registerObserver(executionSignalObserver, { name: "integration-execution-signal", priority: 60 });
   registerObserver(executionIntelligenceObserver, { name: "enterprise-intelligence-recalculation", priority: 50 });
   registerObserver(adaptiveEventQueueObserver, { name: "adaptive-event-queue", priority: 10 });
+  startContextProviderValidation();
   startAdaptiveRuntimeWorker();
   bootstrapped = true;
   return { bootstrapped, observers: listObservers() };
