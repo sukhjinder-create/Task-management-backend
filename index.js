@@ -45,6 +45,7 @@ import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
 import superadminPlansRoutes from "./routes/superadminPlans.routes.js";
 import superadminGrowthRoutes from "./routes/superadminGrowth.routes.js";
+import superadminAdaptiveIntelligenceRoutes from "./routes/superadminAdaptiveIntelligence.routes.js";
 import backupRoutes from "./routes/backup.routes.js";
 import growthRoutes from "./routes/growth.routes.js";
 import { growthProductTelemetry } from "./growth/growthProductTelemetry.middleware.js";
@@ -274,6 +275,7 @@ app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin/plans", superadminPlansRoutes);
 app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin/growth", superadminGrowthRoutes);
+app.use("/superadmin/adaptive-intelligence", superadminAdaptiveIntelligenceRoutes);
 app.use("/app-version", appVersionRoutes);
 
 // Public endpoint — no auth required (must be before any catch-all authMiddleware)

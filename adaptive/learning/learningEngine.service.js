@@ -13,6 +13,7 @@ const STRATEGY_SIGNALS = new Set([
   "execution.succeeded",
   "execution.failed",
   "prediction.accuracy",
+  "memory.pattern.discovered",
 ]);
 
 async function refreshLearningProfiles({ workspaceId, scopeType, scopeId, signalKey }) {

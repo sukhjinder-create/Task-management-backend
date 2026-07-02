@@ -204,7 +204,8 @@ export async function refreshAdaptiveStrategyProfile({ workspaceId, scopeType, s
       AND l.signal_key IN (
         'recommendation.accepted', 'recommendation.rejected',
         'recommendation.ignored', 'recommendation.edited',
-        'execution.succeeded', 'execution.failed', 'prediction.accuracy'
+        'execution.succeeded', 'execution.failed', 'prediction.accuracy',
+        'memory.pattern.discovered'
       )
     ORDER BY l.created_at DESC
     LIMIT 500
@@ -222,8 +223,13 @@ export async function refreshAdaptiveStrategyProfile({ workspaceId, scopeType, s
 
   for (const row of rows) {
     lastSignalAt ||= row.created_at;
-    const positive = positiveWeight(row.signal_key);
-    const negative = negativeWeight(row.signal_key);
+    const patternDirection = row.signal_value?.direction;
+    const positive = row.signal_key === "memory.pattern.discovered" && patternDirection === "prefer"
+      ? 0.6
+      : positiveWeight(row.signal_key);
+    const negative = row.signal_key === "memory.pattern.discovered" && ["avoid", "improve"].includes(patternDirection)
+      ? 0.6
+      : negativeWeight(row.signal_key);
     const capabilityKey = row.capability_key || row.signal_value?.capabilityKey || row.signal_value?.planningDecision?.selectedCapability;
     const capability = collectMapEntry(capabilities, capabilityKey);
     if (capability) {
