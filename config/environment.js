@@ -85,6 +85,8 @@ export function getCorsAllowedOrigins() {
     getFrontendBaseUrl(),
     process.env.FRONTEND_URL,
     process.env.FRONTEND_BASE_URL,
+    "https://asystence.com",
+    "https://www.asystence.com",
     ...splitCsv(process.env.CORS_ALLOWED_ORIGINS),
   ].map(cleanUrl).filter(Boolean));
 

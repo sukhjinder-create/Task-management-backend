@@ -77,6 +77,7 @@ export async function createPlan({
   support_level = "community",
   trial_days = 7,
   grace_period_days = 3,
+  is_active = true,
   is_popular = false,
   is_custom = false,
   display_order = 0,
@@ -87,9 +88,9 @@ export async function createPlan({
        price_monthly_paise, price_yearly_paise, yearly_discount_pct,
        member_limit, max_projects, max_integrations, storage_limit_gb,
        features, support_level, trial_days, grace_period_days,
-       is_popular, is_custom, display_order
+       is_active, is_popular, is_custom, display_order
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
      RETURNING *`,
     [
       name,
@@ -107,6 +108,7 @@ export async function createPlan({
       support_level,
       trial_days,
       grace_period_days,
+      is_active,
       is_popular,
       is_custom,
       display_order,
@@ -115,7 +117,7 @@ export async function createPlan({
   return res.rows[0];
 }
 
-export async function updatePlan(id, data) {
+export async function updatePlan(id, data, { resetProviderPrices = false } = {}) {
   const allowed = [
     "name",
     "tagline",
@@ -146,6 +148,13 @@ export async function updatePlan(id, data) {
       sets.push(`${key} = $${i++}`);
       vals.push(key === "features" ? JSON.stringify(data[key]) : data[key]);
     }
+  }
+
+  if (resetProviderPrices) {
+    sets.push("stripe_price_monthly_id = NULL");
+    sets.push("stripe_price_yearly_id = NULL");
+    sets.push("razorpay_plan_monthly_id = NULL");
+    sets.push("razorpay_plan_yearly_id = NULL");
   }
 
   if (!sets.length) throw new Error("Nothing to update");

@@ -117,6 +117,7 @@ import paymentsRoutes, {
   razorpayWebhookRouter,
   webhookRouter as paymentsWebhookRouter,
 } from "./routes/payments.routes.js";
+import publicBillingRoutes from "./routes/publicBilling.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
 import huddleArtifactRoutes from "./routes/huddleArtifact.routes.js";
@@ -263,6 +264,7 @@ app.get("/version", (req, res) => res.json({
 }));
 
 app.use("/auth", authRoutes);
+app.use("/public/billing", publicBillingRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
