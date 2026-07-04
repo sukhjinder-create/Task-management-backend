@@ -144,6 +144,7 @@ export async function resolveEffectiveConfig({ capabilityKey, workspaceId }) {
       profileKey: reg?.defaultProfile || DEFAULT_PROFILE_KEY,
       profileParams: null,
       promptKey: reg?.defaultPromptKey || null,
+      requires: reg?.requires ?? null,
       locks: { source: "registry+env" },
     };
   }
@@ -186,6 +187,7 @@ export async function resolveEffectiveConfig({ capabilityKey, workspaceId }) {
     profileKey,
     profileParams,
     promptKey,
+    requires: reg?.requires ?? null,
     locks: { capability: capLock, provider: providerRow?.lock_level || null },
   };
 }
