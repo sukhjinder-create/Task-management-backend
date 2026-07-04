@@ -64,6 +64,19 @@ export async function invoke(request, ctx = {}) {
   const workspaceId = request?.tenant?.workspaceId ?? null;
   const variables = request?.variables || {};
   const callOverrides = request?.runtime?.overrides || {};
+  // P5 observability (Contract §12): trace/span/trigger/source-module propagation.
+  const trace = request?.tracing || {};
+  const trigger = request?.trigger || null;
+  const execCtx = request?.executionContext || {};
+  const sourceModule = execCtx.sourceModule || request?.metadata?.sourceModule || null;
+  const obs = {
+    traceId: trace.traceId || corr,
+    spanId: trace.spanId || null,
+    parentSpanId: trace.parentSpanId || null,
+    sourceModule,
+    triggerType: trigger?.eventType || null,
+    parentRequestId: execCtx.parentRequestId || null,
+  };
   let cfg = null;
   let opts = null;
   const retries = 0;
@@ -122,6 +135,7 @@ export async function invoke(request, ctx = {}) {
       status: "success",
       retries,
       correlationId: corr,
+      ...obs,
     });
 
     // 8) Build the Contract v2 AIResponse (symmetric Part[] output).
@@ -139,7 +153,14 @@ export async function invoke(request, ctx = {}) {
         promptKey: template?.promptKey || null,
         promptVersion: template?.version || null,
       },
-      execution: { retries, correlationId: corr, negotiation },
+      execution: {
+        retries,
+        correlationId: corr,
+        negotiation,
+        trace: { traceId: obs.traceId, spanId: obs.spanId, parentSpanId: obs.parentSpanId },
+        trigger,
+        sourceModule,
+      },
     });
   } catch (err) {
     await logRequestFn({
@@ -153,6 +174,7 @@ export async function invoke(request, ctx = {}) {
       failureReason: err?.message,
       retries,
       correlationId: corr,
+      ...obs,
     });
     throw err; // preserve the ORIGINAL error object (parity with legacy generateText)
   }
