@@ -15,12 +15,24 @@
 // `providerConfig` is the resolved provider row:
 //   { key, adapter, baseUrl, apiKeyEnv, authStyle, defaultModel, timeoutMs, extra }
 
+import { resolveKeyRef } from "../keys/keyRef.js";
+
 /**
- * Resolve an API key for a provider from the environment. Keys live ONLY in
- * env and are only ever read here / inside adapters — never returned to callers,
- * never logged.
+ * Resolve an API key for a provider. Keys live ONLY in a secret manager / env and
+ * are only ever read here / inside adapters — never returned to callers, never
+ * logged. P8: if the resolved provider carries a KeyRef (platform-managed or
+ * workspace BYO), it is used first; otherwise the legacy env-name lookup applies
+ * (backward compatible — no KeyRef is set until key ownership is configured).
  */
 export function resolveApiKey(providerConfig, fallbackEnvNames = []) {
+  if (providerConfig?.keyRef) {
+    try {
+      const fromRef = resolveKeyRef(providerConfig.keyRef);
+      if (fromRef) return fromRef;
+    } catch {
+      // Misconfigured/unwired KeyRef → fall back to env (permissive; never breaks).
+    }
+  }
   const names = [providerConfig?.apiKeyEnv, ...fallbackEnvNames].filter(Boolean);
   for (const name of names) {
     const value = process.env[name];
