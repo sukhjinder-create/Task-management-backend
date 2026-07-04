@@ -1,65 +1,79 @@
 // ai-platform/gateway.js
 //
-// THE single choke point for all AI text generation. Every AI request in the
-// platform flows through runCapability():
+// THE single choke point for all AI generation. The real execution path is now
+// invoke(AIRequest) -> AIResponse (Contract v2 §2/§3). runCapability() and
+// gatewayGenerateText() are BACKWARD-COMPATIBLE SHIMS over invoke():
 //
-//   capability → policy resolution → workspace resolution → provider resolution
-//   → model resolution → prompt resolution → runtime profile → budget check
-//   → execution (adapter) → logging → response
+//   capability → policy → workspace → provider → model → prompt → runtime
+//   → (advisory) compatibility negotiation → execution (adapter) → logging → AIResponse
 //
-// Nothing bypasses this once callers adopt it. During migration, services/llm.js
-// delegates here when the feature flag is on; when off, the legacy path runs and
-// this file is not touched (guaranteeing rollback safety).
+// Nothing bypasses this once callers adopt it. services/llm.js delegates to
+// gatewayGenerateText when the platform flag is ON; when OFF the legacy path runs
+// and none of this executes (rollback safety). The shims preserve their exact
+// prior signatures/return types, and invoke() rethrows the ORIGINAL provider
+// error on failure — so flag-ON behavior matches legacy byte-for-byte.
 
 import { randomUUID } from "node:crypto";
 import { resolveEffectiveConfig } from "./config/resolver.js";
+import { resolveCompatibility } from "./config/compatibilityResolver.js";
 import { resolvePromptTemplate } from "./prompts/promptResolver.js";
 import { resolveRuntimeOptions } from "./runtime/runtimeProfiles.js";
 import { getAdapter } from "./providers/registry.js";
 import { checkPolicies } from "./policy/policyEngine.js";
 import { withTransientRetry } from "./shared/retry.js";
 import { logAiRequest } from "./telemetry/requestLog.js";
+import { createAIRequest } from "./contract/aiRequest.js";
+import { createAIResponse, toLegacyText } from "./contract/aiResponse.js";
+import { textPart } from "./contract/parts.js";
+import { createUsage } from "./contract/usage.js";
 
 /**
- * Execute an AI capability.
- *
- * @param {object} req
- * @param {string}  req.capability          capability key (e.g. "meeting_intelligence")
- * @param {string|null} req.workspaceId
- * @param {string}  [req.prompt]            caller-built prompt (used verbatim if no template)
- * @param {Array}   [req.messages]          OpenAI-style messages (optional)
- * @param {object}  [req.variables]         template variables for prompt rendering
- * @param {object}  [req.overrides]         explicit per-call { maxTokens, temperature, json, ... }
- * @param {AbortSignal} [req.signal]
- * @param {string}  [req.correlationId]
- * @returns {Promise<{ text: string, meta: object }>}
+ * Reconstruct the provider call ({prompt} XOR {messages}) from Part[] input,
+ * preserving exactly what the legacy caller passed:
+ *  - a single text part with no role  → { prompt }
+ *  - multiple text parts or any role   → { messages }
+ * Non-text parts (future modalities) are ignored on the text path (forward-compat).
  */
-export async function runCapability({
-  capability,
-  workspaceId = null,
-  prompt,
-  messages,
-  variables = {},
-  overrides = {},
-  signal,
-  correlationId,
-} = {}) {
+function partsToProviderCall(input) {
+  const parts = Array.isArray(input) ? input.filter((p) => p && p.kind === "text") : [];
+  const hasRole = parts.some((p) => p.role);
+  if (parts.length > 1 || hasRole) {
+    return { messages: parts.map((p) => ({ role: p.role || "user", content: String(p.text ?? "") })) };
+  }
+  return { prompt: parts.length ? String(parts[0].text ?? "") : "" };
+}
+
+/**
+ * Execute one AIRequest. The uniform Contract v2 execution entrypoint.
+ * @param {import("./contract/aiRequest.js").AIRequest} request
+ * @param {object} [ctx]  execution context + injectable deps (deps are for tests)
+ * @returns {Promise<import("./contract/aiResponse.js").AIResponse>}
+ */
+export async function invoke(request, ctx = {}) {
+  const resolve = ctx.resolve || resolveEffectiveConfig;
+  const getAdapterFor = ctx.getAdapterFor || getAdapter;
+  const checkPoliciesFn = ctx.checkPolicies || checkPolicies;
+  const resolvePrompt = ctx.resolvePromptTemplate || resolvePromptTemplate;
+  const logRequestFn = ctx.logAiRequest || logAiRequest;
+  const compat = ctx.resolveCompatibility || resolveCompatibility;
+  const { signal, correlationId } = ctx;
+
   const startedAt = Date.now();
-  const corr = correlationId || randomUUID();
+  const corr = correlationId || request?.tracing?.traceId || randomUUID();
+  const capability = request?.capability;
+  const workspaceId = request?.tenant?.workspaceId ?? null;
+  const variables = request?.variables || {};
+  const callOverrides = request?.runtime?.overrides || {};
   let cfg = null;
   let opts = null;
-  let retries = 0;
+  const retries = 0;
 
   try {
-    // 1) Resolve provider/model/profile/prompt-key with inheritance + locking.
-    cfg = await resolveEffectiveConfig({ capabilityKey: capability, workspaceId });
+    // 1) ConfigResolver: provider/model/profile/prompt-key with inheritance + locking.
+    cfg = await resolve({ capabilityKey: capability, workspaceId });
 
-    // 2) Central policy/budget enforcement (fails open when unconfigured).
-    const policy = await checkPolicies({
-      workspaceId,
-      providerKey: cfg.providerKey,
-      capabilityKey: cfg.capabilityKey,
-    });
+    // 2) Central policy/budget (fails open when unconfigured).
+    const policy = await checkPoliciesFn({ workspaceId, providerKey: cfg.providerKey, capabilityKey: cfg.capabilityKey });
     if (!policy.allowed) {
       const err = new Error(policy.reason || "Blocked by AI policy");
       err.code = "AI_POLICY_BLOCKED";
@@ -67,29 +81,24 @@ export async function runCapability({
     }
 
     // 3) Prompt resolution (workspace → platform → code fallback → caller verbatim).
-    const template = await resolvePromptTemplate({
-      promptKey: cfg.promptKey,
-      workspaceId,
-      capabilityKey: cfg.capabilityKey,
-      variables,
-    });
-    const finalPrompt = template?.body ?? prompt;
+    const template = await resolvePrompt({ promptKey: cfg.promptKey, workspaceId, capabilityKey: cfg.capabilityKey, variables });
+    const call = partsToProviderCall(request?.input);
+    const finalPrompt = template?.body ?? call.prompt;
 
     // 4) Runtime options (profile + per-call overrides; call values win).
-    opts = resolveRuntimeOptions({
-      profileKey: cfg.profileKey,
-      profileOverride: cfg.profileParams,
-      callOverrides: overrides,
-    });
+    opts = resolveRuntimeOptions({ profileKey: cfg.profileKey, profileOverride: cfg.profileParams, callOverrides });
 
-    // 5) Execute through the resolved adapter, with transient retry.
-    const adapter = getAdapter(cfg.adapterType);
+    // 5) CompatibilityResolver (advisory in P3; enforced once `requires` exists).
+    const negotiation = compat({ providerKey: cfg.providerKey, modelKey: cfg.model, requires: cfg.requires });
+
+    // 6) Execute through the resolved adapter, with transient retry.
+    const adapter = getAdapterFor(cfg.adapterType);
     const result = await withTransientRetry(
       () =>
         adapter.generate({
           model: cfg.model,
           prompt: finalPrompt,
-          messages,
+          messages: call.messages,
           options: opts,
           providerConfig: cfg.providerConfig,
           signal,
@@ -97,8 +106,8 @@ export async function runCapability({
       { attempts: opts.retries ?? 2 }
     );
 
-    // 6) Telemetry (best-effort).
-    await logAiRequest({
+    // 7) Telemetry (best-effort; never throws).
+    await logRequestFn({
       workspaceId,
       capabilityKey: cfg.capabilityKey,
       providerKey: cfg.providerKey,
@@ -109,28 +118,31 @@ export async function runCapability({
       latencyMs: Date.now() - startedAt,
       inputTokens: result.usage?.inputTokens ?? null,
       outputTokens: result.usage?.outputTokens ?? null,
-      estCostUsd: null, // cost estimation lands with the model cost table wiring (Phase 2)
+      estCostUsd: null,
       status: "success",
       retries,
       correlationId: corr,
     });
 
-    return {
-      text: result.text,
-      meta: {
+    // 8) Build the Contract v2 AIResponse (symmetric Part[] output).
+    return createAIResponse({
+      requestId: request?.requestId,
+      status: "succeeded",
+      output: [textPart({ text: result.text })],
+      usage: createUsage(result.usage || {}),
+      timing: { latencyMs: Date.now() - startedAt },
+      resolution: {
         capability: cfg.capabilityKey,
         provider: cfg.providerKey,
         model: cfg.model || cfg.providerConfig?.defaultModel || null,
         profile: cfg.profileKey,
         promptKey: template?.promptKey || null,
         promptVersion: template?.version || null,
-        usage: result.usage || null,
-        correlationId: corr,
-        latencyMs: Date.now() - startedAt,
       },
-    };
+      execution: { retries, correlationId: corr, negotiation },
+    });
   } catch (err) {
-    await logAiRequest({
+    await logRequestFn({
       workspaceId,
       capabilityKey: cfg?.capabilityKey || capability || null,
       providerKey: cfg?.providerKey || null,
@@ -142,34 +154,68 @@ export async function runCapability({
       retries,
       correlationId: corr,
     });
-    throw err;
+    throw err; // preserve the ORIGINAL error object (parity with legacy generateText)
   }
 }
 
 /**
- * Backward-compatible entrypoint used by services/llm.js when the platform flag
- * is ON. Signature and return type (a plain string) mirror the legacy
- * generateText() so callers are unaffected.
+ * Backward-compatible shim: same {text, meta} return as before. Delegates to
+ * invoke(). `deps` (2nd arg) is optional and used only by tests; production
+ * callers pass one arg, so behavior is unchanged.
  */
-export async function gatewayGenerateText({
-  prompt,
-  messages,
-  maxTokens = 900,
-  json = false,
-  temperature = 0.4,
-  signal,
-  capability, // optional: callers may opt into a capability id
-  workspaceId = null,
-  variables,
-} = {}) {
-  const { text } = await runCapability({
-    capability, // undefined => LEGACY_CAPABILITY_KEY inside resolver
-    workspaceId,
-    prompt,
-    messages,
-    variables,
-    overrides: { maxTokens, temperature, json },
-    signal,
+export async function runCapability(
+  { capability, workspaceId = null, prompt, messages, variables = {}, overrides = {}, signal, correlationId } = {},
+  deps = {}
+) {
+  const input =
+    Array.isArray(messages) && messages.length
+      ? messages.map((m) => textPart({ text: m.content, role: m.role }))
+      : [textPart({ text: prompt ?? "" })];
+  const request = createAIRequest({
+    capability,
+    ...(workspaceId ? { tenant: { workspaceId } } : {}),
+    input,
+    ...(variables && Object.keys(variables).length ? { variables } : {}),
+    ...(overrides && Object.keys(overrides).length ? { runtime: { overrides } } : {}),
   });
-  return text;
+  const res = await invoke(request, { signal, correlationId, ...deps });
+  return {
+    text: toLegacyText(res),
+    meta: {
+      capability: res.resolution?.capability,
+      provider: res.resolution?.provider,
+      model: res.resolution?.model,
+      profile: res.resolution?.profile,
+      promptKey: res.resolution?.promptKey || null,
+      promptVersion: res.resolution?.promptVersion || null,
+      usage: res.usage || null,
+      correlationId: res.execution?.correlationId,
+      latencyMs: res.timing?.latencyMs,
+    },
+  };
+}
+
+/**
+ * Backward-compatible entrypoint used by services/llm.js when the flag is ON.
+ * Returns a plain string, exactly like legacy generateText(). `deps` (2nd arg)
+ * is test-only; production passes one arg.
+ */
+export async function gatewayGenerateText(
+  { prompt, messages, maxTokens = 900, json = false, temperature = 0.4, signal, capability, workspaceId = null, variables } = {},
+  deps = {}
+) {
+  const input =
+    Array.isArray(messages) && messages.length
+      ? messages.map((m) => textPart({ text: m.content, role: m.role }))
+      : [textPart({ text: prompt ?? "" })];
+  const overrides = { maxTokens, temperature, json };
+  const request = createAIRequest({
+    capability: capability ?? "legacy.generate_text",
+    ...(workspaceId ? { tenant: { workspaceId } } : {}),
+    input,
+    ...(variables ? { variables } : {}),
+    runtime: { overrides },
+  });
+  const res = await invoke(request, { signal, ...deps });
+  return toLegacyText(res);
 }
