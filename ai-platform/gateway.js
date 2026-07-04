@@ -27,6 +27,8 @@ import { createAIResponse, toLegacyText } from "./contract/aiResponse.js";
 import { textPart } from "./contract/parts.js";
 import { createUsage } from "./contract/usage.js";
 import { estimateCost, recordCost } from "./cost/costEngine.js";
+import { runInputSafety, runOutputSafety, mergeSafety } from "./safety/pipeline.js";
+import { recordSafetyEvent } from "./safety/safetyEvents.js";
 
 /**
  * Reconstruct the provider call ({prompt} XOR {messages}) from Part[] input,
@@ -115,6 +117,9 @@ export async function invoke(request, ctx = {}) {
       modelKey: resolvedModel,
     });
 
+    // 5c) Input safety (P7; PERMISSIVE — detects/tags, never blocks or rewrites in Epic A).
+    const inputSafety = runInputSafety({ prompt: finalPrompt, messages: call.messages, variables });
+
     // 6) Execute through the resolved adapter, with transient retry.
     const adapter = getAdapterFor(cfg.adapterType);
     const result = await withTransientRetry(
@@ -132,6 +137,17 @@ export async function invoke(request, ctx = {}) {
 
     // 6b) Post-execution actual cost (P6).
     const costActual = recordCost({ usage: result.usage, providerKey: cfg.providerKey, modelKey: resolvedModel });
+
+    // 6c) Output safety (P7; permissive) + best-effort safety-event persistence.
+    const outputSafety = runOutputSafety({ text: result.text, outputSchemaRef: cfg.outputSchema || null });
+    const safety = mergeSafety(inputSafety, outputSafety);
+    if (safety.findings.length) {
+      await recordSafetyEvent({
+        workspaceId, capabilityKey: cfg.capabilityKey,
+        inputVerdict: safety.inputVerdict, outputVerdict: safety.outputVerdict,
+        findings: safety.findings, correlationId: corr,
+      });
+    }
 
     // 7) Telemetry (best-effort; never throws).
     await logRequestFn({
@@ -166,6 +182,7 @@ export async function invoke(request, ctx = {}) {
         owner: workspaceId ? { workspaceId } : "PLATFORM",
         pricingSource: costActual?.pricingSource || costEstimate?.pricingSource || null,
       },
+      safety,
       timing: { latencyMs: Date.now() - startedAt },
       resolution: {
         capability: cfg.capabilityKey,
