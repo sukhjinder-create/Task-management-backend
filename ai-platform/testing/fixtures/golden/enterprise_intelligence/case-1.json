@@ -1,0 +1,13 @@
+{
+  "capability": "enterprise_intelligence",
+  "caseId": "case-1",
+  "capturedAt": "2026-07-05T00:00:00.000Z",
+  "input": {
+    "prompt": "Assess enterprise execution risk from: carryover 18%, overdue 9%, attendance 96%.",
+    "maxTokens": 600,
+    "json": true
+  },
+  "meta": { "legacyTransport": "generateText", "provider": "groq" },
+  "output": "{\"risk\":\"medium\",\"drivers\":[\"carryover\",\"overdue\"],\"confidence\":0.71}",
+  "outputType": "text"
+}

@@ -1,0 +1,12 @@
+{
+  "capability": "executive_summary",
+  "caseId": "case-1",
+  "capturedAt": "2026-07-05T00:00:00.000Z",
+  "input": {
+    "prompt": "Summarize workspace health: 85% on-time delivery, 3 at-risk projects, attendance stable.",
+    "options": { "num_predict": 280, "temperature": 0.35 }
+  },
+  "meta": { "legacyTransport": "generateText", "provider": "groq" },
+  "output": "Workspace execution is strong with 85% on-time delivery and stable attendance. Three projects are at risk and warrant attention this week.",
+  "outputType": "text"
+}

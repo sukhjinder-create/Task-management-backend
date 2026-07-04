@@ -1,0 +1,12 @@
+{
+  "capability": "forecast_reasoning",
+  "caseId": "case-1",
+  "capturedAt": "2026-07-05T00:00:00.000Z",
+  "input": {
+    "prompt": "Given 12 open tasks, 4 overdue, velocity 8/week, forecast completion and risks.",
+    "options": { "num_predict": 180, "temperature": 0.4 }
+  },
+  "meta": { "legacyTransport": "generateText", "provider": "groq" },
+  "output": "Forecast: at ~8 tasks/week the 12 open items clear in about 1.5 weeks. The 4 overdue tasks are the primary risk and should be prioritized first.",
+  "outputType": "text"
+}
