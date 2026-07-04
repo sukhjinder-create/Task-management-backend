@@ -26,6 +26,7 @@ import { createAIRequest } from "./contract/aiRequest.js";
 import { createAIResponse, toLegacyText } from "./contract/aiResponse.js";
 import { textPart } from "./contract/parts.js";
 import { createUsage } from "./contract/usage.js";
+import { estimateCost, recordCost } from "./cost/costEngine.js";
 
 /**
  * Reconstruct the provider call ({prompt} XOR {messages}) from Part[] input,
@@ -104,6 +105,16 @@ export async function invoke(request, ctx = {}) {
     // 5) CompatibilityResolver (advisory in P3; enforced once `requires` exists).
     const negotiation = compat({ providerKey: cfg.providerKey, modelKey: cfg.model, requires: cfg.requires });
 
+    // 5b) Pre-execution cost estimate (P6; permissive — never blocks in Epic A).
+    const resolvedModel = cfg.model || cfg.providerConfig?.defaultModel || null;
+    const costEstimate = estimateCost({
+      prompt: finalPrompt,
+      messages: call.messages,
+      maxTokens: opts.maxTokens,
+      providerKey: cfg.providerKey,
+      modelKey: resolvedModel,
+    });
+
     // 6) Execute through the resolved adapter, with transient retry.
     const adapter = getAdapterFor(cfg.adapterType);
     const result = await withTransientRetry(
@@ -119,6 +130,9 @@ export async function invoke(request, ctx = {}) {
       { attempts: opts.retries ?? 2 }
     );
 
+    // 6b) Post-execution actual cost (P6).
+    const costActual = recordCost({ usage: result.usage, providerKey: cfg.providerKey, modelKey: resolvedModel });
+
     // 7) Telemetry (best-effort; never throws).
     await logRequestFn({
       workspaceId,
@@ -131,7 +145,8 @@ export async function invoke(request, ctx = {}) {
       latencyMs: Date.now() - startedAt,
       inputTokens: result.usage?.inputTokens ?? null,
       outputTokens: result.usage?.outputTokens ?? null,
-      estCostUsd: null,
+      estCostUsd: costEstimate?.amount?.amount ?? null,
+      actualCostUsd: costActual?.amount ?? null,
       status: "success",
       retries,
       correlationId: corr,
@@ -144,6 +159,13 @@ export async function invoke(request, ctx = {}) {
       status: "succeeded",
       output: [textPart({ text: result.text })],
       usage: createUsage(result.usage || {}),
+      cost: {
+        estimated: costEstimate?.amount?.amount ?? null,
+        actual: costActual?.amount ?? null,
+        currency: "USD",
+        owner: workspaceId ? { workspaceId } : "PLATFORM",
+        pricingSource: costActual?.pricingSource || costEstimate?.pricingSource || null,
+      },
       timing: { latencyMs: Date.now() - startedAt },
       resolution: {
         capability: cfg.capabilityKey,

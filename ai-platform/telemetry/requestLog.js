@@ -50,6 +50,7 @@ export async function logAiRequest(r) {
       input_tokens: r.inputTokens,
       output_tokens: r.outputTokens,
       est_cost_usd: r.estCostUsd,
+      actual_cost_usd: r.actualCostUsd,
       status: r.status,
       failure_reason: r.failureReason ? String(r.failureReason).slice(0, 500) : null,
       retries: r.retries,
