@@ -56,6 +56,7 @@ import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
 import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
 import settingsAttendanceRoutes from "./routes/settingsAttendance.routes.js";
+import aiPlatformInvokeRoutes from "./routes/aiPlatformInvoke.routes.js";
 
 import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
@@ -270,6 +271,7 @@ app.use("/public/billing", publicBillingRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
+app.use("/ai", aiPlatformInvokeRoutes); // POST /ai/invoke — single external door into the platform
 app.use("/internal", internalRoutes);
 app.use(internalTasks);
 

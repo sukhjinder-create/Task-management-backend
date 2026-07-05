@@ -75,7 +75,12 @@ test("golden set covers every Wave-2 capability", () => {
 test("Wave 1 + Wave 2 cover ALL backend capabilities (excl. legacy shim + ai-task chat_away_responder)", () => {
   const registered = listCapabilities().map((c) => c.key);
   const covered = new Set([...WAVE1_CAPABILITIES, ...WAVE2_CAPABILITIES]);
-  const outOfScope = new Set([LEGACY_CAPABILITY_KEY, "chat_away_responder"]);
+  // Out of the backend generateText waves: the legacy shim + the ai-task (Epic B′)
+  // capabilities, which are unified via the external invoke door, not these waves.
+  const outOfScope = new Set([
+    LEGACY_CAPABILITY_KEY, "chat_away_responder",
+    "ai_task_creation", "decision_extraction", "summarization", "report_generation", "reasoning_summary",
+  ]);
   const uncovered = registered.filter((k) => !covered.has(k) && !outOfScope.has(k));
   assert.deepEqual(uncovered, [], `every backend capability is covered; leftover: ${uncovered.join(",")}`);
 });

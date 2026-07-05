@@ -86,7 +86,19 @@ export const LEGACY_CAPABILITY_KEY = "legacy.generate_text";
     description: "RAG Q&A over workspace data.", dataSensitivity: "confidential" },
   { key: "ai_features", name: "AI Features", category: "assistant" },
   { key: "chat_away_responder", name: "Chat Away-Colleague Responder", category: "assistant",
-    description: "Standalone ai-service responder (migrates via Epic B′).", dataSensitivity: "confidential" },
+    description: "ai-task away-responder (now routed through the platform).", dataSensitivity: "confidential" },
+
+  // ── ai-task (Epic B′) capabilities — now implementations of the platform ──
+  { key: "ai_task_creation", name: "AI Task Creation", category: "work", requires: { json: true },
+    description: "ai-task: create tasks from natural language.", dataSensitivity: "confidential" },
+  { key: "decision_extraction", name: "Decision Extraction", category: "intelligence", requires: { json: true },
+    description: "ai-task: extract decisions/authority/provenance from chat.", dataSensitivity: "confidential" },
+  { key: "summarization", name: "Conversation Summarization", category: "assistant",
+    description: "ai-task: summarize DM/channel activity for away users.", dataSensitivity: "confidential" },
+  { key: "report_generation", name: "Report Generation", category: "intelligence",
+    description: "ai-task: generate reports from workspace activity.", dataSensitivity: "confidential" },
+  { key: "reasoning_summary", name: "Reasoning Summary", category: "assistant",
+    description: "ai-task: safe reasoning summary attached to a reply." },
 
   // Intelligence
   { key: "executive_summary", name: "Executive Summary", category: "intelligence", executionClass: "async" },
