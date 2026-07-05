@@ -1,56 +1,66 @@
 // routes/aiStudioWorkspace.routes.js
 //
-// Epic C — Workspace AI Studio API surface. Workspace admins see/edit only what
-// the lock model permits. Guarded by auth + workspace + admin role. Read + dry-run
-// preview (no persistence in this layer). Reuses the studio service + governance.
+// Epic C — Workspace AI Studio API. Workspace admins see/edit only what the lock
+// model permits. Guarded by auth + workspace + admin role. Reuses the Studio
+// services + governance. DB-backed override writes are schema-tolerant and
+// UNVERIFIED AT RUNTIME.
 //
-// MOUNT (add to index.js):
-//   import aiStudioWorkspaceRoutes from "./routes/aiStudioWorkspace.routes.js";
-//   app.use("/ai-studio", authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
+// Mounted in index.js as:
+//   app.use("/ai-studio", authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes)
 
 import express from "express";
 import {
-  getOverview,
-  listCapabilityViewModels,
-  getWorkspaceControls,
-  computeEffectiveConfig,
+  getOverview, listCapabilityViewModels, getWorkspaceControls, computeEffectiveConfig,
 } from "../ai-platform/studio/aiStudioService.js";
 import { can } from "../ai-platform/governance/permissions.js";
 import { LOCK_LEVELS } from "../ai-platform/governance/locks.js";
+import { upsertCapabilityConfig } from "../ai-platform/studio/configStore.service.js";
+import * as telemetry from "../ai-platform/studio/telemetry.service.js";
+import { runPlayground } from "../ai-platform/studio/playground.service.js";
 
 const router = express.Router();
-
-// Workspace admins map to the workspace_admin governance role.
-function wsRole(req) {
-  return req.user?.role === "admin" ? "workspace_admin" : "workspace_viewer";
-}
+const wsRole = (req) => (req.user?.role === "admin" ? "workspace_admin" : "workspace_viewer");
+const wrap = (fn) => async (req, res) => { try { await fn(req, res); } catch (e) { res.status(500).json({ error: e.message }); } };
 
 router.get("/overview", (_req, res) => {
   const o = getOverview();
-  // Workspace view: platform counts only, no platform-internal config.
   res.json({ platform: { enabled: o.platform.enabled, contractVersion: o.platform.contractVersion }, counts: { capabilities: o.counts.capabilities } });
 });
 
-router.get("/capabilities", (_req, res) => {
-  // Only workspace-relevant fields.
-  res.json(listCapabilityViewModels().map((c) => ({ key: c.key, name: c.name, category: c.category, description: c.description, lock: c.lock })));
-});
+router.get("/capabilities", (_req, res) =>
+  res.json(listCapabilityViewModels().map((c) => ({ key: c.key, name: c.name, category: c.category, description: c.description, lock: c.lock }))));
 
 router.get("/capabilities/:key/controls", (req, res) => {
-  const lockLevel = LOCK_LEVELS.includes(req.query.lock) ? req.query.lock : "workspace_customizable";
-  const controls = getWorkspaceControls({ role: wsRole(req), capabilityKey: req.params.key, lockLevel });
-  if (!controls) return res.status(404).json({ error: "Unknown capability" });
-  res.json(controls);
+  const lock = LOCK_LEVELS.includes(req.query.lock) ? req.query.lock : "workspace_customizable";
+  const controls = getWorkspaceControls({ role: wsRole(req), capabilityKey: req.params.key, lockLevel: lock });
+  controls ? res.json(controls) : res.status(404).json({ error: "Unknown capability" });
 });
 
-// Dry-run: validate a requested override + preview the effective config (no persist).
+// Preview an override (no persistence).
 router.post("/capabilities/:key/preview-override", (req, res) => {
-  const lockLevel = LOCK_LEVELS.includes(req.body?.lock) ? req.body.lock : "workspace_customizable";
-  const decision = can({ role: wsRole(req), verb: "override", objectType: "capability_config", scope: { workspaceId: req.workspaceId }, lockLevel });
+  const lock = LOCK_LEVELS.includes(req.body?.lock) ? req.body.lock : "workspace_customizable";
+  const decision = can({ role: wsRole(req), verb: "override", objectType: "capability_config", scope: { workspaceId: req.workspaceId }, lockLevel: lock });
   if (!decision.allowed) return res.status(403).json({ error: "Override not permitted", reason: decision.reason });
-  const cfg = computeEffectiveConfig({ capabilityKey: req.params.key, workspaceOverride: req.body?.override || {}, lockLevel });
-  if (!cfg) return res.status(404).json({ error: "Unknown capability" });
-  res.json({ allowed: true, preview: cfg, note: "Preview only — persistence is a DB-layer step" });
+  const cfg = computeEffectiveConfig({ capabilityKey: req.params.key, workspaceOverride: req.body?.override || {}, lockLevel: lock });
+  cfg ? res.json({ allowed: true, preview: cfg }) : res.status(404).json({ error: "Unknown capability" });
 });
+
+// Persist a workspace override (permission + lock enforced; validated in the service).
+router.put("/capabilities/:key/override", wrap(async (req, res) => {
+  const lock = LOCK_LEVELS.includes(req.body?.lock) ? req.body.lock : "workspace_customizable";
+  const decision = can({ role: wsRole(req), verb: "override", objectType: "capability_config", scope: { workspaceId: req.workspaceId }, lockLevel: lock });
+  if (!decision.allowed) return res.status(403).json({ error: "Override not permitted", reason: decision.reason });
+  const ov = req.body?.override || {};
+  const r = await upsertCapabilityConfig({
+    capabilityKey: req.params.key, scope: req.workspaceId, workspaceId: req.workspaceId,
+    provider: ov.provider ?? null, model: ov.model ?? null, promptKey: ov.promptKey ?? null,
+    runtimeProfile: ov.profile ?? null, actorId: req.user?.id,
+  });
+  r.ok ? res.json(r) : res.status(400).json(r);
+}));
+
+router.get("/usage", wrap(async (req, res) => res.json(await telemetry.getUsage({ workspaceId: req.workspaceId, period: req.query.period }))));
+router.get("/cost", wrap(async (req, res) => res.json(await telemetry.getCost({ workspaceId: req.workspaceId, period: req.query.period }))));
+router.post("/playground", wrap(async (req, res) => res.json(await runPlayground({ capability: req.body?.capability, prompt: req.body?.prompt, workspaceId: req.workspaceId, overrides: req.body?.overrides || {} }))));
 
 export default router;

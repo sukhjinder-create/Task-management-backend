@@ -45,6 +45,9 @@ import superadminAuthRoutes from "./routes/superadminAuth.routes.js";
 import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
 import superadminPlansRoutes from "./routes/superadminPlans.routes.js";
 import superadminGrowthRoutes from "./routes/superadminGrowth.routes.js";
+import superadminAdaptiveIntelligenceRoutes from "./routes/superadminAdaptiveIntelligence.routes.js";
+import superadminAiStudioRoutes from "./routes/superadminAiStudio.routes.js";
+import aiStudioWorkspaceRoutes from "./routes/aiStudioWorkspace.routes.js";
 import backupRoutes from "./routes/backup.routes.js";
 import growthRoutes from "./routes/growth.routes.js";
 import { growthProductTelemetry } from "./growth/growthProductTelemetry.middleware.js";
@@ -116,6 +119,7 @@ import paymentsRoutes, {
   razorpayWebhookRouter,
   webhookRouter as paymentsWebhookRouter,
 } from "./routes/payments.routes.js";
+import publicBillingRoutes from "./routes/publicBilling.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
 import huddleArtifactRoutes from "./routes/huddleArtifact.routes.js";
@@ -262,6 +266,7 @@ app.get("/version", (req, res) => res.json({
 }));
 
 app.use("/auth", authRoutes);
+app.use("/public/billing", publicBillingRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
@@ -274,6 +279,8 @@ app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin/plans", superadminPlansRoutes);
 app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin/growth", superadminGrowthRoutes);
+app.use("/superadmin/adaptive-intelligence", superadminAdaptiveIntelligenceRoutes);
+app.use("/superadmin/ai-studio", superadminAiStudioRoutes);
 app.use("/app-version", appVersionRoutes);
 
 // Public endpoint — no auth required (must be before any catch-all authMiddleware)
@@ -294,6 +301,7 @@ app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFe
 app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoutes);
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
+app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
 // 🧪 Testing Agent — plan-gated
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
 
