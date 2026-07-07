@@ -31,3 +31,14 @@ export function isEiAttributionEnabled(workspaceId = null) {
   if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
   return false;
 }
+
+function gate(flagName, workspaceId) {
+  if (envBool(flagName, false)) return true;
+  if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  return false;
+}
+
+/** Wave A gates (all default OFF). */
+export const isEiEvidenceEnabled = (workspaceId = null) => gate("EI_EVIDENCE_ENABLED", workspaceId);
+export const isEiReasoningEnabled = (workspaceId = null) => gate("EI_REASONING_ENABLED", workspaceId);
+export const isEiPredictionEnabled = (workspaceId = null) => gate("EI_PREDICTION_ENABLED", workspaceId);
