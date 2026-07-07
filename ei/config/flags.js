@@ -24,3 +24,10 @@ export function isEiEventPipelineEnabled(workspaceId = null) {
   if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
   return false;
 }
+
+/** Phase 2 attribution gate (global flag OR per-workspace canary). Default OFF. */
+export function isEiAttributionEnabled(workspaceId = null) {
+  if (envBool("EI_ATTRIBUTION_ENABLED", false)) return true;
+  if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  return false;
+}
