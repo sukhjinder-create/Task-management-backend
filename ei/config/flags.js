@@ -1,0 +1,26 @@
+// ei/config/flags.js
+//
+// Enterprise Intelligence V2.1 feature flags. Everything defaults OFF so the EI
+// pipeline changes NO production behavior until deliberately enabled. Reuses the
+// existing envBool helper (no duplicate flag logic).
+//
+//   EI_V2_ENABLED             master switch for EI V2.1 surfaces (read/UI)
+//   EI_EVENT_PIPELINE_ENABLED Phase 1: canonical event ingestion
+//   EI_ENABLED_WORKSPACES     comma-separated canary workspace ids
+
+import { envBool } from "../../config/environment.js";
+
+function csv(value) {
+  return String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+export function isEiEnabled() {
+  return envBool("EI_V2_ENABLED", false);
+}
+
+/** Phase 1 ingestion gate (global flag OR per-workspace canary). Default OFF. */
+export function isEiEventPipelineEnabled(workspaceId = null) {
+  if (envBool("EI_EVENT_PIPELINE_ENABLED", false)) return true;
+  if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  return false;
+}

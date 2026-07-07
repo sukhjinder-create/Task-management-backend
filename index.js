@@ -70,6 +70,7 @@ import adaptiveRoutes from "./routes/adaptive.routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
+import { bootstrapEnterpriseIntelligence } from "./ei/bootstrap.js";
 import { getCorsAllowedOrigins, isProductionRuntime } from "./config/environment.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
@@ -432,6 +433,7 @@ server.listen(PORT, "0.0.0.0", () => {
 // ---------------- EVENT SYSTEM BOOTSTRAP ----------------
 
 bootstrapAdaptivePlatform();
+bootstrapEnterpriseIntelligence(); // EI V2.1 event ingestion (flag-gated; no-op when OFF)
 
 // 2️⃣ Wrap services AFTER observers exist
 
