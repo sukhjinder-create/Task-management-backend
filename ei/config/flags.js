@@ -42,3 +42,16 @@ function gate(flagName, workspaceId) {
 export const isEiEvidenceEnabled = (workspaceId = null) => gate("EI_EVIDENCE_ENABLED", workspaceId);
 export const isEiReasoningEnabled = (workspaceId = null) => gate("EI_REASONING_ENABLED", workspaceId);
 export const isEiPredictionEnabled = (workspaceId = null) => gate("EI_PREDICTION_ENABLED", workspaceId);
+
+/** Wave B gates (all default OFF).
+ *   EI_RECOMMENDATION_ENABLED  Phase 6: deterministic recommendation layer
+ *   EI_EXECUTIVE_ENABLED       Phase 7: executive reasoning (question answering)
+ *   EI_NARRATION_ENABLED       Phase 8: business narration (presentation only)
+ *   EI_METRICS_ENABLED         evidence-backed platform/value metrics
+ *   EI_NARRATION_LLM_ENABLED   optional LLM narration path (Contract V2); template fallback always works
+ */
+export const isEiRecommendationEnabled = (workspaceId = null) => gate("EI_RECOMMENDATION_ENABLED", workspaceId);
+export const isEiExecutiveEnabled = (workspaceId = null) => gate("EI_EXECUTIVE_ENABLED", workspaceId);
+export const isEiNarrationEnabled = (workspaceId = null) => gate("EI_NARRATION_ENABLED", workspaceId);
+export const isEiMetricsEnabled = (workspaceId = null) => gate("EI_METRICS_ENABLED", workspaceId);
+export const isEiNarrationLlmEnabled = (workspaceId = null) => gate("EI_NARRATION_LLM_ENABLED", workspaceId);
