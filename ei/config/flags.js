@@ -55,3 +55,22 @@ export const isEiExecutiveEnabled = (workspaceId = null) => gate("EI_EXECUTIVE_E
 export const isEiNarrationEnabled = (workspaceId = null) => gate("EI_NARRATION_ENABLED", workspaceId);
 export const isEiMetricsEnabled = (workspaceId = null) => gate("EI_METRICS_ENABLED", workspaceId);
 export const isEiNarrationLlmEnabled = (workspaceId = null) => gate("EI_NARRATION_LLM_ENABLED", workspaceId);
+
+/** Wave C gates — the closed-loop learning/validation/outcome engine (all default OFF).
+ *   EI_OUTCOMES_ENABLED       Outcomes Ledger (immutable outcome records)
+ *   EI_EFFECTIVENESS_ENABLED  Recommendation effectiveness (computed)
+ *   EI_VALIDATION_ENABLED     Prediction validation (computed)
+ *   EI_CALIBRATION_ENABLED    Calibration engine (versioned models)
+ *   EI_LEARNING_ENABLED       Learning engine (proposals only, no auto-mutation)
+ *   EI_EXPERIMENTS_ENABLED    Experiment engine (auditable)
+ *   EI_MEMORY_ENABLED         Organizational memory (versioned)
+ *   EI_HEALTH_ENABLED         Platform health (computed)
+ */
+export const isEiOutcomesEnabled = (workspaceId = null) => gate("EI_OUTCOMES_ENABLED", workspaceId);
+export const isEiEffectivenessEnabled = (workspaceId = null) => gate("EI_EFFECTIVENESS_ENABLED", workspaceId);
+export const isEiValidationEnabled = (workspaceId = null) => gate("EI_VALIDATION_ENABLED", workspaceId);
+export const isEiCalibrationEnabled = (workspaceId = null) => gate("EI_CALIBRATION_ENABLED", workspaceId);
+export const isEiLearningEnabled = (workspaceId = null) => gate("EI_LEARNING_ENABLED", workspaceId);
+export const isEiExperimentsEnabled = (workspaceId = null) => gate("EI_EXPERIMENTS_ENABLED", workspaceId);
+export const isEiMemoryEnabled = (workspaceId = null) => gate("EI_MEMORY_ENABLED", workspaceId);
+export const isEiHealthEnabled = (workspaceId = null) => gate("EI_HEALTH_ENABLED", workspaceId);
