@@ -115,6 +115,7 @@ function synthProviderConfig(providerKey, providerRow) {
     adapter: adapterType,
     baseUrl: providerRow?.base_url || null,
     apiKeyEnv: providerRow?.api_key_env || null,
+    apiKey: providerRow?.api_key || null,   // key set from the AI Studio UI (preferred, if present)
     defaultModel: providerRow?.default_model || null,
     timeoutMs: providerRow?.timeout_ms || null,
     extra: providerRow?.config_json || null,

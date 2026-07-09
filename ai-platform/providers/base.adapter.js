@@ -25,6 +25,9 @@ import { resolveKeyRef } from "../keys/keyRef.js";
  * (backward compatible — no KeyRef is set until key ownership is configured).
  */
 export function resolveApiKey(providerConfig, fallbackEnvNames = []) {
+  // A key set from the AI Studio UI (stored on the provider row) wins — this is what
+  // lets a superadmin configure providers other than the env-configured default.
+  if (providerConfig?.apiKey && String(providerConfig.apiKey).trim()) return String(providerConfig.apiKey).trim();
   if (providerConfig?.keyRef) {
     try {
       const fromRef = resolveKeyRef(providerConfig.keyRef);

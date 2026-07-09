@@ -16,6 +16,7 @@ import {
 import { can } from "../ai-platform/governance/permissions.js";
 import { LOCK_LEVELS } from "../ai-platform/governance/locks.js";
 import { upsertCapabilityConfig } from "../ai-platform/studio/configStore.service.js";
+import { listProvidersMerged, listModelsMerged, listProfilesMerged } from "../ai-platform/studio/configReads.service.js";
 import { listPrompts } from "../ai-platform/studio/promptRegistry.service.js";
 import * as telemetry from "../ai-platform/studio/telemetry.service.js";
 import { runPlayground } from "../ai-platform/studio/playground.service.js";
@@ -24,10 +25,13 @@ const router = express.Router();
 const wsRole = (req) => (req.user?.role === "admin" ? "workspace_admin" : "workspace_viewer");
 const wrap = (fn) => async (req, res) => { try { await fn(req, res); } catch (e) { res.status(500).json({ error: e.message }); } };
 
-// Option lists so the workspace UI can offer dropdowns (same registries as superadmin; read-only).
-router.get("/providers", (_req, res) => res.json(listProviderViewModels()));
-router.get("/models", (_req, res) => res.json(listModelViewModels()));
-router.get("/profiles", (_req, res) => res.json(listRuntimeProfileViewModels()));
+// Option lists — workspace admins may only pick PROPERLY-CONFIGURED providers/models.
+router.get("/providers", wrap(async (_req, res) => res.json((await listProvidersMerged()).filter((p) => p.enabled && p.configured))));
+router.get("/models", wrap(async (_req, res) => {
+  const ok = new Set((await listProvidersMerged()).filter((p) => p.enabled && p.configured).map((p) => p.key));
+  res.json((await listModelsMerged()).filter((m) => m.enabled && ok.has(m.providerKey)));
+}));
+router.get("/profiles", wrap(async (_req, res) => res.json(await listProfilesMerged())));
 router.get("/prompts", wrap(async (_req, res) => res.json(await listPrompts())));
 
 router.get("/overview", (_req, res) => {
