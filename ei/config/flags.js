@@ -74,3 +74,7 @@ export const isEiLearningEnabled = (workspaceId = null) => gate("EI_LEARNING_ENA
 export const isEiExperimentsEnabled = (workspaceId = null) => gate("EI_EXPERIMENTS_ENABLED", workspaceId);
 export const isEiMemoryEnabled = (workspaceId = null) => gate("EI_MEMORY_ENABLED", workspaceId);
 export const isEiHealthEnabled = (workspaceId = null) => gate("EI_HEALTH_ENABLED", workspaceId);
+
+/** Enterprise Intelligence Studio — the read-only API/UI surface over all EI subsystems.
+ *  Master gate for the /intelligence-studio routes; default OFF. */
+export const isEiStudioEnabled = (workspaceId = null) => gate("EI_STUDIO_ENABLED", workspaceId);

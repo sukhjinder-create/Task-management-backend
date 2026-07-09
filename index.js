@@ -69,6 +69,8 @@ import autopilotRoutes from "./routes/autopilot.routes.js";
 import adaptiveRoutes from "./routes/adaptive.routes.js";
 // ⚙️ Enterprise Work Intelligence Platform V3 (execution substrate) — inert unless EXEC_ENABLED
 import executionRoutes from "./execution/routes.js";
+// 🧠 Enterprise Intelligence Studio (read-only EI surface) — inert unless EI_STUDIO_ENABLED
+import eiStudioRoutes from "./ei/studio/routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
@@ -306,6 +308,8 @@ app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFe
 app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoutes);
 // ⚙️ Execution platform — self-guards (returns 404 for any workspace where EXEC_ENABLED is off)
 app.use("/execution",     authMiddleware, requireWorkspaceForUser, executionRoutes);
+// 🧠 Enterprise Intelligence Studio — self-guards (404 when EI_STUDIO_ENABLED is off)
+app.use("/intelligence-studio", authMiddleware, requireWorkspaceForUser, eiStudioRoutes);
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
 app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
