@@ -29,6 +29,9 @@ includes(backupRoutes, "missingWorkspaceRecoverySupported", "Recovery config mus
 includes(databaseTarget, "process.env.DATABASE_URL", "Database target helper must support DATABASE_URL");
 includes(databaseTarget, "PGSSLMODE", "Libpq env must carry SSL mode for pg_dump/psql");
 includes(backupService, "getLibpqEnv()", "Backup service must use shared libpq DB target resolution");
+includes(backupService, "process.env.AWS_S3_BUCKET", "Backup service must fall back to existing production S3/R2 bucket env");
+includes(backupService, "process.env.R2_ACCOUNT_ID", "Backup service must derive the R2 endpoint from existing production env");
+includes(backupService, "process.env.AWS_SECRET_ACCESS_KEY", "Backup service must fall back to existing production S3/R2 credentials");
 includes(recoveryService, "getLibpqEnv(database)", "Recovery restore must use shared libpq DB target resolution");
 includes(recoveryService, "createPoolFromConnectionString(sourceDatabaseUrl)", "Recovery source pools must use shared URL/SSL handling");
 includes(dockerfile, "postgresql-client-${POSTGRES_CLIENT_MAJOR}", "Runtime image must install PostgreSQL client tools for pg_dump/psql");
