@@ -8,6 +8,7 @@
 
 import { Router } from "express";
 import { isEiStudioEnabled } from "../config/flags.js";
+import { allowRoles } from "../../middleware/role.middleware.js";
 import * as svc from "./service.js";
 
 const router = Router();
@@ -18,6 +19,9 @@ router.use((req, res, next) => {
   if (!isEiStudioEnabled(wsId(req))) return res.status(404).json({ error: "intelligence_studio_disabled" });
   next();
 });
+// The Studio exposes sensitive organizational intelligence — admin only (defense in
+// depth; the mount also gates the role).
+router.use(allowRoles("admin"));
 
 router.get("/overview",          wrap((req) => svc.getOverview({ workspaceId: wsId(req) })));
 router.get("/evidence",          wrap(async (req) => ({ evidence: await svc.listEvidence({ workspaceId: wsId(req) }) })));

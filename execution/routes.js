@@ -19,8 +19,10 @@ import { createAutomation, validateAutomation, matchTriggers } from "./automatio
 import { actionLogEntry } from "./actionlog.js";
 import { computeExecutionAnalytics } from "./analytics.js";
 import * as store from "./stores.js";
+import { allowRoles } from "../middleware/role.middleware.js";
 
 const router = Router();
+const adminOnly = allowRoles("admin"); // mutating / capability-executing endpoints
 const wsId = (req) => req.workspaceId || req.headers["x-workspace-id"] || null;
 const actorOf = (req) => (req.user ? { type: "user", id: req.user.id, role: req.user.role } : null);
 const wrap = (fn) => async (req, res) => { try { await fn(req, res); } catch (e) { res.status(500).json({ error: e?.message || "execution_error" }); } };
@@ -31,10 +33,13 @@ router.use((req, res, next) => {
   if (!isExecutionEnabled(wsId(req))) return res.status(404).json({ error: "execution_platform_disabled" });
   next();
 });
+// Role floor — the execution platform is admin/manager only (defense in depth; the
+// mount also gates roles). Admin-only actions add `adminOnly` per route below.
+router.use(allowRoles("admin", "manager"));
 
 // ── Capabilities ──────────────────────────────────────────────────────────────
 router.get("/capabilities", wrap(async (req, res) => res.json({ capabilities: listCapabilities() })));
-router.post("/capabilities/:key/execute", wrap(async (req, res) => {
+router.post("/capabilities/:key/execute", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   const execution = await executeCapability({ workspaceId, key: req.params.key, input: req.body?.input || {}, context: { actorId: req.user?.id, idempotencyKey: req.body?.idempotencyKey } });
   const verification = verifyExecution(execution);
@@ -50,7 +55,7 @@ router.get("/decisions", wrap(async (req, res) => {
   const events = await store.listDecisionEvents({ workspaceId });
   res.json({ decisions: decisions.map((d) => ({ ...d, state: resolveDecisionState({ decisionId: d.decision_id }, events.map(mapEvt)).status })) });
 }));
-router.post("/decisions", wrap(async (req, res) => {
+router.post("/decisions", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   const decision = createDecisionFromRecommendation({ workspaceId, recommendation: req.body?.recommendation, proposedAction: req.body?.proposedAction });
   if (!decision) return res.status(400).json({ error: "invalid_recommendation" });
@@ -67,7 +72,7 @@ router.get("/decisions/:id", wrap(async (req, res) => {
   if (!d) return res.status(404).json({ error: "decision_not_found" });
   res.json({ decision: d, state: resolveDecisionState({ decisionId: req.params.id }, events), events });
 }));
-router.post("/decisions/:id/run", wrap(async (req, res) => {
+router.post("/decisions/:id/run", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   const [row] = await store.listDecisions({ workspaceId }).then((rows) => rows.filter((r) => r.decision_id === req.params.id));
   if (!row) return res.status(404).json({ error: "decision_not_found" });
@@ -98,7 +103,7 @@ router.post("/approvals/:approvalId/:action", wrap(async (req, res) => {
 
 // ── Workflows ───────────────────────────────────────────────────────────────
 router.get("/workflows/templates", wrap(async (req, res) => res.json({ templates: WORKFLOW_TEMPLATES })));
-router.post("/workflows/run", wrap(async (req, res) => {
+router.post("/workflows/run", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   if (!isWorkflowEnabled(workspaceId)) return res.status(403).json({ error: "workflow_disabled" });
   const definition = req.body?.definition || WORKFLOW_TEMPLATES[req.body?.templateKey];
@@ -112,7 +117,7 @@ router.get("/workflows/runs", wrap(async (req, res) => res.json({ runs: await st
 
 // ── Policies ────────────────────────────────────────────────────────────────
 router.get("/policies", wrap(async (req, res) => res.json({ policies: await store.listPolicies({ workspaceId: wsId(req) }) })));
-router.post("/policies", wrap(async (req, res) => {
+router.post("/policies", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   if (!isPolicyEnabled(workspaceId)) return res.status(403).json({ error: "policy_disabled" });
   const policy = createPolicy({ ...req.body, workspaceId, scope: req.body?.scope || workspaceId });
@@ -120,7 +125,7 @@ router.post("/policies", wrap(async (req, res) => {
   await store.appendPolicy(policy);
   res.status(201).json({ policy });
 }));
-router.post("/policies/evaluate", wrap(async (req, res) => {
+router.post("/policies/evaluate", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   const platform = (await store.listPolicies({ scope: "PLATFORM" })).map(rowToPolicy);
   const wsPolicies = (await store.listPolicies({ workspaceId })).map(rowToPolicy);
@@ -130,7 +135,7 @@ router.post("/policies/evaluate", wrap(async (req, res) => {
 
 // ── Automations ───────────────────────────────────────────────────────────────
 router.get("/automations", wrap(async (req, res) => res.json({ automations: await store.listAutomations({ workspaceId: wsId(req) }) })));
-router.post("/automations", wrap(async (req, res) => {
+router.post("/automations", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   if (!isAutomationEnabled(workspaceId)) return res.status(403).json({ error: "automation_disabled" });
   const automation = createAutomation({ ...req.body, workspaceId });
@@ -138,7 +143,7 @@ router.post("/automations", wrap(async (req, res) => {
   await store.appendAutomation(automation);
   res.status(201).json({ automation });
 }));
-router.post("/automations/fire", wrap(async (req, res) => {
+router.post("/automations/fire", adminOnly, wrap(async (req, res) => {
   const workspaceId = wsId(req);
   const automations = (await store.listAutomations({ workspaceId })).map(rowToAutomation);
   const fired = matchTriggers(req.body?.signal || {}, automations);

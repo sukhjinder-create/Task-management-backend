@@ -1,8 +1,10 @@
 import "dotenv/config";
 import express from "express";
 import http from "http";
+import fs from "fs";
 import cors from "cors";
 import helmet from "helmet";
+import { validateStartup } from "./ops/startupValidation.js";
 
 // ---------------- ROUTES (UNCHANGED) ----------------
 import projectRoutes from "./routes/project.routes.js";
@@ -271,6 +273,21 @@ app.get("/version", (req, res) => res.json({
   service: "asystence-api",
 }));
 
+// ── Health probes (public, no secrets) ────────────────────────────────────────
+// One-time, deterministic startup validation used by /readyz and boot diagnostics.
+let _migrationFiles = [];
+try { _migrationFiles = fs.readdirSync("migrations"); } catch { /* bundle without migrations dir */ }
+const STARTUP_REPORT = validateStartup({ migrationFiles: _migrationFiles });
+
+app.get("/livez", (_req, res) => res.json({ status: "live", service: "asystence-api", commit: process.env.RELEASE_COMMIT || "unknown" }));
+app.get("/readyz", (_req, res) => res.status(STARTUP_REPORT.ok ? 200 : 503).json({
+  ready: STARTUP_REPORT.ok,
+  production: STARTUP_REPORT.production,
+  errors: STARTUP_REPORT.errors,
+  warnings: STARTUP_REPORT.warnings,
+  checks: STARTUP_REPORT.checks,
+}));
+
 app.use("/auth", authRoutes);
 app.use("/public/billing", publicBillingRoutes);
 app.use("/growth", growthRoutes);
@@ -306,10 +323,10 @@ app.use(
 // 🤖 Autopilot AI — plan-gated
 app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
 app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoutes);
-// ⚙️ Execution platform — self-guards (returns 404 for any workspace where EXEC_ENABLED is off)
-app.use("/execution",     authMiddleware, requireWorkspaceForUser, executionRoutes);
-// 🧠 Enterprise Intelligence Studio — self-guards (404 when EI_STUDIO_ENABLED is off)
-app.use("/intelligence-studio", authMiddleware, requireWorkspaceForUser, eiStudioRoutes);
+// ⚙️ Execution platform — admin/manager only + self-guards (404 when EXEC_ENABLED is off)
+app.use("/execution",     authMiddleware, requireWorkspaceForUser, allowRoles("admin", "manager"), executionRoutes);
+// 🧠 Enterprise Intelligence Studio — admin only + self-guards (404 when EI_STUDIO_ENABLED is off)
+app.use("/intelligence-studio", authMiddleware, requireWorkspaceForUser, allowRoles("admin"), eiStudioRoutes);
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
 app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
@@ -439,6 +456,11 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 // ---------------- EVENT SYSTEM BOOTSTRAP ----------------
+
+// ── Startup diagnostics (non-blocking; no secrets printed) ────────────────────
+console.log(`[startup] readiness=${STARTUP_REPORT.ok ? "OK" : "NOT_READY"} production=${STARTUP_REPORT.production} migrations=${STARTUP_REPORT.checks.migrationsPresent}/${STARTUP_REPORT.checks.migrationsExpected} platformFlagsEnabled=${STARTUP_REPORT.checks.platformFlagsEnabled.length}`);
+for (const e of STARTUP_REPORT.errors) console.error(`[startup][error] ${e}`);
+for (const w of STARTUP_REPORT.warnings) console.warn(`[startup][warn] ${w}`);
 
 bootstrapAdaptivePlatform();
 bootstrapEnterpriseIntelligence(); // EI V2.1 event ingestion (flag-gated; no-op when OFF)
