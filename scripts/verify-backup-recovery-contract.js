@@ -20,6 +20,7 @@ const backupRoutes = read("routes/backup.routes.js");
 const recoveryMigration = read("migrations/20260409_workspace_recovery_jobs.sql");
 const cli = read("run-workspace-recovery.js");
 const runbook = read("BACKUP_RECOVERY_RUNBOOK.md");
+const dockerfile = read("Dockerfile");
 
 includes(backupRoutes, "router.use(requireSuperadmin)", "Backup routes must stay behind Super Admin auth");
 includes(backupRoutes, "confirmApply=true", "Apply recovery route must require explicit confirmation");
@@ -30,6 +31,8 @@ includes(databaseTarget, "PGSSLMODE", "Libpq env must carry SSL mode for pg_dump
 includes(backupService, "getLibpqEnv()", "Backup service must use shared libpq DB target resolution");
 includes(recoveryService, "getLibpqEnv(database)", "Recovery restore must use shared libpq DB target resolution");
 includes(recoveryService, "createPoolFromConnectionString(sourceDatabaseUrl)", "Recovery source pools must use shared URL/SSL handling");
+includes(dockerfile, "postgresql-client-${POSTGRES_CLIENT_MAJOR}", "Runtime image must install PostgreSQL client tools for pg_dump/psql");
+includes(dockerfile, "apt.postgresql.org", "Runtime image must use a modern PostgreSQL apt repository");
 
 notIncludes(
   recoveryMigration,
