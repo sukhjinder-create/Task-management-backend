@@ -50,6 +50,7 @@ import superadminGrowthRoutes from "./routes/superadminGrowth.routes.js";
 import superadminAdaptiveIntelligenceRoutes from "./routes/superadminAdaptiveIntelligence.routes.js";
 import superadminAiStudioRoutes from "./routes/superadminAiStudio.routes.js";
 import aiStudioWorkspaceRoutes from "./routes/aiStudioWorkspace.routes.js";
+import requireSuperadmin from "./middleware/requireSuperadmin.js";
 import backupRoutes from "./routes/backup.routes.js";
 import growthRoutes from "./routes/growth.routes.js";
 import { growthProductTelemetry } from "./growth/growthProductTelemetry.middleware.js";
@@ -306,6 +307,16 @@ app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin/growth", superadminGrowthRoutes);
 app.use("/superadmin/adaptive-intelligence", superadminAdaptiveIntelligenceRoutes);
 app.use("/superadmin/ai-studio", superadminAiStudioRoutes);
+// Enterprise Execution Platform + Enterprise Intelligence Studio — SUPER-ADMIN owned.
+// The superadmin selects the workspace via ?workspaceId=; a synthetic admin role lets
+// the routers' internal guards + workspace-scoped queries work unchanged.
+const superadminWorkspaceCtx = (req, _res, next) => {
+  req.user = { id: req.superadmin?.id || "superadmin", role: "admin" };
+  req.workspaceId = req.query.workspaceId || req.headers["x-workspace-id"] || null;
+  next();
+};
+app.use("/superadmin/execution", requireSuperadmin, superadminWorkspaceCtx, executionRoutes);
+app.use("/superadmin/intelligence-studio", requireSuperadmin, superadminWorkspaceCtx, eiStudioRoutes);
 app.use("/app-version", appVersionRoutes);
 
 // Public endpoint — no auth required (must be before any catch-all authMiddleware)
@@ -324,10 +335,9 @@ app.use(
 // 🤖 Autopilot AI — plan-gated
 app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
 app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoutes);
-// ⚙️ Execution platform — admin/manager only + self-guards (404 when EXEC_ENABLED is off)
-app.use("/execution",     authMiddleware, requireWorkspaceForUser, allowRoles("admin", "manager"), executionRoutes);
-// 🧠 Enterprise Intelligence Studio — admin only + self-guards (404 when EI_STUDIO_ENABLED is off)
-app.use("/intelligence-studio", authMiddleware, requireWorkspaceForUser, allowRoles("admin"), eiStudioRoutes);
+// ⚙️ Execution Platform + 🧠 Enterprise Intelligence Studio are SUPER-ADMIN owned —
+// relocated to /superadmin/* (mounted in the superadmin section below). Workspace admins
+// no longer administer enterprise execution or enterprise intelligence.
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
 app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);

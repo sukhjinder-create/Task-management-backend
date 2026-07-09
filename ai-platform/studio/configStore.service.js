@@ -68,6 +68,22 @@ export async function upsertCapabilityConfig({ capabilityKey, scope = "PLATFORM"
   return { ok: true };
 }
 
+/** Read saved capability configs (platform defaults or a workspace's overrides). */
+export async function listCapabilityConfigs({ scope = "PLATFORM", workspaceId = null } = {}) {
+  const { rows } = await q(
+    `SELECT capability_key, scope, workspace_id, enabled, provider, model, prompt_key, runtime_profile, lock_level, updated_at
+       FROM ai_capability_config
+      WHERE scope = $1 AND ($2::text IS NULL OR workspace_id = $2)
+      ORDER BY capability_key`,
+    [scope, workspaceId]
+  );
+  return rows.map((r) => ({
+    capabilityKey: r.capability_key, scope: r.scope, workspaceId: r.workspace_id, enabled: r.enabled,
+    provider: r.provider, model: r.model, promptKey: r.prompt_key, runtimeProfile: r.runtime_profile,
+    lockLevel: r.lock_level, updatedAt: r.updated_at,
+  }));
+}
+
 /** Set the lock level on a capability config object. */
 export async function setLock({ capabilityKey, scope = "PLATFORM", workspaceId = null, lockLevel, actorId = null }) {
   if (!LOCK_LEVELS.includes(lockLevel)) return { ok: false, reason: "invalid_lock_level" };

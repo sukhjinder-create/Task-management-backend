@@ -66,6 +66,17 @@ router.post("/capability-config/:key/lock", wrap(async (req, res) => {
   const r = await config.setLock({ capabilityKey: req.params.key, scope: "PLATFORM", lockLevel: req.body?.lockLevel, actorId: actor(req) });
   r.ok ? res.json(r) : res.status(400).json(r);
 }));
+// Read SAVED selections (platform defaults, or a specific workspace's overrides).
+router.get("/capability-config", wrap(async (req, res) => res.json(await config.listCapabilityConfigs({ scope: req.query.scope || "PLATFORM", workspaceId: req.query.workspaceId || null }))));
+// Manage a SPECIFIC workspace's config + lock from the superadmin side (lock "a few" workspaces).
+router.post("/workspaces/:wsId/capability-config", wrap(async (req, res) => {
+  const r = await config.upsertCapabilityConfig({ ...req.body, scope: req.params.wsId, workspaceId: req.params.wsId, actorId: actor(req) });
+  r.ok ? res.json(r) : res.status(400).json(r);
+}));
+router.post("/workspaces/:wsId/capability-config/:key/lock", wrap(async (req, res) => {
+  const r = await config.setLock({ capabilityKey: req.params.key, scope: req.params.wsId, workspaceId: req.params.wsId, lockLevel: req.body?.lockLevel, actorId: actor(req) });
+  r.ok ? res.json(r) : res.status(400).json(r);
+}));
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
 router.get("/audit", wrap(async (req, res) => res.json(await listAudit({ objectType: req.query.objectType || null, limit: req.query.limit }))));
