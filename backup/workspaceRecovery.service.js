@@ -1,4 +1,3 @@
-import pg from "pg";
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { createReadStream, existsSync, statSync } from "fs";
@@ -7,19 +6,21 @@ import { createGunzip } from "zlib";
 import path from "path";
 import { fileURLToPath } from "url";
 import pool from "../db.js";
+import {
+  buildDatabaseUrl as buildPrimaryDatabaseUrl,
+  createConfiguredPool,
+  createPoolFromConnectionString,
+  describePrimaryDatabaseTarget,
+  getLibpqEnv,
+} from "./databaseTarget.js";
 
-const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const DB_HOST = process.env.DB_HOST || "localhost";
-const DB_PORT = Number(process.env.DB_PORT || 5432);
-const DB_USER = process.env.DB_USER || "postgres";
-const DB_PASSWORD = process.env.DB_PASSWORD || "";
-const DB_NAME = process.env.DB_NAME || "postgres";
+const PRIMARY_DB_NAME = describePrimaryDatabaseTarget().database || "postgres";
 const DB_ADMIN_DATABASE = process.env.BACKUP_RESTORE_ADMIN_DB || "postgres";
 const MANAGED_SNAPSHOT_DB = (
   process.env.RESTORE_MANAGED_SNAPSHOT_DB ||
-  `${DB_NAME}_snapshot`
+  `${PRIMARY_DB_NAME}_snapshot`
 ).slice(0, 63);
 const RECOVERY_HEARTBEAT_TIMEOUT_MINUTES = Math.max(
   1,
@@ -29,20 +30,46 @@ const BACKUP_DIR = process.env.BACKUP_LOCAL_DIR
   ? path.resolve(process.env.BACKUP_LOCAL_DIR)
   : path.join(__dirname, "..", "backups");
 
-const TABLE_PLAN = [
+export const TABLE_PLAN = [
   { table: "workspaces", where: "id = $1" },
   { table: "users", where: "workspace_id = $1" },
   { table: "workspace_users", where: "workspace_id = $1" },
+  { table: "system_users", where: "workspace_id = $1" },
+  { table: "notification_preferences", where: "workspace_id = $1" },
   { table: "projects", where: "workspace_id = $1" },
   { table: "project_ticket_sequences", where: "workspace_id = $1" },
   { table: "sprints", where: "workspace_id = $1" },
   { table: "tasks", where: "workspace_id = $1" },
+  { table: "comments", where: "workspace_id = $1" },
   { table: "task_attachments", where: "task_id IN (SELECT id FROM tasks WHERE workspace_id = $1)" },
   { table: "task_activity_logs", where: "workspace_id = $1" },
+  { table: "workspace_events", where: "workspace_id = $1" },
   { table: "chat_channels", where: "workspace_id = $1" },
   { table: "chat_channel_members", where: "workspace_id = $1" },
   { table: "chat_channel_admins", where: "workspace_id = $1" },
   { table: "chat_messages", where: "workspace_id = $1" },
+  { table: "chat_channel_read_status", where: "workspace_id = $1" },
+  { table: "huddle_guests", where: "workspace_id = $1" },
+  { table: "huddle_sessions", where: "workspace_id = $1" },
+  { table: "huddle_session_participants", where: "workspace_id = $1" },
+  { table: "huddle_participant_devices", where: "workspace_id = $1" },
+  { table: "huddle_session_events", where: "workspace_id = $1" },
+  { table: "huddle_artifacts", where: "workspace_id = $1" },
+  { table: "huddle_media_sessions", where: "workspace_id = $1" },
+  { table: "huddle_media_provider_identities", where: "workspace_id = $1" },
+  { table: "huddle_transcript_segments", where: "workspace_id = $1" },
+  { table: "huddle_intelligence_jobs", where: "workspace_id = $1" },
+  { table: "huddle_transcript_processing_state", where: "workspace_id = $1" },
+  { table: "huddle_speaker_attributions", where: "workspace_id = $1" },
+  { table: "huddle_caption_events", where: "workspace_id = $1" },
+  { table: "huddle_timeline_entries", where: "workspace_id = $1" },
+  { table: "huddle_ownership_resolutions", where: "workspace_id = $1" },
+  { table: "huddle_memory_candidates", where: "workspace_id = $1" },
+  { table: "huddle_meeting_digests", where: "workspace_id = $1" },
+  { table: "huddle_intelligence_consent_records", where: "workspace_id = $1" },
+  { table: "huddle_intelligence_retention_policies", where: "workspace_id = $1" },
+  { table: "huddle_topic_segments", where: "workspace_id = $1" },
+  { table: "huddle_risk_blocker_items", where: "workspace_id = $1" },
   { table: "wiki_spaces", where: "workspace_id = $1" },
   { table: "wiki_pages", where: "space_id IN (SELECT id FROM wiki_spaces WHERE workspace_id = $1)" },
   {
@@ -57,6 +84,8 @@ const TABLE_PLAN = [
   { table: "leave_requests", where: "workspace_id = $1" },
   { table: "leave_balances", where: "workspace_id = $1" },
   { table: "attendance_daily", where: "workspace_id = $1" },
+  { table: "notifications", where: "workspace_id = $1" },
+  { table: "user_push_tokens", where: "workspace_id = $1" },
   { table: "tags", where: "workspace_id = $1" },
   { table: "task_tag_assignments", where: "task_id IN (SELECT id FROM tasks WHERE workspace_id = $1)" },
   { table: "task_links", where: "workspace_id = $1" },
@@ -66,6 +95,12 @@ const TABLE_PLAN = [
   { table: "issue_templates", where: "workspace_id = $1" },
   { table: "saved_filters", where: "workspace_id = $1" },
   { table: "task_assignees", where: "workspace_id = $1" },
+  { table: "user_intelligence", where: "workspace_id = $1" },
+  { table: "project_intelligence", where: "workspace_id = $1" },
+  { table: "team_intelligence", where: "workspace_id = $1" },
+  { table: "workspace_intelligence", where: "workspace_id = $1" },
+  { table: "intelligence_snapshots", where: "workspace_id = $1" },
+  { table: "intelligence_recalculation_events", where: "workspace_id = $1" },
   { table: "workspace_ai_settings", where: "workspace_id = $1" },
   { table: "ai_memory", where: "workspace_id = $1" },
   { table: "ai_decision_provenance", where: "workspace_id = $1" },
@@ -76,13 +111,58 @@ const TABLE_PLAN = [
   { table: "testing_agent_runs", where: "workspace_id = $1" },
   { table: "testing_agent_project_profiles", where: "workspace_id = $1" },
   { table: "workspace_memory_entries", where: "workspace_id = $1" },
+  { table: "adaptive_runtime_settings", where: "workspace_id = $1" },
+  { table: "adaptive_event_queue", where: "workspace_id = $1" },
+  { table: "adaptive_runtime_runs", where: "workspace_id = $1" },
+  { table: "adaptive_execution_plans", where: "workspace_id = $1" },
   { table: "operations_ai_actions", where: "workspace_id = $1" },
   { table: "operations_ai_action_decisions", where: "workspace_id = $1" },
+  { table: "adaptive_execution_plan_steps", where: "workspace_id = $1" },
+  { table: "adaptive_capability_invocations", where: "workspace_id = $1" },
+  { table: "adaptive_workflow_definitions", where: "workspace_id = $1" },
+  { table: "adaptive_workflow_runs", where: "workspace_id = $1" },
+  { table: "adaptive_workflow_step_runs", where: "workspace_id = $1" },
+  { table: "adaptive_learning_signals", where: "workspace_id = $1" },
+  { table: "adaptive_preference_profiles", where: "workspace_id = $1" },
+  { table: "adaptive_predictions", where: "workspace_id = $1" },
+  { table: "adaptive_intelligence_evaluations", where: "workspace_id = $1" },
+  { table: "adaptive_intelligence_metric_snapshots", where: "workspace_id = $1" },
+  { table: "adaptive_intelligence_coach_insights", where: "workspace_id = $1" },
+  { table: "adaptive_strategy_experiments", where: "workspace_id = $1" },
+  { table: "adaptive_strategy_experiment_results", where: "workspace_id = $1" },
+  { table: "adaptive_memory_patterns", where: "workspace_id = $1" },
+  { table: "adaptive_universal_explanations", where: "workspace_id = $1" },
   { table: "workspace_digest_preferences", where: "workspace_id = $1" },
   { table: "workspace_digest_runs", where: "workspace_id = $1" },
   { table: "operations_automation_rules", where: "workspace_id = $1" },
+  { table: "workspace_executive_summaries", where: "workspace_id = $1" },
+  { table: "workspace_monthly_scores", where: "workspace_id = $1" },
+  { table: "workspace_project_monthly_scores", where: "workspace_id = $1" },
   { table: "workspace_search_history", where: "workspace_id = $1" },
   { table: "workspace_search_click_history", where: "workspace_id = $1" },
+  { table: "exec_decisions", where: "workspace_id = $1" },
+  { table: "exec_decision_events", where: "workspace_id = $1" },
+  { table: "exec_approval_requests", where: "workspace_id = $1" },
+  { table: "exec_approval_events", where: "workspace_id = $1" },
+  { table: "exec_executions", where: "workspace_id = $1" },
+  { table: "exec_verifications", where: "workspace_id = $1" },
+  { table: "exec_workflow_runs", where: "workspace_id = $1" },
+  { table: "exec_policies", where: "workspace_id = $1" },
+  { table: "exec_automations", where: "workspace_id = $1" },
+  { table: "exec_action_log", where: "workspace_id = $1" },
+  { table: "ei_events", where: "workspace_id = $1" },
+  { table: "ei_attributions", where: "workspace_id = $1" },
+  { table: "ei_outcomes", where: "workspace_id = $1" },
+  { table: "ei_predictions", where: "workspace_id = $1" },
+  { table: "ei_calibration_models", where: "workspace_id = $1" },
+  { table: "ei_recommendations", where: "workspace_id = $1" },
+  { table: "ei_learning_proposals", where: "workspace_id = $1" },
+  { table: "ei_learning_reviews", where: "workspace_id = $1" },
+  { table: "ei_experiments", where: "workspace_id = $1" },
+  { table: "ei_experiment_assignments", where: "workspace_id = $1" },
+  { table: "ei_org_memory", where: "workspace_id = $1" },
+  { table: "ei_reasoning_traces", where: "workspace_id = $1" },
+  { table: "ei_evidence", where: "workspace_id = $1" },
   { table: "payment_customers", where: "workspace_id = $1" },
   { table: "workspace_subscriptions", where: "workspace_id = $1" },
   { table: "payment_checkout_sessions", where: "workspace_id = $1" },
@@ -119,27 +199,8 @@ function maskSourceUrl(urlValue) {
   }
 }
 
-function getPoolConfig(database) {
-  return {
-    host: DB_HOST,
-    port: DB_PORT,
-    user: DB_USER,
-    password: DB_PASSWORD,
-    database,
-  };
-}
-
-function buildDatabaseUrl(database) {
-  const user = encodeURIComponent(DB_USER);
-  const pass = encodeURIComponent(DB_PASSWORD);
-  const host = DB_HOST;
-  const port = String(DB_PORT);
-  const db = encodeURIComponent(database);
-  return `postgresql://${user}:${pass}@${host}:${port}/${db}`;
-}
-
 async function ensureDatabaseExists(database) {
-  const adminPool = new Pool(getPoolConfig(DB_ADMIN_DATABASE));
+  const adminPool = createConfiguredPool(DB_ADMIN_DATABASE);
   let client = null;
   try {
     client = await adminPool.connect();
@@ -157,7 +218,7 @@ async function ensureDatabaseExists(database) {
 }
 
 async function resetDatabasePublicSchema(database) {
-  const snapshotPool = new Pool(getPoolConfig(database));
+  const snapshotPool = createConfiguredPool(database);
   try {
     await snapshotPool.query(`DROP SCHEMA IF EXISTS public CASCADE`);
     await snapshotPool.query(`CREATE SCHEMA public`);
@@ -179,14 +240,10 @@ function buildManagedSnapshotDbName() {
 
 function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null }) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, PGPASSWORD: DB_PASSWORD };
+    const env = getLibpqEnv(database);
     const psql = spawn(
       "psql",
       [
-        "-h", DB_HOST,
-        "-p", String(DB_PORT),
-        "-U", DB_USER,
-        "-d", database,
         "-v", "ON_ERROR_STOP=1",
         "-q",
       ],
@@ -368,7 +425,7 @@ async function buildManagedSnapshotSource({ onStatus }) {
   await send({ message: `Managed snapshot is ready (${snapshotDb}).`, restorePct: 100 });
 
   return {
-    sourceDatabaseUrl: buildDatabaseUrl(snapshotDb),
+    sourceDatabaseUrl: buildPrimaryDatabaseUrl(snapshotDb),
     sourceLabel: `managed:${snapshotDb}`,
   };
 }
@@ -384,12 +441,14 @@ export async function ensureRecoveryJobsTable() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS workspace_recovery_jobs (
         id              UUID PRIMARY KEY,
-        workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        workspace_id    UUID NOT NULL,
         status          TEXT NOT NULL CHECK (status IN ('pending','running','success','failed')),
         requested_by    TEXT,
         dry_run         BOOLEAN NOT NULL DEFAULT false,
         batch_size      INT NOT NULL DEFAULT 500,
         source_label    TEXT,
+        target_workspace_exists BOOLEAN,
+        workspace_name_snapshot TEXT,
         rows_scanned    BIGINT NOT NULL DEFAULT 0,
         rows_written    BIGINT NOT NULL DEFAULT 0,
         table_summary   JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -403,6 +462,25 @@ export async function ensureRecoveryJobsTable() {
         updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
         created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
       );
+    `);
+    await pool.query(`
+      DO $$
+      DECLARE
+        constraint_name text;
+      BEGIN
+        FOR constraint_name IN
+          SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_attribute a
+              ON a.attrelid = c.conrelid
+             AND a.attnum = ANY(c.conkey)
+           WHERE c.conrelid = 'workspace_recovery_jobs'::regclass
+             AND c.contype = 'f'
+             AND a.attname = 'workspace_id'
+        LOOP
+          EXECUTE format('ALTER TABLE workspace_recovery_jobs DROP CONSTRAINT %I', constraint_name);
+        END LOOP;
+      END $$;
     `);
     await pool.query(`
       ALTER TABLE workspace_recovery_jobs
@@ -423,6 +501,14 @@ export async function ensureRecoveryJobsTable() {
     await pool.query(`
       ALTER TABLE workspace_recovery_jobs
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    `);
+    await pool.query(`
+      ALTER TABLE workspace_recovery_jobs
+      ADD COLUMN IF NOT EXISTS target_workspace_exists BOOLEAN;
+    `);
+    await pool.query(`
+      ALTER TABLE workspace_recovery_jobs
+      ADD COLUMN IF NOT EXISTS workspace_name_snapshot TEXT;
     `);
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_workspace_recovery_jobs_workspace_created
@@ -509,6 +595,39 @@ async function getPrimaryKeyColumns(client, table) {
   return rows.map((r) => r.column_name);
 }
 
+async function getSequenceBackedColumns(client, table) {
+  const { rows } = await client.query(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1
+        AND column_default LIKE 'nextval(%'`,
+    [table]
+  );
+  return rows.map((r) => r.column_name);
+}
+
+async function syncTableSequences(client, table) {
+  const sequenceColumns = await getSequenceBackedColumns(client, table);
+  for (const column of sequenceColumns) {
+    const sequence = await client.query(
+      "SELECT pg_get_serial_sequence($1, $2) AS name",
+      [`public.${table}`, column]
+    );
+    const sequenceName = sequence.rows[0]?.name;
+    if (!sequenceName) continue;
+
+    await client.query(
+      `SELECT setval(
+         $1::regclass,
+         GREATEST(COALESCE((SELECT MAX(${qIdent(column)}) FROM ${qIdent(table)}), 0), 1),
+         true
+       )`,
+      [sequenceName]
+    );
+  }
+}
+
 function buildUpsertSql(table, columns, pkColumns, rowCount) {
   const qTable = qIdent(table);
   const qCols = columns.map(qIdent);
@@ -538,12 +657,23 @@ function buildUpsertSql(table, columns, pkColumns, rowCount) {
   return sql;
 }
 
+function isRecoverableSchemaMismatch(err) {
+  const msg = String(err?.message || "").toLowerCase();
+  return (
+    err?.code === "42703" ||
+    err?.code === "42P01" ||
+    (msg.includes("column") && msg.includes("does not exist")) ||
+    (msg.includes("relation") && msg.includes("does not exist"))
+  );
+}
+
 async function getDbIdentity(client) {
   const { rows } = await client.query(
     `SELECT current_database() AS db_name,
             current_schema()  AS schema_name,
             current_user      AS db_user,
-            COALESCE(inet_server_addr()::text, 'local') AS host`
+            COALESCE(inet_server_addr()::text, 'local') AS host,
+            COALESCE(inet_server_port()::text, '') AS port`
   );
   return rows[0];
 }
@@ -584,13 +714,28 @@ export async function createRecoveryJob({
   const sourceLabel = sourceDatabaseUrl
     ? maskSourceUrl(sourceDatabaseUrl)
     : (process.env.RESTORE_SOURCE_DATABASE_URL ? "env:RESTORE_SOURCE_DATABASE_URL" : "managed:auto-latest-backup");
+  const workspaceSnapshot = await pool.query(
+    "SELECT name FROM workspaces WHERE id = $1 LIMIT 1",
+    [workspaceId]
+  ).catch(() => ({ rows: [] }));
+  const targetWorkspace = workspaceSnapshot.rows[0] || null;
 
   const { rows } = await pool.query(
     `INSERT INTO workspace_recovery_jobs
-       (id, workspace_id, status, requested_by, dry_run, batch_size, source_label)
-     VALUES ($1, $2, 'pending', $3, $4, $5, $6)
+       (id, workspace_id, status, requested_by, dry_run, batch_size, source_label,
+        target_workspace_exists, workspace_name_snapshot)
+     VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [id, workspaceId, requestedBy || "superadmin", !!dryRun, Math.max(1, Math.min(Number(batchSize) || 500, 2000)), sourceLabel]
+    [
+      id,
+      workspaceId,
+      requestedBy || "superadmin",
+      !!dryRun,
+      Math.max(1, Math.min(Number(batchSize) || 500, 2000)),
+      sourceLabel,
+      !!targetWorkspace,
+      targetWorkspace?.name || null,
+    ]
   );
   return rows[0];
 }
@@ -839,7 +984,7 @@ export async function recoverWorkspaceFromSource({
   allowSameDb = false,
   onProgress = null,
 }) {
-  const sourcePool = new Pool({ connectionString: sourceDatabaseUrl });
+  const sourcePool = createPoolFromConnectionString(sourceDatabaseUrl);
   let source = null;
   let target = null;
 
@@ -852,8 +997,8 @@ export async function recoverWorkspaceFromSource({
     const sameDb =
       sourceId.db_name === targetId.db_name &&
       sourceId.schema_name === targetId.schema_name &&
-      sourceId.db_user === targetId.db_user &&
-      sourceId.host === targetId.host;
+      sourceId.host === targetId.host &&
+      sourceId.port === targetId.port;
 
     if (sameDb && !allowSameDb) {
       throw new Error("Source DB appears identical to target DB. Recovery aborted for safety.");
@@ -954,7 +1099,7 @@ export async function recoverWorkspaceFromSource({
       } catch (err) {
         // If the WHERE clause references columns that don't exist in the source database,
         // skip this table (e.g., workspace_id column missing in older backups)
-        if (err.message && err.message.includes('column') && err.message.includes('does not exist')) {
+        if (isRecoverableSchemaMismatch(err)) {
           console.warn(`Skipping table ${table}: ${err.message}`);
           tableSummary.push({ table, scanned: 0, written: 0, skipped: true });
           completedTables += 1;
@@ -1051,6 +1196,7 @@ export async function recoverWorkspaceFromSource({
       }
 
       totalWritten += writtenForTable;
+      await syncTableSequences(target, table);
       tableSummary.push({ table, scanned: total, written: writtenForTable, skipped: false });
       completedTables += 1;
       await sendProgress({

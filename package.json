@@ -30,6 +30,7 @@
     "migrate:final-intelligence-completion": "node --import ./scripts/database-safety-guard.js run-final-intelligence-completion-migration.js",
     "migrate:enterprise-pilot-product-discovery": "node --import ./scripts/database-safety-guard.js run-enterprise-pilot-product-discovery-migration.js",
     "verify:adaptive-runtime": "node scripts/verify-adaptive-runtime.js",
+    "verify:backup-recovery": "node scripts/verify-backup-recovery-contract.js",
     "verify:adaptive-intelligence-evaluation": "node scripts/verify-adaptive-intelligence-evaluation.js",
     "verify:final-intelligence-completion": "node scripts/verify-final-intelligence-completion.js",
     "test:adaptive-runtime": "node --test tests/adaptive-runtime.test.js",
@@ -95,8 +96,8 @@
     "verify:huddle-provider-lock-authority": "node scripts/verify-huddle-provider-lock-authority.js",
     "verify:huddle-mobile-livekit": "node scripts/verify-huddle-mobile-livekit-certification.js",
     "verify:huddle-operational-readiness": "node scripts/verify-huddle-operational-readiness.js",
-    "recover:workspace:dry": "node run-workspace-recovery.js --dry-run",
-    "recover:workspace": "node run-workspace-recovery.js",
+    "recover:workspace:dry": "node --import ./scripts/database-safety-guard.js run-workspace-recovery.js --dry-run",
+    "recover:workspace": "node --import ./scripts/database-safety-guard.js run-workspace-recovery.js",
     "migrate:supabase": "node --import ./scripts/database-safety-guard.js migrate-to-supabase.js"
   },
   "dependencies": {

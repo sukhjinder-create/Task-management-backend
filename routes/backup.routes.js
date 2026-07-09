@@ -98,6 +98,8 @@ router.get("/recovery-config", (_req, res) => {
   res.json({
     serverDefaultSourceConfigured: !!source,
     managedAutoRecoveryEnabled: true,
+    missingWorkspaceRecoverySupported: true,
+    applyRequiresConfirmation: true,
   });
 });
 
@@ -111,6 +113,7 @@ router.post("/recover-workspace", async (req, res) => {
     const workspaceId = String(req.body?.workspaceId || "").trim();
     const sourceDatabaseUrl = String(req.body?.sourceDatabaseUrl || "").trim();
     const dryRun = !!req.body?.dryRun;
+    const confirmApply = req.body?.confirmApply === true;
     const batchSize = Number(req.body?.batchSize) || 500;
 
     if (!workspaceId) {
@@ -119,6 +122,11 @@ router.post("/recover-workspace", async (req, res) => {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId);
     if (!isUuid) {
       return res.status(400).json({ error: "workspaceId must be a valid UUID" });
+    }
+    if (!dryRun && !confirmApply) {
+      return res.status(400).json({
+        error: "confirmApply=true is required for a workspace recovery apply run",
+      });
     }
     const running = await getRunningRecoveryJob();
     if (running) {
