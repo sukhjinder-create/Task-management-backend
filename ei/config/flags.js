@@ -78,3 +78,9 @@ export const isEiHealthEnabled = (workspaceId = null) => gate("EI_HEALTH_ENABLED
 /** Enterprise Intelligence Studio — the read-only API/UI surface over all EI subsystems.
  *  Master gate for the /intelligence-studio routes; default OFF. */
 export const isEiStudioEnabled = (workspaceId = null) => gate("EI_STUDIO_ENABLED", workspaceId);
+
+/** Enterprise Intelligence Orchestrator — the background worker that runs the
+ *  deterministic reasoning pipeline (events → attribution → evidence → reasoning →
+ *  prediction → recommendation) automatically. Default OFF. Adding a workspace to
+ *  EI_ENABLED_WORKSPACES turns this — and every EI stage — on for that workspace. */
+export const isEiOrchestratorEnabled = (workspaceId = null) => gate("EI_ORCHESTRATOR_ENABLED", workspaceId);

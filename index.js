@@ -77,6 +77,7 @@ import eiStudioRoutes from "./ei/studio/routes.js";
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
 import { bootstrapEnterpriseIntelligence } from "./ei/bootstrap.js";
+import { startEnterpriseIntelligenceOrchestratorWorker } from "./ei/orchestrator/worker.js";
 import { getCorsAllowedOrigins, isProductionRuntime } from "./config/environment.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
@@ -464,6 +465,8 @@ for (const w of STARTUP_REPORT.warnings) console.warn(`[startup][warn] ${w}`);
 
 bootstrapAdaptivePlatform();
 bootstrapEnterpriseIntelligence(); // EI V2.1 event ingestion (flag-gated; no-op when OFF)
+// EI reasoning pipeline auto-execution — canary-scoped worker; no-op unless EI_ENABLED_WORKSPACES is set.
+startEnterpriseIntelligenceOrchestratorWorker();
 
 // 2️⃣ Wrap services AFTER observers exist
 
