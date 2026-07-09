@@ -9,8 +9,23 @@
 import pg from "pg";
 import { readFileSync } from "fs";
 
-const connectionString = process.env.DATABASE_URL?.trim();
-if (!connectionString) throw new Error("DATABASE_URL is required to run migrations");
+// Prefer DATABASE_URL; otherwise build it from the DB_* parts (Cloud Run env / envvars-deploy.yaml).
+function resolveConnectionString() {
+  const url = process.env.DATABASE_URL?.trim();
+  if (url) return url;
+  const host = process.env.DB_HOST?.trim();
+  const user = process.env.DB_USER?.trim();
+  const pass = process.env.DB_PASSWORD;
+  const port = (process.env.DB_PORT || "5432").trim();
+  const name = (process.env.DB_NAME || "postgres").trim();
+  if (host && user && pass != null) {
+    return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}/${name}`;
+  }
+  return null;
+}
+
+const connectionString = resolveConnectionString();
+if (!connectionString) throw new Error("DATABASE_URL (or DB_HOST/DB_USER/DB_PASSWORD/DB_NAME) is required to run migrations");
 
 const pool = new pg.Pool({
   connectionString,
