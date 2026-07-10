@@ -19,6 +19,7 @@ import * as prompts from "../ai-platform/studio/promptRegistry.service.js";
 import * as config from "../ai-platform/studio/configStore.service.js";
 import { listProvidersMerged, listModelsMerged, listProfilesMerged } from "../ai-platform/studio/configReads.service.js";
 import { getCapabilityPrompt, setCapabilityPrompt, resetCapabilityPrompt } from "../ai-platform/studio/capabilityPrompt.service.js";
+import { listBudgets, upsertBudget, deleteBudget } from "../ai-platform/studio/budgets.service.js";
 import * as telemetry from "../ai-platform/studio/telemetry.service.js";
 import { listAudit } from "../ai-platform/studio/audit.service.js";
 import { runPlayground } from "../ai-platform/studio/playground.service.js";
@@ -86,10 +87,18 @@ router.get("/capabilities/:key/prompt", wrap(async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: "Unknown capability" });
 }));
 router.post("/capabilities/:key/prompt", wrap(async (req, res) => {
-  const r = await setCapabilityPrompt({ capabilityKey: req.params.key, body: req.body?.body, actorId: actor(req) });
+  const r = await setCapabilityPrompt({ capabilityKey: req.params.key, body: req.body?.body, force: Boolean(req.body?.force), actorId: actor(req) });
   r.ok ? res.json(r) : res.status(400).json(r);
 }));
 router.post("/capabilities/:key/prompt/reset", wrap(async (req, res) => res.json(await resetCapabilityPrompt({ capabilityKey: req.params.key, actorId: actor(req) }))));
+
+// ── Budgets (enforced by the gateway policy engine when hard_limit = true) ──────
+router.get("/budgets", wrap(async (_req, res) => res.json(await listBudgets())));
+router.post("/budgets", wrap(async (req, res) => {
+  const r = await upsertBudget({ ...req.body, actorId: actor(req) });
+  r.ok ? res.json(r) : res.status(400).json(r);
+}));
+router.delete("/budgets/:id", wrap(async (req, res) => res.json(await deleteBudget({ id: req.params.id, actorId: actor(req) }))));
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
 router.get("/audit", wrap(async (req, res) => res.json(await listAudit({ objectType: req.query.objectType || null, limit: req.query.limit }))));

@@ -6,12 +6,18 @@
 
 import express from "express";
 import requireSuperadmin from "../middleware/requireSuperadmin.js";
-import { getWorkspaceFeatures, setFeatureEnabled } from "../config/platformFeatures.js";
+import { getWorkspaceFeatures, setFeatureEnabled, enabledWorkspacesFor } from "../config/platformFeatures.js";
+import { getOrchestratorMetrics } from "../ei/orchestrator/metrics.js";
 
 const router = express.Router();
 router.use(requireSuperadmin);
 const wrap = (fn) => async (req, res) => { try { await fn(req, res); } catch (e) { res.status(500).json({ error: e.message }); } };
 const FEATURES = ["execution", "intelligence"];
+
+// GET /superadmin/platform-features/orchestrator/status → EI pipeline runtime health
+router.get("/orchestrator/status", wrap(async (_req, res) => {
+  res.json({ ...getOrchestratorMetrics(), enabledWorkspaces: enabledWorkspacesFor("intelligence") });
+}));
 
 // GET /superadmin/platform-features?workspaceId=... → { execution:bool, intelligence:bool }
 router.get("/", wrap(async (req, res) => {

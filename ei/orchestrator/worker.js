@@ -8,6 +8,7 @@
 // shutdown) — no new scheduling dependency.
 
 import { orchestrateWorkspace } from "./service.js";
+import { recordRun } from "./metrics.js";
 import { enabledWorkspacesFor } from "../../config/platformFeatures.js";
 
 function canaryWorkspaces() {
@@ -25,11 +26,16 @@ export function startEnterpriseIntelligenceOrchestratorWorker({ intervalMs = 5 *
     const workspaces = canaryWorkspaces(); // bounded: only explicitly-enabled workspaces
     if (workspaces.length === 0) return;
     for (const workspaceId of workspaces) {
+      const t0 = Date.now();
       try {
         const r = await orchestrateWorkspace({ workspaceId });
-        if (!r.skipped) console.log(`[ei-orchestrator] ws=${workspaceId} events=${r.events} attr=${r.attributions} traces=${r.traces} pred=${r.predictions} rec=${r.recommendations}`);
+        if (!r.skipped) {
+          console.log(`[ei-orchestrator] ws=${workspaceId} events=${r.events} attr=${r.attributions} traces=${r.traces} pred=${r.predictions} rec=${r.recommendations}`);
+          recordRun({ workspaceId, durationMs: Date.now() - t0, ok: true, counts: { events: r.events, attributions: r.attributions, traces: r.traces, predictions: r.predictions, recommendations: r.recommendations } });
+        }
       } catch (err) {
         console.warn(`[ei-orchestrator] ws=${workspaceId} error: ${err.message}`);
+        recordRun({ workspaceId, durationMs: Date.now() - t0, ok: false, error: err.message });
       }
     }
   };

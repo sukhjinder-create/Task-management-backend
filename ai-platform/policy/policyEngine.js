@@ -64,22 +64,31 @@ export async function checkPolicies({ workspaceId, providerKey /*, capabilityKey
 async function checkHardBudget(workspaceId) {
   try {
     const { rows: budgets } = await pool.query(
-      `SELECT period, limit_cost_usd FROM ai_budgets
-       WHERE hard_limit = true AND (workspace_id = $1 OR (scope='global' AND workspace_id IS NULL))`,
+      `SELECT scope, workspace_id, period, limit_cost_usd, limit_tokens FROM ai_budgets
+       WHERE hard_limit = true AND enabled = true
+         AND (workspace_id = $1 OR (scope='global' AND workspace_id IS NULL))`,
       [workspaceId ?? null]
     ).catch(() => ({ rows: [] }));
     if (!budgets.length) return { allowed: true };
 
     for (const b of budgets) {
       const since = b.period === "monthly" ? "date_trunc('month', now())" : "date_trunc('day', now())";
+      // Workspace budget → that workspace's spend; global budget → platform-wide spend.
+      const scopeWs = b.scope === "global" ? null : b.workspace_id;
       const { rows } = await pool.query(
-        `SELECT COALESCE(SUM(est_cost_usd),0)::numeric AS spent FROM ai_request_logs
-         WHERE (workspace_id = $1 OR $1 IS NULL) AND ts >= ${since}`,
-        [workspaceId ?? null]
-      ).catch(() => ({ rows: [{ spent: 0 }] }));
+        `SELECT COALESCE(SUM(est_cost_usd),0)::numeric AS spent,
+                COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0)),0)::bigint AS tokens
+           FROM ai_request_logs
+          WHERE ($1::text IS NULL OR workspace_id = $1) AND ts >= ${since}`,
+        [scopeWs]
+      ).catch(() => ({ rows: [{ spent: 0, tokens: 0 }] }));
       const spent = Number(rows?.[0]?.spent || 0);
+      const tokens = Number(rows?.[0]?.tokens || 0);
       if (b.limit_cost_usd != null && spent >= Number(b.limit_cost_usd)) {
-        return { allowed: false, reason: `AI ${b.period} budget reached` };
+        return { allowed: false, reason: `AI ${b.period} budget reached ($${Number(b.limit_cost_usd)})` };
+      }
+      if (b.limit_tokens != null && tokens >= Number(b.limit_tokens)) {
+        return { allowed: false, reason: `AI ${b.period} token budget reached (${Number(b.limit_tokens)} tokens)` };
       }
     }
     return { allowed: true };
