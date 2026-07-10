@@ -9,6 +9,7 @@ import { recordAudit } from "./audit.service.js";
 import { negotiate } from "../providers/negotiation.js";
 import { getCapability } from "../capabilities/registry.js";
 import { LOCK_LEVELS } from "../governance/locks.js";
+import { encryptSecret } from "../keys/keyCrypto.js";
 
 export async function upsertProvider({ key, displayName, adapter, baseUrl = null, apiKeyEnv = null, defaultModel = null, enabled = true, lockLevel = "workspace_customizable", apiKey = null, actorId = null }) {
   await q(
@@ -18,7 +19,7 @@ export async function upsertProvider({ key, displayName, adapter, baseUrl = null
        base_url=EXCLUDED.base_url, api_key_env=EXCLUDED.api_key_env, default_model=EXCLUDED.default_model,
        enabled=EXCLUDED.enabled, lock_level=EXCLUDED.lock_level,
        api_key=COALESCE(EXCLUDED.api_key, ai_providers.api_key), updated_at=now()`,
-    [key, displayName, adapter, baseUrl, apiKeyEnv, defaultModel, enabled, lockLevel, (apiKey && String(apiKey).trim()) || null]
+    [key, displayName, adapter, baseUrl, apiKeyEnv, defaultModel, enabled, lockLevel, (apiKey && String(apiKey).trim()) ? encryptSecret(String(apiKey).trim()) : null]
   );
   await recordAudit({ actorType: "superadmin", actorId, action: "upsert", objectType: "provider", objectKey: key });
   return { ok: true };

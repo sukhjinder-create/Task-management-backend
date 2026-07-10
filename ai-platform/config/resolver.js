@@ -16,6 +16,7 @@
 // verbatim) } — i.e., exactly the legacy behavior.
 
 import pool from "../../db.js";
+import { decryptSecret } from "../keys/keyCrypto.js";
 import { getCapability, LEGACY_CAPABILITY_KEY } from "../capabilities/registry.js";
 import { adapterTypeForProviderKey } from "../providers/registry.js";
 import { SYSTEM_PROFILES, DEFAULT_PROFILE_KEY } from "../runtime/runtimeProfiles.js";
@@ -115,7 +116,7 @@ function synthProviderConfig(providerKey, providerRow) {
     adapter: adapterType,
     baseUrl: providerRow?.base_url || null,
     apiKeyEnv: providerRow?.api_key_env || null,
-    apiKey: providerRow?.api_key || null,   // key set from the AI Studio UI (preferred, if present)
+    apiKey: providerRow?.api_key ? decryptSecret(providerRow.api_key) : null, // decrypt UI-set key (preferred)
     defaultModel: providerRow?.default_model || null,
     timeoutMs: providerRow?.timeout_ms || null,
     extra: providerRow?.config_json || null,
