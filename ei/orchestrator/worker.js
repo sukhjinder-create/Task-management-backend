@@ -8,9 +8,11 @@
 // shutdown) — no new scheduling dependency.
 
 import { orchestrateWorkspace } from "./service.js";
+import { enabledWorkspacesFor } from "../../config/platformFeatures.js";
 
 function canaryWorkspaces() {
-  return String(process.env.EI_ENABLED_WORKSPACES || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const env = String(process.env.EI_ENABLED_WORKSPACES || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return [...new Set([...env, ...enabledWorkspacesFor("intelligence")])]; // env canary + UI toggle
 }
 
 let timer = null;

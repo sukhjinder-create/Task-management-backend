@@ -9,6 +9,7 @@
 //   EI_ENABLED_WORKSPACES     comma-separated canary workspace ids
 
 import { envBool } from "../../config/environment.js";
+import { isFeatureEnabledCached } from "../../config/platformFeatures.js";
 
 function csv(value) {
   return String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -18,23 +19,27 @@ export function isEiEnabled() {
   return envBool("EI_V2_ENABLED", false);
 }
 
-/** Phase 1 ingestion gate (global flag OR per-workspace canary). Default OFF. */
+/** Phase 1 ingestion gate (global flag OR per-workspace canary OR UI toggle). Default OFF. */
 export function isEiEventPipelineEnabled(workspaceId = null) {
   if (envBool("EI_EVENT_PIPELINE_ENABLED", false)) return true;
   if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  if (isFeatureEnabledCached("intelligence", workspaceId)) return true;
   return false;
 }
 
-/** Phase 2 attribution gate (global flag OR per-workspace canary). Default OFF. */
+/** Phase 2 attribution gate (global flag OR per-workspace canary OR UI toggle). Default OFF. */
 export function isEiAttributionEnabled(workspaceId = null) {
   if (envBool("EI_ATTRIBUTION_ENABLED", false)) return true;
   if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  if (isFeatureEnabledCached("intelligence", workspaceId)) return true;
   return false;
 }
 
 function gate(flagName, workspaceId) {
   if (envBool(flagName, false)) return true;
   if (workspaceId && csv(process.env.EI_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  // A superadmin can enable ALL Enterprise Intelligence for a workspace from the UI.
+  if (isFeatureEnabledCached("intelligence", workspaceId)) return true;
   return false;
 }
 

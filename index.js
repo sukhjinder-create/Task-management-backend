@@ -51,6 +51,8 @@ import superadminAdaptiveIntelligenceRoutes from "./routes/superadminAdaptiveInt
 import superadminAiStudioRoutes from "./routes/superadminAiStudio.routes.js";
 import aiStudioWorkspaceRoutes from "./routes/aiStudioWorkspace.routes.js";
 import requireSuperadmin from "./middleware/requireSuperadmin.js";
+import superadminPlatformFeaturesRoutes from "./routes/superadminPlatformFeatures.routes.js";
+import { primePlatformFeatures } from "./config/platformFeatures.js";
 import backupRoutes from "./routes/backup.routes.js";
 import growthRoutes from "./routes/growth.routes.js";
 import { growthProductTelemetry } from "./growth/growthProductTelemetry.middleware.js";
@@ -307,6 +309,8 @@ app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin/growth", superadminGrowthRoutes);
 app.use("/superadmin/adaptive-intelligence", superadminAdaptiveIntelligenceRoutes);
 app.use("/superadmin/ai-studio", superadminAiStudioRoutes);
+// Per-workspace enablement toggles for Execution + Enterprise Intelligence (UI-driven).
+app.use("/superadmin/platform-features", superadminPlatformFeaturesRoutes);
 // Enterprise Execution Platform + Enterprise Intelligence Studio — SUPER-ADMIN owned.
 // The superadmin selects the workspace via ?workspaceId=; a synthetic admin role lets
 // the routers' internal guards + workspace-scoped queries work unchanged.
@@ -473,6 +477,7 @@ console.log(`[startup] readiness=${STARTUP_REPORT.ok ? "OK" : "NOT_READY"} produ
 for (const e of STARTUP_REPORT.errors) console.error(`[startup][error] ${e}`);
 for (const w of STARTUP_REPORT.warnings) console.warn(`[startup][warn] ${w}`);
 
+primePlatformFeatures(); // load per-workspace Execution/Intelligence enablement into cache
 bootstrapAdaptivePlatform();
 bootstrapEnterpriseIntelligence(); // EI V2.1 event ingestion (flag-gated; no-op when OFF)
 // EI reasoning pipeline auto-execution — canary-scoped worker; no-op unless EI_ENABLED_WORKSPACES is set.

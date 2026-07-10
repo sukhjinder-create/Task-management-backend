@@ -19,22 +19,26 @@
 //   EXEC_ENABLED_WORKSPACES    comma-separated canary workspace ids
 
 import { envBool } from "../config/environment.js";
+import { isFeatureEnabledCached } from "../config/platformFeatures.js";
 
 function csv(value) {
   return String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-function gate(flagName, workspaceId) {
+// feature = the DB toggle that also enables this gate ("execution"); pass null to make
+// a gate env-only (used for the side-effects safety gate, which must stay explicit).
+function gate(flagName, workspaceId, feature = "execution") {
   if (envBool(flagName, false)) return true;
   if (workspaceId && csv(process.env.EXEC_ENABLED_WORKSPACES).includes(String(workspaceId))) return true;
+  if (feature && isFeatureEnabledCached(feature, workspaceId)) return true;
   return false;
 }
 
 /** Master gate — when OFF the whole /execution surface is inert (routes return 404). */
 export const isExecutionEnabled = (workspaceId = null) => gate("EXEC_ENABLED", workspaceId);
 
-/** SAFETY GATE — when OFF, capability adapters never mutate live systems (dry-run only). */
-export const areSideEffectsEnabled = (workspaceId = null) => gate("EXEC_SIDE_EFFECTS_ENABLED", workspaceId);
+/** SAFETY GATE — env-only; the "execution" toggle never enables live mutations. */
+export const areSideEffectsEnabled = (workspaceId = null) => gate("EXEC_SIDE_EFFECTS_ENABLED", workspaceId, null);
 
 export const isDecisionsEnabled = (workspaceId = null) => gate("EXEC_DECISIONS_ENABLED", workspaceId);
 export const isApprovalsEnabled = (workspaceId = null) => gate("EXEC_APPROVALS_ENABLED", workspaceId);
