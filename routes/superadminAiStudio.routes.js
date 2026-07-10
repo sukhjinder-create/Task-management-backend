@@ -18,6 +18,7 @@ import { LOCK_LEVELS } from "../ai-platform/governance/locks.js";
 import * as prompts from "../ai-platform/studio/promptRegistry.service.js";
 import * as config from "../ai-platform/studio/configStore.service.js";
 import { listProvidersMerged, listModelsMerged, listProfilesMerged } from "../ai-platform/studio/configReads.service.js";
+import { getCapabilityPrompt, setCapabilityPrompt, resetCapabilityPrompt } from "../ai-platform/studio/capabilityPrompt.service.js";
 import * as telemetry from "../ai-platform/studio/telemetry.service.js";
 import { listAudit } from "../ai-platform/studio/audit.service.js";
 import { runPlayground } from "../ai-platform/studio/playground.service.js";
@@ -78,6 +79,17 @@ router.post("/workspaces/:wsId/capability-config/:key/lock", wrap(async (req, re
   const r = await config.setLock({ capabilityKey: req.params.key, scope: req.params.wsId, workspaceId: req.params.wsId, lockLevel: req.body?.lockLevel, actorId: actor(req) });
   r.ok ? res.json(r) : res.status(400).json(r);
 }));
+
+// ── Per-feature prompt (show the hardcoded prompt + override it) ───────────────
+router.get("/capabilities/:key/prompt", wrap(async (req, res) => {
+  const r = await getCapabilityPrompt(req.params.key);
+  r ? res.json(r) : res.status(404).json({ error: "Unknown capability" });
+}));
+router.post("/capabilities/:key/prompt", wrap(async (req, res) => {
+  const r = await setCapabilityPrompt({ capabilityKey: req.params.key, body: req.body?.body, actorId: actor(req) });
+  r.ok ? res.json(r) : res.status(400).json(r);
+}));
+router.post("/capabilities/:key/prompt/reset", wrap(async (req, res) => res.json(await resetCapabilityPrompt({ capabilityKey: req.params.key, actorId: actor(req) }))));
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
 router.get("/audit", wrap(async (req, res) => res.json(await listAudit({ objectType: req.query.objectType || null, limit: req.query.limit }))));
