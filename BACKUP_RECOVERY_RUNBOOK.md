@@ -9,6 +9,7 @@ This project now supports:
 Set these env vars in production:
 
 ```env
+DATABASE_URL=postgres://...
 BACKUP_RETENTION_DAYS=30
 ```
 
@@ -16,6 +17,7 @@ Notes:
 - Backup schedule is fixed to daily at 2:00 AM (Asia/Kolkata) in app code.
 - `BACKUP_RETENTION_DAYS` only controls local file pruning.
 - If S3 envs are configured, backups are uploaded off-machine.
+- Backup and managed recovery use the same `DATABASE_URL` / `DB_HOST` target resolution as the main app.
 
 ## 2) Workspace Recovery (From App)
 
@@ -23,11 +25,13 @@ Superadmin UI now supports:
 - Trigger workspace recovery job
 - Dry-run mode
 - Job status/history
+- Existing workspace selection or manual workspace UUID entry for a deleted/missing workspace
 - Upsert behavior (existing rows are skipped/updated safely)
 
 Route used by UI:
 - `POST /superadmin/backups/recover-workspace`
 - `GET /superadmin/backups/recovery-jobs`
+- Apply mode must include `confirmApply=true`; dry-run does not write data.
 
 Server-side source config:
 
@@ -75,13 +79,17 @@ npm run recover:workspace:dry -- --workspace-id <workspace_uuid> --source-url "$
 npm run recover:workspace -- --workspace-id <workspace_uuid> --source-url "$TEMP_DB_URL"
 ```
 
+The npm recovery commands use the database safety guard. Production runs require the same explicit confirmation variables as production migrations.
+
 ## 4) Safety Rules
 
 - Never restore directly from backup file into production for tenant-only incidents.
 - Always restore backup into a temporary DB first.
 - Always run `--dry-run` before apply.
+- For a deleted workspace, recover by known workspace UUID; the recovery job can be created even when the live `workspaces` row is missing.
 - Pause writes for that workspace during the restore window if possible.
 - Keep old backups immutable; do not overwrite snapshots.
+- Recovery resynchronizes PostgreSQL sequences after restoring explicit serial/bigserial IDs.
 
 ## 5) Current Limit
 

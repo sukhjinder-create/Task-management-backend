@@ -50,7 +50,7 @@ router.post("/", async (req, res) => {
       price_monthly, price_yearly, yearly_discount_pct,
       member_limit, max_projects, max_integrations, storage_limit_gb,
       features, support_level, trial_days, grace_period_days,
-      is_popular, is_custom, display_order,
+      is_active, is_popular, is_custom, display_order,
     } = req.body;
 
     if (!name || !slug) {
@@ -72,8 +72,9 @@ router.post("/", async (req, res) => {
       storage_limit_gb:     storage_limit_gb ? Number(storage_limit_gb) : null,
       features:             Array.isArray(features) ? features : [],
       support_level:        support_level || "community",
-      trial_days:           Number(trial_days) ?? 7,
-      grace_period_days:    Number(grace_period_days) ?? 3,
+      trial_days:           trial_days === undefined ? 7 : (Number(trial_days) || 0),
+      grace_period_days:    grace_period_days === undefined ? 3 : (Number(grace_period_days) || 0),
+      is_active:            is_active === undefined ? true : Boolean(is_active),
       is_popular:           Boolean(is_popular),
       is_custom:            Boolean(is_custom),
       display_order:        Number(display_order) || 0,
@@ -93,6 +94,8 @@ router.put("/:id", async (req, res) => {
   try {
     const body = req.body;
     const data = {};
+    const existing = await getPlanById(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Plan not found" });
 
     if (body.name            !== undefined) data.name              = String(body.name).trim();
     if (body.tagline         !== undefined) data.tagline           = body.tagline;
@@ -110,9 +113,21 @@ router.put("/:id", async (req, res) => {
     if (body.grace_period_days !== undefined) data.grace_period_days = Number(body.grace_period_days);
     if (body.is_active       !== undefined) data.is_active         = Boolean(body.is_active);
     if (body.is_popular      !== undefined) data.is_popular        = Boolean(body.is_popular);
+    if (body.is_custom       !== undefined) data.is_custom         = Boolean(body.is_custom);
     if (body.display_order   !== undefined) data.display_order     = Number(body.display_order);
 
-    const updated = await updatePlan(req.params.id, data);
+    const monthlyPriceChanged =
+      data.price_monthly_paise !== undefined &&
+      data.price_monthly_paise !== Number(existing.price_monthly_paise || 0);
+    const yearlyPriceChanged =
+      data.price_yearly_paise !== undefined &&
+      data.price_yearly_paise !== Number(existing.price_yearly_paise || 0);
+
+    // Provider prices are immutable. Existing subscriptions keep their old
+    // provider plan; the next checkout lazily creates a plan at the new price.
+    const updated = await updatePlan(req.params.id, data, {
+      resetProviderPrices: monthlyPriceChanged || yearlyPriceChanged,
+    });
     return res.json(updated);
   } catch (err) {
     return res.status(400).json({ error: err.message });

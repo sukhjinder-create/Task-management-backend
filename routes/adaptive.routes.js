@@ -9,6 +9,22 @@ import { processAdaptiveWorkerBatch } from "../adaptive/runtime/adaptiveWorker.s
 import { getWorkflowCatalog } from "../adaptive/workflows/workflowCatalog.service.js";
 import { listWorkflowDefinitions, saveWorkflowDefinition, setWorkflowStatus } from "../adaptive/workflows/workflowEngine.service.js";
 import {
+  getWorkspaceAiepDashboard,
+  getWorkspaceAiepExplainability,
+  refreshWorkspaceAiepEvaluations,
+} from "../adaptive/evaluation/adaptiveIntelligenceEvaluation.service.js";
+import {
+  createAdaptiveExperiment,
+  discoverWorkspaceMemoryPatterns,
+  evaluateAdaptiveExperiment,
+  getUniversalExplainability,
+  getWorkspaceAdaptiveCoach,
+  listAdaptiveExperiments,
+  listWorkspaceMemoryPatterns,
+  reverseWorkspaceMemoryPattern,
+  setAdaptiveExperimentStatus,
+} from "../adaptive/evaluation/finalIntelligenceCompletion.service.js";
+import {
   approveOperationsAction,
   executeOperationsAction,
   getOperationsActionById,
@@ -192,6 +208,193 @@ router.get("/observability/predictions", requirePrivileged, async (req, res) => 
 router.get("/learning", requirePrivileged, async (req, res) => {
   const signals = await listLearningSignals({ workspaceId: req.workspaceId, scopeType: req.query.scopeType || null, scopeId: req.query.scopeId || null, limit: req.query.limit });
   res.json({ signals });
+});
+
+router.get("/intelligence/dashboard", requireAdministrator, async (req, res) => {
+  try {
+    const dashboard = await getWorkspaceAiepDashboard({
+      workspaceId: req.workspaceId,
+      days: req.query.days,
+      refresh: req.query.refresh !== "false",
+    });
+    res.json(dashboard);
+  } catch (error) {
+    console.error("[adaptive intelligence] dashboard failed:", error.message);
+    res.status(500).json({ error: "Failed to load Adaptive Intelligence Evaluation" });
+  }
+});
+
+router.post("/intelligence/refresh", requireAdministrator, async (req, res) => {
+  try {
+    const result = await refreshWorkspaceAiepEvaluations({
+      workspaceId: req.workspaceId,
+      days: req.body?.days || req.query.days,
+      limit: req.body?.limit || req.query.limit,
+    });
+    res.json(result);
+  } catch (error) {
+    console.error("[adaptive intelligence] refresh failed:", error.message);
+    res.status(500).json({ error: "Failed to refresh Adaptive Intelligence Evaluation" });
+  }
+});
+
+router.get("/intelligence/explain/:id", requireAdministrator, async (req, res) => {
+  try {
+    const evaluation = await getWorkspaceAiepExplainability({
+      workspaceId: req.workspaceId,
+      evaluationId: req.params.id,
+    });
+    if (!evaluation) return res.status(404).json({ error: "Evaluation not found" });
+    res.json(evaluation);
+  } catch (error) {
+    console.error("[adaptive intelligence] explainability failed:", error.message);
+    res.status(500).json({ error: "Failed to load Adaptive Intelligence explanation" });
+  }
+});
+
+router.get("/intelligence/coach", requireAdministrator, async (req, res) => {
+  try {
+    const coach = await getWorkspaceAdaptiveCoach({
+      workspaceId: req.workspaceId,
+      days: req.query.days,
+    });
+    res.json(coach);
+  } catch (error) {
+    console.error("[adaptive coach] failed:", error.message);
+    res.status(500).json({ error: "Failed to load Adaptive Intelligence Coach" });
+  }
+});
+
+router.get("/intelligence/experiments", requireAdministrator, async (req, res) => {
+  try {
+    const experiments = await listAdaptiveExperiments({
+      workspaceId: req.workspaceId,
+      includeArchived: req.query.includeArchived === "true",
+    });
+    res.json({ experiments });
+  } catch (error) {
+    console.error("[adaptive experiments] list failed:", error.message);
+    res.status(500).json({ error: "Failed to load Adaptive Experiments" });
+  }
+});
+
+router.post("/intelligence/experiments", requireAdministrator, async (req, res) => {
+  try {
+    const experiment = await createAdaptiveExperiment({
+      workspaceId: req.workspaceId,
+      actorUserId: req.user.id,
+      payload: req.body || {},
+    });
+    res.status(201).json(experiment);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+router.post("/intelligence/experiments/:id/evaluate", requireAdministrator, async (req, res) => {
+  try {
+    const result = await evaluateAdaptiveExperiment({
+      workspaceId: req.workspaceId,
+      experimentId: req.params.id,
+      days: req.body?.days || req.query.days,
+    });
+    if (!result) return res.status(404).json({ error: "Experiment not found" });
+    res.json(result);
+  } catch (error) {
+    console.error("[adaptive experiments] evaluation failed:", error.message);
+    res.status(500).json({ error: "Failed to evaluate Adaptive Experiment" });
+  }
+});
+
+router.patch("/intelligence/experiments/:id/status", requireAdministrator, async (req, res) => {
+  try {
+    const experiment = await setAdaptiveExperimentStatus({
+      workspaceId: req.workspaceId,
+      experimentId: req.params.id,
+      status: req.body?.status,
+    });
+    if (!experiment) return res.status(404).json({ error: "Experiment not found" });
+    res.json(experiment);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+router.get("/intelligence/memory-patterns", requireAdministrator, async (req, res) => {
+  try {
+    const patterns = await listWorkspaceMemoryPatterns({
+      workspaceId: req.workspaceId,
+      includeArchived: req.query.includeArchived === "true",
+    });
+    res.json({ patterns });
+  } catch (error) {
+    console.error("[adaptive memory] list failed:", error.message);
+    res.status(500).json({ error: "Failed to load Adaptive Memory patterns" });
+  }
+});
+
+router.post("/intelligence/memory-patterns/discover", requireAdministrator, async (req, res) => {
+  try {
+    const result = await discoverWorkspaceMemoryPatterns({
+      workspaceId: req.workspaceId,
+      actorUserId: req.user.id,
+      days: req.body?.days || req.query.days,
+    });
+    res.json(result);
+  } catch (error) {
+    console.error("[adaptive memory] discovery failed:", error.message);
+    res.status(500).json({ error: "Failed to discover Adaptive Memory patterns" });
+  }
+});
+
+router.post("/intelligence/memory-patterns/:id/reverse", requireAdministrator, async (req, res) => {
+  try {
+    const pattern = await reverseWorkspaceMemoryPattern({
+      workspaceId: req.workspaceId,
+      patternId: req.params.id,
+      actorUserId: req.user.id,
+      reason: req.body?.reason,
+    });
+    if (!pattern) return res.status(404).json({ error: "Active memory pattern not found" });
+    res.json(pattern);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+router.get("/explain/recommendation/:id", async (req, res) => {
+  try {
+    const explanation = await getUniversalExplainability({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      actionId: req.params.id,
+      subjectType: "recommendation",
+      subjectId: req.params.id,
+    });
+    if (!explanation) return res.status(404).json({ error: "Explanation not found" });
+    res.json(explanation);
+  } catch (error) {
+    console.error("[universal explainability] recommendation failed:", error.message);
+    res.status(500).json({ error: "Failed to explain recommendation" });
+  }
+});
+
+router.get("/explain", async (req, res) => {
+  try {
+    const explanation = await getUniversalExplainability({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      subjectType: req.query.entityType || "recommendation",
+      subjectId: req.query.entityId || null,
+    });
+    if (!explanation) return res.status(404).json({ error: "Explanation not found" });
+    res.json(explanation);
+  } catch (error) {
+    console.error("[universal explainability] entity failed:", error.message);
+    res.status(500).json({ error: "Failed to explain adaptive intelligence" });
+  }
 });
 
 router.post("/learning/:id/reverse", requireAdministrator, async (req, res) => {

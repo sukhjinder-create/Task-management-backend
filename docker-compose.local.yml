@@ -32,6 +32,9 @@ services:
       - ./migrations/20260624_enterprise_intelligence_rearchitecture.sql:/docker-entrypoint-initdb.d/19-enterprise-intelligence.sql:ro
       - ./migrations/20260624_enterprise_intelligence_cutover_controls.sql:/docker-entrypoint-initdb.d/20-enterprise-intelligence-cutover.sql:ro
       - ./migrations/20260625_enterprise_intelligence_scoring_configs.sql:/docker-entrypoint-initdb.d/21-enterprise-intelligence-scoring.sql:ro
+      - ./migrations/20260701_adaptive_enterprise_pilot_maturity.sql:/docker-entrypoint-initdb.d/22-adaptive-pilot-maturity.sql:ro
+      - ./migrations/20260702_adaptive_intelligence_evaluation_platform.sql:/docker-entrypoint-initdb.d/23-adaptive-intelligence-evaluation.sql:ro
+      - ./migrations/20260702_final_intelligence_completion.sql:/docker-entrypoint-initdb.d/24-final-intelligence-completion.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d asystence_dev"]
       interval: 5s

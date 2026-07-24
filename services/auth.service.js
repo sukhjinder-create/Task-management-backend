@@ -522,6 +522,7 @@ export async function createSelfServeTrialWorkspace({
   ipHash = null,
   avatarUrl = null,
   skipTrialIpCheck = false,
+  plan = "trial",
 }) {
   const name = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
   const email = normalizeSignupEmail(ownerEmail);
@@ -534,7 +535,7 @@ export async function createSelfServeTrialWorkspace({
 
   const result = await createWorkspaceWithOwner({
     name,
-    plan: "trial",
+    plan,
     ownerEmail: email,
     ownerPasswordHash,
     ownerName: username,
@@ -551,7 +552,11 @@ export async function createSelfServeTrialWorkspace({
 
   const userRow = await getUserById(result.owner.id);
   const safeUser = normalizeUserRow(userRow);
-  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id, "trial");
+  await ensureWorkspaceUser(
+    safeUser.id,
+    safeUser.workspace_id,
+    plan === "trial" ? "trial" : "active"
+  );
   const token = generateToken(safeUser);
 
   return { token, user: safeUser, workspace: result.workspace };
@@ -563,6 +568,7 @@ export async function signupWorkspaceWithEmail({
   email,
   password,
   ipHash = null,
+  plan = "trial",
 }) {
   const passwordHash = await bcrypt.hash(validateSignupPassword(password), 10);
 
@@ -573,10 +579,11 @@ export async function signupWorkspaceWithEmail({
     ownerPasswordHash: passwordHash,
     ipHash,
     skipTrialIpCheck: isLocalRuntime(),
+    plan,
   });
 }
 
-export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = null } = {}) {
+export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = null, plan = "trial" } = {}) {
   const profile = await fetchGoogleProfileFromCode(code);
   if (!profile.emailVerified) {
     throw new Error("Your Google account email is not verified.");
@@ -590,6 +597,7 @@ export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = 
     ipHash,
     avatarUrl: profile.picture,
     skipTrialIpCheck: isLocalRuntime(),
+    plan,
   });
 }
 

@@ -28,6 +28,7 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 import { logAudit } from "../services/audit.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
+import { getPlanById, getPlanBySlug } from "../repositories/billingPlans.repository.js";
 import { getJwtSecret } from "../config/secrets.js";
 import {
   getFrontendBaseUrl,
@@ -106,6 +107,35 @@ function trialSignupRequiresPayment() {
   return String(explicit || "true").toLowerCase() !== "false";
 }
 
+function defaultSignupPlanSlug() {
+  return String(process.env.TRIAL_SIGNUP_PLAN_SLUG || "pro").trim().toLowerCase();
+}
+
+async function resolveSignupPlan({ planId, plan } = {}) {
+  const selected = planId
+    ? await getPlanById(planId)
+    : await getPlanBySlug(String(plan || defaultSignupPlanSlug()).trim().toLowerCase());
+
+  if (!selected || !selected.is_active) {
+    throw Object.assign(new Error("Selected plan is not available."), { statusCode: 404 });
+  }
+  if (selected.is_custom) {
+    throw Object.assign(new Error("This plan requires a sales-assisted setup."), { statusCode: 400 });
+  }
+  return selected;
+}
+
+function isFreePlan(plan) {
+  return (
+    (Number(plan?.price_monthly_paise) || 0) === 0 &&
+    (Number(plan?.price_yearly_paise) || 0) === 0
+  );
+}
+
+function signupPlanRequiresPayment(plan) {
+  return trialSignupRequiresPayment() && !isFreePlan(plan);
+}
+
 function getTrialSignupPaymentProvider() {
   const provider = String(
     process.env.TRIAL_SIGNUP_PAYMENT_PROVIDER ||
@@ -156,8 +186,12 @@ function captureCompletedSignup(req, data, method) {
 router.post("/signup/workspace", async (req, res) => {
   try {
     const { workspaceName, name, email, password } = req.body || {};
+    const selectedPlan = await resolveSignupPlan({
+      planId: req.body?.planId,
+      plan: req.body?.plan,
+    });
 
-    if (trialSignupRequiresPayment()) {
+    if (signupPlanRequiresPayment(selectedPlan)) {
       const paymentProvider = getTrialSignupPaymentProvider();
       const createCheckout =
         paymentProvider === "razorpay"
@@ -168,8 +202,8 @@ router.post("/signup/workspace", async (req, res) => {
         name,
         email,
         password,
-        planId: req.body?.planId,
-        plan: req.body?.plan,
+        planId: selectedPlan.id,
+        plan: selectedPlan.slug,
         interval: req.body?.interval,
         successUrl: req.body?.successUrl,
         cancelUrl: req.body?.cancelUrl,
@@ -199,6 +233,7 @@ router.post("/signup/workspace", async (req, res) => {
       email,
       password,
       ipHash: getRequestIpHash(req),
+      plan: isFreePlan(selectedPlan) ? selectedPlan.slug : "trial",
     });
 
     data.refreshToken = await createSession(
@@ -623,7 +658,7 @@ router.get("/magic", async (req, res) => {
 });
 
 // ─── GOOGLE SSO: REDIRECT TO GOOGLE ──────────────────────────────────────────
-router.get("/google", (req, res) => {
+router.get("/google", async (req, res) => {
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CALLBACK_URL) {
     return res.status(503).json({ error: "Google SSO is not configured" });
   }
@@ -636,13 +671,28 @@ router.get("/google", (req, res) => {
   const trialBillingConsent =
     isConsentAccepted(req.query.trialBillingConsent) ||
     isConsentAccepted(req.query.consentAccepted);
+  let selectedPlan = null;
+
+  if (isSignup) {
+    try {
+      selectedPlan = await resolveSignupPlan({
+        planId: req.query.planId,
+        plan: req.query.plan,
+      });
+    } catch (err) {
+      return res.redirect(buildFrontendRedirect("/signup", {
+        error: err.message,
+        plan: req.query.plan,
+      }));
+    }
+  }
 
   if (isSignup && !workspaceName) {
     return res.redirect(
       buildFrontendRedirect("/signup", { error: "workspace_required" })
     );
   }
-  if (isSignup && trialSignupRequiresPayment() && !trialBillingConsent) {
+  if (isSignup && signupPlanRequiresPayment(selectedPlan) && !trialBillingConsent) {
     return res.redirect(
       buildFrontendRedirect("/signup", { error: "billing_consent_required" })
     );
@@ -661,7 +711,12 @@ router.get("/google", (req, res) => {
     params.set("state", signGoogleState({
       mode: isSignup ? "signup" : "login",
       client: isMobileClient ? "mobile" : "web",
-      ...(isSignup ? { workspaceName, trialBillingConsent } : {}),
+      ...(isSignup ? {
+        workspaceName,
+        trialBillingConsent,
+        planId: selectedPlan.id,
+        plan: selectedPlan.slug,
+      } : {}),
     }));
   }
 
@@ -693,7 +748,11 @@ router.get("/google/callback", async (req, res) => {
   }
 
   try {
-    if (isSignup && trialSignupRequiresPayment()) {
+    const selectedPlan = isSignup
+      ? await resolveSignupPlan({ planId: googleState?.planId, plan: googleState?.plan })
+      : null;
+
+    if (isSignup && signupPlanRequiresPayment(selectedPlan)) {
       const profile = await fetchGoogleProfileFromCode(code);
       if (!profile.emailVerified) {
         throw new Error("Your Google account email is not verified.");
@@ -713,6 +772,8 @@ router.get("/google/callback", async (req, res) => {
         ipHash: getRequestIpHash(req),
         userAgent: req.headers["user-agent"],
         consentAccepted: googleState.trialBillingConsent === true,
+        planId: selectedPlan.id,
+        plan: selectedPlan.slug,
       });
       logAudit({
         workspaceId: null,
@@ -743,6 +804,7 @@ router.get("/google/callback", async (req, res) => {
       ? await signupWorkspaceWithGoogle(code, {
           workspaceName: googleState.workspaceName,
           ipHash: getRequestIpHash(req),
+          plan: isFreePlan(selectedPlan) ? selectedPlan.slug : "trial",
         })
       : await loginWithGoogle(code);
 

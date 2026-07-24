@@ -1305,7 +1305,7 @@ export async function getUnreadCounts(userId, workspaceId) {
         AND m.channel_key != 'availability-updates'
         AND m.created_at > COALESCE(
           (SELECT rs.last_read_at FROM chat_channel_read_status rs
-           WHERE rs.user_id = $1 AND rs.channel_key = m.channel_key),
+           WHERE rs.user_id::text = $1 AND rs.channel_key = m.channel_key),
           '1970-01-01'::timestamptz
         )
       GROUP BY m.channel_key

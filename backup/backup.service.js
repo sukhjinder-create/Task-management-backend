@@ -26,10 +26,12 @@
 import { spawn } from "child_process";
 import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { createGzip } from "zlib";
+import { pipeline } from "stream/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
 import pool from "../db.js";
+import { describePrimaryDatabaseTarget, getLibpqEnv } from "./databaseTarget.js";
 import {
   S3Client,
   PutObjectCommand,
@@ -92,11 +94,6 @@ const S3_ENDPOINT     = process.env.BACKUP_S3_ENDPOINT || null; // null = AWS
 const S3_ACCESS_KEY   = process.env.BACKUP_S3_ACCESS_KEY || null;
 const S3_SECRET_KEY   = process.env.BACKUP_S3_SECRET_KEY || null;
 
-const DB_HOST     = process.env.DB_HOST     || "localhost";
-const DB_PORT     = process.env.DB_PORT     || "5432";
-const DB_USER     = process.env.DB_USER     || "postgres";
-const DB_PASSWORD = process.env.DB_PASSWORD || "";
-const DB_NAME     = process.env.DB_NAME     || "postgres";
 
 // ── S3 client (only created if credentials provided) ─────────────────────────
 function getS3Client() {
@@ -179,30 +176,34 @@ export async function getActiveRunningBackup() {
 // ── Core: run pg_dump and write compressed file ───────────────────────────────
 function runPgDump(outputPath) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, PGPASSWORD: DB_PASSWORD };
+    const env = getLibpqEnv();
 
     const pg = spawn(
       "pg_dump",
-      ["-h", DB_HOST, "-p", DB_PORT, "-U", DB_USER, "-d", DB_NAME, "--no-password"],
+      ["--no-password"],
       { env }
     );
 
     const gzip   = createGzip();
     const output = createWriteStream(outputPath);
 
-    pg.stdout.pipe(gzip).pipe(output);
-
     let stderrOut = "";
     pg.stderr.on("data", (d) => { stderrOut += d.toString(); });
 
-    pg.on("error", (err) => reject(new Error(`pg_dump not found: ${err.message}. Is PostgreSQL client installed?`)));
-
-    output.on("finish", () => resolve());
-    output.on("error", reject);
-
-    pg.on("close", (code) => {
-      if (code !== 0) reject(new Error(`pg_dump exited with code ${code}: ${stderrOut}`));
+    const processDone = new Promise((processResolve, processReject) => {
+      pg.on("error", (err) => {
+        processReject(new Error(`pg_dump not found: ${err.message}. Install PostgreSQL client tools on server.`));
+      });
+      pg.on("close", (code) => {
+        if (code === 0) return processResolve();
+        processReject(new Error(`pg_dump exited with code ${code}: ${stderrOut || "unknown error"}`));
+      });
     });
+
+    Promise.all([
+      pipeline(pg.stdout, gzip, output),
+      processDone,
+    ]).then(resolve).catch(reject);
   });
 }
 
@@ -259,7 +260,11 @@ export async function runBackup(triggeredBy = "cron") {
   // Ensure backup dir exists
   mkdirSync(BACKUP_DIR, { recursive: true });
 
-  console.log(`[backup] Starting backup → ${fileName} (triggered by: ${triggeredBy})`);
+  const target = describePrimaryDatabaseTarget();
+  console.log(
+    `[backup] Starting backup -> ${fileName} ` +
+    `(triggered by: ${triggeredBy}, source: ${target.source} ${target.host}:${target.port}/${target.database})`
+  );
 
   // Mark as running
   const logId = randomUUID();
@@ -310,6 +315,7 @@ export async function runBackup(triggeredBy = "cron") {
     return { success: true, fileName, fileSizeBytes, storageType, storagePath, duration };
   } catch (err) {
     console.error("[backup] ❌ Backup failed:", err.message);
+    try { unlinkSync(localPath); } catch {}
 
     if (logId) {
       await pool.query(

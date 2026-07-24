@@ -64,11 +64,11 @@ function requireBillingAdmin(req, res, next) {
   next();
 }
 
-// ── Public: plan catalog ──────────────────────────────────────────────────────
+// ── Authenticated app plan catalog ───────────────────────────────────────────
 
 /**
  * GET /payments/plans
- * Active plans from DB — no auth required within workspace context.
+ * Active plans from DB for the signed-in workspace billing UI.
  */
 router.get("/plans", async (_req, res) => {
   try {
