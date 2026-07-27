@@ -18,6 +18,31 @@ function sanitizeForReadableLLM(value) {
   return out;
 }
 
+function capArraysInPlace(node, cap) {
+  if (Array.isArray(node)) {
+    if (node.length > cap) node.length = cap;
+    for (const item of node) capArraysInPlace(item, cap);
+  } else if (node && typeof node === "object") {
+    for (const key of Object.keys(node)) capArraysInPlace(node[key], cap);
+  }
+}
+
+// Compact, VALID JSON for the context that fits within budgetChars by
+// progressively capping long arrays (task lists, etc.) to a representative
+// sample. Summary / aggregate fields are preserved so the model still sees the
+// whole workspace picture and doesn't mistake trimmed data for "out of scope".
+function fitContextToBudget(contextObj, budgetChars) {
+  let json = JSON.stringify(contextObj);
+  if (json.length <= budgetChars) return json;
+  const clone = JSON.parse(json);
+  for (const cap of [200, 120, 80, 50, 30, 20, 12, 8, 5, 3, 2, 1]) {
+    capArraysInPlace(clone, cap);
+    json = JSON.stringify(clone);
+    if (json.length <= budgetChars) break;
+  }
+  return json;
+}
+
 function buildFallbackAnswer({ context, scope }) {
   const ws = context.workspaceSummary || {};
   const proj = context.projectSummary || {};
@@ -63,7 +88,7 @@ You have access to real-time workspace data including: tasks, projects, team mem
 IMPORTANT RULES:
 
 1. SCOPE DETECTION — This is your most critical rule:
-   - If the question is about THIS workspace (tasks, projects, members, attendance, performance, goals, reviews, leaves, activity, reports, etc.) → answer it.
+   - If the question is about THIS workspace (tasks, projects, members, attendance, performance, goals, reviews, leaves, activity, reports, forecasts, trends, predictions, risks, workload, delivery outlook, etc.) → answer it. "Forecast"/"outlook"/"next month" here means the workspace's project/delivery outlook, NOT weather.
    - If the question has NOTHING to do with this workspace (politics, general knowledge, weather, entertainment, writing essays, telling jokes, coding help unrelated to workspace, etc.) → respond with ONLY the exact text: ${OUT_OF_SCOPE_MARKER}
    - When in doubt, assume it's workspace-related and try to answer.
 
@@ -81,19 +106,15 @@ IMPORTANT RULES:
 
 4. Today's date is ${today}. Use this for overdue calculations and date-relative questions.`;
 
-    // Groq rejects oversized prompts with HTTP 413 — its practical per-request
-    // limit (~12K tokens) is far below the model's full 128K context window. So
-    // trim the workspace-data context to a safe budget and STILL send it to the
-    // LLM, instead of returning a templated (non-AI) answer. If even the trimmed
-    // prompt fails, the try/catch below degrades gracefully to the fallback.
+    // Groq rejects oversized prompts with HTTP 413 (its per-request limit is well
+    // below the model's full context window). Fit the context into a safe budget
+    // as COMPACT, VALID JSON — long task lists trimmed to a representative sample
+    // while summaries/aggregates are kept — so the model recognizes the workspace
+    // data and answers, instead of falling back or wrongly going "out of scope".
     const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 40000;
     const promptPrefix = `Question: "${question}"\n\nWorkspace Data (scope: ${scope}):\n`;
-    const overhead = systemMessage.length + promptPrefix.length;
-    let contextForPrompt = contextJson;
-    if (overhead + contextForPrompt.length > MAX_PROMPT_CHARS) {
-      const budget = Math.max(MAX_PROMPT_CHARS - overhead, 1000);
-      contextForPrompt = contextForPrompt.slice(0, budget) + "\n…[workspace data truncated to fit the model's limit]";
-    }
+    const budget = Math.max(MAX_PROMPT_CHARS - systemMessage.length - promptPrefix.length, 2000);
+    const contextForPrompt = fitContextToBudget(contextForLlm, budget);
     const userMessage = `${promptPrefix}${contextForPrompt}`;
 
     console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length} sent_chars=${contextForPrompt.length}`);
