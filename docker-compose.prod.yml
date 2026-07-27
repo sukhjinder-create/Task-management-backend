@@ -1,0 +1,43 @@
+# Production stack for a self-hosted server (e.g. Oracle Ampere / any VM).
+# Caddy terminates HTTPS (automatic Let's Encrypt certificates) and reverse-proxies
+# to the Node app. The database is external (Supabase) and is configured via .env.
+#
+# Usage on the server:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# To enable the heavy optional features later (you have the RAM on a 12GB box),
+# flip the build args below to "true" and re-run the command above.
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        INCLUDE_BROWSER: "false"      # "true" bundles the Testing Agent browser (Playwright)
+        INCLUDE_PG_CLIENT: "false"    # "true" enables the built-in DB backup tools (pg_dump)
+    restart: always
+    env_file: .env
+    expose:
+      - "3000"
+    networks: [web]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks: [web]
+
+networks:
+  web:
+
+volumes:
+  caddy_data:
+  caddy_config:
