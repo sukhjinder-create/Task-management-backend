@@ -111,7 +111,7 @@ IMPORTANT RULES:
     // as COMPACT, VALID JSON — long task lists trimmed to a representative sample
     // while summaries/aggregates are kept — so the model recognizes the workspace
     // data and answers, instead of falling back or wrongly going "out of scope".
-    const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 40000;
+    const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 24000;
     const promptPrefix = `Question: "${question}"\n\nWorkspace Data (scope: ${scope}):\n`;
     const budget = Math.max(MAX_PROMPT_CHARS - systemMessage.length - promptPrefix.length, 2000);
     const contextForPrompt = fitContextToBudget(contextForLlm, budget);
@@ -119,23 +119,35 @@ IMPORTANT RULES:
 
     console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length} sent_chars=${contextForPrompt.length}`);
 
-    try {
-      const raw = await generateText({
-        messages: [
-          { role: "system", content: systemMessage },
-          { role: "user", content: userMessage },
-        ],
-        maxTokens: 400,
-      });
-
-      const answer = String(raw || "").trim();
-      if (answer.includes(OUT_OF_SCOPE_MARKER)) {
-        return OUT_OF_SCOPE_MESSAGE;
+    // Call the LLM, retrying briefly on transient rate limits (Groq's free tier
+    // has a low tokens-per-minute cap) before degrading to the deterministic fallback.
+    let raw = "";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        raw = await generateText({
+          messages: [
+            { role: "system", content: systemMessage },
+            { role: "user", content: userMessage },
+          ],
+          maxTokens: 400,
+        });
+        break;
+      } catch (llmErr) {
+        const rateLimited = /\b429\b|rate limit|too many requests/i.test(llmErr.message || "");
+        if (rateLimited && attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+          continue;
+        }
+        console.warn("[AI Intelligence] LLM unavailable, using deterministic fallback:", llmErr.message);
+        return buildFallbackAnswer({ context, scope });
       }
-      if (answer) return answer;
-    } catch (llmErr) {
-      console.warn("[AI Intelligence] LLM unavailable, using deterministic fallback:", llmErr.message);
     }
+
+    const answer = String(raw || "").trim();
+    if (answer.includes(OUT_OF_SCOPE_MARKER)) {
+      return OUT_OF_SCOPE_MESSAGE;
+    }
+    if (answer) return answer;
 
     return buildFallbackAnswer({ context, scope });
   } catch (error) {
