@@ -81,19 +81,22 @@ IMPORTANT RULES:
 
 4. Today's date is ${today}. Use this for overdue calculations and date-relative questions.`;
 
-    const userMessage = `Question: "${question}"\n\nWorkspace Data (scope: ${scope}):\n${contextJson}`;
-
-    console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length}`);
-
-    // Groq llama-3.3-70b has a ~128K-token (~500K-char) context window, so allow
-    // large workspace contexts through to the LLM instead of silently falling back
-    // to a templated answer. Anything genuinely too big for the model still degrades
-    // gracefully via the try/catch below. Tunable via env if ever needed.
-    const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 400000;
-    if (systemMessage.length + userMessage.length > MAX_PROMPT_CHARS) {
-      console.warn("[AI Intelligence] Prompt too large, using deterministic fallback");
-      return buildFallbackAnswer({ context, scope });
+    // Groq rejects oversized prompts with HTTP 413 — its practical per-request
+    // limit (~12K tokens) is far below the model's full 128K context window. So
+    // trim the workspace-data context to a safe budget and STILL send it to the
+    // LLM, instead of returning a templated (non-AI) answer. If even the trimmed
+    // prompt fails, the try/catch below degrades gracefully to the fallback.
+    const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 40000;
+    const promptPrefix = `Question: "${question}"\n\nWorkspace Data (scope: ${scope}):\n`;
+    const overhead = systemMessage.length + promptPrefix.length;
+    let contextForPrompt = contextJson;
+    if (overhead + contextForPrompt.length > MAX_PROMPT_CHARS) {
+      const budget = Math.max(MAX_PROMPT_CHARS - overhead, 1000);
+      contextForPrompt = contextForPrompt.slice(0, budget) + "\n…[workspace data truncated to fit the model's limit]";
     }
+    const userMessage = `${promptPrefix}${contextForPrompt}`;
+
+    console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length} sent_chars=${contextForPrompt.length}`);
 
     try {
       const raw = await generateText({
