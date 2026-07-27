@@ -85,7 +85,12 @@ IMPORTANT RULES:
 
     console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length}`);
 
-    if (systemMessage.length + userMessage.length > 50000) {
+    // Groq llama-3.3-70b has a ~128K-token (~500K-char) context window, so allow
+    // large workspace contexts through to the LLM instead of silently falling back
+    // to a templated answer. Anything genuinely too big for the model still degrades
+    // gracefully via the try/catch below. Tunable via env if ever needed.
+    const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 400000;
+    if (systemMessage.length + userMessage.length > MAX_PROMPT_CHARS) {
       console.warn("[AI Intelligence] Prompt too large, using deterministic fallback");
       return buildFallbackAnswer({ context, scope });
     }
