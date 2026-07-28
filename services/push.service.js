@@ -153,65 +153,108 @@ async function sendWebPushToSubscription(subscription, payload) {
   }
 }
 
-async function sendFCMNotification(fcmToken, payload) {
-  if (!fcmReady || !firebaseAdmin) {
-    console.warn("[push] FCM not ready — skipping. fcmReady:", fcmReady);
-    return;
+async function sendFCMMulticast(tokens, payload) {
+  if (!tokens.length || !fcmReady || !firebaseAdmin) return;
+
+  const extraStringified = {};
+  if (payload.extraData) {
+    for (const [k, v] of Object.entries(payload.extraData)) extraStringified[k] = String(v);
   }
-  try {
-    const extraStringified = {};
-    if (payload.extraData) {
-      for (const [k, v] of Object.entries(payload.extraData)) {
-        extraStringified[k] = String(v);
-      }
+  const message = {
+    notification: { title: payload.title, body: payload.body },
+    data: { url: payload.url || "/", type: payload.type || "general", ...extraStringified },
+    android: {
+      priority: "high",
+      notification: { channelId: "default", sound: "default", defaultVibrateTimings: true, defaultSound: true },
+    },
+    apns: {
+      headers: { "apns-priority": "10" },
+      payload: { aps: { alert: { title: payload.title, body: payload.body }, sound: "default", badge: 1 } },
+    },
+  };
+
+  // FCM's multicast API caps at 500 tokens per call — chunk larger fan-outs.
+  const FCM_BATCH_LIMIT = 500;
+  const invalidTokens = [];
+  for (let i = 0; i < tokens.length; i += FCM_BATCH_LIMIT) {
+    const batch = tokens.slice(i, i + FCM_BATCH_LIMIT);
+    try {
+      const res = await firebaseAdmin.messaging().sendEachForMulticast({ tokens: batch, ...message });
+      res.responses.forEach((r, idx) => {
+        if (!r.success && r.error?.code === "messaging/registration-token-not-registered") {
+          invalidTokens.push(batch[idx]);
+        }
+      });
+      console.log(`[push] FCM multicast batch: ${res.successCount} ok, ${res.failureCount} failed (of ${batch.length})`);
+    } catch (err) {
+      console.error("[push] FCM multicast batch error:", err.message);
     }
-    const type = payload.type || "general";
-    console.log(`[push] FCM sending to token=${fcmToken?.slice(0, 20)} type=${type} title="${payload.title}"`);
-    const msgId = await firebaseAdmin.messaging().send({
-      token: fcmToken,
-      notification: { title: payload.title, body: payload.body },
-      data: {
-        url:  payload.url  || "/",
-        type,
-        ...extraStringified,
-      },
-      android: {
-        priority: "high",
-        notification: {
-          channelId: "default",
-          sound: "default",
-          defaultVibrateTimings: true,
-          defaultSound: true,
-        },
-      },
-      apns: {
-        headers: { "apns-priority": "10" },
-        payload: {
-          aps: {
-            alert: { title: payload.title, body: payload.body },
-            sound: "default",
-            badge: 1,
-          },
-        },
-      },
-    });
-    console.log(`[push] FCM success msgId=${msgId} token=${fcmToken?.slice(0, 20)}`);
-  } catch (err) {
-    if (err.code === "messaging/registration-token-not-registered") {
-      console.warn("[push] FCM token expired/invalid, removing:", fcmToken?.slice(0, 20));
-      await pool.query(
-        "DELETE FROM user_push_tokens WHERE fcm_token = $1",
-        [fcmToken]
-      );
-    } else {
-      console.error("[push] FCM send error:", err.code || err.message, "token:", fcmToken?.slice(0, 20));
-    }
+  }
+  if (invalidTokens.length) {
+    await pool.query("DELETE FROM user_push_tokens WHERE fcm_token = ANY($1)", [invalidTokens]).catch(() => {});
   }
 }
 
 /**
- * Send a push notification to all registered devices for a user.
- * Respects mute preferences.
+ * Send a push notification to many users at once — the efficient path for
+ * channel/group fan-out. Batches preference + token lookups into a single
+ * query each (instead of per-user round trips), and sends FCM via the real
+ * multicast API (up to 500 devices per HTTP call to Firebase, instead of one
+ * call per device). Web Push has no true multicast API, so those still send
+ * individually, but only for the (typically much smaller) web-token subset.
+ *
+ * @param {(string|number)[]} userIds
+ * @param {object} opts - same payload shape as sendPushToUser
+ */
+export async function sendPushToUsers(userIds, { title, body, url = "/", type = "general", extraData = null }) {
+  const ids = [...new Set((userIds || []).map(String))].filter(Boolean);
+  if (!ids.length) return;
+
+  try {
+    const { rows: prefRows } = await pool.query(
+      "SELECT user_id::text AS user_id, mute_all, mute_tasks, mute_chat FROM notification_preferences WHERE user_id::text = ANY($1::text[])",
+      [ids]
+    );
+    const prefsByUser = new Map(prefRows.map((r) => [r.user_id, r]));
+    const eligible = ids.filter((id) => {
+      const p = prefsByUser.get(id);
+      if (!p) return true; // no row = defaults (not muted)
+      if (p.mute_all) return false;
+      if (type === "task" && p.mute_tasks) return false;
+      if (type === "chat" && p.mute_chat) return false;
+      return true;
+    });
+    if (!eligible.length) return;
+
+    const { rows: tokenRows } = await pool.query(
+      "SELECT user_id::text AS user_id, platform, endpoint, keys_p256dh, keys_auth, fcm_token FROM user_push_tokens WHERE user_id::text = ANY($1::text[])",
+      [eligible]
+    );
+
+    const payload = { title, body, url, type, extraData };
+    const webRows = tokenRows.filter((r) => r.platform === "web" && r.endpoint);
+    const fcmTokens = tokenRows
+      .filter((r) => (r.platform === "android" || r.platform === "ios") && r.fcm_token)
+      .map((r) => r.fcm_token);
+
+    await Promise.allSettled([
+      ...webRows.map((row) =>
+        sendWebPushToSubscription(
+          { endpoint: row.endpoint, keys: { p256dh: row.keys_p256dh, auth: row.keys_auth } },
+          payload
+        )
+      ),
+      sendFCMMulticast(fcmTokens, payload),
+    ]);
+  } catch (err) {
+    console.error("[push] sendPushToUsers error:", err.message);
+  }
+}
+
+/**
+ * Send a push notification to all registered devices for a single user.
+ * Thin wrapper over sendPushToUsers — prefer sendPushToUsers directly for
+ * any fan-out to more than one recipient (channel messages, broadcasts).
  *
  * @param {object} opts
  * @param {number}  opts.userId
@@ -221,38 +264,7 @@ async function sendFCMNotification(fcmToken, payload) {
  * @param {string}  opts.type       - 'task' | 'chat' | 'general'
  */
 export async function sendPushToUser({ userId, title, body, url = "/", type = "general", extraData = null }) {
-  try {
-    // Check preferences
-    const prefs = await getPreferences(userId);
-    if (prefs.mute_all) return;
-    if (type === "task" && prefs.mute_tasks) return;
-    if (type === "chat" && prefs.mute_chat) return;
-
-    // Fetch all tokens (cast to text to avoid UUID vs text type mismatch)
-    const { rows } = await pool.query(
-      "SELECT platform, endpoint, keys_p256dh, keys_auth, fcm_token FROM user_push_tokens WHERE user_id::text = $1",
-      [String(userId)]
-    );
-
-    const payload = { title, body, url, type, extraData };
-
-    await Promise.allSettled(
-      rows.map((row) => {
-        if (row.platform === "web" && row.endpoint) {
-          return sendWebPushToSubscription(
-            { endpoint: row.endpoint, keys: { p256dh: row.keys_p256dh, auth: row.keys_auth } },
-            payload
-          );
-        }
-        if ((row.platform === "android" || row.platform === "ios") && row.fcm_token) {
-          return sendFCMNotification(row.fcm_token, payload);
-        }
-        return Promise.resolve();
-      })
-    );
-  } catch (err) {
-    console.error("[push] sendPushToUser error:", err.message);
-  }
+  return sendPushToUsers([userId], { title, body, url, type, extraData });
 }
 
 export const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || null;

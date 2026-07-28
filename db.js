@@ -48,9 +48,14 @@ const pool = new Pool({
       }),
 
   // Production-grade pool — sized for high concurrency via a connection pooler
-  // (Supabase PgBouncer sits in front, so the DB sees far fewer actual connections)
-  max: 20,                             // max connections this process holds open
-  min: 2,                              // keep 2 warm so first requests are instant
+  // (Supabase's transaction-mode pooler sits in front, so the DB sees far fewer
+  // actual connections). This process runs as a single self-hosted instance
+  // rather than many small Cloud Run instances sharing an aggregate connection
+  // budget, so its own pool is the entire app's DB concurrency ceiling — sized
+  // up accordingly (verified comfortable up to 150 concurrent DB-touching
+  // requests against the transaction-mode pooler in load testing).
+  max: 60,                             // max connections this process holds open
+  min: 5,                              // keep 5 warm so first requests are instant
   idleTimeoutMillis: 30000,            // release idle connections after 30s
   connectionTimeoutMillis: 8000,       // fail fast if pool is exhausted (don't queue forever)
   allowExitOnIdle: false,              // keep pool alive for long-running servers
