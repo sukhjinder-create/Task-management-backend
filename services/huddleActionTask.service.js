@@ -127,7 +127,9 @@ export async function createTaskFromHuddleAction({
 }) {
   const lockClient = await pool.connect();
   const sourceKey = taskSourceKey(sessionId, artifactId, actionItemId);
+  let committed = false;
   try {
+    await lockClient.query("BEGIN");
     await loadSession({
       workspaceId,
       sessionId,
@@ -135,7 +137,14 @@ export async function createTaskFromHuddleAction({
       role,
       client: lockClient,
     });
-    await lockClient.query("SELECT pg_advisory_lock(hashtext($1))", [sourceKey]);
+    // Transaction-scoped advisory lock: held for the life of this transaction and
+    // auto-released on COMMIT/ROLLBACK. A session-level pg_advisory_lock would be
+    // unsafe here — under a transaction-mode pooler, each unwrapped statement can
+    // land on a different underlying connection, so the lock, the check below, and
+    // the eventual unlock could each hit a different session, providing no real
+    // mutual exclusion and potentially leaking the lock on whatever connection
+    // acquired it.
+    await lockClient.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sourceKey]);
 
     const existing = await lockClient.query(
       `
@@ -149,6 +158,8 @@ export async function createTaskFromHuddleAction({
       [workspaceId, sourceKey]
     );
     if (existing.rows[0]) {
+      await lockClient.query("COMMIT");
+      committed = true;
       return { task: existing.rows[0], created: false, idempotent: true };
     }
 
@@ -276,6 +287,8 @@ export async function createTaskFromHuddleAction({
         taskLinkArtifactId: taskLink.artifact.id,
       },
     });
+    await lockClient.query("COMMIT");
+    committed = true;
     return {
       task,
       taskLinkArtifact: taskLink.artifact,
@@ -284,7 +297,7 @@ export async function createTaskFromHuddleAction({
     };
   } finally {
     try {
-      await lockClient.query("SELECT pg_advisory_unlock(hashtext($1))", [sourceKey]);
+      if (!committed) await lockClient.query("ROLLBACK");
     } finally {
       lockClient.release();
     }
