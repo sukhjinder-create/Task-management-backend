@@ -29,6 +29,11 @@ services:
     expose:
       - "3000"
     networks: [web]
+    volumes:
+      # Database dumps are uploaded off-site (R2) as the primary copy; this volume
+      # keeps the local copy across container recreation, since the container
+      # filesystem is ephemeral and would otherwise discard every backup on deploy.
+      - app_backups:/app/backups
     logging: *default-logging
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -58,3 +63,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  app_backups:
