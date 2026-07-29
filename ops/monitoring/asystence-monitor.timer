@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Asystence health monitor every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=asystence-monitor.service
+
+[Install]
+WantedBy=timers.target

@@ -1,8 +1,10 @@
 import "dotenv/config";
 import express from "express";
 import http from "http";
+import fs from "fs";
 import cors from "cors";
 import helmet from "helmet";
+import { validateStartup } from "./ops/startupValidation.js";
 
 // ---------------- ROUTES (UNCHANGED) ----------------
 import projectRoutes from "./routes/project.routes.js";
@@ -46,6 +48,11 @@ import superadminWorkspaceRoutes from "./routes/superadminWorkspaces.routes.js";
 import superadminPlansRoutes from "./routes/superadminPlans.routes.js";
 import superadminGrowthRoutes from "./routes/superadminGrowth.routes.js";
 import superadminAdaptiveIntelligenceRoutes from "./routes/superadminAdaptiveIntelligence.routes.js";
+import superadminAiStudioRoutes from "./routes/superadminAiStudio.routes.js";
+import aiStudioWorkspaceRoutes from "./routes/aiStudioWorkspace.routes.js";
+import requireSuperadmin from "./middleware/requireSuperadmin.js";
+import superadminPlatformFeaturesRoutes from "./routes/superadminPlatformFeatures.routes.js";
+import { primePlatformFeatures } from "./config/platformFeatures.js";
 import backupRoutes from "./routes/backup.routes.js";
 import growthRoutes from "./routes/growth.routes.js";
 import { growthProductTelemetry } from "./growth/growthProductTelemetry.middleware.js";
@@ -54,6 +61,7 @@ import adminAttendanceRoutes from "./routes/adminAttendance.routes.js";
 import adminAttendanceRecalculateRoutes from "./routes/adminAttendanceRecalculate.routes.js";
 import adminAttendanceExportRoutes from "./routes/adminAttendanceExport.routes.js";
 import settingsAttendanceRoutes from "./routes/settingsAttendance.routes.js";
+import aiPlatformInvokeRoutes from "./routes/aiPlatformInvoke.routes.js";
 
 import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
@@ -64,10 +72,17 @@ import intelligenceRoutes from "./intelligence/intelligence.routes.js";
 // 🤖 Autopilot AI
 import autopilotRoutes from "./routes/autopilot.routes.js";
 import adaptiveRoutes from "./routes/adaptive.routes.js";
+// ⚙️ Enterprise Work Intelligence Platform V3 (execution substrate) — inert unless EXEC_ENABLED
+import executionRoutes from "./execution/routes.js";
+// 🧠 Enterprise Intelligence Studio (read-only EI surface) — inert unless EI_STUDIO_ENABLED
+import eiStudioRoutes from "./ei/studio/routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
+import { bootstrapEnterpriseIntelligence } from "./ei/bootstrap.js";
+import { startEnterpriseIntelligenceOrchestratorWorker } from "./ei/orchestrator/worker.js";
 import { getCorsAllowedOrigins, isProductionRuntime } from "./config/environment.js";
+import { generalLimiter, authLimiter, publicLimiter } from "./middleware/rateLimit.middleware.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
 
@@ -190,6 +205,15 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Abuse protection. Mounted after the payment/webhook raw-body routes above so
+// signature verification is untouched, and after body parsing so limiter keying
+// can read auth context. Health probes, CORS preflights and service-to-service
+// calls are exempt; see middleware/rateLimit.middleware.js for the keying model
+// (per-user rather than per-IP, so shared office NAT addresses aren't throttled
+// as one client). Disable entirely with RATE_LIMIT_ENABLED=false.
+app.use(generalLimiter);
+
 app.use(growthProductTelemetry);
 
 app.use("/integration-webhooks", integrationWebhookReceiverRoutes);
@@ -263,11 +287,27 @@ app.get("/version", (req, res) => res.json({
   service: "asystence-api",
 }));
 
-app.use("/auth", authRoutes);
-app.use("/public/billing", publicBillingRoutes);
+// ── Health probes (public, no secrets) ────────────────────────────────────────
+// One-time, deterministic startup validation used by /readyz and boot diagnostics.
+let _migrationFiles = [];
+try { _migrationFiles = fs.readdirSync("migrations"); } catch { /* bundle without migrations dir */ }
+const STARTUP_REPORT = validateStartup({ migrationFiles: _migrationFiles });
+
+app.get("/livez", (_req, res) => res.json({ status: "live", service: "asystence-api", commit: process.env.RELEASE_COMMIT || "unknown" }));
+app.get("/readyz", (_req, res) => res.status(STARTUP_REPORT.ok ? 200 : 503).json({
+  ready: STARTUP_REPORT.ok,
+  production: STARTUP_REPORT.production,
+  errors: STARTUP_REPORT.errors,
+  warnings: STARTUP_REPORT.warnings,
+  checks: STARTUP_REPORT.checks,
+}));
+
+app.use("/auth", authLimiter, authRoutes);
+app.use("/public/billing", publicLimiter, publicBillingRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
+app.use("/ai", aiPlatformInvokeRoutes); // POST /ai/invoke — single external door into the platform
 app.use("/internal", internalRoutes);
 app.use(internalTasks);
 
@@ -278,6 +318,19 @@ app.use("/superadmin/plans", superadminPlansRoutes);
 app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin/growth", superadminGrowthRoutes);
 app.use("/superadmin/adaptive-intelligence", superadminAdaptiveIntelligenceRoutes);
+app.use("/superadmin/ai-studio", superadminAiStudioRoutes);
+// Per-workspace enablement toggles for Execution + Enterprise Intelligence (UI-driven).
+app.use("/superadmin/platform-features", superadminPlatformFeaturesRoutes);
+// Enterprise Execution Platform + Enterprise Intelligence Studio — SUPER-ADMIN owned.
+// The superadmin selects the workspace via ?workspaceId=; a synthetic admin role lets
+// the routers' internal guards + workspace-scoped queries work unchanged.
+const superadminWorkspaceCtx = (req, _res, next) => {
+  req.user = { id: req.superadmin?.id || "superadmin", role: "admin" };
+  req.workspaceId = req.query.workspaceId || req.headers["x-workspace-id"] || null;
+  next();
+};
+app.use("/superadmin/execution", requireSuperadmin, superadminWorkspaceCtx, executionRoutes);
+app.use("/superadmin/intelligence-studio", requireSuperadmin, superadminWorkspaceCtx, eiStudioRoutes);
 app.use("/app-version", appVersionRoutes);
 
 // Public endpoint — no auth required (must be before any catch-all authMiddleware)
@@ -296,8 +349,12 @@ app.use(
 // 🤖 Autopilot AI — plan-gated
 app.use("/autopilot",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_autopilot"),    autopilotRoutes);
 app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoutes);
+// ⚙️ Execution Platform + 🧠 Enterprise Intelligence Studio are SUPER-ADMIN owned —
+// relocated to /superadmin/* (mounted in the superadmin section below). Workspace admins
+// no longer administer enterprise execution or enterprise intelligence.
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
+app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
 // 🧪 Testing Agent — plan-gated
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
 
@@ -425,7 +482,16 @@ server.listen(PORT, "0.0.0.0", () => {
 
 // ---------------- EVENT SYSTEM BOOTSTRAP ----------------
 
+// ── Startup diagnostics (non-blocking; no secrets printed) ────────────────────
+console.log(`[startup] readiness=${STARTUP_REPORT.ok ? "OK" : "NOT_READY"} production=${STARTUP_REPORT.production} migrations=${STARTUP_REPORT.checks.migrationsPresent}/${STARTUP_REPORT.checks.migrationsExpected} platformFlagsEnabled=${STARTUP_REPORT.checks.platformFlagsEnabled.length}`);
+for (const e of STARTUP_REPORT.errors) console.error(`[startup][error] ${e}`);
+for (const w of STARTUP_REPORT.warnings) console.warn(`[startup][warn] ${w}`);
+
+primePlatformFeatures(); // load per-workspace Execution/Intelligence enablement into cache
 bootstrapAdaptivePlatform();
+bootstrapEnterpriseIntelligence(); // EI V2.1 event ingestion (flag-gated; no-op when OFF)
+// EI reasoning pipeline auto-execution — canary-scoped worker; no-op unless EI_ENABLED_WORKSPACES is set.
+startEnterpriseIntelligenceOrchestratorWorker();
 
 // 2️⃣ Wrap services AFTER observers exist
 

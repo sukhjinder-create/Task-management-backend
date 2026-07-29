@@ -1,0 +1,20 @@
+{
+  "capability": "sample_echo",
+  "caseId": "case-json",
+  "capturedAt": "2026-07-04T00:00:00.000Z",
+  "input": {
+    "json": true,
+    "prompt": "extract status"
+  },
+  "meta": {
+    "latencyMs": 15,
+    "model": "mock-1",
+    "provider": "mock"
+  },
+  "output": {
+    "items": 3,
+    "risk": "low",
+    "status": "ok"
+  },
+  "outputType": "json"
+}

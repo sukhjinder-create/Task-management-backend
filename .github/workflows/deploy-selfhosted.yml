@@ -1,0 +1,156 @@
+name: Deploy to production (self-hosted)
+
+# Builds the image on GitHub's runners and publishes it to GitHub Container
+# Registry, then the server only PULLS it. Previously the image was built on the
+# production host itself — a 1-CPU box that also serves live traffic — which made
+# deploys take 15+ minutes and did heavy work on the machine users depend on.
+#
+# Safety model — this pipeline is designed to never leave production broken:
+#   1. Build and push happen BEFORE the server is touched. A build failure means
+#      production is never modified at all.
+#   2. Records the currently running image before switching.
+#   3. Pulls the new image, restarts, and health-checks the app locally AND
+#      through the public HTTPS endpoint.
+#   4. If either check fails, rolls back to the previously running image.
+#
+# Requires repository secrets: DEPLOY_SSH_KEY, DEPLOY_HOST, DEPLOY_USER
+# (GITHUB_TOKEN is provided automatically and is used to push to ghcr.io.)
+
+on:
+  push:
+    branches: [ai-platform-epic-a]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # The production host is arm64; GitHub runners are amd64, so emulation is
+      # required to produce a compatible image.
+      - name: Set up QEMU (for arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            INCLUDE_BROWSER=false
+            INCLUDE_PG_CLIENT=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull image on server, restart, health-check, rollback on failure
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          IMAGE_REF: ghcr.io/${{ github.repository }}:${{ needs.build.outputs.image_tag }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=20 "$USER@$HOST" \
+            "IMAGE_REF='$IMAGE_REF' REGISTRY_USER='$REGISTRY_USER' REGISTRY_TOKEN='$REGISTRY_TOKEN' bash -s" <<'REMOTE'
+          set -uo pipefail
+          cd ~/app
+
+          PREV_IMAGE="$(sudo docker inspect app-app-1 --format '{{.Config.Image}}' 2>/dev/null || echo '')"
+          echo "previously running image: ${PREV_IMAGE:-none}"
+
+          echo "$REGISTRY_TOKEN" | sudo docker login ghcr.io -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1 \
+            || { echo "registry login failed"; exit 1; }
+
+          # Keep the working tree in sync for compose/config files (no build here).
+          git fetch origin ai-platform-epic-a && git merge --ff-only origin/ai-platform-epic-a || echo "warning: git sync skipped"
+
+          echo "pulling $IMAGE_REF ..."
+          sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
+
+          run_with_image() {
+            local img="$1"
+            sudo IMAGE_REF="$img" docker compose -f docker-compose.prod.yml up -d --no-build app 2>&1 | tail -10
+          }
+
+          health_ok() {
+            local code pub
+            for i in $(seq 1 20); do
+              code="$(sudo docker exec app-app-1 node -e "fetch('http://127.0.0.1:3000/livez').then(r=>{console.log(r.status);process.exit(0)}).catch(()=>{console.log('000');process.exit(0)})" 2>/dev/null | tail -1)"
+              [ "$code" = "200" ] && break
+              sleep 5
+            done
+            [ "$code" != "200" ] && { echo "LOCAL HEALTH FAILED ($code)"; return 1; }
+
+            for i in $(seq 1 10); do
+              pub="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' https://api.asystence.com/livez 2>/dev/null || echo 000)"
+              [ "$pub" = "200" ] && break
+              sleep 5
+            done
+            [ "$pub" != "200" ] && { echo "PUBLIC HEALTH FAILED ($pub)"; return 1; }
+
+            echo "health checks passed (local=200 public=200)"
+            return 0
+          }
+
+          run_with_image "$IMAGE_REF"
+          if health_ok; then
+            echo "DEPLOY SUCCEEDED: $IMAGE_REF"
+            sudo docker image prune -f >/dev/null 2>&1 || true
+            exit 0
+          fi
+
+          echo "!!! HEALTH CHECK FAILED — ROLLING BACK to ${PREV_IMAGE:-previous}"
+          if [ -n "$PREV_IMAGE" ]; then
+            run_with_image "$PREV_IMAGE"
+            if health_ok; then
+              echo "ROLLED BACK SUCCESSFULLY — production healthy on the previous image."
+              exit 1
+            fi
+          fi
+          echo "CRITICAL: rollback failed. Manual intervention required."
+          exit 1
+          REMOTE

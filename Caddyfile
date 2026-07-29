@@ -1,0 +1,7 @@
+# Caddy automatically obtains and renews a free Let's Encrypt HTTPS certificate
+# for this domain, then forwards all traffic to the Node app container on port 3000.
+# Requires: DNS A record for api.asystence.com pointing at this server's public IP,
+# and ports 80 + 443 reachable from the internet.
+api.asystence.com {
+	reverse_proxy app:3000
+}

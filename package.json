@@ -98,7 +98,11 @@
     "verify:huddle-operational-readiness": "node scripts/verify-huddle-operational-readiness.js",
     "recover:workspace:dry": "node --import ./scripts/database-safety-guard.js run-workspace-recovery.js --dry-run",
     "recover:workspace": "node --import ./scripts/database-safety-guard.js run-workspace-recovery.js",
-    "migrate:supabase": "node --import ./scripts/database-safety-guard.js migrate-to-supabase.js"
+    "migrate:supabase": "node --import ./scripts/database-safety-guard.js migrate-to-supabase.js",
+    "migrate:ai-platform": "node --import ./scripts/database-safety-guard.js run-ai-platform-migration.js",
+    "migrate:ewip-v3": "node --import ./scripts/database-safety-guard.js run-ewip-v3-migration.js",
+    "test:ai-harness": "node --test tests/ai-platform-harness.test.js",
+    "test:ai-contract": "node --test tests/ai-platform-contract.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",
@@ -109,6 +113,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.19.2",
+    "express-rate-limit": "^7.5.1",
     "firebase-admin": "^12.7.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",

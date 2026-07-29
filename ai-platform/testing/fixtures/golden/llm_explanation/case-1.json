@@ -1,0 +1,11 @@
+{
+  "capability": "llm_explanation",
+  "caseId": "case-1",
+  "capturedAt": "2026-07-05T00:00:00.000Z",
+  "input": {
+    "prompt": "Explain a user's monthly score of 72 given: on-time 88%, 2 carried-over tasks, 1 blocker resolved."
+  },
+  "meta": { "legacyTransport": "generateNarrative->ai-service", "provider": "groq", "note": "production cutover requires events->gateway re-path (Epic B')" },
+  "output": "The score of 72 reflects strong on-time delivery (88%), tempered by two carried-over tasks. Resolving one blocker helped, and clearing the carryover would lift next month's score.",
+  "outputType": "text"
+}

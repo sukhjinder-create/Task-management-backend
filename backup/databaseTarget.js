@@ -20,7 +20,21 @@ function isLocalHost(host) {
     value.endsWith(".local");
 }
 
-function parseDatabaseUrl(value = process.env.DATABASE_URL) {
+/**
+ * Connection URL for backup/restore (pg_dump / psql) operations.
+ *
+ * These tools need a SESSION-mode connection: pg_dump holds a consistent
+ * snapshot across many statements, which a transaction-mode pooler cannot
+ * provide (each statement may land on a different backend). The application
+ * pool deliberately uses transaction mode for concurrency, so backups get
+ * their own endpoint via BACKUP_DATABASE_URL. Falls back to DATABASE_URL when
+ * unset, preserving previous behaviour.
+ */
+function backupDatabaseUrl() {
+  return safeTrim(process.env.BACKUP_DATABASE_URL) || process.env.DATABASE_URL;
+}
+
+function parseDatabaseUrl(value = backupDatabaseUrl()) {
   const raw = safeTrim(value);
   if (!raw) return null;
   try {
@@ -65,7 +79,7 @@ function normalizeUrlDatabase(rawUrl, database) {
   return parsed.toString();
 }
 
-function targetFromDatabaseUrl({ rawUrl = process.env.DATABASE_URL, databaseOverride = null } = {}) {
+function targetFromDatabaseUrl({ rawUrl = backupDatabaseUrl(), databaseOverride = null } = {}) {
   const parsed = parseDatabaseUrl(rawUrl);
   if (!parsed) return null;
 

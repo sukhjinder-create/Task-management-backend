@@ -8,6 +8,8 @@
 //   OPENAI_API_KEY, GROK_API_KEY, GROQ_API_KEY, HUGGINGFACE_API_KEY as needed
 
 import axios from "axios";
+import { isAiPlatformEnabled } from "../ai-platform/config/featureFlag.js";
+import { gatewayGenerateText } from "../ai-platform/gateway.js";
 
 const PROVIDER     = process.env.LLM_PROVIDER  || "ollama";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "llama3.2:1b";
@@ -77,7 +79,16 @@ async function generateTextOnce({
  * @param {AbortSignal} [opts.signal]       — optional abort signal (Ollama only)
  * @returns {Promise<string>}
  */
-export async function generateText({
+export async function generateText(options = {}) {
+  // Feature-flagged dispatch. Flag OFF (default) → legacy path below, unchanged.
+  // Flag ON → centralized AI Platform gateway. Rollback = flip the flag.
+  if (isAiPlatformEnabled(options?.workspaceId)) {
+    return gatewayGenerateText(options);
+  }
+  return legacyGenerateText(options);
+}
+
+async function legacyGenerateText({
   prompt,
   messages,
   maxTokens = 900,

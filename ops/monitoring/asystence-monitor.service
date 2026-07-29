@@ -1,0 +1,11 @@
+[Unit]
+Description=Asystence production health monitor
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/asystence-health-monitor
+# Health-check failures are expected signal, not a unit failure — the script
+# emails on its own. Suppress systemd noise for the non-zero exit.
+SuccessExitStatus=0 1

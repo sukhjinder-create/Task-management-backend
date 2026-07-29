@@ -1,0 +1,45 @@
+name: AI Platform CI
+
+# P0 deliverable: a CI gate that runs the AI Platform test harness and BLOCKS on
+# failure. Scoped intentionally to the hermetic AI Platform harness (no database,
+# no provider keys) so it is reliably green and meaningful. Broadening CI to the
+# full backend suite requires test-DB provisioning and is out of P0 scope.
+
+on:
+  pull_request:
+    paths:
+      - "ai-platform/**"
+      - "tests/ai-platform-harness.test.js"
+      - "tests/ai-platform-contract.test.js"
+      - "services/llm.js"
+      - ".github/workflows/ai-platform-ci.yml"
+  push:
+    branches: [ main ]
+    paths:
+      - "ai-platform/**"
+      - "tests/ai-platform-harness.test.js"
+      - "tests/ai-platform-contract.test.js"
+      - "services/llm.js"
+
+jobs:
+  ai-platform-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax-check AI Platform modules
+        run: |
+          set -e
+          find ai-platform -name '*.js' -print0 | xargs -0 -n1 node --check
+          node --check services/llm.js
+
+      - name: Run AI Platform self-tests (blocks on failure)
+        run: node --test tests/ai-platform-*.test.js

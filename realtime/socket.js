@@ -24,7 +24,7 @@ import {
   getRecentMessagesResolved,
 } from "../services/chat.service.js";
 
-import { sendPushToUser } from "../services/push.service.js";
+import { sendPushToUser, sendPushToUsers } from "../services/push.service.js";
 
 import huddleCompatibilityAdapter from "../services/huddleCompatibilityAdapter.service.js";
 import huddleRealtimeService from "../services/huddleRealtime.service.js";
@@ -1414,20 +1414,29 @@ socket.emit("chat:history", {
     try {
       const senderName = saved?.username || username || "Someone";
       const channelUrl = `/chat?channel=${encodeURIComponent(channelId)}`;
+      // Recipients with an active connection already receive the message live via
+      // the room broadcast / unread-bump below, so a push would be redundant —
+      // push only genuinely offline recipients. This also decouples fan-out cost
+      // from channel size (large channels no longer trigger one push attempt per
+      // member; only the currently-offline subset does), and the token/multicast
+      // batching in sendPushToUsers keeps even that subset cheap.
+      const isOnline = (uid) => io.sockets.adapter.rooms.has(String(uid));
 
       if (isDM) {
         // DM: unread-bump + push to each participant
         const dmTargets = channelId.split(":").slice(1).filter((id) => id !== String(userId));
         for (const targetId of dmTargets) {
           io.to(targetId).emit("chat:unread-bump", { channelKey: channelId });
-          sendPushToUser({
-            userId: targetId,
+        }
+        const offlineTargets = dmTargets.filter((id) => !isOnline(id));
+        if (offlineTargets.length) {
+          sendPushToUsers(offlineTargets, {
             title: senderName,
             body: "Sent a message",
             url: channelUrl,
             type: "chat",
             extraData: { channelId },
-          }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
+          }).catch((e) => console.error("[push:chat:socket] sendPushToUsers failed:", e.message));
         }
       } else {
         // Channel: fetch members for push notifications
@@ -1451,16 +1460,16 @@ socket.emit("chat:history", {
             fromUserId: String(userId),
           });
         }
-        // Push notifications go to explicit members only
-        for (const { user_id } of chMembers) {
-          sendPushToUser({
-            userId: user_id,
+        // Push notifications go to explicit members only, and only the offline ones
+        const offlineMembers = chMembers.map((m) => m.user_id).filter((id) => !isOnline(id));
+        if (offlineMembers.length) {
+          sendPushToUsers(offlineMembers, {
             title: `${senderName} in #${channelId}`,
             body: "Sent a message",
             url: channelUrl,
             type: "chat",
             extraData: { channelId },
-          }).catch((e) => console.error("[push:chat:socket] sendPushToUser failed:", e.message));
+          }).catch((e) => console.error("[push:chat:socket] sendPushToUsers failed:", e.message));
         }
       }
       console.log(`[push:chat:socket] isDM=${isDM} channelId=${channelId} sender=${userId}`);

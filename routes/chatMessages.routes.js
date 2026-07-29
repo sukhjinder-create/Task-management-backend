@@ -15,7 +15,7 @@ import {
 import { getIO } from "../realtime/socket.js";
 
 import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
-import { sendPushToUser } from "../services/push.service.js";
+import { sendPushToUsers } from "../services/push.service.js";
 import pool from "../db.js";
 
 const router = express.Router();
@@ -228,15 +228,21 @@ router.post("/", async (req, res) => {
         : (plainFallback.length > 80 ? plainFallback.slice(0, 77) + "…" : plainFallback);
       const notifTitle = messageIsDMChannel ? senderName : `${senderName} in #${channel?.name || channelKey || "chat"}`;
       const chatUrl = `/chat?channel=${encodeURIComponent(channelKey)}`;
-      for (const { user_id } of members) {
-        console.log(`[push:chat] sending to user_id=${user_id}`);
-        sendPushToUser({
-          userId: user_id,
+      // Members with an active connection already got the unread-bump/room broadcast
+      // above, so skip them here — push only genuinely offline recipients. Batches
+      // preference + token lookups and sends FCM via multicast instead of one HTTP
+      // call per member, so fan-out cost no longer scales with channel size.
+      const offlineMembers = members
+        .map((m) => m.user_id)
+        .filter((uid) => !io.sockets.adapter.rooms.has(String(uid)));
+      console.log(`[push:chat] channel=${channelKey} offline recipients=${offlineMembers.length}/${members.length}`);
+      if (offlineMembers.length) {
+        sendPushToUsers(offlineMembers, {
           title: notifTitle,
           body: safePreview,
           url: chatUrl,
           type: "chat",
-        }).catch((e) => console.error("[push:chat] sendPushToUser error:", e.message));
+        }).catch((e) => console.error("[push:chat] sendPushToUsers error:", e.message));
       }
     } catch (e) {
       console.error("[push:chat] member query error:", e.message);

@@ -1,0 +1,15 @@
+{
+  "capability": "sample_echo",
+  "caseId": "case-basic",
+  "capturedAt": "2026-07-04T00:00:00.000Z",
+  "input": {
+    "prompt": "Summarize: the quarterly review went well and tasks are on track"
+  },
+  "meta": {
+    "latencyMs": 12,
+    "model": "mock-1",
+    "provider": "mock"
+  },
+  "output": "Summarize: the quarterly review went well and tasks are on track",
+  "outputType": "text"
+}

@@ -18,6 +18,31 @@ function sanitizeForReadableLLM(value) {
   return out;
 }
 
+function capArraysInPlace(node, cap) {
+  if (Array.isArray(node)) {
+    if (node.length > cap) node.length = cap;
+    for (const item of node) capArraysInPlace(item, cap);
+  } else if (node && typeof node === "object") {
+    for (const key of Object.keys(node)) capArraysInPlace(node[key], cap);
+  }
+}
+
+// Compact, VALID JSON for the context that fits within budgetChars by
+// progressively capping long arrays (task lists, etc.) to a representative
+// sample. Summary / aggregate fields are preserved so the model still sees the
+// whole workspace picture and doesn't mistake trimmed data for "out of scope".
+function fitContextToBudget(contextObj, budgetChars) {
+  let json = JSON.stringify(contextObj);
+  if (json.length <= budgetChars) return json;
+  const clone = JSON.parse(json);
+  for (const cap of [200, 120, 80, 50, 30, 20, 12, 8, 5, 3, 2, 1]) {
+    capArraysInPlace(clone, cap);
+    json = JSON.stringify(clone);
+    if (json.length <= budgetChars) break;
+  }
+  return json;
+}
+
 function buildFallbackAnswer({ context, scope }) {
   const ws = context.workspaceSummary || {};
   const proj = context.projectSummary || {};
@@ -63,7 +88,7 @@ You have access to real-time workspace data including: tasks, projects, team mem
 IMPORTANT RULES:
 
 1. SCOPE DETECTION — This is your most critical rule:
-   - If the question is about THIS workspace (tasks, projects, members, attendance, performance, goals, reviews, leaves, activity, reports, etc.) → answer it.
+   - If the question is about THIS workspace (tasks, projects, members, attendance, performance, goals, reviews, leaves, activity, reports, forecasts, trends, predictions, risks, workload, delivery outlook, etc.) → answer it. "Forecast"/"outlook"/"next month" here means the workspace's project/delivery outlook, NOT weather.
    - If the question has NOTHING to do with this workspace (politics, general knowledge, weather, entertainment, writing essays, telling jokes, coding help unrelated to workspace, etc.) → respond with ONLY the exact text: ${OUT_OF_SCOPE_MARKER}
    - When in doubt, assume it's workspace-related and try to answer.
 
@@ -81,32 +106,48 @@ IMPORTANT RULES:
 
 4. Today's date is ${today}. Use this for overdue calculations and date-relative questions.`;
 
-    const userMessage = `Question: "${question}"\n\nWorkspace Data (scope: ${scope}):\n${contextJson}`;
+    // Groq rejects oversized prompts with HTTP 413 (its per-request limit is well
+    // below the model's full context window). Fit the context into a safe budget
+    // as COMPACT, VALID JSON — long task lists trimmed to a representative sample
+    // while summaries/aggregates are kept — so the model recognizes the workspace
+    // data and answers, instead of falling back or wrongly going "out of scope".
+    const MAX_PROMPT_CHARS = Number(process.env.AI_INTELLIGENCE_MAX_PROMPT_CHARS) || 24000;
+    const promptPrefix = `Question: "${question}"\n\nWorkspace Data (scope: ${scope}):\n`;
+    const budget = Math.max(MAX_PROMPT_CHARS - systemMessage.length - promptPrefix.length, 2000);
+    const contextForPrompt = fitContextToBudget(contextForLlm, budget);
+    const userMessage = `${promptPrefix}${contextForPrompt}`;
 
-    console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length}`);
+    console.log(`[AI Intelligence] scope=${scope} entity=${entityId || "N/A"} question="${question}" context_chars=${contextJson.length} sent_chars=${contextForPrompt.length}`);
 
-    if (systemMessage.length + userMessage.length > 50000) {
-      console.warn("[AI Intelligence] Prompt too large, using deterministic fallback");
-      return buildFallbackAnswer({ context, scope });
-    }
-
-    try {
-      const raw = await generateText({
-        messages: [
-          { role: "system", content: systemMessage },
-          { role: "user", content: userMessage },
-        ],
-        maxTokens: 400,
-      });
-
-      const answer = String(raw || "").trim();
-      if (answer.includes(OUT_OF_SCOPE_MARKER)) {
-        return OUT_OF_SCOPE_MESSAGE;
+    // Call the LLM, retrying briefly on transient rate limits (Groq's free tier
+    // has a low tokens-per-minute cap) before degrading to the deterministic fallback.
+    let raw = "";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        raw = await generateText({
+          messages: [
+            { role: "system", content: systemMessage },
+            { role: "user", content: userMessage },
+          ],
+          maxTokens: 400,
+        });
+        break;
+      } catch (llmErr) {
+        const rateLimited = /\b429\b|rate limit|too many requests/i.test(llmErr.message || "");
+        if (rateLimited && attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+          continue;
+        }
+        console.warn("[AI Intelligence] LLM unavailable, using deterministic fallback:", llmErr.message);
+        return buildFallbackAnswer({ context, scope });
       }
-      if (answer) return answer;
-    } catch (llmErr) {
-      console.warn("[AI Intelligence] LLM unavailable, using deterministic fallback:", llmErr.message);
     }
+
+    const answer = String(raw || "").trim();
+    if (answer.includes(OUT_OF_SCOPE_MARKER)) {
+      return OUT_OF_SCOPE_MESSAGE;
+    }
+    if (answer) return answer;
 
     return buildFallbackAnswer({ context, scope });
   } catch (error) {
