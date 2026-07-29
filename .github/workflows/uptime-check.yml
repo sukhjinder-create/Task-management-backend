@@ -1,0 +1,53 @@
+name: Production uptime check
+
+# External health monitoring, deliberately run from GitHub rather than from the
+# production server itself: a monitor living on the box it watches cannot report
+# that the box is gone. On failure this workflow fails, and GitHub emails the
+# repository owner — so alerting needs no SMTP credentials or third-party service.
+#
+# Checks the public endpoint (covers DNS, Cloudflare, Caddy, the app and its DB
+# readiness in one shot) and retries before alerting, so a single transient
+# blip doesn't page anyone.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (GitHub's minimum is 5)
+  workflow_dispatch:
+
+concurrency:
+  group: uptime-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check public API health
+        run: |
+          URL="https://api.asystence.com/livez"
+          ATTEMPTS=5
+          for i in $(seq 1 $ATTEMPTS); do
+            CODE=$(curl -sS -m 20 -o /tmp/body.txt -w '%{http_code}' "$URL" 2>/dev/null || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "OK (attempt $i): $URL -> $CODE"
+              cat /tmp/body.txt
+              exit 0
+            fi
+            echo "attempt $i/$ATTEMPTS failed: HTTP $CODE"
+            [ "$i" -lt "$ATTEMPTS" ] && sleep 20
+          done
+
+          echo "::error::Production health check FAILED after $ATTEMPTS attempts — $URL returned $CODE"
+          echo "--- response body (if any) ---"
+          cat /tmp/body.txt 2>/dev/null || true
+          exit 1
+
+      - name: Check readiness endpoint (startup validation / config)
+        run: |
+          CODE=$(curl -sS -m 20 -o /tmp/ready.txt -w '%{http_code}' "https://api.asystence.com/readyz" 2>/dev/null || echo "000")
+          echo "readyz -> $CODE"
+          cat /tmp/ready.txt 2>/dev/null || true
+          if [ "$CODE" != "200" ]; then
+            echo "::warning::readyz returned $CODE — the app is serving traffic but reports a configuration/readiness problem"
+          fi
