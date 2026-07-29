@@ -22,7 +22,7 @@ services:
     build:
       context: .
       args:
-        INCLUDE_BROWSER: "false"      # "true" bundles the Testing Agent browser (Playwright)
+        INCLUDE_BROWSER: "true"       # bundles Playwright Chromium for the Testing Agent
         INCLUDE_PG_CLIENT: "true"     # ships pg_dump/psql for the built-in DB backup + recovery
     restart: always
     env_file: .env
