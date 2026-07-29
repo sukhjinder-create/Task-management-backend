@@ -8,18 +8,34 @@
 # To enable the heavy optional features later (you have the RAM on a 12GB box),
 # flip the build args below to "true" and re-run the command above.
 
+# Container logs are rotated (capped at max-size × max-file per container) so a
+# chatty or looping process can never fill the disk and take the host down.
+# Docker's default is unlimited, which is a latent outage risk.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   app:
     build:
       context: .
       args:
         INCLUDE_BROWSER: "false"      # "true" bundles the Testing Agent browser (Playwright)
-        INCLUDE_PG_CLIENT: "false"    # "true" enables the built-in DB backup tools (pg_dump)
+        INCLUDE_PG_CLIENT: "true"     # ships pg_dump/psql for the built-in DB backup + recovery
     restart: always
     env_file: .env
     expose:
       - "3000"
     networks: [web]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   caddy:
     image: caddy:2-alpine
@@ -34,6 +50,7 @@ services:
     depends_on:
       - app
     networks: [web]
+    logging: *default-logging
 
 networks:
   web:
