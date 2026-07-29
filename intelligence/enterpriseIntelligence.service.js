@@ -13,6 +13,59 @@
 import pool from "../db.js";
 import { generateText } from "../services/llm.js";
 
+/**
+ * LLM responses occasionally drift from the requested schema: a field asked for
+ * as a string comes back as a nested object, or a prompt placeholder such as
+ * "high|medium|low" is echoed back verbatim. Everything returned from these
+ * endpoints is rendered directly by the UI, so each insight is flattened to
+ * primitives here — at the boundary — rather than trusting the model's shape.
+ *
+ * All original fields are preserved; only their types are made safe.
+ */
+function asPlainText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(asPlainText).filter(Boolean).join(" · ");
+  if (typeof value === "object") {
+    const preferred =
+      asPlainText(value.description) || asPlainText(value.detail) ||
+      asPlainText(value.text) || asPlainText(value.message) ||
+      asPlainText(value.summary) || asPlainText(value.value);
+    if (preferred) return preferred;
+    const strings = Object.values(value).filter((v) => typeof v === "string" && v.trim());
+    return strings.length ? strings.join(" · ") : "";
+  }
+  return String(value);
+}
+
+const INSIGHT_TEXT_FIELDS = ["title", "detail", "description", "action", "username", "summary", "message", "reason"];
+const INSIGHT_ENUM_FIELDS = ["impact", "priority", "urgency", "framing"];
+
+export function normalizeInsights(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+      const out = {};
+      // keep every field the model returned, but never leak a non-primitive
+      for (const [k, v] of Object.entries(raw)) {
+        out[k] = v === null || typeof v !== "object" ? v : asPlainText(v);
+      }
+      for (const k of INSIGHT_TEXT_FIELDS) {
+        if (out[k] !== undefined) out[k] = asPlainText(out[k]);
+      }
+      // an un-substituted prompt placeholder ("high|medium|low") is not a value
+      for (const k of INSIGHT_ENUM_FIELDS) {
+        if (typeof out[k] === "string" && out[k].includes("|")) delete out[k];
+      }
+      if (!out.detail && out.description) out.detail = out.description;
+      return out.title || out.detail || out.action ? out : null;
+    })
+    .filter(Boolean);
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FEATURE 1: Pre-Project Profitability Oracle
 //
@@ -231,7 +284,7 @@ Respond ONLY with valid JSON: {"insights":[{"title":"...","detail":"...","impact
 
     const raw = await generateText({ prompt, maxTokens: 600, json: true });
     const m = raw.match(/\{[\s\S]*\}/);
-    if (m) aiInsights = JSON.parse(m[0]).insights;
+    if (m) aiInsights = normalizeInsights(JSON.parse(m[0]).insights);
   } catch (_) { /* LLM unavailable — degrade gracefully */ }
 
   return { calibration, projects, aiInsights };
@@ -388,7 +441,7 @@ export async function getResignationRadar(workspaceId) {
 Respond ONLY with valid JSON: {"recommendations":[{"username":"...","action":"...","urgency":"immediate|this_week|this_month"}]}`;
       const raw = await generateText({ prompt, maxTokens: 600, json: true });
       const m = raw.match(/\{[\s\S]*\}/);
-      if (m) aiInsights = JSON.parse(m[0]).recommendations;
+      if (m) aiInsights = normalizeInsights(JSON.parse(m[0]).recommendations);
     } catch (_) { /* degrade gracefully */ }
   }
 
@@ -574,7 +627,7 @@ export async function getGhostWorkDetection(workspaceId) {
 Respond ONLY with valid JSON: {"recommendations":[{"username":"...","action":"...","framing":"process_issue|needs_investigation|monitor"}]}`;
       const raw = await generateText({ prompt, maxTokens: 500, json: true });
       const m = raw.match(/\{[\s\S]*\}/);
-      if (m) aiInsights = JSON.parse(m[0]).recommendations;
+      if (m) aiInsights = normalizeInsights(JSON.parse(m[0]).recommendations);
     } catch (_) { /* degrade gracefully */ }
   }
 
@@ -775,7 +828,7 @@ export async function getOrgTruthMap(workspaceId) {
 Respond ONLY with valid JSON: {"insights":[{"title":"...","detail":"...","priority":"critical|high|medium"}]}`;
     const raw = await generateText({ prompt, maxTokens: 600, json: true });
     const m = raw.match(/\{[\s\S]*\}/);
-    if (m) aiInsights = JSON.parse(m[0]).insights;
+    if (m) aiInsights = normalizeInsights(JSON.parse(m[0]).insights);
   } catch (_) { /* degrade gracefully */ }
 
   return {
