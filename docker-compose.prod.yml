@@ -19,10 +19,19 @@ x-logging: &default-logging
 
 services:
   app:
+    # CI builds and publishes the image, and the deploy sets IMAGE_REF so the
+    # server only pulls it — the production host no longer builds anything.
+    # Falls back to a local build when IMAGE_REF is unset (e.g. manual recovery).
+    image: ${IMAGE_REF:-app-app:latest}
     build:
       context: .
       args:
-        INCLUDE_BROWSER: "true"       # bundles Playwright Chromium for the Testing Agent
+        # Chromium is deliberately NOT bundled here. It adds ~500MB to an image that
+        # is rebuilt and restarted on every deploy, for a feature used occasionally —
+        # and downloading it on a 1-CPU host made deploys take 15+ minutes. If the
+        # Testing Agent is needed, run it as its own service from a prebuilt
+        # Playwright image rather than inflating the API image.
+        INCLUDE_BROWSER: "false"
         INCLUDE_PG_CLIENT: "true"     # ships pg_dump/psql for the built-in DB backup + recovery
     restart: always
     env_file: .env
