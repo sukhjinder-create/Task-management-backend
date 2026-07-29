@@ -28,6 +28,12 @@ services:
     env_file: .env
     expose:
       - "3000"
+    ports:
+      # Bound to loopback ONLY — this is for the cloudflared tunnel connector,
+      # which runs on the host rather than in this network. It is deliberately
+      # not 0.0.0.0, so the app is never reachable from the internet except
+      # through Caddy or the tunnel.
+      - "127.0.0.1:3000:3000"
     networks: [web]
     volumes:
       # Database dumps are uploaded off-site (R2) as the primary copy; this volume
