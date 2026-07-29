@@ -58,20 +58,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push (linux/arm64)
+      # Deliberately minimal: no `platforms:` (the runner is already arm64, so the
+      # native build matches the production host) and no registry/gha cache. An
+      # earlier version specified both and failed here, while the identical build
+      # succeeds on the production host — so the extra machinery, not the
+      # Dockerfile, was the problem. Layer caching can be reintroduced once this
+      # is proven green.
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64
           push: true
+          provenance: false
           tags: |
             ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE }}:latest
           build-args: |
             INCLUDE_BROWSER=false
             INCLUDE_PG_CLIENT=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   deploy:
     needs: build
