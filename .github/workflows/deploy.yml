@@ -1,8 +1,17 @@
-name: Deploy to Cloud Run
+name: Deploy to Cloud Run (DEPRECATED)
 
+# DEPRECATED — retained for reference only.
+#
+# Production moved off Google Cloud Run to a self-hosted server in July 2026
+# after the GCP billing account was closed; that project can no longer deploy.
+# The live pipeline is .github/workflows/deploy-selfhosted.yml.
+#
+# The automatic push trigger is disabled so this cannot fire and fail (or, if
+# GCP billing were ever restored, silently deploy a second live backend
+# alongside the self-hosted one). Manual dispatch is kept for the case where
+# Cloud Run is deliberately brought back.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:

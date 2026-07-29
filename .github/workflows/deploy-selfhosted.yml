@@ -1,0 +1,106 @@
+name: Deploy to production (self-hosted)
+
+# Deploys the backend to the self-hosted Oracle server.
+#
+# Safety model — this pipeline is designed to never leave production broken:
+#   1. Records the currently deployed commit before touching anything.
+#   2. Pulls, rebuilds and restarts the app.
+#   3. Health-checks the app locally AND through the public HTTPS endpoint.
+#   4. If either check fails, automatically rolls back to the previous commit,
+#      rebuilds it, and reports failure.
+#
+# Requires repository secrets:
+#   DEPLOY_SSH_KEY  - private key authorised on the server (ed25519)
+#   DEPLOY_HOST     - server IP/hostname
+#   DEPLOY_USER     - ssh user (ubuntu)
+
+on:
+  push:
+    branches: [ai-platform-epic-a]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy with health check and automatic rollback
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=20 "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          cd ~/app
+
+          PREV_COMMIT="$(git rev-parse HEAD)"
+          echo "::group::Current deployment"
+          echo "previous commit: $PREV_COMMIT"
+          echo "::endgroup::"
+
+          echo "Pulling latest..."
+          git fetch origin ai-platform-epic-a || { echo "git fetch failed"; exit 1; }
+          git merge --ff-only origin/ai-platform-epic-a || { echo "fast-forward merge failed"; exit 1; }
+          NEW_COMMIT="$(git rev-parse HEAD)"
+          echo "new commit: $NEW_COMMIT"
+
+          if [ "$PREV_COMMIT" = "$NEW_COMMIT" ]; then
+            echo "Already up to date; rebuilding anyway to pick up any config changes."
+          fi
+
+          deploy_current() {
+            sudo docker compose -f docker-compose.prod.yml up -d --build 2>&1 | tail -20
+          }
+
+          health_ok() {
+            # Local app check
+            for i in $(seq 1 20); do
+              code="$(sudo docker exec app-app-1 node -e "fetch('http://127.0.0.1:3000/livez').then(r=>{console.log(r.status);process.exit(0)}).catch(()=>{console.log('000');process.exit(0)})" 2>/dev/null | tail -1)"
+              [ "$code" = "200" ] && break
+              sleep 5
+            done
+            [ "$code" != "200" ] && { echo "LOCAL HEALTH FAILED (got $code)"; return 1; }
+
+            # Public endpoint check (catches proxy/TLS/DNS breakage too)
+            for i in $(seq 1 10); do
+              pub="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' https://api.asystence.com/livez 2>/dev/null || echo 000)"
+              [ "$pub" = "200" ] && break
+              sleep 5
+            done
+            [ "$pub" != "200" ] && { echo "PUBLIC HEALTH FAILED (got $pub)"; return 1; }
+
+            echo "health checks passed (local=200 public=200)"
+            return 0
+          }
+
+          echo "Building and starting new version..."
+          deploy_current
+
+          if health_ok; then
+            echo "DEPLOY SUCCEEDED: $NEW_COMMIT"
+            exit 0
+          fi
+
+          echo "!!! HEALTH CHECK FAILED — ROLLING BACK to $PREV_COMMIT"
+          git reset --hard "$PREV_COMMIT" || { echo "ROLLBACK CHECKOUT FAILED"; exit 1; }
+          deploy_current
+
+          if health_ok; then
+            echo "ROLLED BACK SUCCESSFULLY to $PREV_COMMIT — production is healthy on the previous version."
+            exit 1
+          fi
+
+          echo "CRITICAL: rollback also failed health checks. Manual intervention required."
+          exit 1
+          REMOTE
