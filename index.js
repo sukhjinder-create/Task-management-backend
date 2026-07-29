@@ -82,6 +82,7 @@ import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
 import { bootstrapEnterpriseIntelligence } from "./ei/bootstrap.js";
 import { startEnterpriseIntelligenceOrchestratorWorker } from "./ei/orchestrator/worker.js";
 import { getCorsAllowedOrigins, isProductionRuntime } from "./config/environment.js";
+import { generalLimiter, authLimiter, publicLimiter } from "./middleware/rateLimit.middleware.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
 
@@ -204,6 +205,15 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Abuse protection. Mounted after the payment/webhook raw-body routes above so
+// signature verification is untouched, and after body parsing so limiter keying
+// can read auth context. Health probes, CORS preflights and service-to-service
+// calls are exempt; see middleware/rateLimit.middleware.js for the keying model
+// (per-user rather than per-IP, so shared office NAT addresses aren't throttled
+// as one client). Disable entirely with RATE_LIMIT_ENABLED=false.
+app.use(generalLimiter);
+
 app.use(growthProductTelemetry);
 
 app.use("/integration-webhooks", integrationWebhookReceiverRoutes);
@@ -292,8 +302,8 @@ app.get("/readyz", (_req, res) => res.status(STARTUP_REPORT.ok ? 200 : 503).json
   checks: STARTUP_REPORT.checks,
 }));
 
-app.use("/auth", authRoutes);
-app.use("/public/billing", publicBillingRoutes);
+app.use("/auth", authLimiter, authRoutes);
+app.use("/public/billing", publicLimiter, publicBillingRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
