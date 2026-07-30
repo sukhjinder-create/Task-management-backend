@@ -134,9 +134,12 @@ export async function getTaskById(id, workspaceId = null) {
       COALESCE(st.completed_subtasks, 0) AS subtasks_completed,
       CASE WHEN p.project_code IS NOT NULL AND t.ticket_number IS NOT NULL
            THEN p.project_code || '-' || t.ticket_number END AS display_id,
-      p.name AS project_name
+      p.name AS project_name,
+      sp.name AS sprint_name,
+      sp.status AS sprint_status
     FROM tasks t
     LEFT JOIN projects p ON p.id = t.project_id
+    LEFT JOIN sprints sp ON sp.id = t.sprint_id
     LEFT JOIN (
       SELECT
         task_id,
