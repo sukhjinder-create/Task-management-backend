@@ -217,7 +217,7 @@ export async function notifyUser({
       await mirrorProjectNotificationToChat({
         text: slackText,
         userId: user_id,
-        workspace_id: resolvedWorkspaceId, // 🔐 SAFE
+        workspaceId: resolvedWorkspaceId,
       });
     } catch (err) {
       console.error("Project Manager chat mirror failed:", err.message);

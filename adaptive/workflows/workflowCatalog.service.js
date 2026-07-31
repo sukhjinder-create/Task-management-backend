@@ -3,10 +3,12 @@ import { WORKFLOW_STEP_TYPES } from "./workflowValidator.js";
 
 const EVENT_CATALOG = Object.freeze([
   { value: "TASK_CREATED", label: "Task created", category: "Delivery", description: "A task is added to the workspace." },
-  { value: "TASK_UPDATED", label: "Task updated", category: "Delivery", description: "A task changes status, owner, due date, or priority." },
-  { value: "TASK_COMPLETED", label: "Task completed", category: "Delivery", description: "A task reaches a completed state." },
-  { value: "TASK_OVERDUE", label: "Task overdue", category: "Delivery", description: "A task passes its due date while still open." },
-  { value: "TASK_BLOCKED", label: "Task blocked", category: "Delivery", description: "A task is marked blocked or stuck." },
+  { value: "TASK_UPDATED", label: "Task details updated", category: "Delivery", description: "A task changes due date, priority, description, or other details." },
+  { value: "TASK_STATUS_CHANGED", label: "Task status changed", category: "Delivery", description: "A task moves to blocked, completed, in progress, or another status." },
+  { value: "TASK_ASSIGNED", label: "Task assignment changed", category: "Delivery", description: "A task is assigned or reassigned." },
+  { value: "TASK_DELETED", label: "Task deleted", category: "Delivery", description: "A task is removed from the workspace." },
+  { value: "PROJECT_CREATED", label: "Project created", category: "Delivery", description: "A project is added to the workspace." },
+  { value: "PROJECT_UPDATED", label: "Project updated", category: "Delivery", description: "Project details change." },
   { value: "SPRINT_STARTED", label: "Sprint started", category: "Planning", description: "A sprint begins." },
   { value: "SPRINT_CLOSED", label: "Sprint closed", category: "Planning", description: "A sprint is closed." },
   { value: "MEETING_STARTED", label: "Meeting started", category: "Collaboration", description: "A Huddle/meeting session starts." },
@@ -19,14 +21,13 @@ const EVENT_CATALOG = Object.freeze([
   { value: "REVIEW_UPDATED", label: "Review updated", category: "People", description: "A performance/review artifact changes." },
   { value: "GOAL_UPDATED", label: "Goal updated", category: "Goals", description: "An OKR/goal is updated." },
   { value: "KNOWLEDGE_UPDATED", label: "Knowledge updated", category: "Knowledge", description: "Workspace knowledge or wiki content changes." },
-  { value: "CUSTOMER_ESCALATION", label: "Customer escalation", category: "Customer", description: "A customer issue requires cross-functional follow-through." },
-  { value: "INCIDENT_REPORTED", label: "Incident reported", category: "Operations", description: "A production or operational incident is reported." },
-  { value: "SECURITY_RISK_DETECTED", label: "Security risk detected", category: "Security", description: "A security/compliance risk needs governed response." },
 ]);
 
 const CONDITION_FIELDS = Object.freeze([
-  { path: "event.eventType", label: "Event type", type: "text", examples: ["TASK_UPDATED", "CUSTOMER_ESCALATION"] },
-  { path: "event.metadata.priority", label: "Event priority", type: "text", examples: ["high", "critical"] },
+  { path: "event.eventType", label: "Event type", type: "text", examples: ["TASK_UPDATED", "TASK_STATUS_CHANGED"] },
+  { path: "context.data.task.status", label: "Task status", type: "text", examples: ["blocked", "completed"] },
+  { path: "context.data.task.priority", label: "Task priority", type: "text", examples: ["high", "critical"] },
+  { path: "context.data.task.assigned_to", label: "Task has an assignee", type: "exists", examples: ["exists"] },
   { path: "event.metadata.riskLevel", label: "Risk level", type: "text", examples: ["medium", "high", "critical"] },
   { path: "context.coverage", label: "Context confidence", type: "number", examples: [0.6, 0.85] },
   { path: "context.data.operationalGraph.relevance.projectId", label: "Related project exists", type: "exists", examples: ["exists"] },
@@ -40,8 +41,9 @@ const TEMPLATES = Object.freeze([
     description: "When high-risk work is blocked, ask for approval before notifying workspace leads.",
     definition: {
       steps: [
-        { type: "WHEN", eventTypes: ["TASK_BLOCKED", "TASK_UPDATED"] },
-        { type: "IF", path: "event.metadata.priority", operator: "in", value: ["high", "critical"] },
+        { type: "WHEN", eventTypes: ["TASK_STATUS_CHANGED", "TASK_UPDATED"] },
+        { type: "IF", path: "context.data.task.status", operator: "in", value: ["blocked", "on_hold", "stuck"] },
+        { type: "IF", path: "context.data.task.priority", operator: "in", value: ["high", "critical", "urgent"] },
         { type: "APPROVAL", mode: "approval_required" },
         {
           type: "THEN",
@@ -50,9 +52,9 @@ const TEMPLATES = Object.freeze([
           summary: "A critical blocked task needs manager attention.",
           input: {
             title: "Blocked work needs review",
-            message: "{{event.metadata.title}}",
-            projectId: "{{event.metadata.projectId}}",
-            taskId: "{{event.metadata.taskId}}",
+            message: "{{context.data.task.task}}",
+            projectId: "{{context.data.task.project_id}}",
+            taskId: "{{context.data.task.id}}",
           },
         },
         { type: "END" },
@@ -83,51 +85,24 @@ const TEMPLATES = Object.freeze([
       ],
     },
   },
-  {
-    key: "customer-escalation-response",
-    name: "Coordinate customer escalation",
-    description: "Create a follow-up task and notify leaders when a customer escalation is recorded.",
-    definition: {
-      steps: [
-        { type: "WHEN", eventTypes: ["CUSTOMER_ESCALATION"] },
-        { type: "APPROVAL", mode: "approval_required" },
-        {
-          type: "THEN",
-          capabilityKey: "task.create",
-          title: "Create escalation follow-up",
-          summary: "Create accountable work from the escalation.",
-          input: {
-            title: "{{event.metadata.title}}",
-            projectId: "{{event.metadata.projectId}}",
-            addedBy: "{{event.actorUserId}}",
-            assignedTo: "{{event.metadata.ownerId}}",
-            priority: "critical",
-            description: "{{event.metadata.summary}}",
-          },
-        },
-        {
-          type: "THEN",
-          capabilityKey: "notification.send",
-          title: "Notify escalation stakeholders",
-          summary: "Escalation follow-through is ready for stakeholder review.",
-          input: {
-            title: "Customer escalation follow-up created",
-            message: "{{event.metadata.summary}}",
-            projectId: "{{event.metadata.projectId}}",
-          },
-        },
-        { type: "END" },
-      ],
-    },
-  },
 ]);
+
+const CAPABILITY_LABELS = Object.freeze({
+  "notification.send": "Notify accountable people",
+  "task.create": "Create follow-up work",
+  "workspace_memory.create": "Save operating memory",
+  "autopilot.analyze": "Analyze delivery risk",
+  "testing_agent.run_task": "Validate with Testing Agent",
+  "executive_summary.generate": "Refresh executive context",
+});
 
 export function getWorkflowCatalog() {
   const capabilities = listCapabilities()
     .filter((capability) => capability.planning)
     .map((capability) => ({
       value: capability.key,
-      label: capability.description,
+      label: CAPABILITY_LABELS[capability.key] || capability.description,
+      description: capability.description,
       riskLevel: capability.riskLevel,
       approvalMode: capability.approvalMode,
       intents: capability.planning?.intents || [],

@@ -33,10 +33,10 @@ async function persistHeartbeat(status = "healthy") {
   }
 }
 
-export async function processAdaptiveWorkerBatch({ limit = 10 } = {}) {
+export async function processAdaptiveWorkerBatch({ limit = 10, workspaceId = null } = {}) {
   const batchStartedAt = Date.now();
   diagnostics.lastError = null;
-  const items = await claimAdaptiveEvents({ workerId, limit });
+  const items = await claimAdaptiveEvents({ workerId, limit, workspaceId });
   diagnostics.recoveredLeases += items.filter((item) => Number(item.attempts) > 1).length;
   const concurrency = Math.min(
     Math.max(Number(process.env.ADAPTIVE_RUNTIME_WORKER_CONCURRENCY) || 4, 1),
@@ -68,12 +68,12 @@ export async function processAdaptiveWorkerBatch({ limit = 10 } = {}) {
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, consume));
 
-  const workflowResults = await resumeDueWorkflowRuns({ limit, settingsLoader: getRuntimeSettings }).catch((error) => {
+  const workflowResults = await resumeDueWorkflowRuns({ limit, workspaceId, settingsLoader: getRuntimeSettings }).catch((error) => {
     diagnostics.lastError = error?.message || String(error);
     diagnostics.lastErrorAt = new Date().toISOString();
     return [];
   });
-  const evaluatedPredictions = await evaluateDueOutcomePredictions({ limit }).catch((error) => {
+  const evaluatedPredictions = await evaluateDueOutcomePredictions({ limit, workspaceId }).catch((error) => {
     diagnostics.lastError = error?.message || String(error);
     diagnostics.lastErrorAt = new Date().toISOString();
     return [];

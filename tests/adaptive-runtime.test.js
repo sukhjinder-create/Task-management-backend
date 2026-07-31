@@ -12,6 +12,9 @@ import { getJwtSecret, secretMatches } from "../config/secrets.js";
 import { validateDomainEvent } from "../adaptive/events/domainEventContracts.js";
 import { assertExecutableApproval } from "../adaptive/approvals/approvalInvariant.js";
 import { applyAdaptivePolicy } from "../adaptive/personalization/adaptivePolicy.service.js";
+import { resolveApprovalPolicy } from "../adaptive/approvals/approvalPolicy.js";
+import { workflowConditionMatches } from "../adaptive/workflows/workflowConditions.js";
+import { getWorkflowCatalog } from "../adaptive/workflows/workflowCatalog.service.js";
 
 test("operational event capture maps core product routes to semantic events", () => {
   assert.deepEqual(
@@ -211,6 +214,65 @@ test("workflow validator rejects unknown capabilities and unsafe wait ranges", (
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((message) => message.includes("WAIT")));
   assert.ok(result.errors.some((message) => message.includes("unknown capability")));
+});
+
+test("workflow conditions correctly match comma-separated choices and numeric values", () => {
+  const source = {
+    context: { data: { task: { status: "blocked", priority: "critical", estimate: 8 } } },
+  };
+  assert.equal(workflowConditionMatches({
+    path: "context.data.task.status",
+    operator: "in",
+    value: "blocked, on_hold, stuck",
+  }, source), true);
+  assert.equal(workflowConditionMatches({
+    path: "context.data.task.priority",
+    operator: "not_in",
+    value: ["low", "medium"],
+  }, source), true);
+  assert.equal(workflowConditionMatches({
+    path: "context.data.task.estimate",
+    operator: "equals",
+    value: "8",
+  }, source), true);
+});
+
+test("automatic workflow requests cannot bypass capability safety policy", async () => {
+  const settings = { mode: "auto", default_approval_mode: "automatic" };
+  assert.equal(await resolveApprovalPolicy({
+    recommendation: { approvalMode: "automatic", riskLevel: "low" },
+    capability: { approvalMode: "manual_only", autoEligible: false },
+    settings,
+  }), "manual_only");
+  assert.equal(await resolveApprovalPolicy({
+    recommendation: { approvalMode: "automatic", riskLevel: "high" },
+    capability: { approvalMode: "approval_required", autoEligible: true },
+    settings,
+  }), "approval_required");
+  assert.equal(await resolveApprovalPolicy({
+    recommendation: { approvalMode: "automatic", riskLevel: "low" },
+    capability: { approvalMode: "approval_required", autoEligible: true },
+    settings: { ...settings, mode: "assist" },
+  }), "approval_required");
+  assert.equal(await resolveApprovalPolicy({
+    recommendation: { approvalMode: "automatic", riskLevel: "low" },
+    capability: { approvalMode: "approval_required", autoEligible: true },
+    settings,
+  }), "automatic");
+});
+
+test("workflow catalog exposes emitted task events and complete valid templates", () => {
+  clearCapabilitiesForTests();
+  registerDefaultCapabilities();
+  const catalog = getWorkflowCatalog();
+  const eventTypes = new Set(catalog.events.map((item) => item.value));
+  assert.ok(eventTypes.has("TASK_STATUS_CHANGED"));
+  assert.ok(eventTypes.has("TASK_ASSIGNED"));
+  assert.equal(eventTypes.has("TASK_BLOCKED"), false);
+  for (const template of catalog.templates) {
+    const result = validateWorkflowDefinition(template.definition);
+    assert.equal(result.valid, true, `${template.key}: ${result.errors.join("; ")}`);
+  }
 });
 
 test("runtime hashes are stable and JWT secret is shared by auth surfaces", () => {

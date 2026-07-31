@@ -9,6 +9,9 @@ import {
   findOperationsActionByIdempotencyKey,
 } from "../../services/operationsAction.service.js";
 import pool from "../../db.js";
+import { resolveApprovalPolicy } from "./approvalPolicy.js";
+
+export { resolveApprovalPolicy };
 
 async function persistPlanHeader({ event, runtimeRunId, recommendation }) {
   const plan = recommendation.plan;
@@ -33,18 +36,6 @@ async function persistPlanStep({ event, runtimeRunId, recommendation, action }) 
      ON CONFLICT (plan_id, step_index) DO UPDATE SET action_id = EXCLUDED.action_id, updated_at = NOW()`,
     [event.workspaceId, plan.id, plan.stepIndex || 0, recommendation.capabilityKey, action.id, JSON.stringify(plan.dependsOn || [])]
   );
-}
-
-export async function resolveApprovalPolicy({ recommendation, capability, settings }) {
-  const configured = recommendation.approvalMode || capability.approvalMode || settings.default_approval_mode;
-  if (configured === "manual_only" || capability.approvalMode === "manual_only") return "manual_only";
-  if (settings.mode !== "auto") return "approval_required";
-  if (!capability.autoEligible || ["high", "critical"].includes(recommendation.riskLevel)) {
-    return "approval_required";
-  }
-  return configured === "automatic" || settings.default_approval_mode === "automatic"
-    ? "automatic"
-    : "approval_required";
 }
 
 function operationsPayload(recommendation) {

@@ -34,7 +34,7 @@ export async function enqueueAdaptiveEvent(event) {
   }
 }
 
-export async function claimAdaptiveEvents({ workerId, limit = 10, leaseSeconds = 120 }) {
+export async function claimAdaptiveEvents({ workerId, limit = 10, leaseSeconds = 120, workspaceId = null }) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -47,6 +47,7 @@ export async function claimAdaptiveEvents({ workerId, limit = 10, leaseSeconds =
           status = 'pending'
           OR (status = 'processing' AND lease_expires_at < NOW())
         )
+          AND ($4::uuid IS NULL OR workspace_id = $4)
           AND available_at <= NOW()
           AND attempts < max_attempts
         ORDER BY available_at ASC, id ASC
@@ -63,7 +64,7 @@ export async function claimAdaptiveEvents({ workerId, limit = 10, leaseSeconds =
       WHERE q.id = c.id
       RETURNING q.*
       `,
-      [Math.min(Math.max(Number(limit) || 10, 1), maxClaimLimit()), workerId, String(leaseSeconds)]
+      [Math.min(Math.max(Number(limit) || 10, 1), maxClaimLimit()), workerId, String(leaseSeconds), workspaceId]
     );
     await client.query("COMMIT");
     return rows;

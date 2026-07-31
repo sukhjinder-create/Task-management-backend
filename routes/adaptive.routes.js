@@ -7,7 +7,7 @@ import { recordLearningSignal, listLearningSignals, reverseLearningSignal } from
 import { getAdaptivePlatformHealth, getExecutionPlan, getRuntimeRun, listAdaptiveRecommendations, listExecutionPlans, listPredictionHistory, listRuntimeRuns } from "../adaptive/observability/observability.service.js";
 import { processAdaptiveWorkerBatch } from "../adaptive/runtime/adaptiveWorker.service.js";
 import { getWorkflowCatalog } from "../adaptive/workflows/workflowCatalog.service.js";
-import { listWorkflowDefinitions, saveWorkflowDefinition, setWorkflowStatus } from "../adaptive/workflows/workflowEngine.service.js";
+import { listWorkflowDefinitions, listWorkflowRuns, saveWorkflowDefinition, setWorkflowStatus } from "../adaptive/workflows/workflowEngine.service.js";
 import {
   getWorkspaceAiepDashboard,
   getWorkspaceAiepExplainability,
@@ -158,6 +158,15 @@ router.put("/settings", requireAdministrator, async (req, res) => {
 router.get("/workflows", requirePrivileged, async (req, res) => {
   const workflows = await listWorkflowDefinitions({ workspaceId: req.workspaceId, includeArchived: req.query.includeArchived === "true" });
   res.json({ workflows });
+});
+
+router.get("/workflows/runs", requirePrivileged, async (req, res) => {
+  const runs = await listWorkflowRuns({
+    workspaceId: req.workspaceId,
+    workflowDefinitionId: req.query.workflowDefinitionId || null,
+    limit: req.query.limit,
+  });
+  res.json({ runs });
 });
 
 router.post("/workflows", requirePrivileged, async (req, res) => {
@@ -417,7 +426,10 @@ router.post("/events/dead-letters/retry", requireAdministrator, async (req, res)
 });
 
 router.post("/worker/run-once", requireAdministrator, async (req, res) => {
-  const result = await processAdaptiveWorkerBatch({ limit: req.body?.limit || 10 });
+  const result = await processAdaptiveWorkerBatch({
+    limit: req.body?.limit || 10,
+    workspaceId: req.workspaceId,
+  });
   res.json(result);
 });
 

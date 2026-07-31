@@ -1,8 +1,13 @@
 import pool from "../../db.js";
-import { routeRecommendation, executeWorkflowCapability } from "../approvals/approvalEngine.service.js";
+import { getCapability } from "../capabilities/capabilityRegistry.js";
+import { resolveApprovalPolicy, routeRecommendation, executeWorkflowCapability } from "../approvals/approvalEngine.service.js";
+import { buildOperationalContext } from "../context/contextBuilder.service.js";
 import { adaptiveStrategyPrior } from "../personalization/personalizationEngine.service.js";
 import { compactSummary, getPath, stableHash } from "../shared/runtimeUtils.js";
 import { validateWorkflowDefinition } from "./workflowValidator.js";
+import { workflowConditionMatches } from "./workflowConditions.js";
+
+export { workflowConditionMatches };
 
 function cleanWorkflowKey(value) {
   const key = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
@@ -64,6 +69,31 @@ export async function listWorkflowDefinitions({ workspaceId, includeArchived = f
   return rows;
 }
 
+export async function listWorkflowRuns({ workspaceId, workflowDefinitionId = null, limit = 20 }) {
+  const params = [workspaceId];
+  const where = ["r.workspace_id = $1"];
+  if (workflowDefinitionId) {
+    params.push(workflowDefinitionId);
+    where.push(`r.workflow_definition_id = $${params.length}`);
+  }
+  params.push(Math.min(Math.max(Number(limit) || 20, 1), 100));
+  const { rows } = await pool.query(
+    `SELECT r.*, d.workflow_key, d.name AS workflow_name,
+            a.status AS approval_action_status, a.executed_at AS action_executed_at
+     FROM adaptive_workflow_runs r
+     JOIN adaptive_workflow_definitions d
+       ON d.id = r.workflow_definition_id AND d.workspace_id = r.workspace_id
+     LEFT JOIN operations_ai_actions a
+       ON a.workspace_id = r.workspace_id
+      AND a.id::text = COALESCE(r.state->>'approvalActionId', r.state->>'lastApprovalActionId')
+     WHERE ${where.join(" AND ")}
+     ORDER BY r.started_at DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  return rows;
+}
+
 export async function setWorkflowStatus({ workspaceId, workflowId, actorUserId, status }) {
   if (!["draft", "active", "paused", "archived"].includes(status)) throw new Error("Invalid workflow status");
   const client = await pool.connect();
@@ -94,22 +124,6 @@ export async function setWorkflowStatus({ workspaceId, workflowId, actorUserId, 
     throw error;
   } finally {
     client.release();
-  }
-}
-
-function conditionMatches(step, context) {
-  const actual = getPath(context, step.path);
-  switch (step.operator) {
-    case "equals": return actual === step.value;
-    case "not_equals": return actual !== step.value;
-    case "in": return Array.isArray(step.value) && step.value.includes(actual);
-    case "not_in": return Array.isArray(step.value) && !step.value.includes(actual);
-    case "exists": return step.value === false ? actual == null : actual != null;
-    case "gt": return Number(actual) > Number(step.value);
-    case "gte": return Number(actual) >= Number(step.value);
-    case "lt": return Number(actual) < Number(step.value);
-    case "lte": return Number(actual) <= Number(step.value);
-    default: return false;
   }
 }
 
@@ -147,7 +161,7 @@ function workflowActionType(capabilityKey, input) {
   if (capabilityKey === "notification.send") return input?.userId ? "notify_user" : "notify_supervisors";
   if (capabilityKey === "task.create") return "create_followup_task";
   if (capabilityKey === "workspace_memory.create") return "save_memory_entry";
-  return null;
+  return getCapability(capabilityKey)?.planning?.actionType || null;
 }
 
 async function workflowApprovalMode({ event, input, step, state }) {
@@ -180,7 +194,7 @@ async function executeWorkflowRun({ run, workflow, event, context, settings }) {
         return { status: "completed", matched: false };
       }
     } else if (step.type === "IF") {
-      const matched = conditionMatches(step, source);
+      const matched = workflowConditionMatches(step, source);
       await writeStep({ run, index, type: step.type, status: matched ? "succeeded" : "skipped", input: step, output: { matched } });
       if (!matched) {
         await pool.query(`UPDATE adaptive_workflow_runs SET status = 'completed', current_step = $1, completed_at = NOW() WHERE id = $2`, [steps.length, run.id]);
@@ -206,7 +220,17 @@ async function executeWorkflowRun({ run, workflow, event, context, settings }) {
       }
     } else if (step.type === "THEN") {
       const input = interpolate(step.input || {}, source);
-      const approvalMode = await workflowApprovalMode({ event, input, step, state });
+      const capability = getCapability(step.capabilityKey);
+      if (!capability) throw new Error(`Unknown workflow capability: ${step.capabilityKey}`);
+      const requestedApprovalMode = await workflowApprovalMode({ event, input, step, state });
+      const approvalMode = await resolveApprovalPolicy({
+        capability,
+        settings,
+        recommendation: {
+          approvalMode: requestedApprovalMode,
+          riskLevel: step.riskLevel || capability.riskLevel || "medium",
+        },
+      });
       const idempotencyKey = `workflow:${run.id}:step:${index}:${stableHash(input).slice(0, 16)}`;
       let output;
       const actionType = workflowActionType(step.capabilityKey, input);
@@ -311,12 +335,58 @@ export async function startMatchingWorkflows({ event, runtimeRunId, context, set
   return results;
 }
 
-export async function resumeDueWorkflowRuns({ limit = 20, settingsLoader }) {
+export async function resumeApprovedWorkflowRun({ workspaceId, workflowRunId, settingsLoader }) {
+  const [runResult, workflowResult] = await Promise.all([
+    pool.query(`SELECT * FROM adaptive_workflow_runs WHERE id = $1 AND workspace_id = $2`, [workflowRunId, workspaceId]),
+    pool.query(
+      `SELECT d.* FROM adaptive_workflow_definitions d
+       JOIN adaptive_workflow_runs r ON r.workflow_definition_id = d.id
+       WHERE r.id = $1 AND r.workspace_id = $2 AND d.workspace_id = $2`,
+      [workflowRunId, workspaceId]
+    ),
+  ]);
+  const run = runResult.rows[0];
+  const workflow = workflowResult.rows[0];
+  if (!run || !workflow) return null;
+  const { rows: eventRows } = await pool.query(
+    `SELECT id AS "eventId", workspace_id AS "workspaceId", actor_user_id AS "actorUserId",
+            event_type AS "eventType", entity_type AS "entityType", entity_id AS "entityId",
+            metadata, schema_version AS "schemaVersion", origin,
+            correlation_id AS "correlationId", causation_id AS "causationId", trace_id AS "traceId",
+            COALESCE(occurred_at, created_at) AS timestamp
+     FROM workspace_events WHERE id = $1 AND workspace_id = $2`,
+    [run.event_id, workspaceId]
+  );
+  const event = eventRows[0];
+  if (!event) throw new Error("Workflow event no longer exists");
+  const settings = await settingsLoader(workspaceId);
+  try {
+    const context = await buildOperationalContext({ event, settings });
+    return await executeWorkflowRun({
+      run: { ...run, status: "running" },
+      workflow,
+      event,
+      context,
+      settings,
+    });
+  } catch (error) {
+    await pool.query(
+      `UPDATE adaptive_workflow_runs
+       SET status = 'failed', error_message = $1, completed_at = NOW()
+       WHERE id = $2 AND workspace_id = $3`,
+      [String(error.message).slice(0, 2000), workflowRunId, workspaceId]
+    );
+    throw error;
+  }
+}
+
+export async function resumeDueWorkflowRuns({ limit = 20, workspaceId = null, settingsLoader }) {
   const { rows } = await pool.query(
     `
     WITH due AS (
       SELECT id FROM adaptive_workflow_runs
       WHERE status = 'waiting' AND resume_after <= NOW()
+        AND ($2::uuid IS NULL OR workspace_id = $2)
       ORDER BY resume_after ASC
       FOR UPDATE SKIP LOCKED
       LIMIT $1
@@ -327,7 +397,7 @@ export async function resumeDueWorkflowRuns({ limit = 20, settingsLoader }) {
     WHERE r.id = due.id
     RETURNING r.*
     `,
-    [Math.min(Math.max(Number(limit) || 20, 1), 50)]
+    [Math.min(Math.max(Number(limit) || 20, 1), 50), workspaceId]
   );
   const results = [];
   for (const run of rows) {
@@ -347,7 +417,8 @@ export async function resumeDueWorkflowRuns({ limit = 20, settingsLoader }) {
     const event = eventResult.rows[0];
     if (!workflow || !event) continue;
     const settings = await settingsLoader(run.workspace_id);
-    results.push(await executeWorkflowRun({ run: { ...run, status: "waiting" }, workflow, event, context: run.state?.context || {}, settings }));
+    const context = await buildOperationalContext({ event, settings });
+    results.push(await executeWorkflowRun({ run: { ...run, status: "waiting" }, workflow, event, context, settings }));
   }
   return results;
 }
