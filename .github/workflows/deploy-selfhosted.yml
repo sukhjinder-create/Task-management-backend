@@ -93,6 +93,163 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
+      # ── Application secrets ──────────────────────────────────────────────────
+      # The move off Cloud Run left this behind. The old pipeline mapped every
+      # application secret into the runtime; nothing replaced it, so RAZORPAY_*,
+      # STRIPE_*, LIVEKIT_*, DEEPGRAM_API_KEY and TURN_* were simply absent from
+      # the container and the features that depend on them were silently dead.
+      #
+      # This MERGES into the server's .env. A key is written only when the
+      # matching repository secret is non-empty; every other line is left alone.
+      # That direction matters: some values live only on the server and are not
+      # in the GitHub vault, so a blanket overwrite would delete working
+      # credentials. A secret that is unset in GitHub can never blank one out.
+      #
+      # Values are base64-encoded in transit so punctuation cannot break the
+      # transfer, and only key NAMES are ever echoed.
+      - name: Sync application secrets into the server .env
+        id: envsync
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
+          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ATTENDANCE_SLACK_WEBHOOK_URL: ${{ secrets.ATTENDANCE_SLACK_WEBHOOK_URL }}
+          AI_SERVICE_SECRET: ${{ secrets.AI_SERVICE_SECRET }}
+          INTERNAL_SERVICE_SECRET: ${{ secrets.INTERNAL_SERVICE_SECRET }}
+          ASANA_CLIENT_ID: ${{ secrets.ASANA_CLIENT_ID }}
+          ASANA_CLIENT_SECRET: ${{ secrets.ASANA_CLIENT_SECRET }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT_B64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_B64 }}
+          TURN_USERNAME: ${{ secrets.TURN_USERNAME }}
+          TURN_CREDENTIAL: ${{ secrets.TURN_CREDENTIAL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          # Non-secret runtime config, driven by repository *variables* rather
+          # than secrets so turning payments on stays an explicit, visible
+          # choice made in the GitHub UI. Unset = left exactly as-is on the box.
+          PAYMENTS_PROVIDER: ${{ vars.PAYMENTS_PROVIDER }}
+          TRIAL_SIGNUP_PAYMENT_PROVIDER: ${{ vars.TRIAL_SIGNUP_PAYMENT_PROVIDER }}
+          TRIAL_SIGNUP_REQUIRE_PAYMENT: ${{ vars.TRIAL_SIGNUP_REQUIRE_PAYMENT }}
+          TRIAL_SIGNUP_PLAN_SLUG: ${{ vars.TRIAL_SIGNUP_PLAN_SLUG }}
+          TRIAL_SIGNUP_VERIFICATION_AMOUNT: ${{ vars.TRIAL_SIGNUP_VERIFICATION_AMOUNT }}
+          BILLING_BASE_CURRENCY: ${{ vars.BILLING_BASE_CURRENCY }}
+          BILLING_SUPPORTED_CURRENCIES: ${{ vars.BILLING_SUPPORTED_CURRENCIES }}
+          RAZORPAY_SUPPORTED_CURRENCIES: ${{ vars.RAZORPAY_SUPPORTED_CURRENCIES }}
+          FX_RATES_URL: ${{ vars.FX_RATES_URL }}
+          FX_RATES_TTL_HOURS: ${{ vars.FX_RATES_TTL_HOURS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+
+          KEYS="DATABASE_URL JWT_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
+                STRIPE_SECRET_KEY STRIPE_PUBLISHABLE_KEY STRIPE_WEBHOOK_SECRET
+                RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET
+                VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY SLACK_WEBHOOK_URL
+                ATTENDANCE_SLACK_WEBHOOK_URL AI_SERVICE_SECRET
+                INTERNAL_SERVICE_SECRET ASANA_CLIENT_ID ASANA_CLIENT_SECRET
+                DB_PASSWORD GROQ_API_KEY FIREBASE_SERVICE_ACCOUNT_B64
+                TURN_USERNAME TURN_CREDENTIAL R2_ACCOUNT_ID AWS_ACCESS_KEY_ID
+                AWS_SECRET_ACCESS_KEY SUPABASE_SERVICE_KEY LIVEKIT_URL
+                LIVEKIT_API_KEY LIVEKIT_API_SECRET DEEPGRAM_API_KEY
+                PAYMENTS_PROVIDER TRIAL_SIGNUP_PAYMENT_PROVIDER
+                TRIAL_SIGNUP_REQUIRE_PAYMENT TRIAL_SIGNUP_PLAN_SLUG
+                TRIAL_SIGNUP_VERIFICATION_AMOUNT BILLING_BASE_CURRENCY
+                BILLING_SUPPORTED_CURRENCIES RAZORPAY_SUPPORTED_CURRENCIES
+                FX_RATES_URL FX_RATES_TTL_HOURS"
+
+          umask 077
+          : > /tmp/envsync
+          for k in $KEYS; do
+            v="$(printenv "$k" || true)"
+            [ -n "$v" ] || continue
+            # dotenv/env_file cannot represent a newline inside a value.
+            case "$v" in
+              *"$(printf '\n')"*)
+                echo "::warning::$k contains a newline and cannot go in env_file — skipped"
+                continue ;;
+            esac
+            printf '%s %s\n' "$k" "$(printf '%s' "$v" | base64 -w0)" >> /tmp/envsync
+          done
+
+          COUNT="$(wc -l < /tmp/envsync | tr -d ' ')"
+          echo "sending $COUNT key(s) that are configured in this repository"
+          if [ "$COUNT" = "0" ]; then
+            echo "::warning::No application secrets are configured — the server .env is left untouched."
+            exit 0
+          fi
+
+          scp -i ~/.ssh/deploy_key -o ConnectTimeout=20 /tmp/envsync "$USER@$HOST:/tmp/envsync"
+          rm -f /tmp/envsync
+
+          # Capture the remote output so a changed .env can force a recreate:
+          # compose will not necessarily restart the container for an env_file
+          # edit alone when the image tag is unchanged (a re-run of the same
+          # commit), and new credentials are useless until the process restarts.
+          OUT="$(ssh -i ~/.ssh/deploy_key -o ConnectTimeout=20 "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          umask 077
+          cd ~/app
+
+          [ -f .env ] || : > .env
+
+          # Backups live outside the git working tree so they are never staged.
+          mkdir -p ~/.env-backups
+          cp .env ~/.env-backups/"env.$(date -u +%Y%m%dT%H%M%SZ)"
+          ls -1t ~/.env-backups/env.* 2>/dev/null | tail -n +11 | xargs -r rm -f
+
+          changed=0
+          while read -r key b64; do
+            [ -n "${key:-}" ] || continue
+            val="$(printf '%s' "$b64" | base64 -d)"
+
+            if grep -q "^${key}=" .env 2>/dev/null; then
+              current="$(grep "^${key}=" .env | head -1 | cut -d= -f2-)"
+              if [ "$current" = "$val" ]; then
+                continue
+              fi
+              grep -v "^${key}=" .env > .env.tmp && mv .env.tmp .env
+              action="updated"
+            else
+              action="added"
+            fi
+
+            printf '%s=%s\n' "$key" "$val" >> .env
+            echo "  $action $key"          # name only — never the value
+            changed=$((changed + 1))
+          done < /tmp/envsync
+
+          rm -f /tmp/envsync
+          chmod 600 .env
+          echo "$changed key(s) changed; .env now has $(grep -c '=' .env) entries"
+          REMOTE
+          )"
+
+          echo "$OUT"
+          if echo "$OUT" | grep -qE '^[1-9][0-9]* key\(s\) changed'; then
+            echo "env_changed=true" >> "$GITHUB_OUTPUT"
+            echo "credentials changed — the app container will be force-recreated"
+          else
+            echo "env_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Pull image on server, restart, health-check, rollback on failure
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
@@ -100,9 +257,10 @@ jobs:
           IMAGE_REF: ghcr.io/${{ needs.build.outputs.image_name }}:${{ needs.build.outputs.image_tag }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENV_CHANGED: ${{ steps.envsync.outputs.env_changed }}
         run: |
           ssh -i ~/.ssh/deploy_key -o ConnectTimeout=20 "$USER@$HOST" \
-            "IMAGE_REF='$IMAGE_REF' REGISTRY_USER='$REGISTRY_USER' REGISTRY_TOKEN='$REGISTRY_TOKEN' bash -s" <<'REMOTE'
+            "IMAGE_REF='$IMAGE_REF' REGISTRY_USER='$REGISTRY_USER' REGISTRY_TOKEN='$REGISTRY_TOKEN' ENV_CHANGED='$ENV_CHANGED' bash -s" <<'REMOTE'
           set -uo pipefail
           cd ~/app
 
@@ -118,9 +276,19 @@ jobs:
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 
+          # A changed .env must reach the process. Compose does not reliably
+          # recreate a container for an env_file edit when the image tag is
+          # unchanged, so force it in that case — otherwise new credentials sit
+          # on disk while the running process keeps the old (or missing) ones.
+          RECREATE=""
+          if [ "${ENV_CHANGED:-false}" = "true" ]; then
+            RECREATE="--force-recreate"
+            echo "credentials changed — forcing container recreate"
+          fi
+
           run_with_image() {
             local img="$1"
-            sudo IMAGE_REF="$img" docker compose -f docker-compose.prod.yml up -d --no-build app 2>&1 | tail -10
+            sudo IMAGE_REF="$img" docker compose -f docker-compose.prod.yml up -d --no-build $RECREATE app 2>&1 | tail -10
           }
 
           health_ok() {
