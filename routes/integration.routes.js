@@ -11,6 +11,16 @@ import asanaMigrationRoutes
   from "../integrations/asana/asana.migration.routes.js";
 import youtrackMigrationRoutes
   from "../integrations/youtrack/youtrack.migration.routes.js";
+import pool from "../db.js";
+import {
+  listBuiltInProviders,
+  describeCustomProvider,
+} from "../integrations/core/providerCapabilities.js";
+import {
+  listSyncConfigs,
+  upsertSyncConfig,
+} from "../integrations/sync/integration.syncConfig.repository.js";
+import { syncIntegrationNow } from "../integrations/sync/integration.sync.manager.js";
 
 
 const router = express.Router();
@@ -49,6 +59,77 @@ router.get("/", async (req, res) => {
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch integrations" });
+  }
+});
+
+/**
+ * Available providers (built-in + this workspace's custom ones), with the
+ * capability metadata the UI needs to render itself instead of hardcoding a
+ * panel per platform.
+ *
+ * Declared before the "/:provider" routes below so it isn't shadowed by them.
+ */
+router.get("/providers", async (req, res) => {
+  try {
+    const builtIn = listBuiltInProviders();
+    const { rows } = await pool.query(
+      `SELECT * FROM custom_integration_providers
+       WHERE workspace_id = $1 AND status <> 'disabled'
+       ORDER BY name`,
+      [req.workspaceId]
+    );
+    res.json({ providers: [...builtIn, ...rows.map(describeCustomProvider)] });
+  } catch (err) {
+    console.error("Failed to list providers:", err);
+    res.status(500).json({ error: "Failed to list providers" });
+  }
+});
+
+/**
+ * Sync configuration — how often each integration is reconciled and which
+ * external projects are in scope.
+ */
+router.get("/sync-config", async (req, res) => {
+  try {
+    res.json({ configs: await listSyncConfigs(req.workspaceId) });
+  } catch (err) {
+    console.error("Failed to load sync config:", err);
+    res.status(500).json({ error: "Failed to load sync configuration" });
+  }
+});
+
+router.put("/sync-config/:provider", async (req, res) => {
+  try {
+    const config = await upsertSyncConfig({
+      workspaceId: req.workspaceId,
+      provider: req.params.provider,
+      patch: {
+        syncMode: req.body?.syncMode,
+        reconcileIntervalMinutes: req.body?.reconcileIntervalMinutes,
+        scopedProjectIds: req.body?.scopedProjectIds,
+      },
+    });
+    res.json({ config });
+  } catch (err) {
+    // Validation failures (bad mode, out-of-range interval) are the caller's
+    // fault, not a server error.
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * Force a sync immediately, without waiting for the next reconciliation.
+ */
+router.post("/sync-now/:provider", async (req, res) => {
+  try {
+    const result = await syncIntegrationNow({
+      workspaceId: req.workspaceId,
+      provider: req.params.provider,
+      reason: "manual",
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

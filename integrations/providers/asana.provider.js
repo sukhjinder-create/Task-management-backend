@@ -275,6 +275,10 @@ class AsanaProvider extends BaseProvider {
     lastSyncedAt = null,
     syncStartedAt = new Date().toISOString(),
     retryTokenRefresh = false,
+    // Empty = every project the token can see (previous behaviour). Non-empty
+    // restricts this sync to the projects an admin scoped, or to the single
+    // project a webhook reported as changed.
+    scopedProjectIds = [],
   }) {
     const startedAt = toIsoString(syncStartedAt) || new Date().toISOString();
     let integrationConfig = null;
@@ -298,14 +302,23 @@ class AsanaProvider extends BaseProvider {
         state.lastCursorAt || state.lastSuccessfulSyncAt || lastSyncedAt;
       const modifiedSince = isBootstrap ? null : withLookback(cursor);
 
-      const { projects, projectCache, refreshed } = await this.resolveProjects({
+      const { projects: allProjects, projectCache, refreshed } = await this.resolveProjects({
         headers,
         state,
         syncStartedAt: startedAt,
         isBootstrap,
       });
 
+      // Scope AFTER resolution so the project cache still reflects the full
+      // account — narrowing the cache would make it wrong for other callers.
+      const scopeSet = new Set((scopedProjectIds || []).map(String).filter(Boolean));
+      const projects = scopeSet.size
+        ? allProjects.filter((project) => scopeSet.has(String(project.gid ?? project.id)))
+        : allProjects;
+
       const stats = {
+        projectsInAccount: allProjects.length,
+        projectScopeApplied: scopeSet.size > 0,
         mode: isBootstrap ? "bootstrap" : "incremental",
         incrementalSince: modifiedSince,
         projectCacheRefreshed: refreshed,

@@ -154,6 +154,10 @@ class YouTrackProvider extends BaseProvider {
     state = {},
     lastSyncedAt = null,
     syncStartedAt = new Date().toISOString(),
+    // Empty = every project the token can see (previous behaviour). Non-empty
+    // restricts this sync to the projects an admin scoped, or to the single
+    // project a webhook reported as changed.
+    scopedProjectIds = [],
   }) {
     const startedAt = toIsoString(syncStartedAt) || new Date().toISOString();
     const entityStateExists = await hasWorkspaceBootstrapped(workspaceId);
@@ -164,14 +168,28 @@ class YouTrackProvider extends BaseProvider {
       state.lastCursorAt || state.lastSuccessfulSyncAt || lastSyncedAt;
     const updatedAfter = isBootstrap ? null : withLookback(cursor);
 
-    const { projects, projectCache, refreshed } = await this.resolveProjects({
+    const { projects: allProjects, projectCache, refreshed } = await this.resolveProjects({
       workspaceId,
       state,
       syncStartedAt: startedAt,
       isBootstrap,
     });
 
+    // Scope AFTER resolution so the project cache still reflects the full
+    // instance — narrowing the cache would make it wrong for other callers.
+    // Matches on id, key or name since callers may hold any of them.
+    const scopeSet = new Set((scopedProjectIds || []).map(String).filter(Boolean));
+    const projects = scopeSet.size
+      ? allProjects.filter((project) =>
+          scopeSet.has(String(project.id)) ||
+          scopeSet.has(String(project.key)) ||
+          scopeSet.has(String(project.name))
+        )
+      : allProjects;
+
     const stats = {
+      projectsInAccount: allProjects.length,
+      projectScopeApplied: scopeSet.size > 0,
       mode: isBootstrap ? "bootstrap" : "incremental",
       incrementalSince: updatedAfter,
       projectCacheRefreshed: refreshed,

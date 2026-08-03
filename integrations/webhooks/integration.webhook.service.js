@@ -4,6 +4,7 @@ import pool from "../../db.js";
 import { emitIntegrationEvent } from "../integration.events.js";
 import { hashIntegrationState } from "../../events/utils/hashState.js";
 import youtrackAdapter from "../youtrack/youtrack.adapter.js";
+import { getSyncConfig, isProjectInScope, recordWebhookEvent } from "../sync/integration.syncConfig.repository.js";
 
 const ASANA_API_BASE = "https://app.asana.com/api/1.0";
 const ASANA_TASK_FIELDS =
@@ -417,9 +418,23 @@ export async function setupAsanaWebhooks({
   resourceGids = null,
 }) {
   const baseUrl = normalizeBaseUrl(publicBaseUrl);
-  const requestedResources = Array.isArray(resourceGids)
+
+  // Precedence: an explicit request wins; otherwise fall back to the admin's
+  // saved project scope. Only when neither exists do we subscribe to every
+  // project — previously the UI always sent an empty body, so clicking
+  // "Set up" silently registered a webhook against the entire Asana account.
+  let requestedResources = Array.isArray(resourceGids)
     ? new Set(resourceGids.map((gid) => String(gid || "").trim()).filter(Boolean))
     : null;
+
+  if (!requestedResources || !requestedResources.size) {
+    const syncConfig = await getSyncConfig(workspaceId, "asana");
+    const scoped = Array.isArray(syncConfig?.scoped_project_ids)
+      ? syncConfig.scoped_project_ids.map(String).filter(Boolean)
+      : [];
+    requestedResources = scoped.length ? new Set(scoped) : null;
+  }
+
   const allProjects = await fetchAsanaProjects(workspaceId);
   const projects = requestedResources
     ? allProjects.filter((project) => requestedResources.has(String(project.gid)))
@@ -696,6 +711,13 @@ export async function handleAsanaWebhookEvent({
   const events = Array.isArray(body?.events) ? body.events : [];
   const results = [];
 
+  // Respect the admin's project scope: a webhook for a project they excluded
+  // must not cause any work.
+  const syncConfig = await getSyncConfig(workspaceId, "asana");
+  if (!isProjectInScope(syncConfig, resourceGid)) {
+    return { received: events.length, processed: 0, emitted: 0, skipped: "project_out_of_scope", results: [] };
+  }
+
   for (const event of events) {
     results.push(await processAsanaTaskEvent({ workspaceId, event, resourceGid }));
   }
@@ -711,6 +733,10 @@ export async function handleAsanaWebhookEvent({
       lastError: null,
     },
   }));
+
+  // Proof the real-time path is alive; the reconciliation sweep is only a
+  // safety net for what this misses.
+  await recordWebhookEvent({ workspaceId, provider: "asana" }).catch(() => {});
 
   return {
     received: events.length,
@@ -1239,6 +1265,10 @@ export async function handleYouTrackWebhookEvent({
       },
     };
   });
+
+  // Proof the real-time path is alive; the reconciliation sweep is only a
+  // safety net for what this misses.
+  await recordWebhookEvent({ workspaceId, provider: "youtrack" }).catch(() => {});
 
   return {
     received: payloads.length,
