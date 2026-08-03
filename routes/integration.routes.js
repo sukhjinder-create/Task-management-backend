@@ -11,6 +11,7 @@ import asanaMigrationRoutes
   from "../integrations/asana/asana.migration.routes.js";
 import youtrackMigrationRoutes
   from "../integrations/youtrack/youtrack.migration.routes.js";
+import customProviderRoutes from "../integrations/custom/customProvider.routes.js";
 import pool from "../db.js";
 import {
   listBuiltInProviders,
@@ -132,6 +133,9 @@ router.post("/sync-now/:provider", async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+// Admin-defined platforms. Mounted before "/:provider" so its paths win.
+router.use(customProviderRoutes);
 
 /**
  * Disconnect integration

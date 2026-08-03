@@ -78,6 +78,7 @@ import executionRoutes from "./execution/routes.js";
 import eiStudioRoutes from "./ei/studio/routes.js";
 
 // ---------------- EVENTS / AI OBSERVATION (NEW) ----------------
+import customWebhookReceiverRoutes from "./integrations/custom/customWebhook.receiver.js";
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
 import { bootstrapEnterpriseIntelligence } from "./ei/bootstrap.js";
 import { startEnterpriseIntelligenceOrchestratorWorker } from "./ei/orchestrator/worker.js";
@@ -217,6 +218,9 @@ app.use(generalLimiter);
 app.use(growthProductTelemetry);
 
 app.use("/integration-webhooks", integrationWebhookReceiverRoutes);
+// Admin-defined platforms. Public like the receiver above; each request is
+// verified against a per-endpoint secret rather than a shared global one.
+app.use("/integration-webhooks", customWebhookReceiverRoutes);
 app.use(
   "/integrations/webhooks",
   authMiddleware,
