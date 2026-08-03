@@ -94,9 +94,26 @@ router.post("/custom/:workspaceId/:slug", async (req, res) => {
     );
     await recordWebhookEvent({ workspaceId, provider }).catch(() => {});
 
-    // Acknowledge immediately; the provider should not wait on our processing,
-    // and a slow response is what causes platforms to disable a webhook.
+    // Acknowledge immediately — the provider must not wait on our processing.
+    // A slow webhook response is exactly what causes platforms to mark an
+    // endpoint unhealthy and stop sending, which would break real-time updates.
     res.json({ received: true });
+
+    // Refresh after responding. Errors are logged rather than surfaced: the
+    // delivery genuinely was accepted, and the reconciliation sweep will retry
+    // this anyway, so failing here must not make the provider retry-storm.
+    const { syncCustomProvider } = await import("./customProvider.service.js");
+    syncCustomProvider({
+      workspaceId,
+      slug,
+      projectId: endpoint.external_project_id || null,
+    })
+      .then((result) => {
+        if (result?.updated) {
+          console.log(`[custom-webhook] ${slug}: updated ${result.updated} task(s)`);
+        }
+      })
+      .catch((error) => console.warn(`[custom-webhook] ${slug} refresh failed:`, error.message));
   } catch (error) {
     console.error("[custom-webhook] handler error:", error.message);
     if (!res.headersSent) res.status(500).json({ error: "Webhook processing failed" });

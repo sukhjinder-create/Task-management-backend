@@ -136,7 +136,26 @@ export async function saveCustomProvider({ workspaceId, actorUserId, slug = null
       actorUserId || null,
     ]
   );
-  return presentProvider(rows[0]);
+
+  // Give the connector a sync schedule as soon as it is usable, otherwise it
+  // would import once and then silently never update again. Only for active
+  // connectors with a tasks endpoint — a draft has nothing to sweep yet.
+  const saved = rows[0];
+  if (saved.status === "active" && asObject(saved.endpoints).tasks?.path) {
+    const { upsertSyncConfig } = await import("../sync/integration.syncConfig.repository.js");
+    await upsertSyncConfig({
+      workspaceId,
+      provider: customProviderKey(providerSlug),
+      patch: {
+        // Custom platforms only reach real time once the admin wires up the
+        // webhook; until then the sweep is the sole update path, so 'poll'
+        // describes the behaviour honestly rather than implying webhooks exist.
+        syncMode: existing ? undefined : "poll",
+      },
+    }).catch((error) => console.warn("[custom-provider] sync config not created:", error.message));
+  }
+
+  return presentProvider(saved);
 }
 
 export async function deleteCustomProvider(workspaceId, slug) {
@@ -392,6 +411,91 @@ export async function migrateCustomProvider({
     importId: importRecord.id,
     importNumber: importRecord.import_number,
   };
+}
+
+/**
+ * Keep already-imported tasks current with the source platform.
+ *
+ * Called by the webhook path (something changed) and by the reconciliation
+ * sweep (catch anything a webhook missed). Deliberately only UPDATES tasks that
+ * were previously imported — it never silently creates new ones, because tasks
+ * appearing in Asystence without an admin choosing to import them would be
+ * surprising. New records are counted and reported instead.
+ */
+export async function syncCustomProvider({ workspaceId, slug, projectId = null }) {
+  const row = await getCustomProvider(workspaceId, slug);
+  if (!row) throw new Error("Platform not found.");
+  if (row.status === "disabled") return { skipped: "provider_disabled" };
+  if (!asObject(row.endpoints).tasks?.path) return { skipped: "no_tasks_endpoint" };
+
+  const providerId = customProviderKey(slug);
+  const { raw } = await listCustomProviderTasks({ workspaceId, slug, projectId });
+  if (!raw.length) return { checked: 0, updated: 0, unchanged: 0, newRecords: 0 };
+
+  const { default: taskRepository } = await import("../../repositories/task.repository.js");
+  const { rows: workspaceUsers } = await pool.query(
+    "SELECT id, email, username FROM users WHERE workspace_id = $1",
+    [workspaceId]
+  );
+
+  const fieldMappings = asObject(row.field_mappings);
+  const valueMappings = asObject(row.value_mappings);
+
+  // One query for all mappings rather than one per record.
+  const { rows: mappingRows } = await pool.query(
+    `SELECT m.external_task_id, m.internal_task_id, t.task, t.status, t.priority,
+            t.assigned_to, t.due_date, t.description, t.story_points, t.task_type, t.is_blocked
+     FROM integration_task_mappings m
+     JOIN tasks t ON t.id = m.internal_task_id
+     WHERE m.workspace_id = $1 AND m.provider = $2`,
+    [workspaceId, providerId]
+  );
+  const byExternalId = new Map(mappingRows.map((r) => [String(r.external_task_id), r]));
+
+  let updated = 0;
+  let unchanged = 0;
+  let newRecords = 0;
+
+  for (const item of raw) {
+    const normalized = normalizeExternalTask(item, {
+      fieldMappings,
+      valueMappings,
+      resolveAssignee: (value) => matchAssignee(value, workspaceUsers),
+    });
+    if (!normalized.externalId) continue;
+
+    const existing = byExternalId.get(String(normalized.externalId));
+    if (!existing) { newRecords += 1; continue; }
+
+    const next = normalized.task;
+    const currentDue = existing.due_date
+      ? new Date(existing.due_date).toISOString().slice(0, 10)
+      : null;
+
+    // Only write when something actually differs, so an unchanged sweep costs
+    // no writes and produces no spurious "updated" activity.
+    const changed =
+      existing.task !== next.task ||
+      existing.status !== next.status ||
+      existing.priority !== next.priority ||
+      (existing.assigned_to || null) !== (next.assigned_to || null) ||
+      currentDue !== (next.due_date || null) ||
+      (existing.description || "") !== (next.description || "") ||
+      (existing.story_points ?? null) !== (next.story_points ?? null) ||
+      existing.task_type !== next.task_type ||
+      Boolean(existing.is_blocked) !== Boolean(next.is_blocked);
+
+    if (!changed) { unchanged += 1; continue; }
+
+    await taskRepository.updateTask(existing.internal_task_id, {
+      ...next,
+      description: next.description || "",
+      workspaceId,
+    });
+    updated += 1;
+  }
+
+  return { checked: raw.length, updated, unchanged, newRecords };
 }
 
 /** Secret for a custom provider's inbound webhook endpoint. */

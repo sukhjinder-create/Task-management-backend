@@ -7,6 +7,7 @@ import {
   getIntegrationState,
   saveIntegrationState,
 } from "../integration.state.repository.js";
+import { isCustomProvider, customProviderSlug } from "../core/providerCapabilities.js";
 import {
   claimDueReconciliations,
   getSyncConfig,
@@ -97,6 +98,23 @@ export async function runReconciliationSweep({ limit = 5 } = {}) {
 
   for (const config of due) {
     try {
+      // Admin-defined platforms live in custom_integration_providers, not
+      // workspace_integrations, and have no provider class in the registry —
+      // they are swept through their own service instead.
+      if (isCustomProvider(config.provider)) {
+        const { syncCustomProvider } = await import("../custom/customProvider.service.js");
+        await syncCustomProvider({
+          workspaceId: config.workspace_id,
+          slug: customProviderSlug(config.provider),
+        });
+        await recordReconcileSuccess({
+          workspaceId: config.workspace_id,
+          provider: config.provider,
+        });
+        summary.reconciled += 1;
+        continue;
+      }
+
       const integrations = await getAllActiveIntegrations();
       const record = integrations.find(
         (item) =>
