@@ -110,89 +110,55 @@ jobs:
       - name: Sync application secrets into the server .env
         id: envsync
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
-          STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
-          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
-          RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
-          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
-          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
-          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
-          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          ATTENDANCE_SLACK_WEBHOOK_URL: ${{ secrets.ATTENDANCE_SLACK_WEBHOOK_URL }}
-          AI_SERVICE_SECRET: ${{ secrets.AI_SERVICE_SECRET }}
-          INTERNAL_SERVICE_SECRET: ${{ secrets.INTERNAL_SERVICE_SECRET }}
-          ASANA_CLIENT_ID: ${{ secrets.ASANA_CLIENT_ID }}
-          ASANA_CLIENT_SECRET: ${{ secrets.ASANA_CLIENT_SECRET }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          FIREBASE_SERVICE_ACCOUNT_B64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_B64 }}
-          TURN_USERNAME: ${{ secrets.TURN_USERNAME }}
-          TURN_CREDENTIAL: ${{ secrets.TURN_CREDENTIAL }}
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
-          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
-          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
-          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          # Every secret in the vault, as JSON. Passed via env (never inlined
+          # into the script) so values cannot break quoting or inject shell.
+          #
+          # Enumerating the vault rather than naming secrets one by one is
+          # deliberate: the first version of this step listed names copied from
+          # the dead Cloud Run pipeline, and those were GCP Secret Manager names,
+          # not GitHub ones. Every lookup silently returned empty and the step
+          # shipped nothing. Reading the vault directly cannot miss a secret
+          # because its name differs from what this file guessed.
+          ALL_SECRETS: ${{ toJSON(secrets) }}
           # Non-secret runtime config, driven by repository *variables* rather
           # than secrets so turning payments on stays an explicit, visible
           # choice made in the GitHub UI. Unset = left exactly as-is on the box.
-          PAYMENTS_PROVIDER: ${{ vars.PAYMENTS_PROVIDER }}
-          TRIAL_SIGNUP_PAYMENT_PROVIDER: ${{ vars.TRIAL_SIGNUP_PAYMENT_PROVIDER }}
-          TRIAL_SIGNUP_REQUIRE_PAYMENT: ${{ vars.TRIAL_SIGNUP_REQUIRE_PAYMENT }}
-          TRIAL_SIGNUP_PLAN_SLUG: ${{ vars.TRIAL_SIGNUP_PLAN_SLUG }}
-          TRIAL_SIGNUP_VERIFICATION_AMOUNT: ${{ vars.TRIAL_SIGNUP_VERIFICATION_AMOUNT }}
-          BILLING_BASE_CURRENCY: ${{ vars.BILLING_BASE_CURRENCY }}
-          BILLING_SUPPORTED_CURRENCIES: ${{ vars.BILLING_SUPPORTED_CURRENCIES }}
-          RAZORPAY_SUPPORTED_CURRENCIES: ${{ vars.RAZORPAY_SUPPORTED_CURRENCIES }}
-          FX_RATES_URL: ${{ vars.FX_RATES_URL }}
-          FX_RATES_TTL_HOURS: ${{ vars.FX_RATES_TTL_HOURS }}
+          ALL_VARS: ${{ toJSON(vars) }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
           set -euo pipefail
 
-          KEYS="DATABASE_URL JWT_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
-                STRIPE_SECRET_KEY STRIPE_PUBLISHABLE_KEY STRIPE_WEBHOOK_SECRET
-                RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET
-                VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY SLACK_WEBHOOK_URL
-                ATTENDANCE_SLACK_WEBHOOK_URL AI_SERVICE_SECRET
-                INTERNAL_SERVICE_SECRET ASANA_CLIENT_ID ASANA_CLIENT_SECRET
-                DB_PASSWORD GROQ_API_KEY FIREBASE_SERVICE_ACCOUNT_B64
-                TURN_USERNAME TURN_CREDENTIAL R2_ACCOUNT_ID AWS_ACCESS_KEY_ID
-                AWS_SECRET_ACCESS_KEY SUPABASE_SERVICE_KEY LIVEKIT_URL
-                LIVEKIT_API_KEY LIVEKIT_API_SECRET DEEPGRAM_API_KEY
-                PAYMENTS_PROVIDER TRIAL_SIGNUP_PAYMENT_PROVIDER
-                TRIAL_SIGNUP_REQUIRE_PAYMENT TRIAL_SIGNUP_PLAN_SLUG
-                TRIAL_SIGNUP_VERIFICATION_AMOUNT BILLING_BASE_CURRENCY
-                BILLING_SUPPORTED_CURRENCIES RAZORPAY_SUPPORTED_CURRENCIES
-                FX_RATES_URL FX_RATES_TTL_HOURS"
-
           umask 077
-          : > /tmp/envsync
-          for k in $KEYS; do
-            v="$(printenv "$k" || true)"
-            [ -n "$v" ] || continue
-            # dotenv/env_file cannot represent a newline inside a value.
-            case "$v" in
-              *"$(printf '\n')"*)
-                echo "::warning::$k contains a newline and cannot go in env_file — skipped"
-                continue ;;
-            esac
-            printf '%s %s\n' "$k" "$(printf '%s' "$v" | base64 -w0)" >> /tmp/envsync
-          done
+
+          # Deploy plumbing belongs to this pipeline, not to the application,
+          # and must never be written into the app's .env.
+          DENY='["DEPLOY_SSH_KEY","DEPLOY_HOST","DEPLOY_USER","GITHUB_TOKEN","GCP_SA_KEY","ACTIONS_RUNNER_DEBUG","ACTIONS_STEP_DEBUG"]'
+
+          # Take every non-empty secret and repository variable, minus the
+          # deploy plumbing, minus anything containing a newline (env_file has
+          # no syntax for those). Emits "NAME base64value" — names in the clear,
+          # values encoded so punctuation survives the trip.
+          {
+            printf '%s' "$ALL_SECRETS" | jq -r --argjson deny "$DENY" '
+              to_entries[]
+              | select(.value != null and .value != "")
+              | select(.key as $k | $deny | index($k) | not)
+              | select(.value | test("\n") | not)
+              | "\(.key) \(.value | @base64)"'
+            printf '%s' "$ALL_VARS" | jq -r '
+              to_entries[]
+              | select(.value != null and .value != "")
+              | select(.value | test("\n") | not)
+              | "\(.key) \(.value | @base64)"'
+          } > /tmp/envsync
 
           COUNT="$(wc -l < /tmp/envsync | tr -d ' ')"
-          echo "sending $COUNT key(s) that are configured in this repository"
+          echo "found $COUNT deliverable value(s) in this repository:"
+          cut -d' ' -f1 /tmp/envsync | sed 's/^/  - /'    # names only, never values
+
           if [ "$COUNT" = "0" ]; then
-            echo "::warning::No application secrets are configured — the server .env is left untouched."
+            echo "::warning::Nothing to deliver — the vault has no application secrets visible to this job, so the server .env is left untouched."
             exit 0
           fi
 
