@@ -22,11 +22,11 @@ try {
 
   console.log("Billing plans migration complete.");
   const { rows } = await pool.query(
-    "SELECT name, slug, stripe_currency, price_monthly_paise FROM billing_plans ORDER BY display_order"
+    "SELECT name, slug, base_currency, price_monthly_minor FROM billing_plans ORDER BY display_order"
   );
   console.log("Plans seeded:");
   rows.forEach((row) => {
-    console.log(`  - ${row.name} (${row.slug}) ${row.stripe_currency || "usd"} ${row.price_monthly_paise / 100}/mo`);
+    console.log(`  - ${row.name} (${row.slug}) ${(row.base_currency || "usd").toUpperCase()} ${row.price_monthly_minor / 100}/mo`);
   });
 } catch (err) {
   console.error("Migration failed:", err.message);

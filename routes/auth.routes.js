@@ -29,6 +29,8 @@ import { logAudit } from "../services/audit.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
 import { getPlanById, getPlanBySlug } from "../repositories/billingPlans.repository.js";
+import { detectCountry, resolveRequestCurrency } from "../services/currency.service.js";
+import { providerSupportsCurrency } from "../services/billingPricing.service.js";
 import { getJwtSecret } from "../config/secrets.js";
 import {
   getFrontendBaseUrl,
@@ -127,8 +129,8 @@ async function resolveSignupPlan({ planId, plan } = {}) {
 
 function isFreePlan(plan) {
   return (
-    (Number(plan?.price_monthly_paise) || 0) === 0 &&
-    (Number(plan?.price_yearly_paise) || 0) === 0
+    (Number(plan?.price_monthly_minor) || 0) === 0 &&
+    (Number(plan?.price_yearly_minor) || 0) === 0
   );
 }
 
@@ -136,14 +138,24 @@ function signupPlanRequiresPayment(plan) {
   return trialSignupRequiresPayment() && !isFreePlan(plan);
 }
 
-function getTrialSignupPaymentProvider() {
+function getTrialSignupPaymentProvider(currency = null) {
   const provider = String(
     process.env.TRIAL_SIGNUP_PAYMENT_PROVIDER ||
       process.env.PAYMENTS_PROVIDER ||
       "stripe"
   ).toLowerCase();
   const razorpayConfigured = !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
-  return provider === "razorpay" && razorpayConfigured ? "razorpay" : "stripe";
+  const configured = provider === "razorpay" && razorpayConfigured ? "razorpay" : "stripe";
+
+  // Route to a provider that can settle this customer's currency — Razorpay is
+  // INR-only unless International Payments is enabled on the account.
+  if (!currency) return configured;
+  if (providerSupportsCurrency(configured, currency)) return configured;
+  if (configured === "razorpay" && process.env.STRIPE_SECRET_KEY) return "stripe";
+  if (configured === "stripe" && razorpayConfigured && providerSupportsCurrency("razorpay", currency)) {
+    return "razorpay";
+  }
+  return configured;
 }
 
 function isConsentAccepted(value) {
@@ -192,7 +204,10 @@ router.post("/signup/workspace", async (req, res) => {
     });
 
     if (signupPlanRequiresPayment(selectedPlan)) {
-      const paymentProvider = getTrialSignupPaymentProvider();
+      // Charge in the currency the visitor was quoted on the pricing page, and
+      // pick a provider that can settle it.
+      const signupCurrency = req.body?.currency || resolveRequestCurrency(req).currency;
+      const paymentProvider = getTrialSignupPaymentProvider(signupCurrency);
       const createCheckout =
         paymentProvider === "razorpay"
           ? createRazorpayTrialSignupCheckoutSession
@@ -205,6 +220,8 @@ router.post("/signup/workspace", async (req, res) => {
         planId: selectedPlan.id,
         plan: selectedPlan.slug,
         interval: req.body?.interval,
+        currency: signupCurrency,
+        country: detectCountry(req),
         successUrl: req.body?.successUrl,
         cancelUrl: req.body?.cancelUrl,
         ipHash: getRequestIpHash(req),
@@ -758,7 +775,8 @@ router.get("/google/callback", async (req, res) => {
         throw new Error("Your Google account email is not verified.");
       }
 
-      const paymentProvider = getTrialSignupPaymentProvider();
+      const signupCurrency = googleState.currency || resolveRequestCurrency(req).currency;
+      const paymentProvider = getTrialSignupPaymentProvider(signupCurrency);
       const createCheckout =
         paymentProvider === "razorpay"
           ? createRazorpayTrialSignupCheckoutSession
@@ -774,6 +792,8 @@ router.get("/google/callback", async (req, res) => {
         consentAccepted: googleState.trialBillingConsent === true,
         planId: selectedPlan.id,
         plan: selectedPlan.slug,
+        currency: signupCurrency,
+        country: detectCountry(req),
       });
       logAudit({
         workspaceId: null,

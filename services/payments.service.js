@@ -29,9 +29,23 @@ import {
   getPlanByRazorpayPlanId,
   getPlanBySlug,
   getPlanByStripePriceId,
+  getProviderPrice,
+  saveProviderPrice,
   saveRazorpayPlanIds,
   saveStripePriceIds,
 } from "../repositories/billingPlans.repository.js";
+import {
+  formatMoney,
+  getBaseCurrency,
+  getCurrencyMeta,
+  minorUnitFactor,
+  normalizeCurrency,
+} from "./currency.service.js";
+import {
+  getChargeAmount,
+  providerSupportsCurrency,
+  resolveChargeCurrency,
+} from "./billingPricing.service.js";
 import { getUserByEmail, getUserById } from "../repositories/user.repository.js";
 import {
   cleanRequiredString,
@@ -203,22 +217,45 @@ function normalizeBillingInterval(interval) {
   return interval === "yearly" ? "yearly" : "monthly";
 }
 
-function getTrialSignupCurrency(plan, provider = "stripe") {
-  const planCurrency =
-    provider === "razorpay"
-      ? plan?.razorpay_currency || plan?.stripe_currency
-      : plan?.stripe_currency;
-  return String(process.env.TRIAL_SIGNUP_CURRENCY || planCurrency || "inr")
-    .trim()
-    .toLowerCase();
+/**
+ * Currency to charge in. The requested currency wins when the provider can
+ * settle it; otherwise we fall back to a currency it can (INR for a Razorpay
+ * account without International Payments), never failing the checkout outright.
+ */
+function resolveProviderCurrency({ requested, plan, provider = "stripe" }) {
+  const forced = normalizeCurrency(process.env.TRIAL_SIGNUP_CURRENCY);
+  const preferred =
+    normalizeCurrency(requested) ||
+    forced ||
+    normalizeCurrency(provider === "razorpay" ? plan?.razorpay_currency : plan?.stripe_currency) ||
+    normalizeCurrency(plan?.base_currency) ||
+    getBaseCurrency();
+
+  return resolveChargeCurrency(provider, preferred);
 }
 
+// Card-verification charge: a token amount in the customer's own currency,
+// refunded immediately. Kept above each provider's minimum chargeable amount.
+const VERIFICATION_MINIMUMS = {
+  usd: 50, eur: 50, gbp: 30, inr: 100, aed: 200, sgd: 50, aud: 50, cad: 50,
+  jpy: 50, chf: 50, sek: 300, nok: 300, dkk: 250, hkd: 400, nzd: 50, mxn: 1000,
+  brl: 50, pln: 200, czk: 1500, huf: 17500, ron: 200, bgn: 100, try: 3000,
+};
+
 function getTrialSignupVerificationAmount(currency, provider = "stripe") {
-  const parsed = Number.parseInt(process.env.TRIAL_SIGNUP_VERIFICATION_AMOUNT || "", 10);
-  const amount = Number.isFinite(parsed) && parsed > 0 ? parsed : 100;
-  if (provider === "razorpay" && currency === "inr") return Math.max(amount, 100);
-  if (currency === "inr") return Math.max(amount, 50);
-  return amount;
+  const normalized = normalizeCurrency(currency) || getBaseCurrency();
+  const configured = Number.parseInt(process.env.TRIAL_SIGNUP_VERIFICATION_AMOUNT || "", 10);
+  const minimum = VERIFICATION_MINIMUMS[normalized] ?? minorUnitFactor(normalized);
+
+  // The configured amount is expressed in the base currency, so only apply it
+  // directly when we are actually charging in that currency.
+  const base = Number.isFinite(configured) && configured > 0 && normalized === getBaseCurrency()
+    ? configured
+    : minimum;
+
+  // Razorpay will not authorise below ₹1.
+  if (provider === "razorpay" && normalized === "inr") return Math.max(base, 100);
+  return Math.max(base, minimum);
 }
 
 function getTrialSignupPlanSlug() {
@@ -233,6 +270,29 @@ function getConfiguredPaymentsProvider() {
   ).toLowerCase();
   if (provider === "razorpay" && getRazorpayKeyId() && getRazorpayKeySecret()) return "razorpay";
   return "stripe";
+}
+
+/**
+ * Pick the provider that can actually settle this customer's currency.
+ *
+ * Razorpay is INR-only unless International Payments is enabled, so a euro
+ * customer on a Razorpay-default deployment is routed to Stripe instead of
+ * being silently charged in rupees. If Stripe isn't configured, we stay on
+ * Razorpay and the currency falls back to one it supports.
+ */
+export function resolvePaymentsProviderForCurrency(currency) {
+  const configured = getConfiguredPaymentsProvider();
+  const normalized = normalizeCurrency(currency);
+  if (!normalized || providerSupportsCurrency(configured, normalized)) return configured;
+
+  const alternate = configured === "razorpay" ? "stripe" : "razorpay";
+  const alternateConfigured =
+    alternate === "stripe"
+      ? !!getStripeSecretKey()
+      : !!(getRazorpayKeyId() && getRazorpayKeySecret());
+
+  if (alternateConfigured && providerSupportsCurrency(alternate, normalized)) return alternate;
+  return configured;
 }
 
 function assertTrialSignupConsent(consentAccepted) {
@@ -258,62 +318,96 @@ async function findActivePendingTrialSignup({ email }) {
   return rows[0] || null;
 }
 
+/**
+ * Stripe Prices are immutable and single-currency, so each (plan, currency,
+ * interval) needs its own Price object. They are created lazily on first use and
+ * then reused forever, which is what keeps an existing subscriber's amount fixed
+ * even after the price book is refreshed.
+ */
 async function ensurePlanStripePricesForCurrency(plan, currency) {
-  const monthlyAmount = Math.round(Number(plan.price_monthly_paise) || 0);
-  const yearlyAmount  = Math.round(Number(plan.price_yearly_paise) || 0);
-  if (monthlyAmount <= 0 && yearlyAmount <= 0) {
+  const normalizedCurrency = normalizeCurrency(currency) || getBaseCurrency();
+  const monthly = await getChargeAmount({ plan, interval: "monthly", currency: normalizedCurrency });
+  const yearly = await getChargeAmount({ plan, interval: "yearly", currency: normalizedCurrency });
+
+  if (monthly.amountMinor <= 0 && yearly.amountMinor <= 0) {
     throw Object.assign(new Error("Trial signup requires a paid Stripe plan."), { statusCode: 400 });
   }
 
-  const currentCurrency = String(plan.stripe_currency || "").toLowerCase();
-  const needsCurrencyRefresh = currentCurrency !== currency;
-  let productId = plan.stripe_product_id || null;
-  let monthlyPriceId = needsCurrencyRefresh ? null : plan.stripe_price_monthly_id || null;
-  let yearlyPriceId = needsCurrencyRefresh ? null : plan.stripe_price_yearly_id || null;
+  const [existingMonthly, existingYearly] = await Promise.all([
+    getProviderPrice({ planId: plan.id, provider: "stripe", currency: normalizedCurrency, interval: "monthly" }),
+    getProviderPrice({ planId: plan.id, provider: "stripe", currency: normalizedCurrency, interval: "yearly" }),
+  ]);
+
+  let productId = plan.stripe_product_id || existingMonthly?.provider_product_id || existingYearly?.provider_product_id || null;
+  let monthlyPriceId = existingMonthly?.provider_price_id || null;
+  let yearlyPriceId = existingYearly?.provider_price_id || null;
   const created = { product: false, monthlyPrice: false, yearlyPrice: false };
 
-  if (!productId) {
+  if (!productId && (monthly.amountMinor > 0 || yearly.amountMinor > 0)) {
     const product = await createStripeProductForPlan(plan);
     productId = product.id;
     created.product = true;
   }
 
-  if (monthlyAmount > 0 && !monthlyPriceId) {
+  if (monthly.amountMinor > 0 && !monthlyPriceId) {
     const price = await createStripeRecurringPriceForPlan({
       plan,
       productId,
       interval: "monthly",
-      amount: monthlyAmount,
-      currency,
+      amount: monthly.amountMinor,
+      currency: normalizedCurrency,
     });
     monthlyPriceId = price.id;
     created.monthlyPrice = true;
+    await saveProviderPrice({
+      planId: plan.id,
+      provider: "stripe",
+      currency: normalizedCurrency,
+      interval: "monthly",
+      providerPriceId: price.id,
+      providerProductId: productId,
+      unitAmountMinor: monthly.amountMinor,
+    });
   }
 
-  if (yearlyAmount > 0 && !yearlyPriceId) {
+  if (yearly.amountMinor > 0 && !yearlyPriceId) {
     const price = await createStripeRecurringPriceForPlan({
       plan,
       productId,
       interval: "yearly",
-      amount: yearlyAmount,
-      currency,
+      amount: yearly.amountMinor,
+      currency: normalizedCurrency,
     });
     yearlyPriceId = price.id;
     created.yearlyPrice = true;
+    await saveProviderPrice({
+      planId: plan.id,
+      provider: "stripe",
+      currency: normalizedCurrency,
+      interval: "yearly",
+      providerPriceId: price.id,
+      providerProductId: productId,
+      unitAmountMinor: yearly.amountMinor,
+    });
   }
 
-  if (created.product || created.monthlyPrice || created.yearlyPrice || needsCurrencyRefresh) {
+  // Keep the legacy single-currency columns pointed at the plan's base currency
+  // so older reads and dashboards keep resolving.
+  if (normalizedCurrency === (normalizeCurrency(plan.base_currency) || getBaseCurrency())) {
     await saveStripePriceIds(plan.id, {
       productId,
       monthly: monthlyPriceId,
       yearly: yearlyPriceId,
-      currency,
+      currency: normalizedCurrency,
     });
   }
 
   return {
     monthlyPriceId,
     yearlyPriceId,
+    currency: normalizedCurrency,
+    monthlyAmount: monthly.amountMinor,
+    yearlyAmount: yearly.amountMinor,
     created,
   };
 }
@@ -344,27 +438,45 @@ async function createRazorpayPlanForBillingPlan({ plan, interval, amount, curren
   });
 }
 
+/**
+ * Razorpay Plans are also immutable and single-currency. Same lazy-create,
+ * reuse-forever contract as Stripe, keyed on (plan, currency, interval).
+ */
 async function ensurePlanRazorpayPlanForCurrency(plan, currency, interval) {
   const billingInterval = normalizeBillingInterval(interval);
-  const amount =
-    billingInterval === "yearly"
-      ? Math.round(Number(plan.price_yearly_paise) || 0)
-      : Math.round(Number(plan.price_monthly_paise) || 0);
-  if (amount <= 0) {
+  const normalizedCurrency = normalizeCurrency(currency) || "inr";
+
+  if (!providerSupportsCurrency("razorpay", normalizedCurrency)) {
+    throw Object.assign(
+      new Error(
+        `Razorpay is not enabled for ${normalizedCurrency.toUpperCase()} on this account. ` +
+        `Add it to RAZORPAY_SUPPORTED_CURRENCIES once International Payments is live.`
+      ),
+      { statusCode: 400 }
+    );
+  }
+
+  const { amountMinor } = await getChargeAmount({
+    plan,
+    interval: billingInterval,
+    currency: normalizedCurrency,
+  });
+  if (amountMinor <= 0) {
     throw Object.assign(new Error("Trial signup requires a paid Razorpay plan."), { statusCode: 400 });
   }
 
-  const currentCurrency = String(plan.razorpay_currency || "").toLowerCase();
-  const needsCurrencyRefresh = currentCurrency !== currency;
-  let monthlyPlanId = needsCurrencyRefresh ? null : plan.razorpay_plan_monthly_id || null;
-  let yearlyPlanId = needsCurrencyRefresh ? null : plan.razorpay_plan_yearly_id || null;
-  const existingPlanId = billingInterval === "yearly" ? yearlyPlanId : monthlyPlanId;
+  const existing = await getProviderPrice({
+    planId: plan.id,
+    provider: "razorpay",
+    currency: normalizedCurrency,
+    interval: billingInterval,
+  });
 
-  if (existingPlanId) {
+  if (existing?.provider_price_id) {
     return {
-      planId: existingPlanId,
-      monthlyPlanId,
-      yearlyPlanId,
+      planId: existing.provider_price_id,
+      currency: normalizedCurrency,
+      amount: Number(existing.unit_amount_minor),
       created: false,
     };
   }
@@ -372,25 +484,88 @@ async function ensurePlanRazorpayPlanForCurrency(plan, currency, interval) {
   const razorpayPlan = await createRazorpayPlanForBillingPlan({
     plan,
     interval: billingInterval,
-    amount,
-    currency,
+    amount: amountMinor,
+    currency: normalizedCurrency,
   });
 
-  if (billingInterval === "yearly") yearlyPlanId = razorpayPlan.id;
-  else monthlyPlanId = razorpayPlan.id;
-
-  await saveRazorpayPlanIds(plan.id, {
-    monthly: monthlyPlanId,
-    yearly: yearlyPlanId,
-    currency,
+  await saveProviderPrice({
+    planId: plan.id,
+    provider: "razorpay",
+    currency: normalizedCurrency,
+    interval: billingInterval,
+    providerPriceId: razorpayPlan.id,
+    unitAmountMinor: amountMinor,
   });
+
+  // Mirror into the legacy columns for the plan's primary Razorpay currency.
+  if (normalizedCurrency === (normalizeCurrency(plan.razorpay_currency) || "inr")) {
+    await saveRazorpayPlanIds(plan.id, {
+      monthly: billingInterval === "monthly" ? razorpayPlan.id : null,
+      yearly: billingInterval === "yearly" ? razorpayPlan.id : null,
+      currency: normalizedCurrency,
+    });
+  }
 
   return {
     planId: razorpayPlan.id,
-    monthlyPlanId,
-    yearlyPlanId,
+    currency: normalizedCurrency,
+    amount: amountMinor,
     created: true,
   };
+}
+
+/**
+ * Probe whether this Razorpay account can actually accept a currency, by
+ * creating a minimal unpaid Order. An account without International Payments
+ * rejects it outright, which is the only reliable way to find out.
+ */
+export async function probeRazorpayCurrencySupport(currencies = []) {
+  ensureRazorpayConfigured();
+
+  const targets = (currencies.length ? currencies : ["inr", "usd", "eur", "gbp", "aed", "sgd"])
+    .map((code) => normalizeCurrency(code))
+    .filter(Boolean);
+
+  const results = [];
+  for (const currency of targets) {
+    const amount = getTrialSignupVerificationAmount(currency, "razorpay");
+    try {
+      const order = await razorpayRequest("post", "/orders", {
+        data: {
+          amount,
+          currency: currency.toUpperCase(),
+          receipt: `probe_${currency}_${Date.now()}`,
+          notes: { purpose: "currency_support_probe", source: "asystence" },
+        },
+      });
+      results.push({ currency: currency.toUpperCase(), supported: true, orderId: order.id, amount });
+    } catch (err) {
+      results.push({
+        currency: currency.toUpperCase(),
+        supported: false,
+        reason: err.message,
+        statusCode: err.statusCode || null,
+      });
+    }
+  }
+
+  const supported = results.filter((row) => row.supported).map((row) => row.currency.toLowerCase());
+  return {
+    livemode: isRazorpayLiveMode(),
+    configured: getProviderCurrenciesForDisplay("razorpay"),
+    results,
+    suggestedEnv: `RAZORPAY_SUPPORTED_CURRENCIES=${supported.join(",")}`,
+  };
+}
+
+function getProviderCurrenciesForDisplay(provider) {
+  return (provider === "razorpay"
+    ? String(process.env.RAZORPAY_SUPPORTED_CURRENCIES || "inr")
+    : String(process.env.STRIPE_SUPPORTED_CURRENCIES || "*")
+  )
+    .split(",")
+    .map((code) => code.trim())
+    .filter(Boolean);
 }
 
 function getExpandedSubscriptionFromSession(session) {
@@ -638,11 +813,17 @@ async function updateWorkspaceBillingState({
   currentPeriodStart,
   currentPeriodEnd,
   provider = "stripe",
+  currency = null,
+  unitAmountMinor = null,
 }) {
   const isEntitled = isSubscriptionEntitled(status);
   const planSlug = isEntitled ? plan?.slug || null : null;
   const memberLimit = isEntitled ? plan?.member_limit || null : null;
-  const perUserPricePaise = isEntitled ? plan?.price_monthly_paise || null : null;
+  // Per-seat price must be recorded in the currency actually charged, not the
+  // plan's USD list price, or pro-rated activation maths comes out wrong.
+  const perUserPriceMinor = isEntitled
+    ? unitAmountMinor ?? plan?.price_monthly_minor ?? null
+    : null;
 
   await db.query(
     `UPDATE workspaces
@@ -657,7 +838,8 @@ async function updateWorkspaceBillingState({
          member_limit               = COALESCE($7, member_limit),
          max_members                = COALESCE($7, max_members),
          billing_cycle_anchor       = COALESCE($8, billing_cycle_anchor),
-         per_user_price_paise       = COALESCE($9, per_user_price_paise),
+         per_user_price_minor       = COALESCE($9, per_user_price_minor),
+         billing_currency           = COALESCE($11, billing_currency),
          trial_started_at           = COALESCE(trial_started_at, now())
      WHERE id = $1`,
     [
@@ -669,8 +851,9 @@ async function updateWorkspaceBillingState({
       currentPeriodEnd || null,
       memberLimit,
       currentPeriodStart || null,
-      perUserPricePaise,
+      perUserPriceMinor,
       provider,
+      normalizeCurrency(currency),
     ]
   );
 }
@@ -757,6 +940,8 @@ async function upsertSubscriptionFromStripe(subscription, explicitWorkspaceId = 
     subscriptionId:  subscription.id,
     currentPeriodStart: stripeTimestampToIso(subscription.current_period_start),
     currentPeriodEnd: stripeTimestampToIso(subscription.current_period_end),
+    currency:        price?.currency || null,
+    unitAmountMinor: price?.unit_amount ?? null,
   });
 
   // Activate trial users when subscription becomes active
@@ -822,13 +1007,14 @@ export async function getWorkspaceBillingSummary(workspaceId) {
       `SELECT id, name, plan, billing_plan, billing_status, billing_provider,
               billing_customer_id, billing_subscription_id,
               billing_current_period_end, billing_updated_at,
-              member_limit, max_members, billing_cycle_anchor, per_user_price_paise
+              member_limit, max_members, billing_cycle_anchor,
+              per_user_price_minor, billing_currency, billing_country
        FROM workspaces WHERE id = $1 LIMIT 1`,
       [workspaceId]
     ),
     db.query(
       `SELECT ws.*, bp.name AS plan_name, bp.slug AS plan_slug,
-              bp.price_monthly_paise, bp.price_yearly_paise,
+              bp.price_monthly_minor, bp.price_yearly_minor, bp.base_currency,
               bp.member_limit AS plan_member_limit, bp.features, bp.support_level,
               bp.stripe_currency, bp.razorpay_currency
        FROM workspace_subscriptions ws
@@ -869,11 +1055,17 @@ async function createRazorpayWorkspaceSubscriptionCheckout({
   user,
   dbPlan,
   interval = "monthly",
+  requestedCurrency = null,
 }) {
   ensureRazorpayConfigured();
 
   const billingInterval = normalizeBillingInterval(interval);
-  const currency = getTrialSignupCurrency(dbPlan, "razorpay");
+  const charge = resolveProviderCurrency({
+    requested: requestedCurrency || workspace?.billing_currency,
+    plan: dbPlan,
+    provider: "razorpay",
+  });
+  const currency = charge.currency;
   const razorpayPlan = await ensurePlanRazorpayPlanForCurrency(dbPlan, currency, billingInterval);
   const seatQuantity = await countBillableWorkspaceUsers(workspace.id);
   const trialDays = Number(dbPlan.trial_days) || 0;
@@ -950,6 +1142,14 @@ async function createRazorpayWorkspaceSubscriptionCheckout({
     ]
   );
 
+  await db.query(
+    `UPDATE workspaces
+        SET billing_currency = COALESCE(billing_currency, $2)
+      WHERE id = $1`,
+    [workspace.id, currency]
+  );
+
+  const currencyMeta = getCurrencyMeta(currency);
   return {
     id: subscription.id,
     provider: "razorpay",
@@ -963,6 +1163,13 @@ async function createRazorpayWorkspaceSubscriptionCheckout({
     trialDays,
     verificationAmount,
     currency,
+    currencyDisplay: currencyMeta?.display || currency.toUpperCase(),
+    currencySymbol: currencyMeta?.symbol || null,
+    unitAmount: razorpayPlan.amount,
+    // True when the customer asked for a currency Razorpay could not settle and
+    // we charged in a supported one instead — the UI must say so before payment.
+    currencyConverted: !!charge.converted,
+    requestedCurrency: charge.requested || null,
     prefill: {
       name: user?.username || user?.name || "",
       email: user?.email || "",
@@ -977,6 +1184,7 @@ export async function createCheckoutSession({
   planId,          // DB UUID (preferred)
   plan,            // plan slug fallback
   interval = "monthly",
+  currency,        // display currency requested by the client
   successUrl,
   cancelUrl,
 }) {
@@ -1000,34 +1208,44 @@ export async function createCheckoutSession({
     throw err;
   }
 
-  // Free plan — no Stripe checkout needed
-  const monthlyAmount = dbPlan.price_monthly_paise || 0;
-  const yearlyAmount  = dbPlan.price_yearly_paise  || 0;
+  // Free plan — no checkout needed
+  const monthlyAmount = dbPlan.price_monthly_minor || 0;
+  const yearlyAmount  = dbPlan.price_yearly_minor  || 0;
   if (monthlyAmount === 0 && yearlyAmount === 0) {
     const err = new Error("Free plan does not require a payment");
     err.statusCode = 400;
     throw err;
   }
 
-  if (getConfiguredPaymentsProvider() === "razorpay") {
+  const requestedCurrency = currency || workspace?.billing_currency || null;
+  if (resolvePaymentsProviderForCurrency(requestedCurrency) === "razorpay") {
     return createRazorpayWorkspaceSubscriptionCheckout({
       workspace,
       user,
       dbPlan,
       interval,
+      requestedCurrency,
     });
   }
 
   ensureStripeConfigured();
 
-  const priceId = interval === "yearly"
-    ? dbPlan.stripe_price_yearly_id
-    : dbPlan.stripe_price_monthly_id;
+  const charge = resolveProviderCurrency({
+    requested: currency || workspace?.billing_currency,
+    plan: dbPlan,
+    provider: "stripe",
+  });
+  const chargeCurrency = charge.currency;
+
+  // Mints the Price for this currency on first use rather than requiring a
+  // manual superadmin sync per currency.
+  const prices = await ensurePlanStripePricesForCurrency(dbPlan, chargeCurrency);
+  const priceId = interval === "yearly" ? prices.yearlyPriceId : prices.monthlyPriceId;
 
   if (!priceId) {
     const err = new Error(
-      `No Stripe price configured for plan "${dbPlan.name}" (${interval}). ` +
-      `Please sync this plan to Stripe via the superadmin panel.`
+      `No ${interval} Stripe price could be created for plan "${dbPlan.name}" in ` +
+      `${chargeCurrency.toUpperCase()}.`
     );
     err.statusCode = 503;
     throw err;
@@ -1108,6 +1326,14 @@ export async function createCheckoutSession({
     ]
   );
 
+  await db.query(
+    `UPDATE workspaces
+        SET billing_currency = COALESCE(billing_currency, $2)
+      WHERE id = $1`,
+    [workspace.id, chargeCurrency]
+  );
+
+  const currencyMeta = getCurrencyMeta(chargeCurrency);
   return {
     id:       session.id,
     url:      session.url,
@@ -1117,6 +1343,12 @@ export async function createCheckoutSession({
     priceId,
     seatQuantity,
     trialDays: dbPlan.trial_days || 0,
+    currency: chargeCurrency,
+    currencyDisplay: currencyMeta?.display || chargeCurrency.toUpperCase(),
+    currencySymbol: currencyMeta?.symbol || null,
+    unitAmount: interval === "yearly" ? prices.yearlyAmount : prices.monthlyAmount,
+    currencyConverted: !!charge.converted,
+    requestedCurrency: charge.requested || null,
   };
 }
 
@@ -1131,6 +1363,8 @@ export async function createTrialSignupCheckoutSession({
   planId = null,
   plan = null,
   interval = "monthly",
+  currency: requestedCurrency = null,
+  country = null,
   successUrl,
   cancelUrl,
   ipHash = null,
@@ -1173,7 +1407,8 @@ export async function createTrialSignupCheckoutSession({
   }
 
   const billingInterval = normalizeBillingInterval(interval);
-  const currency = getTrialSignupCurrency(dbPlan);
+  const charge = resolveProviderCurrency({ requested: requestedCurrency, plan: dbPlan, provider: "stripe" });
+  const currency = charge.currency;
   const prices = await ensurePlanStripePricesForCurrency(dbPlan, currency);
   const priceId = billingInterval === "yearly" ? prices.yearlyPriceId : prices.monthlyPriceId;
   if (!priceId) {
@@ -1203,13 +1438,13 @@ export async function createTrialSignupCheckoutSession({
        provider, customer_id, status, workspace_name, owner_name, owner_email,
        owner_password_hash, auth_provider, avatar_url, billing_plan_id,
        billing_plan, billing_interval, verification_amount, currency,
-       consent_ip_hash, consent_user_agent, metadata, created_at, updated_at
+       consent_ip_hash, consent_user_agent, billing_country, metadata, created_at, updated_at
      )
      VALUES (
        'stripe', $1, 'created', $2, $3, $4,
        $5, $6, $7, $8,
        $9, $10, $11, $12,
-       $13, $14, $15, now(), now()
+       $13, $14, $15, $16, now(), now()
      )
      RETURNING id`,
     [
@@ -1227,11 +1462,13 @@ export async function createTrialSignupCheckoutSession({
       currency,
       ipHash,
       userAgent,
+      country ? String(country).toUpperCase().slice(0, 2) : null,
       {
         priceId,
         planName: dbPlan.name,
         trialDays: dbPlan.trial_days,
         stripePriceCreated: prices.created,
+        requestedCurrency: charge.requested || null,
       },
     ]
   );
@@ -1239,8 +1476,9 @@ export async function createTrialSignupCheckoutSession({
   const pendingId = pendingInsert.rows[0].id;
   const consentMessage =
     `By starting your ${dbPlan.trial_days}-day trial, you authorize automatic ${billingInterval} ` +
-    `billing after the trial unless you cancel first. The ${(verificationAmount / 100).toFixed(2)} ` +
-    `${currency.toUpperCase()} card verification charge is refunded automatically after confirmation.`;
+    `billing after the trial unless you cancel first. The ` +
+    `${formatMoney(verificationAmount, currency, { maximumFractionDigits: undefined })} ` +
+    `card verification charge is refunded automatically after confirmation.`;
 
   const session = await stripeRequest("post", "/v1/checkout/sessions", {
     data: qs.stringify(
@@ -1298,6 +1536,7 @@ export async function createTrialSignupCheckoutSession({
     ]
   );
 
+  const currencyMeta = getCurrencyMeta(currency);
   return {
     id: session.id,
     url: session.url,
@@ -1308,7 +1547,13 @@ export async function createTrialSignupCheckoutSession({
     interval: billingInterval,
     trialDays: dbPlan.trial_days,
     verificationAmount,
+    verificationAmountDisplay: formatMoney(verificationAmount, currency),
     currency,
+    currencyDisplay: currencyMeta?.display || currency.toUpperCase(),
+    currencySymbol: currencyMeta?.symbol || null,
+    unitAmount: billingInterval === "yearly" ? prices.yearlyAmount : prices.monthlyAmount,
+    currencyConverted: !!charge.converted,
+    requestedCurrency: charge.requested || null,
     livemode: !!session.livemode,
   };
 }
@@ -1808,6 +2053,7 @@ async function upsertSubscriptionFromRazorpay(subscription, explicitWorkspaceId 
     ]
   );
 
+  const razorpayChargeCurrency = normalizeCurrency(pending?.currency || plan?.razorpay_currency) || null;
   await updateWorkspaceBillingState({
     workspaceId,
     plan,
@@ -1817,6 +2063,15 @@ async function upsertSubscriptionFromRazorpay(subscription, explicitWorkspaceId 
     currentPeriodStart: razorpayTimestampToIso(subscription.current_start) || new Date().toISOString(),
     currentPeriodEnd,
     provider: "razorpay",
+    currency: razorpayChargeCurrency,
+    unitAmountMinor: razorpayChargeCurrency
+      ? (await getProviderPrice({
+          planId: plan?.id,
+          provider: "razorpay",
+          currency: razorpayChargeCurrency,
+          interval: billingInterval,
+        }))?.unit_amount_minor ?? null
+      : null,
   });
 
   if (isSubscriptionEntitled(normalizeRazorpayWorkspaceStatus(subscription))) {
@@ -1870,6 +2125,8 @@ export async function createRazorpayTrialSignupCheckoutSession({
   planId = null,
   plan = null,
   interval = "monthly",
+  currency: requestedCurrency = null,
+  country = null,
   ipHash = null,
   userAgent = null,
   consentAccepted = false,
@@ -1910,7 +2167,8 @@ export async function createRazorpayTrialSignupCheckoutSession({
   }
 
   const billingInterval = normalizeBillingInterval(interval);
-  const currency = getTrialSignupCurrency(dbPlan, "razorpay");
+  const charge = resolveProviderCurrency({ requested: requestedCurrency, plan: dbPlan, provider: "razorpay" });
+  const currency = charge.currency;
   const verificationAmount = getTrialSignupVerificationAmount(currency, "razorpay");
   let razorpayPlan = null;
   let useOrderFallback = false;
@@ -1926,13 +2184,14 @@ export async function createRazorpayTrialSignupCheckoutSession({
        provider, status, workspace_name, owner_name, owner_email,
        owner_password_hash, auth_provider, avatar_url, billing_plan_id,
        billing_plan, billing_interval, verification_amount, currency,
-       provider_plan_id, consent_ip_hash, consent_user_agent, metadata, created_at, updated_at
+       provider_plan_id, consent_ip_hash, consent_user_agent, billing_country,
+       metadata, created_at, updated_at
      )
      VALUES (
        'razorpay', 'created', $1, $2, $3,
        $4, $5, $6, $7,
        $8, $9, $10, $11,
-       $12, $13, $14, $15, now(), now()
+       $12, $13, $14, $15, $16, now(), now()
      )
      RETURNING id`,
     [
@@ -1950,11 +2209,13 @@ export async function createRazorpayTrialSignupCheckoutSession({
       razorpayPlan?.planId || null,
       ipHash,
       userAgent,
+      country ? String(country).toUpperCase().slice(0, 2) : null,
       {
         planName: dbPlan.name,
         trialDays: dbPlan.trial_days,
         razorpayPlanCreated: razorpayPlan?.created || false,
         razorpayOrderFallback: useOrderFallback,
+        requestedCurrency: charge.requested || null,
       },
     ]
   );
@@ -2007,8 +2268,13 @@ export async function createRazorpayTrialSignupCheckoutSession({
       interval: billingInterval,
       trialDays: dbPlan.trial_days,
       verificationAmount,
+      verificationAmountDisplay: formatMoney(verificationAmount, currency),
       amount: order.amount,
       currency,
+      currencyDisplay: getCurrencyMeta(currency)?.display || currency.toUpperCase(),
+      currencySymbol: getCurrencyMeta(currency)?.symbol || null,
+      currencyConverted: !!charge.converted,
+      requestedCurrency: charge.requested || null,
       livemode: isRazorpayLiveMode(),
       prefill: {
         name: cleanedName,
@@ -2084,7 +2350,13 @@ export async function createRazorpayTrialSignupCheckoutSession({
     interval: billingInterval,
     trialDays: dbPlan.trial_days,
     verificationAmount,
+    verificationAmountDisplay: formatMoney(verificationAmount, currency),
     currency,
+    currencyDisplay: getCurrencyMeta(currency)?.display || currency.toUpperCase(),
+    currencySymbol: getCurrencyMeta(currency)?.symbol || null,
+    unitAmount: razorpayPlan?.amount ?? null,
+    currencyConverted: !!charge.converted,
+    requestedCurrency: charge.requested || null,
     livemode: isRazorpayLiveMode(),
     prefill: {
       name: cleanedName,
@@ -2851,15 +3123,16 @@ export async function calculateActivationCost(workspaceId, userIds) {
   }
 
   const wsRes = await db.query(
-    `SELECT billing_cycle_anchor, per_user_price_paise FROM workspaces WHERE id = $1 LIMIT 1`,
+    `SELECT billing_cycle_anchor, per_user_price_minor, billing_currency
+       FROM workspaces WHERE id = $1 LIMIT 1`,
     [workspaceId]
   );
   const ws = wsRes.rows[0];
   if (!ws) throw Object.assign(new Error("Workspace not found"), { statusCode: 404 });
 
   const subRes = await db.query(
-    `SELECT sub.status, sub.current_period_start, sub.current_period_end,
-            bp.price_monthly_paise
+    `SELECT sub.status, sub.current_period_start, sub.current_period_end, sub.currency,
+            bp.price_monthly_minor, bp.base_currency, bp.id AS plan_id
      FROM workspace_subscriptions sub
      LEFT JOIN billing_plans bp
        ON (sub.billing_plan_id = bp.id OR sub.billing_plan = bp.slug)
@@ -2875,7 +3148,28 @@ export async function calculateActivationCost(workspaceId, userIds) {
     );
   }
 
-  let pricePerUser = ws.per_user_price_paise || sub.price_monthly_paise || null;
+  // Pro-rating has to happen in the currency the workspace is billed in, so
+  // prefer the recorded seat price over the plan's base-currency list price.
+  const currency =
+    normalizeCurrency(ws.billing_currency) ||
+    normalizeCurrency(sub.currency) ||
+    normalizeCurrency(sub.base_currency) ||
+    getBaseCurrency();
+
+  let pricePerUser = ws.per_user_price_minor || null;
+  if (!pricePerUser && sub.plan_id) {
+    const providerPrice = await getProviderPrice({
+      planId: sub.plan_id,
+      provider: "stripe",
+      currency,
+      interval: "monthly",
+    });
+    pricePerUser = Number(providerPrice?.unit_amount_minor) || null;
+  }
+  if (!pricePerUser && normalizeCurrency(sub.base_currency) === currency) {
+    pricePerUser = Number(sub.price_monthly_minor) || null;
+  }
+
   if (!ws.billing_cycle_anchor && sub.current_period_start) {
     ws.billing_cycle_anchor = sub.current_period_start;
   }
@@ -2883,10 +3177,11 @@ export async function calculateActivationCost(workspaceId, userIds) {
   if (pricePerUser && pricePerUser > 0) {
     await db.query(
       `UPDATE workspaces
-       SET per_user_price_paise = COALESCE(per_user_price_paise, $2),
+       SET per_user_price_minor = COALESCE(per_user_price_minor, $2),
+           billing_currency     = COALESCE(billing_currency, $4),
            billing_cycle_anchor = COALESCE(billing_cycle_anchor, $3, now())
        WHERE id = $1`,
-      [workspaceId, pricePerUser, ws.billing_cycle_anchor || null]
+      [workspaceId, pricePerUser, ws.billing_cycle_anchor || null, currency]
     );
   }
 
@@ -2928,8 +3223,12 @@ export async function calculateActivationCost(workspaceId, userIds) {
 
   return {
     userCount:                 userIds.length,
-    pricePerUserMonthlyPaise:  pricePerUser,
-    pricePerUserProRatedPaise: pricePerUserProRated,
+    currency,
+    currencyDisplay:           getCurrencyMeta(currency)?.display || currency.toUpperCase(),
+    currencySymbol:            getCurrencyMeta(currency)?.symbol || null,
+    pricePerUserMonthlyMinor:  pricePerUser,
+    pricePerUserProRatedMinor: pricePerUserProRated,
+    totalAmountDisplay:        formatMoney(totalAmount, currency),
     proRatedDays,
     daysInCycle,
     totalAmount,
@@ -2969,18 +3268,9 @@ export async function createActivationCheckoutSession({
   }
 
   const cost = await calculateActivationCost(workspace.id, userIds);
-
-  // Look up the currency from the workspace subscription
-  const subRes = await db.query(
-    `SELECT COALESCE(ws.currency, bp.stripe_currency) AS currency
-     FROM workspace_subscriptions ws
-     LEFT JOIN billing_plans bp
-       ON (ws.billing_plan_id = bp.id OR ws.billing_plan = bp.slug)
-     WHERE ws.workspace_id = $1 AND ws.provider = 'stripe'
-     LIMIT 1`,
-    [workspace.id]
-  );
-  const currency = subRes.rows[0]?.currency || "usd";
+  // calculateActivationCost already resolved the workspace's billing currency,
+  // and the amount it returned is denominated in it.
+  const currency = cost.currency;
 
   const customer = await getOrCreateStripeCustomer({ workspace, user });
   const seatQuantityBefore = await countBillableWorkspaceUsers(workspace.id);
@@ -3043,11 +3333,11 @@ export async function createActivationCheckoutSession({
 
   await db.query(
     `INSERT INTO user_activation_payments (
-       workspace_id, user_ids, amount_paise, provider, checkout_session_id,
+       workspace_id, user_ids, amount_minor, currency, provider, checkout_session_id,
        status, pro_rated_days, cycle_start, cycle_end, seat_quantity_before,
        seat_quantity_after, created_by, created_at, updated_at
      )
-     VALUES ($1,$2,$3,'stripe',$4,'created',$5,$6,$7,$8,$9,$10,now(),now())
+     VALUES ($1,$2,$3,$11,'stripe',$4,'created',$5,$6,$7,$8,$9,$10,now(),now())
      ON CONFLICT DO NOTHING`,
     [
       workspace.id,
@@ -3060,6 +3350,7 @@ export async function createActivationCheckoutSession({
       seatQuantityBefore,
       seatQuantityAfter,
       user?.id || null,
+      currency,
     ]
   );
 
@@ -3068,7 +3359,9 @@ export async function createActivationCheckoutSession({
     url:         session.url,
     userCount:   userIds.length,
     totalAmount: cost.totalAmount,
+    totalAmountDisplay: formatMoney(cost.totalAmount, currency),
     currency,
+    currencyDisplay: getCurrencyMeta(currency)?.display || currency.toUpperCase(),
     seatQuantityBefore,
     seatQuantityAfter,
     cost,
@@ -3154,8 +3447,10 @@ export async function syncPlanToStripe(
     resolvedCurrency ||= price.currency || null;
   }
 
-  const monthlyAmount = Math.round(Number(plan.price_monthly_paise) || 0);
-  const yearlyAmount = Math.round(Number(plan.price_yearly_paise) || 0);
+  // Amounts always come from the published price book for the target currency,
+  // so syncing a plan to EUR uses the EUR list price, not a converted USD one.
+  const monthlyAmount = (await getChargeAmount({ plan, interval: "monthly", currency: resolvedCurrency })).amountMinor;
+  const yearlyAmount = (await getChargeAmount({ plan, interval: "yearly", currency: resolvedCurrency })).amountMinor;
   const needsMonthly = monthlyAmount > 0 && (replaceExisting || !resolvedMonthlyPriceId);
   const needsYearly = yearlyAmount > 0 && (replaceExisting || !resolvedYearlyPriceId);
 
@@ -3204,17 +3499,48 @@ export async function syncPlanToStripe(
     );
   }
 
-  const saved = await saveStripePriceIds(plan.id, {
-    productId: resolvedProductId,
-    monthly:   resolvedMonthlyPriceId || null,
-    yearly:    resolvedYearlyPriceId  || null,
-    currency:  resolvedCurrency,
-  });
+  // Record the per-currency mapping so checkout in this currency reuses these
+  // exact Price objects instead of minting new ones.
+  if (resolvedMonthlyPriceId && monthlyAmount > 0) {
+    await saveProviderPrice({
+      planId: plan.id,
+      provider: "stripe",
+      currency: resolvedCurrency,
+      interval: "monthly",
+      providerPriceId: resolvedMonthlyPriceId,
+      providerProductId: resolvedProductId,
+      unitAmountMinor: monthlyAmount,
+    });
+  }
+  if (resolvedYearlyPriceId && yearlyAmount > 0) {
+    await saveProviderPrice({
+      planId: plan.id,
+      provider: "stripe",
+      currency: resolvedCurrency,
+      interval: "yearly",
+      providerPriceId: resolvedYearlyPriceId,
+      providerProductId: resolvedProductId,
+      unitAmountMinor: yearlyAmount,
+    });
+  }
+
+  const isBaseCurrency = resolvedCurrency === (normalizeCurrency(plan.base_currency) || getBaseCurrency());
+  const saved = isBaseCurrency
+    ? await saveStripePriceIds(plan.id, {
+        productId: resolvedProductId,
+        monthly:   resolvedMonthlyPriceId || null,
+        yearly:    resolvedYearlyPriceId  || null,
+        currency:  resolvedCurrency,
+      })
+    : await getPlanById(plan.id);
 
   return {
     ...saved,
     stripe_sync: {
       created,
+      currency: resolvedCurrency,
+      monthlyAmount,
+      yearlyAmount,
       createMissing: !!createMissing,
       replaceExisting: !!replaceExisting,
     },

@@ -4,7 +4,17 @@
 // =============================================================================
 import express from "express";
 import pool from "../db.js";
+import db from "../db.js";
 import { listPlans } from "../repositories/billingPlans.repository.js";
+import {
+  formatMoney,
+  getBaseCurrency,
+  getCurrencyMeta,
+  listCurrencies,
+  resolveRequestCurrency,
+  toMajorUnits,
+} from "../services/currency.service.js";
+import { resolveCatalogPrices } from "../services/billingPricing.service.js";
 import {
   getPublicBillingConfig,
   getWorkspaceBillingSummary,
@@ -70,20 +80,60 @@ function requireBillingAdmin(req, res, next) {
  * GET /payments/plans
  * Active plans from DB for the signed-in workspace billing UI.
  */
-router.get("/plans", async (_req, res) => {
+router.get("/plans", async (req, res) => {
   try {
+    // A workspace that already has a billing currency keeps seeing that one, so
+    // upgrade pricing matches what it is actually charged.
+    const { rows } = await db.query(
+      `SELECT billing_currency FROM workspaces WHERE id = $1 LIMIT 1`,
+      [req.workspaceId]
+    );
+    const { currency } = resolveRequestCurrency(req, { preferred: rows[0]?.billing_currency });
+
     const plans = await listPlans({ includeInactive: false });
-    const formatted = plans.map((p) => ({
-      ...p,
-      price_monthly: (p.price_monthly_paise || 0) / 100,
-      price_yearly:  (p.price_yearly_paise  || 0) / 100,
-      stripe_ready:  !!(p.stripe_price_monthly_id || p.stripe_price_yearly_id),
-      razorpay_ready: !!(p.razorpay_plan_monthly_id || p.razorpay_plan_yearly_id),
-    }));
+    const prices = await resolveCatalogPrices(plans, currency);
+
+    const formatted = plans.map((p) => {
+      const price = prices.get(p.id);
+      const meta = getCurrencyMeta(price?.currency || currency);
+      return {
+        ...p,
+        currency: meta.display,
+        currency_symbol: meta.symbol,
+        price_monthly: toMajorUnits(price?.price_monthly_minor ?? p.price_monthly_minor, meta.code),
+        price_yearly:  toMajorUnits(price?.price_yearly_minor  ?? p.price_yearly_minor,  meta.code),
+        price_monthly_minor: price?.price_monthly_minor ?? p.price_monthly_minor,
+        price_yearly_minor:  price?.price_yearly_minor  ?? p.price_yearly_minor,
+        price_monthly_display: formatMoney(price?.price_monthly_minor ?? p.price_monthly_minor, meta.code),
+        price_yearly_display:  formatMoney(price?.price_yearly_minor  ?? p.price_yearly_minor,  meta.code),
+        stripe_ready:  !!(p.stripe_price_monthly_id || p.stripe_price_yearly_id),
+        razorpay_ready: !!(p.razorpay_plan_monthly_id || p.razorpay_plan_yearly_id),
+      };
+    });
     return res.json(formatted);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
+});
+
+/**
+ * GET /payments/currencies
+ * Currency options for the in-app billing screen.
+ */
+router.get("/currencies", (req, res) => {
+  const { currency, source, country } = resolveRequestCurrency(req);
+  return res.json({
+    base: getBaseCurrency().toUpperCase(),
+    detected: currency.toUpperCase(),
+    detected_source: source,
+    country: country || null,
+    currencies: listCurrencies().map((meta) => ({
+      code: meta.display,
+      name: meta.name,
+      symbol: meta.symbol,
+      decimals: meta.decimals,
+    })),
+  });
 });
 
 /**
@@ -118,14 +168,27 @@ router.get("/summary", async (req, res) => {
  */
 router.post("/subscribe", requireBillingAdmin, async (req, res) => {
   try {
-    const { planId, interval = "monthly", successUrl, cancelUrl } = req.body;
+    const { planId, interval = "monthly", currency, successUrl, cancelUrl } = req.body;
     if (!planId) return res.status(400).json({ error: "planId is required" });
 
-    const workspace = { id: req.workspaceId, name: req.workspace?.name || "" };
+    const { rows } = await db.query(
+      `SELECT name, billing_currency FROM workspaces WHERE id = $1 LIMIT 1`,
+      [req.workspaceId]
+    );
+    const workspace = {
+      id: req.workspaceId,
+      name: req.workspace?.name || rows[0]?.name || "",
+      billing_currency: rows[0]?.billing_currency || null,
+    };
     const user      = { id: req.user?.id,   email: req.user?.email || "" };
 
+    // Explicit body currency wins; otherwise fall back to what this visitor
+    // would have been shown on the pricing screen.
+    const requested =
+      currency || resolveRequestCurrency(req, { preferred: workspace.billing_currency }).currency;
+
     const result = await createCheckoutSession({
-      workspace, user, planId, interval, successUrl, cancelUrl,
+      workspace, user, planId, interval, currency: requested, successUrl, cancelUrl,
     });
 
     return res.status(201).json(result);
@@ -216,14 +279,21 @@ router.get("/pending-users", requireBillingAdmin, async (req, res) => {
     const users = await listPendingUsers(req.workspaceId);
 
     const { rows: wsRows } = await pool.query(
-      `SELECT billing_cycle_anchor, per_user_price_paise FROM workspaces WHERE id = $1`,
+      `SELECT billing_cycle_anchor, per_user_price_minor, billing_currency
+         FROM workspaces WHERE id = $1`,
       [req.workspaceId]
     );
     const ws = wsRows[0] || {};
+    const currency = ws.billing_currency || getBaseCurrency();
 
     return res.json({
       users,
-      perUserPricePaise:  ws.per_user_price_paise || null,
+      perUserPriceMinor:   ws.per_user_price_minor || null,
+      perUserPriceDisplay: ws.per_user_price_minor
+        ? formatMoney(ws.per_user_price_minor, currency)
+        : null,
+      currency: currency.toUpperCase(),
+      currencySymbol: getCurrencyMeta(currency)?.symbol || null,
       billingCycleAnchor: ws.billing_cycle_anchor || null,
     });
   } catch (err) {
