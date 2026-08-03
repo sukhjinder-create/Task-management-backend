@@ -30,6 +30,7 @@
     "migrate:final-intelligence-completion": "node --import ./scripts/database-safety-guard.js run-final-intelligence-completion-migration.js",
     "migrate:enterprise-pilot-product-discovery": "node --import ./scripts/database-safety-guard.js run-enterprise-pilot-product-discovery-migration.js",
     "verify:adaptive-runtime": "node scripts/verify-adaptive-runtime.js",
+    "migrate:universal-integrations": "node --import ./scripts/database-safety-guard.js run-universal-integrations-migration.js",
     "verify:smart-automations-e2e": "node scripts/verify-smart-automations-e2e.js",
     "verify:backup-recovery": "node scripts/verify-backup-recovery-contract.js",
     "verify:adaptive-intelligence-evaluation": "node scripts/verify-adaptive-intelligence-evaluation.js",

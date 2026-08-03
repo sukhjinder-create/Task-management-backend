@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import taskRepository from "../../repositories/task.repository.js";
+import { normalizeExternalTask, matchAssignee } from "../core/taskNormalizer.js";
 import { fetchAsanaProjectTasks } from "./asana.viewer.service.js";
 import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
 import { EVENT_TYPES } from "../../events/eventTypes.js";
@@ -46,26 +47,6 @@ async function migrateAsanaAttachments(token, asanaTaskGid, internalTaskId, work
   } catch (e) {
     console.warn(`Asana attachments fetch failed for task ${asanaTaskGid}:`, e.message);
   }
-}
-
-/* =====================================================
-   ASSIGNEE MAPPING
-===================================================== */
-async function mapAsanaAssignee(workspaceId, asanaUser) {
-  if (!asanaUser?.email) return null;
-
-  const result = await pool.query(
-    `
-    SELECT id
-    FROM users
-    WHERE workspace_id = $1
-      AND LOWER(email) = LOWER($2)
-    LIMIT 1
-    `,
-    [workspaceId, asanaUser.email]
-  );
-
-  return result.rows[0]?.id || null;
 }
 
 /* =====================================================
@@ -201,7 +182,15 @@ export async function migrateAsanaProject({
   const newProjectId = projectInsert.rows[0].id;
   const systemActorId = await getSystemActorId(workspaceId);
 
+  // Loaded once instead of a per-task assignee lookup (previously one query per
+  // imported task and per subtask); matching is shared with every other provider.
+  const { rows: workspaceUsers } = await pool.query(
+    "SELECT id, email, username FROM users WHERE workspace_id = $1",
+    [workspaceId]
+  );
+
   let importedCount = 0;
+  const unmappedValues = new Set();
 
   /* =====================================================
      IMPORT TASKS
@@ -224,21 +213,18 @@ export async function migrateAsanaProject({
       if (existing.rows.length) continue;
     }
 
-    const assignedUserId =
-      await mapAsanaAssignee(workspaceId, asanaTask.assignee);
+    // Shared normalizer: keeps the source's priority/type/story points/blocked
+    // flag, which this importer previously discarded (priority was hardcoded).
+    const normalized = normalizeExternalTask(asanaTask, {
+      resolveAssignee: (raw) => matchAssignee(raw ?? asanaTask.assignee, workspaceUsers),
+    });
+    for (const value of normalized.unmapped) unmappedValues.add(value);
 
     const createdTask = await taskRepository.createTask({
-      task: asanaTask.name || "Untitled Task",
+      ...normalized.task,
+      description: normalized.task.description?.trim() || null,
       project_id: newProjectId,
-      status: asanaTask.completed ? "completed" : "pending",
-      priority: "medium",
       added_by: systemActorId,
-      assigned_to: assignedUserId,
-      due_date: asanaTask.due_on || null,
-      description:
-        asanaTask.notes?.trim()?.length
-          ? asanaTask.notes.trim()
-          : null,
       workspaceId,
     });
 
@@ -269,8 +255,7 @@ if (asanaTask.subtasks?.length) {
         sub.gid
       );
 
-      const assignedSubUser =
-        await mapAsanaAssignee(workspaceId, subFull.assignee);
+      const assignedSubUser = matchAssignee(subFull.assignee, workspaceUsers);
 
       await pool.query(
         `
@@ -326,8 +311,14 @@ if (asanaTask.subtasks?.length) {
   const importRecord = await recordMigrationImport({
     workspaceId,
     source: "asana",
-    stats: { importedTasks: importedCount },
-    metadata: { projectId: newProjectId, asanaProjectId: projectId },
+    stats: { importedTasks: importedCount, unmappedValues: [...unmappedValues] },
+    metadata: {
+      projectId: newProjectId,
+      asanaProjectId: projectId,
+      // Source values we could not confidently map, surfaced so an admin can
+      // see exactly what was approximated instead of it failing silently.
+      unmappedValues: [...unmappedValues],
+    },
     triggeredBy,
   });
 

@@ -9,6 +9,7 @@ import { emitWorkspaceEvent } from "../../events/emitWorkspaceEvent.js";
 import { EVENT_TYPES } from "../../events/eventTypes.js";
 import { getSystemActorId } from "../../events/systemActor.service.js";
 import { recordMigrationImport } from "../../services/migrationHistory.service.js";
+import { normalizeExternalTask, matchAssignee } from "../core/taskNormalizer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,28 +57,6 @@ async function migrateYouTrackAttachments(baseUrl, token, ytIssueId, internalTas
   }
 }
 
-async function mapYouTrackAssignee(workspaceId, assigneeText) {
-  const value = String(assigneeText || "").trim();
-  if (!value || value === "-") return null;
-
-  const res = await pool.query(
-    `
-    SELECT id
-    FROM users
-    WHERE workspace_id = $1
-      AND (
-        LOWER(username) = LOWER($2)
-        OR LOWER(email) = LOWER($2)
-        OR LOWER(split_part(email, '@', 1)) = LOWER($2)
-      )
-    LIMIT 1
-    `,
-    [workspaceId, value]
-  );
-
-  return res.rows[0]?.id || null;
-}
-
 async function resolveYouTrackProject(workspaceId, projectId) {
   const projects = await youtrackAdapter.listProjects(workspaceId);
   const match = projects.find(
@@ -92,19 +71,6 @@ async function resolveYouTrackProject(workspaceId, projectId) {
   }
 
   return { key: projectId, label: projectId };
-}
-
-function normalizeDate(value) {
-  if (!value) return null;
-  if (typeof value === "number") {
-    const dt = new Date(value);
-    if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
-  }
-  if (typeof value === "string") {
-    const dt = new Date(value);
-    if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
-  }
-  return null;
 }
 
 export async function migrateYouTrackProject({
@@ -233,7 +199,15 @@ export async function migrateYouTrackProject({
   const newProjectId = projectRows[0].id;
   const systemActorId = await getSystemActorId(workspaceId);
 
+  // Loaded once instead of a per-task assignee lookup (previously one query per
+  // imported task); matching itself is shared with every other provider.
+  const { rows: workspaceUsers } = await pool.query(
+    "SELECT id, email, username FROM users WHERE workspace_id = $1",
+    [workspaceId]
+  );
+
   let importedCount = 0;
+  const unmappedValues = new Set();
 
   for (const task of tasksToImport) {
     const externalTaskId = String(task.externalId || task.id || "").trim();
@@ -249,17 +223,18 @@ export async function migrateYouTrackProject({
       if (existing.rows.length) continue;
     }
 
-    const assignedUserId = await mapYouTrackAssignee(workspaceId, task.assignee);
+    // Shared normalizer: preserves the source's priority/type/story points/blocked
+    // flag, which this importer previously discarded (priority was hardcoded).
+    const normalized = normalizeExternalTask(task, {
+      resolveAssignee: (raw) => matchAssignee(raw ?? task.assignee, workspaceUsers),
+    });
+    for (const value of normalized.unmapped) unmappedValues.add(value);
 
     const createdTask = await taskRepository.createTask({
-      task: task.title || task.name || "Untitled Task",
+      ...normalized.task,
+      description: normalized.task.description?.trim() || null,
       project_id: newProjectId,
-      status: task.completed ? "completed" : "pending",
-      priority: "medium",
       added_by: systemActorId,
-      assigned_to: assignedUserId,
-      due_date: normalizeDate(task.dueDate),
-      description: String(task.description || "").trim() || null,
       workspaceId,
     });
 
@@ -297,8 +272,11 @@ export async function migrateYouTrackProject({
   const importRecord = await recordMigrationImport({
     workspaceId,
     source: "youtrack",
-    stats: { importedTasks: importedCount },
+    stats: { importedTasks: importedCount, unmappedValues: [...unmappedValues] },
     metadata: {
+      // Source values we could not confidently map, surfaced so an admin can
+      // see exactly what was approximated instead of it failing silently.
+      unmappedValues: [...unmappedValues],
       projectId: newProjectId,
       youtrackProjectId: projectId,
       youtrackProjectKey: projectKey,
