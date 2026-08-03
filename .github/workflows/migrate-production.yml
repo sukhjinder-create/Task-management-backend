@@ -1,0 +1,203 @@
+name: Run a production database migration
+
+# Applies a migration to the production Supabase database WITHOUT anyone having
+# to handle a database credential.
+#
+# How it works: this job SSHes to the production host with the same
+# DEPLOY_SSH_KEY / DEPLOY_HOST / DEPLOY_USER secrets the deploy pipeline already
+# uses, syncs the git working tree so the .sql file is on disk, and pipes it into
+# the *running* app container. That container already has DATABASE_URL in its
+# environment, so the password is never copied, printed, or stored anywhere new.
+#
+# It deliberately does NOT require the new image to be deployed first. The
+# multi-currency migration has to land BEFORE the new backend, because the new
+# code reads price_monthly_minor and the old code reads price_monthly_paise —
+# whichever column is missing reads as 0, and a 0 price makes every plan look
+# free to the signup flow. Phase 1 is additive and keeps both columns in sync,
+# so it is safe against the currently running image.
+#
+# Order of operations for the multi-currency change:
+#   1. this workflow, phase = expand
+#   2. the normal deploy workflow (new backend)
+#   3. reprice (scripts/reprice-plans-usd.js, run deliberately)
+#   4. this workflow, phase = contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_file:
+        description: "Path to the .sql file, relative to the repo root"
+        required: true
+        default: migrations/20260803b_multi_currency_billing.sql
+      confirm:
+        description: 'Type MIGRATE to confirm you are writing to PRODUCTION'
+        required: true
+        default: ""
+      dry_run:
+        description: "Only snapshot and report current state; apply nothing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: production-database
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require explicit confirmation
+        if: ${{ inputs.confirm != 'MIGRATE' }}
+        run: |
+          echo "Refusing to run: the confirm box must contain exactly MIGRATE."
+          exit 1
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Snapshot, then apply the migration inside the running container
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          MIGRATION_FILE: ${{ inputs.migration_file }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=20 "$USER@$HOST" \
+            "MIGRATION_FILE='$MIGRATION_FILE' DRY_RUN='$DRY_RUN' BRANCH='$BRANCH' bash -s" <<'REMOTE'
+          set -uo pipefail
+          cd ~/app || { echo "~/app not found on the production host"; exit 1; }
+
+          CONTAINER=app-app-1
+          sudo docker inspect "$CONTAINER" >/dev/null 2>&1 \
+            || { echo "container $CONTAINER is not running"; exit 1; }
+
+          # Sync the working tree so the .sql file exists on disk. Read-only with
+          # respect to the running image — no rebuild, no restart.
+          git fetch origin "$BRANCH" && git merge --ff-only "origin/$BRANCH" \
+            || { echo "could not fast-forward ~/app to origin/$BRANCH"; exit 1; }
+
+          [ -f "$MIGRATION_FILE" ] || { echo "migration file not found: $MIGRATION_FILE"; exit 1; }
+          echo "migration file: $MIGRATION_FILE ($(wc -l < "$MIGRATION_FILE") lines)"
+
+          # ── Snapshot the rows this migration touches, before anything runs ──
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p ~/migration-snapshots
+          sudo docker exec "$CONTAINER" node -e '
+            const { Pool } = require("pg");
+            const pool = new Pool({
+              connectionString: process.env.DATABASE_URL,
+              ssl: { rejectUnauthorized: false },
+            });
+            pool.query("SELECT * FROM billing_plans ORDER BY display_order")
+              .then((r) => { console.log(JSON.stringify(r.rows, null, 2)); })
+              .catch((e) => { console.error("snapshot failed:", e.message); process.exitCode = 1; })
+              .finally(() => pool.end());
+          ' > ~/migration-snapshots/billing_plans_"$STAMP".json 2>/tmp/snapshot.err
+
+          if [ $? -ne 0 ] || [ ! -s ~/migration-snapshots/billing_plans_"$STAMP".json ]; then
+            echo "SNAPSHOT FAILED — refusing to migrate:"; cat /tmp/snapshot.err; exit 1
+          fi
+          echo "snapshot saved: ~/migration-snapshots/billing_plans_$STAMP.json"
+
+          # Show the current prices. These are the numbers that decide whether the
+          # stored values are rupees or dollars, which nothing should guess at.
+          echo "--- current billing_plans ---"
+          sudo docker exec "$CONTAINER" node -e '
+            const { Pool } = require("pg");
+            const pool = new Pool({
+              connectionString: process.env.DATABASE_URL,
+              ssl: { rejectUnauthorized: false },
+            });
+            pool.query(`SELECT slug, name, is_active,
+                               price_monthly_paise, price_yearly_paise,
+                               stripe_currency, razorpay_currency
+                          FROM billing_plans ORDER BY display_order`)
+              .then((r) => {
+                for (const p of r.rows) {
+                  console.log(
+                    `  ${p.slug.padEnd(12)} monthly=${String(p.price_monthly_paise).padStart(8)}` +
+                    `  yearly=${String(p.price_yearly_paise).padStart(9)}` +
+                    `  [as INR ${(p.price_monthly_paise / 100).toFixed(2)}/mo` +
+                    ` | as USD ${(p.price_monthly_paise / 100).toFixed(2)}/mo]` +
+                    `  active=${p.is_active}`
+                  );
+                }
+              })
+              .catch((e) => { console.error("read failed:", e.message); process.exitCode = 1; })
+              .finally(() => pool.end());
+          '
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo ""
+            echo "DRY RUN — nothing was applied. Re-run with dry_run unchecked to migrate."
+            exit 0
+          fi
+
+          # ── Apply. The SQL is piped in on stdin; the container supplies the
+          # credential from its own environment. ──
+          echo ""
+          echo "applying $MIGRATION_FILE ..."
+          sudo docker exec -i "$CONTAINER" node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (d) => { sql += d; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: { rejectUnauthorized: false },
+              });
+              try {
+                await pool.query(sql);
+                console.log("MIGRATION APPLIED");
+              } catch (e) {
+                console.error("MIGRATION FAILED:", e.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$MIGRATION_FILE" || { echo "migration failed — database unchanged past the failing statement"; exit 1; }
+
+          # ── Verify the old and new columns agree, which is what keeps the
+          # currently deployed backend correct. ──
+          echo ""
+          echo "--- verification ---"
+          sudo docker exec "$CONTAINER" node -e '
+            const { Pool } = require("pg");
+            const pool = new Pool({
+              connectionString: process.env.DATABASE_URL,
+              ssl: { rejectUnauthorized: false },
+            });
+            pool.query(`SELECT slug, price_monthly_paise, price_monthly_minor,
+                               price_yearly_paise, price_yearly_minor, base_currency
+                          FROM billing_plans ORDER BY display_order`)
+              .then((r) => {
+                let bad = 0;
+                for (const p of r.rows) {
+                  const ok = p.price_monthly_paise === p.price_monthly_minor
+                          && p.price_yearly_paise === p.price_yearly_minor;
+                  if (!ok) bad++;
+                  console.log(
+                    `  ${p.slug.padEnd(12)} paise=${p.price_monthly_paise}/${p.price_yearly_paise}` +
+                    `  minor=${p.price_monthly_minor}/${p.price_yearly_minor}` +
+                    `  base=${p.base_currency}  ${ok ? "OK" : "MISMATCH"}`
+                  );
+                }
+                if (bad) { console.error(`${bad} plan(s) mismatched — investigate before deploying.`); process.exitCode = 1; }
+                else { console.log("all plans consistent — old and new backends will read the same prices"); }
+              })
+              .catch((e) => {
+                // The contract migration drops the *_paise columns, so this
+                // check no longer applies once phase 2 has run.
+                console.log("verification skipped:", e.message);
+              })
+              .finally(() => pool.end());
+          '
+          REMOTE
