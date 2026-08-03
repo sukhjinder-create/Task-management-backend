@@ -298,10 +298,22 @@ ALTER TABLE workspace_subscriptions
   ADD COLUMN IF NOT EXISTS auth_amount_minor INTEGER,
   ADD COLUMN IF NOT EXISTS auth_currency     VARCHAR(3);
 
-UPDATE workspace_subscriptions
-   SET auth_amount_minor = auth_amount_paise
- WHERE auth_amount_minor IS NULL
-   AND auth_amount_paise IS NOT NULL;
+-- auth_amount_paise exists in some environments and not others (it is absent in
+-- production), so the backfill has to be guarded rather than assumed.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'workspace_subscriptions'
+      AND column_name = 'auth_amount_paise'
+  ) THEN
+    UPDATE workspace_subscriptions
+       SET auth_amount_minor = auth_amount_paise
+     WHERE auth_amount_minor IS NULL
+       AND auth_amount_paise IS NOT NULL;
+  END IF;
+END $$;
 
 -- ── Default plans are authored in USD from here on ───────────────────────────
 
