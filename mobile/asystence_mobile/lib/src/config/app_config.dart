@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 
 class AppConfig {
@@ -19,24 +20,43 @@ class AppConfig {
     defaultValue: 'Asystence',
   );
 
-  static const apiBaseUrl = String.fromEnvironment(
-    'API_BASE_URL',
-    defaultValue: 'http://10.0.2.2:5000',
-  );
+  // Build-time overrides. Empty means "not supplied", which lets us fall back
+  // per build mode below instead of baking one wrong value into every build.
+  static const _apiBaseUrlOverride = String.fromEnvironment('API_BASE_URL');
+  static const _webAppUrlOverride = String.fromEnvironment('WEB_APP_URL');
 
-  static const webAppUrl = String.fromEnvironment(
-    'WEB_APP_URL',
-    defaultValue: 'http://localhost:5173',
-  );
+  static const _prodApiBaseUrl = 'https://api.asystence.com';
+  static const _prodWebAppUrl = 'https://app.asystence.com';
+
+  // 10.0.2.2 is the Android emulator's alias for the host machine's localhost.
+  // It resolves to nothing on a real device.
+  static const _devApiBaseUrl = 'http://10.0.2.2:5000';
+  static const _devWebAppUrl = 'http://localhost:5173';
+
+  /// Backend origin.
+  ///
+  /// A release build that forgot `--dart-define=API_BASE_URL=...` previously
+  /// shipped pointing at the emulator loopback, so every request — including
+  /// login — failed on a real phone with no indication why. Release builds now
+  /// default to production and only debug builds fall back to the emulator
+  /// address; an explicit --dart-define still overrides both.
+  static String get apiBaseUrl => _apiBaseUrlOverride.isNotEmpty
+      ? _apiBaseUrlOverride
+      : (kReleaseMode ? _prodApiBaseUrl : _devApiBaseUrl);
+
+  /// Web app origin, used for deep links out to pages the app doesn't cover.
+  static String get webAppUrl => _webAppUrlOverride.isNotEmpty
+      ? _webAppUrlOverride
+      : (kReleaseMode ? _prodWebAppUrl : _devWebAppUrl);
 
   static const version = String.fromEnvironment(
     'APP_VERSION',
-    defaultValue: '1.0.24',
+    defaultValue: '1.0.25',
   );
 
   static const versionCode = int.fromEnvironment(
     'APP_VERSION_CODE',
-    defaultValue: 25,
+    defaultValue: 26,
   );
 
   static const allowApiOverride = bool.fromEnvironment(
