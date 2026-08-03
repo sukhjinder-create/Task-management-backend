@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../config/app_config.dart';
+import '../../config/design_tokens.dart';
 import '../../core/models.dart';
 import '../../core/ui.dart';
 import '../../state/app_scope.dart';
@@ -52,48 +53,52 @@ class _LoginScreenState extends State<LoginScreen> {
       body: SafeArea(
         child: Center(
           child: ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 28),
+            padding: const EdgeInsets.symmetric(
+              horizontal: Insets.lg,
+              vertical: Insets.xxl,
+            ),
             shrinkWrap: true,
             children: [
               Center(
-                child: Image.asset(
-                  'assets/images/asystence-logo.png',
-                  width: 72,
-                  height: 72,
-                  fit: BoxFit.contain,
+                child: Container(
+                  width: 76,
+                  height: 76,
+                  padding: const EdgeInsets.all(Insets.md),
+                  decoration: BoxDecoration(
+                    color: context.palette.primarySoft,
+                    borderRadius: BorderRadius.circular(Radii.xl),
+                    border: Border.all(color: scheme.outline),
+                  ),
+                  child: Image.asset(
+                    'assets/images/asystence-logo.png',
+                    fit: BoxFit.contain,
+                  ),
                 ),
               ),
-              const SizedBox(height: 18),
+              const SizedBox(height: Insets.lg),
               Text(
                 AppConfig.appName,
                 textAlign: TextAlign.center,
-                style: theme.textTheme.headlineMedium?.copyWith(
-                  color: scheme.onSurface,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0,
-                ),
+                style: theme.textTheme.displaySmall,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: Insets.xs),
               Text(
                 _mfaToken == null
                     ? 'Sign in to your workspace.'
                     : 'Verify it is you.',
                 textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  height: 1.5,
-                ),
+                style: theme.textTheme.bodyMedium,
               ),
-              const SizedBox(height: 28),
+              const SizedBox(height: Insets.xl + Insets.xxs),
               SectionCard(
-                padding: const EdgeInsets.all(18),
+                padding: const EdgeInsets.all(Insets.lg),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     if (_mfaToken == null) ...[
                       OutlinedButton.icon(
                         style: OutlinedButton.styleFrom(
-                          minimumSize: const Size.fromHeight(54),
+                          minimumSize: const Size.fromHeight(48),
                           foregroundColor: scheme.onSurface,
                         ),
                         onPressed:
@@ -108,7 +113,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             : const _GoogleMark(),
                         label: const Text('Sign in with Google'),
                       ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: Insets.md),
                       Row(
                         children: [
                           const Expanded(child: Divider()),
@@ -122,7 +127,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           const Expanded(child: Divider()),
                         ],
                       ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: Insets.md),
                       TextField(
                         controller: _email,
                         keyboardType: TextInputType.emailAddress,
@@ -132,7 +137,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           prefixIcon: Icon(Icons.mail_outline),
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: Insets.sm),
                       TextField(
                         controller: _password,
                         obscureText: !_showPassword,

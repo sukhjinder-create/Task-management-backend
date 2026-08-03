@@ -2,27 +2,38 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../config/design_tokens.dart';
 import 'models.dart';
 
 class SectionCard extends StatelessWidget {
   const SectionCard({
     super.key,
     required this.child,
-    this.padding = const EdgeInsets.all(16),
+    this.padding = const EdgeInsets.all(Insets.md),
+    this.onTap,
   });
 
   final Widget child;
   final EdgeInsetsGeometry padding;
 
+  /// When provided the whole card becomes tappable with a proper ripple,
+  /// instead of screens wrapping cards in a bare GestureDetector.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final content = Padding(padding: padding, child: child);
     return Card(
       color: theme.cardTheme.color ?? theme.colorScheme.surface,
-      child: Padding(
-        padding: padding,
-        child: child,
-      ),
+      clipBehavior: Clip.antiAlias,
+      child: onTap == null
+          ? content
+          : InkWell(
+              onTap: onTap,
+              borderRadius: Radii.cardRadius,
+              child: content,
+            ),
     );
   }
 }
@@ -45,30 +56,40 @@ class EmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final palette = context.palette;
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(Insets.xxl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 42, color: scheme.primary),
-            const SizedBox(height: 12),
+            // Tinted disc rather than a bare icon — reads as intentional
+            // empty state instead of a missing-content error.
+            Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                color: palette.primarySoft,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, size: 28, color: scheme.primary),
+            ),
+            const SizedBox(height: Insets.md),
             Text(
               title,
-              style: theme.textTheme.titleMedium,
+              style: theme.textTheme.titleLarge,
               textAlign: TextAlign.center,
             ),
             if (message != null) ...[
-              const SizedBox(height: 6),
+              const SizedBox(height: Insets.xs),
               Text(
                 message!,
-                style: theme.textTheme.bodyMedium
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                style: theme.textTheme.bodyMedium,
                 textAlign: TextAlign.center,
               ),
             ],
             if (action != null) ...[
-              const SizedBox(height: 16),
+              const SizedBox(height: Insets.lg),
               action!,
             ],
           ],
@@ -90,26 +111,35 @@ class StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final color = switch (tone) {
-      ChipTone.success => const Color(0xff16a34a),
-      ChipTone.warning => const Color(0xffd97706),
-      ChipTone.danger => const Color(0xffdc2626),
-      ChipTone.info => scheme.primary,
-      ChipTone.neutral => scheme.outline,
+    final palette = context.palette;
+    final status = palette.status;
+    // Previously hardcoded hex values tuned for a dark background, which left
+    // these chips low-contrast in light mode. The palette supplies per-
+    // brightness variants instead.
+    final (Color color, Color background) = switch (tone) {
+      ChipTone.success => (status.success, status.successSoft),
+      ChipTone.warning => (status.warning, status.warningSoft),
+      ChipTone.danger => (status.danger, status.dangerSoft),
+      ChipTone.info => (palette.primary, palette.primarySoft),
+      ChipTone.neutral => (palette.textMuted, palette.surfaceSoft),
     };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Insets.xs + 2,
+        vertical: Insets.xxs,
+      ),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
+        color: background,
+        borderRadius: BorderRadius.circular(Radii.pill),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
       ),
       child: Text(
         label,
         style: TextStyle(
           color: color,
-          fontSize: 12,
+          fontSize: 11.5,
           fontWeight: FontWeight.w700,
+          letterSpacing: 0.2,
         ),
       ),
     );

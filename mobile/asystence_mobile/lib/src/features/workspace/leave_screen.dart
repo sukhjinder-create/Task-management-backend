@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../config/app_config.dart';
 import '../../core/formatters.dart';
 import '../../core/models.dart';
 import '../../core/ui.dart';
@@ -104,7 +103,7 @@ class _LeaveScreenState extends State<LeaveScreen> {
                                   style: Theme.of(context)
                                       .textTheme
                                       .titleLarge
-                                      ?.copyWith(color: AppConfig.primary),
+                                      ?.copyWith(color: Theme.of(context).colorScheme.primary),
                                 ),
                                 Text(
                                   '${_number(balance.used)} used',
