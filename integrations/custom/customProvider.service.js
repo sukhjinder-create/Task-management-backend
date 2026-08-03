@@ -196,9 +196,35 @@ function extractItems(payload, itemsPath) {
   return [];
 }
 
-async function callProvider(row, { path, vars = {}, method = "GET" }) {
+/**
+ * Interpolate {placeholders} anywhere inside a request body, so a GraphQL query
+ * can reference the selected project the same way a REST path does.
+ */
+function interpolateBody(body, vars = {}) {
+  if (typeof body === "string") {
+    return body.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? ""));
+  }
+  if (Array.isArray(body)) return body.map((item) => interpolateBody(item, vars));
+  if (body && typeof body === "object") {
+    return Object.fromEntries(
+      Object.entries(body).map(([key, value]) => [key, interpolateBody(value, vars)])
+    );
+  }
+  return body;
+}
+
+/**
+ * One request against a custom provider.
+ *
+ * Endpoint config may specify `method` and `body`, which is what makes GraphQL
+ * work: a GraphQL API is just a POST to a single path with {query: "..."} as
+ * the body, and the response is read through `itemsPath` like any other nested
+ * JSON (e.g. "data.issues.nodes").
+ */
+async function callProvider(row, { path, vars = {}, method, body }) {
   return safeFetchJson(buildUrl(row.base_url, path, vars), {
-    method,
+    method: method || "GET",
+    body: body == null ? null : interpolateBody(body, vars),
     authType: row.auth_type,
     authConfig: asObject(row.auth_config),
   });
@@ -223,7 +249,11 @@ export async function testCustomProvider({ workspaceId, slug, probePath = null }
   let sampleFields = [];
 
   try {
-    result = await callProvider(row, { path });
+    result = await callProvider(row, {
+      path,
+      method: endpoints.tasks?.method || endpoints.projects?.method,
+      body: endpoints.tasks?.body ?? endpoints.projects?.body,
+    });
     if (!result.ok) {
       message = `The platform responded with HTTP ${result.status}.` +
         (result.status === 401 || result.status === 403
@@ -293,7 +323,9 @@ export async function listCustomProviderProjects({ workspaceId, slug }) {
   const projects = asObject(row.endpoints).projects;
   if (!projects?.path) return [];
 
-  const result = await callProvider(row, { path: projects.path });
+  const result = await callProvider(row, {
+    path: projects.path, method: projects.method, body: projects.body,
+  });
   if (!result.ok) throw new Error(`The platform responded with HTTP ${result.status}.`);
 
   const idField = projects.idField || "id";
@@ -311,7 +343,9 @@ export async function listCustomProviderTasks({ workspaceId, slug, projectId = n
   const tasks = asObject(row.endpoints).tasks;
   if (!tasks?.path) throw new Error("Add a tasks endpoint before importing.");
 
-  const result = await callProvider(row, { path: tasks.path, vars: { projectId } });
+  const result = await callProvider(row, {
+    path: tasks.path, vars: { projectId }, method: tasks.method, body: tasks.body,
+  });
   if (!result.ok) throw new Error(`The platform responded with HTTP ${result.status}.`);
 
   return { raw: extractItems(result.data, tasks.itemsPath), row };

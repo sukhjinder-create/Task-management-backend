@@ -114,25 +114,39 @@ router.post("/custom-providers/:slug/migrate", async (req, res) => {
 router.post("/custom-providers/:slug/webhook", async (req, res) => {
   try {
     const provider = customProviderKey(req.params.slug);
-    const secret = generateWebhookSecret();
     const externalProjectId = req.body?.externalProjectId || null;
-    const signatureHeader = req.body?.signatureHeader || "x-asystence-token";
     const entityIdPath = req.body?.entityIdPath || null;
+
+    // Two directions, both needed in practice:
+    //  - We generate a secret and the admin pastes it into their tool.
+    //  - Their platform signs with ITS OWN secret (GitHub, Stripe, Shopify,
+    //    Trello and friends all do this) and the admin tells us that secret,
+    //    which header it arrives in, and how it is computed.
+    const providedSecret = String(req.body?.secret || "").trim();
+    const secret = providedSecret || generateWebhookSecret();
+    const signatureScheme = req.body?.signatureScheme === "hmac_sha256"
+      ? "hmac_sha256"
+      : "token";
+    const signatureHeader = req.body?.signatureHeader
+      || (signatureScheme === "hmac_sha256" ? "x-hub-signature-256" : "x-asystence-token");
 
     const { rows } = await pool.query(
       `
       INSERT INTO integration_webhook_endpoints
-        (workspace_id, provider, external_project_id, secret, signature_header, entity_id_path)
-      VALUES ($1,$2,$3,$4,$5,$6)
+        (workspace_id, provider, external_project_id, secret, signature_header,
+         signature_scheme, entity_id_path)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
       ON CONFLICT (workspace_id, provider, COALESCE(external_project_id, ''))
       DO UPDATE SET secret = EXCLUDED.secret,
                     signature_header = EXCLUDED.signature_header,
+                    signature_scheme = EXCLUDED.signature_scheme,
                     entity_id_path = EXCLUDED.entity_id_path,
                     active = true,
                     updated_at = NOW()
       RETURNING *
       `,
-      [req.workspaceId, provider, externalProjectId, secret, signatureHeader, entityIdPath]
+      [req.workspaceId, provider, externalProjectId, secret, signatureHeader,
+       signatureScheme, entityIdPath]
     );
 
     const baseUrl = process.env.INTEGRATION_WEBHOOK_BASE_URL
@@ -145,7 +159,11 @@ router.post("/custom-providers/:slug/webhook", async (req, res) => {
         // Shown once, at creation time — the admin pastes these into their tool.
         url: `${String(baseUrl).replace(/\/+$/, "")}/integration-webhooks/custom/${req.workspaceId}/${req.params.slug}`,
         headerName: rows[0].signature_header,
-        secret,
+        signatureScheme: rows[0].signature_scheme,
+        // Only echoed back when we generated it. If the admin supplied their
+        // platform's secret they already have it, and re-displaying a stored
+        // secret would turn this endpoint into a credential-read API.
+        secret: providedSecret ? null : secret,
         externalProjectId: rows[0].external_project_id,
       },
     });
