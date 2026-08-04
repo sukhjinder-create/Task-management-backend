@@ -152,7 +152,19 @@ jobs:
           # refused to boot -- correctly, because signing tokens with a
           # publicly-known development key is far worse than an outage.
           # These two are owned by the server and are never delivered from here.
-          DENY='["DEPLOY_SSH_KEY","DEPLOY_HOST","DEPLOY_USER","GITHUB_TOKEN","GCP_SA_KEY","ACTIONS_RUNNER_DEBUG","ACTIONS_STEP_DEBUG","JWT_SECRET","DATABASE_URL"]'
+          #
+          # The STRIPE_* keys are refused for a different reason: the key in the
+          # vault is a TEST key, and Stripe is not in use. Delivering it is not
+          # merely useless, it is harmful -- ensureStripeConfigured() only checks
+          # that a secret key exists, so a test key makes Stripe look available,
+          # and resolvePaymentsProviderForCurrency() then routes any currency
+          # Razorpay cannot settle (everything except INR) to it. An overseas
+          # customer would complete a test-mode checkout and receive a paid plan
+          # without any money moving. This happened: the key was removed from the
+          # server by hand and the next deploy's additive sync put it straight
+          # back. Remove these entries when a live Stripe key replaces the test
+          # one and Stripe is genuinely wanted.
+          DENY='["DEPLOY_SSH_KEY","DEPLOY_HOST","DEPLOY_USER","GITHUB_TOKEN","GCP_SA_KEY","ACTIONS_RUNNER_DEBUG","ACTIONS_STEP_DEBUG","JWT_SECRET","DATABASE_URL","STRIPE_SECRET_KEY","STRIPE_PUBLISHABLE_KEY","STRIPE_WEBHOOK_SECRET"]'
 
           # Take every non-empty secret and repository variable, minus the
           # deploy plumbing, minus anything containing a newline (env_file has
