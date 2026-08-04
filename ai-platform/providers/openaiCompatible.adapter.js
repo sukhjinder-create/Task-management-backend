@@ -11,6 +11,7 @@
 
 import axios from "axios";
 import { BaseAdapter, resolveApiKey, toMessages, extractUsage } from "./base.adapter.js";
+import { toOpenAITools, toOpenAIToolChoice, parseOpenAIToolCalls } from "./toolWire.js";
 
 const DEFAULTS = {
   openai:     { baseUrl: "https://api.openai.com/v1",            keys: ["OPENAI_API_KEY"],     model: "gpt-4o-mini",                 timeout: 30000 },
@@ -49,6 +50,11 @@ export class OpenAICompatibleAdapter extends BaseAdapter {
       }
     }
 
+    // Tool calling is OPT-IN: with no options.tools the body is byte-identical to
+    // the pre-tools implementation, so existing capabilities are unaffected.
+    const wireTools = options.tools ? toOpenAITools(options.tools) : [];
+    const toolChoice = wireTools.length ? toOpenAIToolChoice(options.toolChoice ?? "auto") : undefined;
+
     const body = {
       ...(isAzure ? {} : { model: resolvedModel }),
       messages: toMessages({ prompt, messages }),
@@ -56,12 +62,26 @@ export class OpenAICompatibleAdapter extends BaseAdapter {
       temperature: options.temperature ?? 0.4,
       ...(options.topP != null ? { top_p: options.topP } : {}),
       ...(options.json ? { response_format: { type: "json_object" } } : {}),
+      ...(wireTools.length ? { tools: wireTools } : {}),
+      ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     };
 
     const res = await axios.post(url, body, { headers, timeout, ...(signal ? { signal } : {}) });
     const text = res.data?.choices?.[0]?.message?.content;
-    if (typeof text !== "string") throw new Error(`${key} error: ${JSON.stringify(res.data)?.slice(0, 300)}`);
-    return { text: text.trim(), usage: extractUsage(res.data), raw: res.data };
+    const toolCalls = wireTools.length ? parseOpenAIToolCalls(res.data) : [];
+
+    // A tool-calling turn legitimately returns `content: null`; only treat a
+    // missing string as an error when no tool call came back to explain it.
+    if (typeof text !== "string") {
+      if (!toolCalls.length) throw new Error(`${key} error: ${JSON.stringify(res.data)?.slice(0, 300)}`);
+      return { text: "", usage: extractUsage(res.data), toolCalls, raw: res.data };
+    }
+    return {
+      text: text.trim(),
+      usage: extractUsage(res.data),
+      ...(toolCalls.length ? { toolCalls } : {}),
+      raw: res.data,
+    };
   }
 }
 

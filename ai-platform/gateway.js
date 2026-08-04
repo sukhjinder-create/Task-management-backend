@@ -19,6 +19,7 @@ import { resolveCompatibility } from "./config/compatibilityResolver.js";
 import { resolvePromptTemplate } from "./prompts/promptResolver.js";
 import { resolveRuntimeOptions } from "./runtime/runtimeProfiles.js";
 import { getAdapter } from "./providers/registry.js";
+import { applyToolDirective } from "./providers/toolWire.js";
 import { checkPolicies } from "./policy/policyEngine.js";
 import { withTransientRetry } from "./shared/retry.js";
 import { logAiRequest } from "./telemetry/requestLog.js";
@@ -104,6 +105,13 @@ export async function invoke(request, ctx = {}) {
     // 4) Runtime options (profile + per-call overrides; call values win).
     opts = resolveRuntimeOptions({ profileKey: cfg.profileKey, profileOverride: cfg.profileParams, callOverrides });
 
+    // 4b) Tool directive (Contract §14). Absent directive → no tools on the wire,
+    // so every existing capability keeps its exact pre-tools request body.
+    const toolPlan = applyToolDirective(request?.tools);
+    if (toolPlan.definitions.length) {
+      opts = { ...opts, tools: toolPlan.definitions, toolChoice: toolPlan.mode };
+    }
+
     // 5) CompatibilityResolver (advisory in P3; enforced once `requires` exists).
     const negotiation = compat({ providerKey: cfg.providerKey, modelKey: cfg.model, requires: cfg.requires });
 
@@ -174,6 +182,9 @@ export async function invoke(request, ctx = {}) {
       requestId: request?.requestId,
       status: "succeeded",
       output: [textPart({ text: result.text })],
+      // §14: surface provider tool calls when the caller asked for tools. Omitted
+      // entirely otherwise, so the response shape is unchanged for every existing caller.
+      ...(Array.isArray(result.toolCalls) && result.toolCalls.length ? { toolCalls: result.toolCalls } : {}),
       usage: createUsage(result.usage || {}),
       cost: {
         estimated: costEstimate?.amount?.amount ?? null,
@@ -225,7 +236,7 @@ export async function invoke(request, ctx = {}) {
  * callers pass one arg, so behavior is unchanged.
  */
 export async function runCapability(
-  { capability, workspaceId = null, prompt, messages, variables = {}, overrides = {}, signal, correlationId } = {},
+  { capability, workspaceId = null, prompt, messages, variables = {}, overrides = {}, tools = null, signal, correlationId } = {},
   deps = {}
 ) {
   const input =
@@ -238,10 +249,12 @@ export async function runCapability(
     input,
     ...(variables && Object.keys(variables).length ? { variables } : {}),
     ...(overrides && Object.keys(overrides).length ? { runtime: { overrides } } : {}),
+    ...(tools ? { tools } : {}),
   });
   const res = await invoke(request, { signal, correlationId, ...deps });
   return {
     text: toLegacyText(res),
+    toolCalls: res.toolCalls || [],
     meta: {
       capability: res.resolution?.capability,
       provider: res.resolution?.provider,

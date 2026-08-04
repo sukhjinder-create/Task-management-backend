@@ -66,6 +66,8 @@ import aiPlatformInvokeRoutes from "./routes/aiPlatformInvoke.routes.js";
 import aiRoutes from "./ai/ai.routes.js";
 import internalRoutes from "./routes/internal.js";
 import internalTasks from "./routes/internalTasks.js";
+// 🤖 Narrow internal door for AI-agent proposals + chat approvals (inert unless EXEC_ENABLED).
+import agentExecutionRoutes from "./routes/agentExecution.routes.js";
 import reportsRouter from "./routes/reports.js";
 // 🧠 Intelligence (READ-ONLY)
 import intelligenceRoutes from "./intelligence/intelligence.routes.js";
@@ -314,6 +316,7 @@ app.use("/ai", aiRoutes);
 app.use("/ai", aiPlatformInvokeRoutes); // POST /ai/invoke — single external door into the platform
 app.use("/internal", internalRoutes);
 app.use(internalTasks);
+app.use("/internal", agentExecutionRoutes);
 
 // ── Superadmin routes MUST be before any global authMiddleware ──
 app.use("/superadmin", superadminAuthRoutes);

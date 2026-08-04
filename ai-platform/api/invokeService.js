@@ -18,10 +18,11 @@ import { createAIRequest, textPart, toLegacyText } from "../contract/index.js";
  * @param {object} [p.overrides]
  * @param {object} [p.trigger]
  * @param {string} [p.sourceModule]
+ * @param {object} [p.tools]  Contract §14 ToolDirective ({definitions, mode, allow, deny})
  * @param {object} [deps]  gateway deps (tests only)
  */
 export async function externalInvoke(
-  { capability, prompt, messages, workspaceId = null, overrides = {}, trigger = null, sourceModule = "external" } = {},
+  { capability, prompt, messages, workspaceId = null, overrides = {}, trigger = null, sourceModule = "external", tools = null } = {},
   deps = undefined
 ) {
   const input =
@@ -35,12 +36,14 @@ export async function externalInvoke(
     input,
     ...(overrides && Object.keys(overrides).length ? { runtime: { overrides } } : {}),
     ...(trigger ? { trigger } : {}),
+    ...(tools ? { tools } : {}),
     executionContext: { sourceModule },
   });
 
   const res = await invoke(request, deps || {});
   return {
     text: toLegacyText(res),
+    toolCalls: res.toolCalls || [],
     response: {
       status: res.status,
       resolution: res.resolution,

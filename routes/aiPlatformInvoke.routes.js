@@ -16,11 +16,12 @@ const router = express.Router();
 
 router.post("/invoke", requireInternalServiceSecret, async (req, res) => {
   try {
-    const { capability, prompt, messages, workspaceId, overrides, trigger, sourceModule } = req.body || {};
+    const { capability, prompt, messages, workspaceId, overrides, trigger, sourceModule, tools } = req.body || {};
     const out = await externalInvoke({
       capability, prompt, messages, workspaceId,
       overrides: overrides || {}, trigger: trigger || null,
       sourceModule: sourceModule || "external:ai-task",
+      tools: tools || null,
     });
     res.json(out);
   } catch (e) {

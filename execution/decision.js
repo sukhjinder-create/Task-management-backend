@@ -36,6 +36,70 @@ export function createDecisionFromRecommendation({ workspaceId, recommendation, 
   });
 }
 
+/**
+ * Build a decision from an AI-AGENT proposal (a chat message the assistant read
+ * as a request to act), rather than from an EI recommendation.
+ *
+ * Explainability is NOT relaxed for this origin. `validateDecision` requires a
+ * source id and a reasoning trace, and both are satisfied with REAL evidence:
+ *   • sourceRecommendationId → the chat message that triggered the proposal
+ *   • reasoningTraceId       → the tool call (name + extracted arguments)
+ * Anyone auditing an agent decision can therefore walk back to the exact message
+ * a human wrote and the exact slots the model extracted from it.
+ *
+ * Everything agent-specific rides in `provenance`, which stores.js already
+ * persists as provenance_json — so this needs NO migration and no new columns.
+ *
+ * @param {object} p
+ * @param {string} p.workspaceId
+ * @param {object} p.trigger  { messageId, channelKey, text, userId, userRole, toolCall, model }
+ * @param {object} p.proposedAction { capabilityKey, input }
+ * @param {boolean} [p.requiresApproval]
+ */
+export function createDecisionFromAgent({ workspaceId, trigger, proposedAction, requiresApproval = true, now } = {}) {
+  if (!workspaceId || !trigger?.messageId || !proposedAction?.capabilityKey) return null;
+  const createdAt = nowIso(now);
+
+  // Deterministic refs: the same trigger message + tool call always yields the
+  // same ids, which makes agent proposals idempotent on retry.
+  const sourceRecommendationId = deterministicId("agentsrc", [workspaceId, trigger.messageId]);
+  const reasoningTraceId = deterministicId("agenttrace", [
+    workspaceId, trigger.messageId, trigger.toolCall?.name ?? null, trigger.toolCall?.arguments ?? null,
+  ]);
+
+  return deepFreeze({
+    decisionId: deterministicId("dec", [workspaceId, sourceRecommendationId, createdAt]),
+    eiVersion: "ewip-3",
+    workspaceId: String(workspaceId),
+    sourceRecommendationId,
+    entity: proposedAction.entity || null,
+    proposedAction,
+    rationaleRefs: {
+      predictionId: null,
+      reasoningTraceId,
+      evidenceIds: [trigger.messageId],
+      attributionIds: trigger.userId ? [String(trigger.userId)] : [],
+    },
+    requiresApproval: requiresApproval !== false,
+    manualOnly: false,
+    createdAt,
+    provenance: {
+      engineVersion: "ewip-dec-1",
+      origin: "agent",
+      agentVersion: "ai-task-1",
+      // The return path: lets the pipeline post the outcome back where it started.
+      channelKey: trigger.channelKey ?? null,
+      triggerMessageId: trigger.messageId,
+      triggerText: String(trigger.text ?? "").slice(0, 500),
+      requestedBy: trigger.userId ? { id: String(trigger.userId), role: trigger.userRole ?? null } : null,
+      toolCall: trigger.toolCall
+        ? { name: trigger.toolCall.name, arguments: trigger.toolCall.arguments ?? {}, argumentsValid: trigger.toolCall.argumentsValid !== false }
+        : null,
+      model: trigger.model ?? null,
+    },
+  });
+}
+
 /** An append-only lifecycle event. Deterministic id. */
 export function decisionEvent({ decisionId, workspaceId, from, to, actor = null, ref = null, at } = {}) {
   const occurredAt = nowIso(at);

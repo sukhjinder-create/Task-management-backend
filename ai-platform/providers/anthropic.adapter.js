@@ -7,6 +7,7 @@
 
 import axios from "axios";
 import { BaseAdapter, resolveApiKey, extractUsage } from "./base.adapter.js";
+import { toAnthropicTools, toAnthropicToolChoice, parseAnthropicToolCalls } from "./toolWire.js";
 
 export class AnthropicAdapter extends BaseAdapter {
   async generate({ model, prompt, messages, options = {}, providerConfig = {}, signal }) {
@@ -23,6 +24,11 @@ export class AnthropicAdapter extends BaseAdapter {
       .filter((m) => m.role !== "system")
       .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content ?? "") }));
 
+    // Tool calling is OPT-IN: with no options.tools the request body is identical
+    // to the pre-tools implementation.
+    const wireTools = options.tools ? toAnthropicTools(options.tools) : [];
+    const toolChoice = wireTools.length ? toAnthropicToolChoice(options.toolChoice ?? "auto") : undefined;
+
     const res = await axios.post(
       `${base}/v1/messages`,
       {
@@ -32,6 +38,8 @@ export class AnthropicAdapter extends BaseAdapter {
         ...(options.topP != null ? { top_p: options.topP } : {}),
         ...(system ? { system } : {}),
         messages: userAssistant.length ? userAssistant : [{ role: "user", content: String(prompt ?? "") }],
+        ...(wireTools.length ? { tools: wireTools } : {}),
+        ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
       },
       {
         headers: {
@@ -47,8 +55,19 @@ export class AnthropicAdapter extends BaseAdapter {
     const text = Array.isArray(res.data?.content)
       ? res.data.content.map((block) => block.text || "").join("").trim()
       : "";
-    if (!text) throw new Error(`Anthropic error: ${JSON.stringify(res.data)?.slice(0, 300)}`);
-    return { text, usage: extractUsage(res.data), raw: res.data };
+    const toolCalls = wireTools.length ? parseAnthropicToolCalls(res.data) : [];
+
+    // A tool_use-only turn carries no text block; that is success, not failure.
+    if (!text) {
+      if (!toolCalls.length) throw new Error(`Anthropic error: ${JSON.stringify(res.data)?.slice(0, 300)}`);
+      return { text: "", usage: extractUsage(res.data), toolCalls, raw: res.data };
+    }
+    return {
+      text,
+      usage: extractUsage(res.data),
+      ...(toolCalls.length ? { toolCalls } : {}),
+      raw: res.data,
+    };
   }
 }
 
