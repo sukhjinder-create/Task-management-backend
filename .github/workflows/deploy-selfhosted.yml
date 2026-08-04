@@ -18,10 +18,13 @@ name: Deploy to production (self-hosted)
 
 on:
   push:
-    # main is the default branch, so "merged to main" now means "deployed".
-    # ai-platform-epic-a is kept because the server's working tree and older
-    # tooling still reference it; both are kept in sync and either can deploy.
-    branches: [main, ai-platform-epic-a]
+    # main only. This repo previously deployed from ai-platform-epic-a -- a
+    # feature branch that became production by accident -- while main was the
+    # default branch and sat eight commits behind. Two branches meant a push
+    # could deploy, or silently do nothing, depending on which one you used,
+    # and briefly meant every push ran two identical deploys. One branch, one
+    # rule: what is on main is what is in production.
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -279,8 +282,22 @@ jobs:
           # disk match the image being started. --ff-only keeps it non-
           # destructive: a divergence warns and is skipped rather than
           # discarding anything on the server.
+          # The server was cloned single-branch and shallow, so it only knew
+          # refs/remotes/origin/ai-platform-epic-a. Merging "origin/main" there
+          # fails with "not a commit" and the sync is skipped -- silently, which
+          # is how the files on disk drift from the image being started.
+          # Widening the refspec makes any branch fetchable, and FETCH_HEAD is
+          # used rather than a remote-tracking ref so this works on a shallow
+          # clone that has never seen the branch before.
           SYNC_BRANCH="${BRANCH:-main}"
-          git fetch origin "$SYNC_BRANCH" && git merge --ff-only "origin/$SYNC_BRANCH" || echo "warning: git sync skipped"
+          git remote set-branches origin '*' 2>/dev/null || true
+          if git fetch --depth=1 origin "$SYNC_BRANCH"; then
+            # A deploy checkout mirrors the repository; it is not a place to
+            # keep local edits. Untracked files (.env above all) are untouched.
+            git reset --hard FETCH_HEAD >/dev/null               && echo "synced working tree to origin/$SYNC_BRANCH"               || echo "warning: could not reset working tree"
+          else
+            echo "warning: git sync skipped (fetch of $SYNC_BRANCH failed)"
+          fi
 
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
