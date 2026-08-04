@@ -33,31 +33,12 @@ concurrency:
 
 jobs:
   build:
-    # Emulated arm64 on a standard runner.
-    #
-    # This job previously used the native `ubuntu-24.04-arm` runner, which is
-    # faster and was the right default. GitHub stopped scheduling that label for
-    # this repository on 2026-08-04: every run concluded `action_required` with
-    # ZERO jobs executed, instantly and permanently — not a queue, not an
-    # approval gate (the approve endpoint rejects it as "not from a fork pull
-    # request", and no deployment environment is declared). The symptom is
-    # specific to this label: workflows on `ubuntu-latest` kept running green on
-    # the very same commits. Two commits sat undeployed for hours before anyone
-    # noticed, because a build that never starts looks a lot like a build that
-    # is still going.
-    #
-    # A deploy that cannot run is worse than a deploy that runs slowly, so this
-    # trades speed for the pipeline actually working. QEMU emulation was tried
-    # once before and abandoned as "an order of magnitude slower and failed" —
-    # note it failed alongside registry/gha caching, which that same commit
-    # message blames for the failure. The caching is still absent here, and the
-    # timeout is doubled to absorb the emulation penalty honestly rather than
-    # rediscovering it as a red build.
-    #
-    # Revert to `runs-on: ubuntu-24.04-arm` (and drop the QEMU step and
-    # `platforms:` below) if native ARM runners become schedulable again.
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Native arm64 runner (free for public repositories). The first attempt at
+    # this pipeline built arm64 via QEMU emulation on an amd64 runner, which was
+    # roughly an order of magnitude slower and failed. Building on the same
+    # architecture as the production host removes the emulation entirely.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -77,15 +58,6 @@ jobs:
           echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "image=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      # Registers the binfmt handlers that let an amd64 runner execute arm64
-      # binaries, which is what makes the RUN steps in the Dockerfile work.
-      # Without this, buildx accepts `platforms: linux/arm64` and then fails the
-      # first RUN with "exec format error".
-      - name: Set up QEMU (arm64 emulation)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -96,19 +68,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `platforms: linux/arm64` is REQUIRED now that the runner is amd64: the
-      # production host is Oracle Ampere (aarch64), and an amd64 image would
-      # pull cleanly and then die with "exec format error" on start.
-      #
-      # Still no registry/gha cache. The earlier QEMU attempt specified caching
-      # too and failed; the caching is the part that was never proven, so it
-      # stays out until this is green. Layer caching is the obvious next
-      # optimisation if emulated builds prove too slow.
+      # Deliberately minimal: no `platforms:` (the runner is already arm64, so the
+      # native build matches the production host) and no registry/gha cache. An
+      # earlier version specified both and failed here, while the identical build
+      # succeeds on the production host — so the extra machinery, not the
+      # Dockerfile, was the problem. Layer caching can be reintroduced once this
+      # is proven green.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64
           push: true
           provenance: false
           tags: |
