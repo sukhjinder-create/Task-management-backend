@@ -109,6 +109,10 @@ jobs:
       # transfer, and only key NAMES are ever echoed.
       - name: Sync application secrets into the server .env
         id: envsync
+        # Delivering credentials is a convenience; shipping the code is the job.
+        # A fault here must never block a deploy or leave production on an old
+        # image, so this step reports and moves on.
+        continue-on-error: true
         env:
           # Every secret in the vault, as JSON. Passed via env (never inlined
           # into the script) so values cannot break quoting or inject shell.
@@ -131,9 +135,18 @@ jobs:
 
           umask 077
 
-          # Deploy plumbing belongs to this pipeline, not to the application,
-          # and must never be written into the app's .env.
-          DENY='["DEPLOY_SSH_KEY","DEPLOY_HOST","DEPLOY_USER","GITHUB_TOKEN","GCP_SA_KEY","ACTIONS_RUNNER_DEBUG","ACTIONS_STEP_DEBUG"]'
+          # Deploy plumbing belongs to this pipeline, not to the application.
+          #
+          # JWT_SECRET and DATABASE_URL are also refused, permanently. The vault
+          # is a snapshot from the retired Cloud Run era and its copies are
+          # stale: JWT_SECRET there is the literal development fallback
+          # ("task_management_secret"), and DATABASE_URL points at the old
+          # Supabase host that went IPv6-only. An earlier version of this step
+          # wrote both over the working production values, and the process
+          # refused to boot -- correctly, because signing tokens with a
+          # publicly-known development key is far worse than an outage.
+          # These two are owned by the server and are never delivered from here.
+          DENY='["DEPLOY_SSH_KEY","DEPLOY_HOST","DEPLOY_USER","GITHUB_TOKEN","GCP_SA_KEY","ACTIONS_RUNNER_DEBUG","ACTIONS_STEP_DEBUG","JWT_SECRET","DATABASE_URL"]'
 
           # Take every non-empty secret and repository variable, minus the
           # deploy plumbing, minus anything containing a newline (env_file has
@@ -181,26 +194,47 @@ jobs:
           cp .env ~/.env-backups/"env.$(date -u +%Y%m%dT%H%M%SZ)"
           ls -1t ~/.env-backups/env.* 2>/dev/null | tail -n +11 | xargs -r rm -f
 
-          changed=0
+          # ADDITIVE ONLY. A key already present on the server is left exactly
+          # as it is; only genuinely absent keys are written.
+          #
+          # The previous version updated a key whenever the vault value differed
+          # from the server's, which is backwards: the server holds the values
+          # that are actually working, and the vault holds older ones. It
+          # replaced a live 65-character JWT_SECRET with a 22-character
+          # development placeholder and a working pooler DATABASE_URL with a
+          # dead host, and production stopped booting. Additive-only delivers
+          # the credentials that are missing -- which was the whole point --
+          # without ever being able to damage one that works.
+
+          # The server's .env uses CRLF. Comparing or appending without
+          # accounting for that made every existing key look different from its
+          # vault copy (the trailing \r), so the old code rewrote all of them.
+          if grep -q $'\r$' .env 2>/dev/null; then EOL=$'\r'; else EOL=''; fi
+
+          # An append to a file whose last line has no newline would fuse onto
+          # that line and corrupt both entries.
+          if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then
+            printf '%s\n' "$EOL" >> .env
+          fi
+
+          added=0
+          kept=0
           while read -r key b64; do
             [ -n "${key:-}" ] || continue
-            val="$(printf '%s' "$b64" | base64 -d)"
 
             if grep -q "^${key}=" .env 2>/dev/null; then
-              current="$(grep "^${key}=" .env | head -1 | cut -d= -f2-)"
-              if [ "$current" = "$val" ]; then
-                continue
-              fi
-              grep -v "^${key}=" .env > .env.tmp && mv .env.tmp .env
-              action="updated"
-            else
-              action="added"
+              kept=$((kept + 1))
+              continue
             fi
 
-            printf '%s=%s\n' "$key" "$val" >> .env
-            echo "  $action $key"          # name only — never the value
-            changed=$((changed + 1))
+            val="$(printf '%s' "$b64" | base64 -d)"
+            printf '%s=%s%s\n' "$key" "$val" "$EOL" >> .env
+            echo "  added $key"            # name only — never the value
+            added=$((added + 1))
           done < /tmp/envsync
+
+          changed=$added
+          echo "$kept key(s) already set on the server were left untouched"
 
           rm -f /tmp/envsync
           chmod 600 .env
