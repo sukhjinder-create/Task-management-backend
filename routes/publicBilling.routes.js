@@ -8,7 +8,8 @@ import {
   resolveRequestCurrency,
   toMajorUnits,
 } from "../services/currency.service.js";
-import { resolveCatalogPrices } from "../services/billingPricing.service.js";
+import { resolveCatalogPrices, resolveChargeCurrency } from "../services/billingPricing.service.js";
+import { resolvePaymentsProviderForCurrency } from "../services/payments.service.js";
 
 const router = express.Router();
 
@@ -26,6 +27,9 @@ export function toPublicBillingPlan(plan, price = null) {
   const baseYearly = Number(plan.price_yearly_minor) || 0;
 
   const currency = String(price?.currency || baseCurrency).toLowerCase();
+  // Which provider would take this payment, and what it can actually settle.
+  const provider = resolvePaymentsProviderForCurrency(currency);
+  const charge = resolveChargeCurrency(provider, currency);
   const monthlyMinor = price ? Number(price.price_monthly_minor) || 0 : baseMonthly;
   const yearlyMinor = price ? Number(price.price_yearly_minor) || 0 : baseYearly;
   const meta = getCurrencyMeta(currency) || getCurrencyMeta(getBaseCurrency());
@@ -51,6 +55,14 @@ export function toPublicBillingPlan(plan, price = null) {
     base_price_monthly: toMajorUnits(baseMonthly, baseCurrency),
     base_price_yearly: toMajorUnits(baseYearly, baseCurrency),
     price_source: price?.source || "base",
+
+    // The currency the card is actually debited in, which is not always the
+    // one quoted: Razorpay settles recurring subscriptions in INR only, so an
+    // overseas visitor shown $11 is charged the rupee equivalent. Stating it
+    // here lets the signup form say so before payment rather than leaving the
+    // customer to discover it on their statement.
+    charge_currency: charge.currency.toUpperCase(),
+    charge_currency_differs: charge.currency !== currency,
 
     yearly_discount_pct: Number(plan.yearly_discount_pct) || 0,
     member_limit: plan.member_limit == null ? null : Number(plan.member_limit),
