@@ -18,7 +18,10 @@ name: Deploy to production (self-hosted)
 
 on:
   push:
-    branches: [ai-platform-epic-a]
+    # main is the default branch, so "merged to main" now means "deployed".
+    # ai-platform-epic-a is kept because the server's working tree and older
+    # tooling still reference it; both are kept in sync and either can deploy.
+    branches: [main, ai-platform-epic-a]
   workflow_dispatch:
 
 concurrency:
@@ -258,9 +261,10 @@ jobs:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ENV_CHANGED: ${{ steps.envsync.outputs.env_changed }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           ssh -i ~/.ssh/deploy_key -o ConnectTimeout=20 "$USER@$HOST" \
-            "IMAGE_REF='$IMAGE_REF' REGISTRY_USER='$REGISTRY_USER' REGISTRY_TOKEN='$REGISTRY_TOKEN' ENV_CHANGED='$ENV_CHANGED' bash -s" <<'REMOTE'
+            "IMAGE_REF='$IMAGE_REF' REGISTRY_USER='$REGISTRY_USER' REGISTRY_TOKEN='$REGISTRY_TOKEN' ENV_CHANGED='$ENV_CHANGED' BRANCH='$BRANCH' bash -s" <<'REMOTE'
           set -uo pipefail
           cd ~/app
 
@@ -271,7 +275,12 @@ jobs:
             || { echo "registry login failed"; exit 1; }
 
           # Keep the working tree in sync for compose/config files (no build here).
-          git fetch origin ai-platform-epic-a && git merge --ff-only origin/ai-platform-epic-a || echo "warning: git sync skipped"
+          # Sync from the branch that triggered this deploy, so the files on
+          # disk match the image being started. --ff-only keeps it non-
+          # destructive: a divergence warns and is skipped rather than
+          # discarding anything on the server.
+          SYNC_BRANCH="${BRANCH:-main}"
+          git fetch origin "$SYNC_BRANCH" && git merge --ff-only "origin/$SYNC_BRANCH" || echo "warning: git sync skipped"
 
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
