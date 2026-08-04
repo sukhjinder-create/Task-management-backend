@@ -155,3 +155,27 @@ test("widening RAZORPAY_SUPPORTED_CURRENCIES lets it charge in that currency", (
     else process.env.RAZORPAY_SUPPORTED_CURRENCIES = previous;
   }
 });
+
+test("a plan priced in a non-USD base converts via the reference currency", () => {
+  // Production case: pro is authored at ₹999/mo while the rate table is
+  // USD-quoted. Applying rates.eur straight to 999 produced €900 instead of
+  // ~€11, because it treated rupees as dollars.
+  const inrMonthly = 99900; // ₹999.00
+
+  const eur = convertMinorAmount(inrMonthly, "eur", RATES, { base: "inr" });
+  assert.ok(eur > 800 && eur < 1500, `₹999 should be roughly €8-15, got ${eur / 100}`);
+
+  const usd = convertMinorAmount(inrMonthly, "usd", RATES, { base: "inr" });
+  assert.ok(usd > 900 && usd < 1600, `₹999 should be roughly $9-16, got ${usd / 100}`);
+
+  // Same money either way round: converting INR→USD→EUR must land near INR→EUR.
+  const viaUsd = convertMinorAmount(usd, "eur", RATES, { base: "usd" });
+  assert.ok(Math.abs(viaUsd - eur) <= 300, `paths disagree: ${viaUsd} vs ${eur}`);
+});
+
+test("converting from a base with no rate throws instead of mispricing", () => {
+  assert.throws(
+    () => convertMinorAmount(1000, "eur", { usd: 1, eur: 0.92 }, { base: "inr" }),
+    /base currency INR/
+  );
+});

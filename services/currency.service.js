@@ -391,11 +391,23 @@ export function convertMinorAmount(baseMinorAmount, targetCurrency, rates, { bas
   if (!target) throw new Error(`Unsupported currency: ${targetCurrency}`);
   if (target === base) return Math.round(Number(baseMinorAmount) || 0);
 
-  const rate = Number(rates?.[target]);
-  if (!Number.isFinite(rate) || rate <= 0) {
+  // The rate table is quoted against a single reference currency (USD), so a
+  // plan priced in anything else has to be rebased: rate(base→target) is
+  // rate(ref→target) / rate(ref→base). Skipping that division applies the
+  // dollar rate to a non-dollar amount — a ₹999 plan came out at €900 instead
+  // of €11, because 0.92 was multiplied against 999 rupees as though they were
+  // dollars.
+  const rateTarget = Number(rates?.[target]);
+  if (!Number.isFinite(rateTarget) || rateTarget <= 0) {
     throw new Error(`No FX rate available for ${target.toUpperCase()}`);
   }
 
+  const rateBase = Number(rates?.[base]);
+  if (!Number.isFinite(rateBase) || rateBase <= 0) {
+    throw new Error(`No FX rate available for base currency ${base.toUpperCase()}`);
+  }
+
+  const rate = rateTarget / rateBase;
   const baseMajor = toMajorUnits(baseMinorAmount, base);
   const rawTargetMinor = baseMajor * rate * minorUnitFactor(target);
   if (!round) return Math.round(rawTargetMinor);
