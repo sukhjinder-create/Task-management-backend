@@ -19,10 +19,11 @@ import { createAIRequest, textPart, toLegacyText } from "../contract/index.js";
  * @param {object} [p.trigger]
  * @param {string} [p.sourceModule]
  * @param {object} [p.tools]  Contract §14 ToolDirective ({definitions, mode, allow, deny})
+ * @param {object} [p.variables]  prompt-template variables — UNTRUSTED content
  * @param {object} [deps]  gateway deps (tests only)
  */
 export async function externalInvoke(
-  { capability, prompt, messages, workspaceId = null, overrides = {}, trigger = null, sourceModule = "external", tools = null } = {},
+  { capability, prompt, messages, workspaceId = null, overrides = {}, trigger = null, sourceModule = "external", tools = null, variables = null } = {},
   deps = undefined
 ) {
   const input =
@@ -37,6 +38,11 @@ export async function externalInvoke(
     ...(overrides && Object.keys(overrides).length ? { runtime: { overrides } } : {}),
     ...(trigger ? { trigger } : {}),
     ...(tools ? { tools } : {}),
+    // Variables were previously dropped here, so an external caller could not
+    // use a prompt template AND the safety layer never saw the untrusted values
+    // separately from the assembled prompt — which is exactly the trust boundary
+    // variable-injection detection exists to police.
+    ...(variables && Object.keys(variables).length ? { variables } : {}),
     executionContext: { sourceModule },
   });
 

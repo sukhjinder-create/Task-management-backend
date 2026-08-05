@@ -120,19 +120,80 @@ jobs:
         # image, so this step reports and moves on.
         continue-on-error: true
         env:
-          # Every secret in the vault, as JSON. Passed via env (never inlined
-          # into the script) so values cannot break quoting or inject shell.
+          # ── The application secrets this backend actually reads ──────────────
           #
-          # Enumerating the vault rather than naming secrets one by one is
-          # deliberate: the first version of this step listed names copied from
-          # the dead Cloud Run pipeline, and those were GCP Secret Manager names,
-          # not GitHub ones. Every lookup silently returned empty and the step
-          # shipped nothing. Reading the vault directly cannot miss a secret
-          # because its name differs from what this file guessed.
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          # This used to serialise the ENTIRE secret vault into one variable and
+          # pipe it over SSH. That is indistinguishable from secret
+          # exfiltration, and GitHub's scanner agrees -- it froze every run of
+          # this workflow with "GitHub detected that this workflow file may be
+          # malicious", conclusion `action_required` and ZERO jobs executed. The
+          # reason appears only as a banner on the run's web page; the REST API
+          # reports no rulesets, no environments, nothing pending, so from a
+          # terminal the pipeline simply looks stuck. Two commits sat undeployed
+          # for hours before anyone noticed.
+          #
+          # Naming each secret fixes the real problem too: the vault holds 30
+          # entries and the app needs 20 of them, so a wholesale dump shipped
+          # deploy credentials and dead keys to the runtime for no reason.
+          #
+          # Every name below was verified against a real `process.env` (or
+          # config-module) read in this repository before being listed. Note
+          # LIVEKIT_* are read through the `env` config object rather than
+          # `process.env` directly, so a naive grep misses them -- they are
+          # required by services/huddleMediaToken.service.js.
+          #
+          # DELIBERATELY ABSENT, and why:
+          #   DEPLOY_SSH_KEY/HOST/USER, GCP_SA_KEY  deploy plumbing, not app config
+          #   JWT_SECRET, DATABASE_URL              server-owned; the vault copies are
+          #                                         stale and once broke production
+          #   STRIPE_*                              a TEST key; delivering it made
+          #                                         Stripe look configured and gave
+          #                                         non-INR customers free paid plans
+          #   FIREBASE_B64                          misnamed -- push.service.js reads
+          #                                         FIREBASE_SERVICE_ACCOUNT_JSON/_B64,
+          #                                         so this has never done anything
+          #
+          # Adding a secret to the vault now also requires adding it here. That
+          # is the intended trade: explicit beats invisible. An earlier version
+          # of this step guessed names copied from the dead Cloud Run pipeline
+          # and silently shipped nothing, so the failure mode is real -- the
+          # step therefore prints every name it delivers, and warns loudly when
+          # it finds none.
+          APP_SECRET_NAMES: >-
+            ASANA_CLIENT_SECRET ATTENDANCE_SLACK_WEBHOOK_URL
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+            DB_PASSWORD DEEPGRAM_API_KEY
+            GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GROQ_API_KEY
+            LIVEKIT_API_KEY LIVEKIT_API_SECRET LIVEKIT_URL
+            R2_ACCOUNT_ID
+            RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET
+            SLACK_WEBHOOK_URL SUPABASE_SERVICE_KEY
+            VAPID_PRIVATE_KEY VAPID_PUBLIC_KEY
+          ASANA_CLIENT_SECRET: ${{ secrets.ASANA_CLIENT_SECRET }}
+          ATTENDANCE_SLACK_WEBHOOK_URL: ${{ secrets.ATTENDANCE_SLACK_WEBHOOK_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
+          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           # Non-secret runtime config, driven by repository *variables* rather
           # than secrets so turning payments on stays an explicit, visible
           # choice made in the GitHub UI. Unset = left exactly as-is on the box.
+          # Variables are non-secret by definition, so enumerating them carries
+          # none of the risk that enumerating the secret vault did.
           ALL_VARS: ${{ toJSON(vars) }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
@@ -141,42 +202,40 @@ jobs:
 
           umask 077
 
-          # Deploy plumbing belongs to this pipeline, not to the application.
+          # The old DENY list is gone: with an explicit allow-list above, a
+          # secret is delivered only by being named, so exclusion needs no
+          # mechanism. The reasoning behind each exclusion has moved to the
+          # allow-list comment, where it stays next to the decision it explains.
           #
-          # JWT_SECRET and DATABASE_URL are also refused, permanently. The vault
-          # is a snapshot from the retired Cloud Run era and its copies are
-          # stale: JWT_SECRET there is the literal development fallback
-          # ("task_management_secret"), and DATABASE_URL points at the old
-          # Supabase host that went IPv6-only. An earlier version of this step
-          # wrote both over the working production values, and the process
-          # refused to boot -- correctly, because signing tokens with a
-          # publicly-known development key is far worse than an outage.
-          # These two are owned by the server and are never delivered from here.
-          #
-          # The STRIPE_* keys are refused for a different reason: the key in the
-          # vault is a TEST key, and Stripe is not in use. Delivering it is not
-          # merely useless, it is harmful -- ensureStripeConfigured() only checks
-          # that a secret key exists, so a test key makes Stripe look available,
-          # and resolvePaymentsProviderForCurrency() then routes any currency
-          # Razorpay cannot settle (everything except INR) to it. An overseas
-          # customer would complete a test-mode checkout and receive a paid plan
-          # without any money moving. This happened: the key was removed from the
-          # server by hand and the next deploy's additive sync put it straight
-          # back. Remove these entries when a live Stripe key replaces the test
-          # one and Stripe is genuinely wanted.
-          DENY='["DEPLOY_SSH_KEY","DEPLOY_HOST","DEPLOY_USER","GITHUB_TOKEN","GCP_SA_KEY","ACTIONS_RUNNER_DEBUG","ACTIONS_STEP_DEBUG","JWT_SECRET","DATABASE_URL","STRIPE_SECRET_KEY","STRIPE_PUBLISHABLE_KEY","STRIPE_WEBHOOK_SECRET"]'
+          # Two of those exclusions were paid for in outages and must not be
+          # re-added casually. JWT_SECRET and DATABASE_URL are owned by the
+          # SERVER: the vault's copies are stale (a development-fallback signing
+          # key, and a Supabase host that went IPv6-only), and an earlier version
+          # of this step wrote them over the working values until production
+          # refused to boot. STRIPE_* is a TEST key with Stripe unused; because
+          # ensureStripeConfigured() only checks that a key exists, delivering it
+          # made Stripe look available and routed every non-INR customer to a
+          # test-mode checkout that granted a paid plan with no money moving.
 
-          # Take every non-empty secret and repository variable, minus the
-          # deploy plumbing, minus anything containing a newline (env_file has
-          # no syntax for those). Emits "NAME base64value" — names in the clear,
-          # values encoded so punctuation survives the trip.
+          # Take every non-empty allow-listed secret and repository variable,
+          # minus anything containing a newline (env_file has no syntax for
+          # those). Emits "NAME base64value" — names in the clear, values
+          # encoded so punctuation survives the trip.
           {
-            printf '%s' "$ALL_SECRETS" | jq -r --argjson deny "$DENY" '
-              to_entries[]
-              | select(.value != null and .value != "")
-              | select(.key as $k | $deny | index($k) | not)
-              | select(.value | test("\n") | not)
-              | "\(.key) \(.value | @base64)"'
+            for name in $APP_SECRET_NAMES; do
+              # Indirect expansion reads the value from this step's env, where
+              # the secret was placed above. An unset or empty secret is skipped
+              # so it can never blank a working key on the server.
+              value="${!name-}"
+              [ -n "$value" ] || continue
+              # Skip multi-line values: env_file has no syntax for them.
+              # NOTE: the pattern must be $'\n'. Writing *"$(printf '\n')"*
+              # looks equivalent but is not -- command substitution strips
+              # trailing newlines, so the pattern collapses to ** and matches
+              # EVERY value, silently delivering nothing at all.
+              case "$value" in *$'\n'*) continue ;; esac
+              printf '%s %s\n' "$name" "$(printf '%s' "$value" | base64 -w0)"
+            done
             printf '%s' "$ALL_VARS" | jq -r '
               to_entries[]
               | select(.value != null and .value != "")

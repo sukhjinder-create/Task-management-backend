@@ -9,6 +9,7 @@
 
 import { scanInjection } from "./injection.js";
 import { detectPii } from "./pii.js";
+import { evaluateBlock } from "./enforcement.js";
 
 /** Verdict is advisory in Epic A: "flag" when findings exist, else "allow". Never "block". */
 function verdictFor(findings) {
@@ -57,13 +58,30 @@ export function runOutputSafety({ text, outputSchemaRef = null } = {}) {
   return { outputVerdict: verdictFor(findings), findings, schemaChecked };
 }
 
-/** Merge input + output safety into a Contract §11 SafetyReport (advisory). */
-export function mergeSafety(input, output) {
+/**
+ * Merge input + output safety into a Contract §11 SafetyReport.
+ *
+ * Advisory by default: with enforcement off (the default) this returns exactly
+ * what it always did — verdicts of "allow"/"flag", enforced: false, and nothing
+ * blocked. Enforcement is opt-in per deployment or per workspace; see
+ * ./enforcement.js for why PII never blocks and variable injection does.
+ *
+ * @param {object} [options]
+ * @param {string} [options.mode]  resolved enforcement mode ("off" when omitted)
+ */
+export function mergeSafety(input, output, { mode = "off" } = {}) {
+  const findings = [...(input?.findings || []), ...(output?.findings || [])];
+  const decision = evaluateBlock(input?.findings || [], mode);
+
   return {
-    inputVerdict: input?.inputVerdict || "allow",
+    inputVerdict: decision.blocked ? "block" : input?.inputVerdict || "allow",
     outputVerdict: output?.outputVerdict || "allow",
-    findings: [...(input?.findings || []), ...(output?.findings || [])],
-    redactions: [], // none in permissive mode
-    enforced: false, // Epic A never enforces
+    findings,
+    redactions: [], // detection only; redaction is a later phase
+    enforced: mode !== "off",
+    mode,
+    ...(decision.blocked
+      ? { blocked: { stage: "input", reason: decision.reason, types: decision.types } }
+      : {}),
   };
 }

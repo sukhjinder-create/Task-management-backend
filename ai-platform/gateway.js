@@ -29,6 +29,7 @@ import { textPart } from "./contract/parts.js";
 import { createUsage } from "./contract/usage.js";
 import { estimateCost, recordCost } from "./cost/costEngine.js";
 import { runInputSafety, runOutputSafety, mergeSafety } from "./safety/pipeline.js";
+import { safetyEnforcementMode, evaluateBlock } from "./safety/enforcement.js";
 import { recordSafetyEvent } from "./safety/safetyEvents.js";
 
 /**
@@ -125,8 +126,35 @@ export async function invoke(request, ctx = {}) {
       modelKey: resolvedModel,
     });
 
-    // 5c) Input safety (P7; PERMISSIVE — detects/tags, never blocks or rewrites in Epic A).
+    // 5c) Input safety. Detection always runs; whether a finding STOPS the
+    // request depends on the enforcement mode, which is "off" by default.
     const inputSafety = runInputSafety({ prompt: finalPrompt, messages: call.messages, variables });
+    const safetyMode = safetyEnforcementMode(workspaceId);
+    const inputDecision = evaluateBlock(inputSafety.findings, safetyMode);
+
+    // Blocking happens BEFORE the adapter call: a request refused on safety
+    // grounds must not reach a provider, so it costs nothing and leaks nothing.
+    if (inputDecision.blocked) {
+      const safety = mergeSafety(inputSafety, null, { mode: safetyMode });
+      await recordSafetyEvent({
+        workspaceId, capabilityKey: cfg.capabilityKey,
+        inputVerdict: safety.inputVerdict, outputVerdict: safety.outputVerdict,
+        findings: safety.findings, correlationId: corr,
+      });
+      await logRequestFn({
+        workspaceId, capabilityKey: cfg.capabilityKey, providerKey: cfg.providerKey,
+        modelKey: cfg.model || null, profileKey: cfg.profileKey,
+        latencyMs: Date.now() - startedAt, status: "blocked",
+        failureReason: inputDecision.reason, retries: 0, correlationId: corr, ...obs,
+      });
+      const err = new Error(inputDecision.reason);
+      // Distinguishable on purpose: callers that fall back to a direct provider
+      // on failure must NOT do so here, or the block is trivially bypassed.
+      err.code = "AI_SAFETY_BLOCKED";
+      err.safety = safety;
+      err.retryable = false;
+      throw err;
+    }
 
     // 6) Execute through the resolved adapter, with transient retry.
     const adapter = getAdapterFor(cfg.adapterType);
@@ -148,7 +176,7 @@ export async function invoke(request, ctx = {}) {
 
     // 6c) Output safety (P7; permissive) + best-effort safety-event persistence.
     const outputSafety = runOutputSafety({ text: result.text, outputSchemaRef: cfg.outputSchema || null });
-    const safety = mergeSafety(inputSafety, outputSafety);
+    const safety = mergeSafety(inputSafety, outputSafety, { mode: safetyMode });
     if (safety.findings.length) {
       await recordSafetyEvent({
         workspaceId, capabilityKey: cfg.capabilityKey,
