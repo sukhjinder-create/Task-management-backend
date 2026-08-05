@@ -36,11 +36,22 @@ const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "
  */
 const EXEMPT = new Set([]);
 
-/** Strip -- line comments and block comments so commented-out SQL is ignored. */
+/**
+ * Strip everything that LOOKS like SQL but is not executed as DDL here:
+ * block comments, line comments, and single-quoted string literals.
+ *
+ * The string literals matter. An event trigger declares
+ * `WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS')`, and a naive scan reads
+ * that as a statement creating a table called "as". Any migration that talks
+ * ABOUT DDL — trigger definitions, dynamic SQL, seeded config — would otherwise
+ * produce phantom tables and a red build with nothing to fix.
+ */
 function stripSqlComments(sql) {
   return sql
     .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--[^\n]*/g, " ");
+    .replace(/--[^\n]*/g, " ")
+    // '' is an escaped quote inside a literal, so consume pairs before closing.
+    .replace(/'(?:[^']|'')*'/g, " '' ");
 }
 
 function normalizeTableName(raw) {
@@ -148,6 +159,19 @@ test("the guard actually detects an unprotected table (self-check)", () => {
   assert.ok(created.includes("gadget_thing"));
   assert.ok(!created.includes("commented_out_should_be_ignored"), "commented SQL must be ignored");
   assert.deepEqual(created.filter((t) => !secured.includes(t)), ["gadget_thing"]);
+});
+
+test("DDL mentioned inside a string literal is not a table (self-check)", () => {
+  // Regression: the auto-RLS event trigger declares
+  //   WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+  // which a naive scan read as creating a table named "as".
+  const sql = stripSqlComments(`
+    CREATE EVENT TRIGGER t ON ddl_command_end
+      WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+      EXECUTE FUNCTION f();
+  `);
+  const created = [...sql.matchAll(CREATE_TABLE)].map((m) => normalizeTableName(m[1]));
+  assert.deepEqual(created, [], "string literals must not register as CREATE TABLE");
 });
 
 test("temporary tables are not required to have RLS", () => {
