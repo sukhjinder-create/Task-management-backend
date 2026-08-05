@@ -108,7 +108,9 @@
     "migrate:multi-currency": "node --import ./scripts/database-safety-guard.js run-multi-currency-billing-migration.js",
     "billing:reprice": "node scripts/reprice-plans-usd.js",
     "test:currency": "node --test tests/currency.test.js tests/public-billing.test.js",
-    "migrate:multi-currency:contract": "node --import ./scripts/database-safety-guard.js run-multi-currency-billing-migration.js --contract"
+    "migrate:multi-currency:contract": "node --import ./scripts/database-safety-guard.js run-multi-currency-billing-migration.js --contract",
+    "verify:rls": "node scripts/verify-rls.js",
+    "test:rls-guard": "node --test tests/migrations-rls-guard.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",

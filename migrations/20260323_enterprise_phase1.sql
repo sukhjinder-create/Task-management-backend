@@ -277,3 +277,13 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id, created_at DESC);
+
+-- Supabase exposes every table over its public REST API, so RLS is what stops an
+-- anon/authenticated key reading this directly, bypassing the backend and its
+-- permission checks. Enabled here, in the migration that creates the table,
+-- rather than in a later sweep: 20260430_enable_rls_all_tables.sql listed tables
+-- by name, so every table created after it silently arrived unprotected -- 85 of
+-- them by 2026-08-05. Protecting the table where it is born is what stops that
+-- recurring. The backend is unaffected; it connects as the owner, and owners
+-- bypass RLS unless FORCE is set (it is not).
+ALTER TABLE public.okr_key_results ENABLE ROW LEVEL SECURITY;

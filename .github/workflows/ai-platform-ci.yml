@@ -13,6 +13,10 @@ on:
       - "tests/ai-platform-contract.test.js"
       - "services/llm.js"
       - ".github/workflows/ai-platform-ci.yml"
+      # Any migration can create a table, and a table born without RLS is
+      # readable through Supabase's public REST API.
+      - "migrations/**"
+      - "tests/migrations-rls-guard.test.js"
   push:
     branches: [ main ]
     paths:
@@ -20,6 +24,8 @@ on:
       - "tests/ai-platform-harness.test.js"
       - "tests/ai-platform-contract.test.js"
       - "services/llm.js"
+      - "migrations/**"
+      - "tests/migrations-rls-guard.test.js"
 
 jobs:
   ai-platform-harness:
@@ -43,3 +49,17 @@ jobs:
 
       - name: Run AI Platform self-tests (blocks on failure)
         run: node --test tests/ai-platform-*.test.js
+
+      # Every table must have Row Level Security. Supabase publishes a REST
+      # endpoint for each table, and RLS is the only thing that stops an anon
+      # key reading it directly, bypassing the backend's permission checks.
+      #
+      # 20260430_enable_rls_all_tables.sql enabled RLS by listing tables BY NAME,
+      # which protected that day's tables and nothing since -- 85 tables had
+      # silently drifted out of protection by 2026-08-05, including meeting
+      # transcripts and billing. Nothing detected it because nothing checked.
+      # This check is static (no database, no credentials), so it can block the
+      # pull request that introduces the table rather than being noticed months
+      # later.
+      - name: Every migrated table has RLS (blocks on failure)
+        run: node --test tests/migrations-rls-guard.test.js
