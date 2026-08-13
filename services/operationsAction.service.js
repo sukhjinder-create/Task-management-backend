@@ -75,6 +75,7 @@ export async function createOperationsAction({
   targetUserId = null,
   projectId = null,
   taskId = null,
+  goalId = null,
   payload = {},
   evidence = [],
   generatedBy = "system",
@@ -105,6 +106,7 @@ export async function createOperationsAction({
         target_user_id,
         project_id,
         task_id,
+        goal_id,
         payload,
         evidence,
         generated_by,
@@ -122,8 +124,8 @@ export async function createOperationsAction({
         personalization_source,
         execution_plan_id
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21,
-        $22,$23,$24,$25,$26,$27,$28,$29)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,$19,$20,$21,$22,
+        $23,$24,$25,$26,$27,$28,$29,$30)
       RETURNING *
       `,
       [
@@ -140,6 +142,7 @@ export async function createOperationsAction({
         targetUserId,
         projectId,
         taskId,
+        goalId,
         JSON.stringify(payload || {}),
         JSON.stringify(Array.isArray(evidence) ? evidence : []),
         generatedBy,
@@ -242,11 +245,13 @@ export async function listOperationsActions({
       a.*,
       u.username AS target_user_name,
       p.name AS project_name,
-      t.task AS task_title
+      t.task AS task_title,
+      g.title AS goal_title
     FROM operations_ai_actions a
-    LEFT JOIN users u ON u.id = a.target_user_id
-    LEFT JOIN projects p ON p.id = a.project_id
-    LEFT JOIN tasks t ON t.id = a.task_id
+    LEFT JOIN users u ON u.id = a.target_user_id AND u.workspace_id = a.workspace_id
+    LEFT JOIN projects p ON p.id = a.project_id AND p.workspace_id = a.workspace_id
+    LEFT JOIN tasks t ON t.id = a.task_id AND t.workspace_id = a.workspace_id
+    LEFT JOIN okr_objectives g ON g.id = a.goal_id AND g.workspace_id = a.workspace_id
     WHERE ${where.join(" AND ")}
     ORDER BY a.created_at DESC
     LIMIT $${idx}
@@ -264,11 +269,13 @@ export async function getOperationsActionById({ id, workspaceId, userId, role })
       a.*,
       u.username AS target_user_name,
       p.name AS project_name,
-      t.task AS task_title
+      t.task AS task_title,
+      g.title AS goal_title
     FROM operations_ai_actions a
-    LEFT JOIN users u ON u.id = a.target_user_id
-    LEFT JOIN projects p ON p.id = a.project_id
-    LEFT JOIN tasks t ON t.id = a.task_id
+    LEFT JOIN users u ON u.id = a.target_user_id AND u.workspace_id = a.workspace_id
+    LEFT JOIN projects p ON p.id = a.project_id AND p.workspace_id = a.workspace_id
+    LEFT JOIN tasks t ON t.id = a.task_id AND t.workspace_id = a.workspace_id
+    LEFT JOIN okr_objectives g ON g.id = a.goal_id AND g.workspace_id = a.workspace_id
     WHERE a.id = $1
       AND a.workspace_id = $2
     `,

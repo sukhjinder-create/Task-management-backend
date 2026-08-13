@@ -22,6 +22,7 @@ import projectStatusRoutes from "./routes/projectStatus.routes.js";
 import reportRoutes from "./routes/report.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import operationsRoutes from "./routes/operations.routes.js";
+import assuranceRoutes from "./routes/assurance.routes.js";
 import testingAgentRoutes from "./routes/testingAgent.routes.js";
 import { startAttendanceCron } from "./cron/attendance.cron.js";
 import { startAutopilotCron } from "./cron/autopilot.cron.js";
@@ -362,6 +363,7 @@ app.use("/adaptive",      authMiddleware, requireWorkspaceForUser, adaptiveRoute
 // no longer administer enterprise execution or enterprise intelligence.
 app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
+app.use("/assurance",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("okr_goals"), assuranceRoutes);
 app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
 // 🧪 Testing Agent — plan-gated
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
