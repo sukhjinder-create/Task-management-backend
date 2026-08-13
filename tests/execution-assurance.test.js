@@ -140,11 +140,12 @@ test("attention exposes one plain next action instead of internal platform conce
   assert.equal(Object.prototype.hasOwnProperty.call(attention, "confidence"), false);
 });
 
-test("role policy is explicit and does not grant ordinary members write authority", () => {
+test("role policy recognizes only the three workspace roles", () => {
   assert.equal(canManageAssurance("admin"), true);
-  assert.equal(canManageAssurance("owner"), true);
   assert.equal(canManageAssurance("manager"), true);
   assert.equal(canManageAssurance("user"), false);
+  assert.equal(canManageAssurance("owner"), false);
+  assert.equal(canManageAssurance("member"), false);
   assert.equal(canManageAssurance("superadmin"), false);
 });
 

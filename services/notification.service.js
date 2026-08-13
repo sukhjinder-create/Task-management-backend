@@ -165,6 +165,8 @@ export async function notifyUser({
   project_id = null,
   comment_id = null,
   workspaceId = null,
+  mirrorToChat = true,
+  broadcastToSlack = true,
 }) {
   if (!user_id) return null;
 
@@ -202,7 +204,7 @@ export async function notifyUser({
   }
 
   // 3️⃣ Slack + chat mirror
-  try {
+  if (mirrorToChat || broadcastToSlack) try {
     const slackText = await buildSlackText({
       user_id,
       type,
@@ -213,17 +215,19 @@ export async function notifyUser({
       comment_id,
     });
 
-    try {
-      await mirrorProjectNotificationToChat({
-        text: slackText,
-        userId: user_id,
-        workspaceId: resolvedWorkspaceId,
-      });
-    } catch (err) {
-      console.error("Project Manager chat mirror failed:", err.message);
+    if (mirrorToChat) {
+      try {
+        await mirrorProjectNotificationToChat({
+          text: slackText,
+          userId: user_id,
+          workspaceId: resolvedWorkspaceId,
+        });
+      } catch (err) {
+        console.error("Project Manager chat mirror failed:", err.message);
+      }
     }
 
-    await sendSlackWebhook(slackText);
+    if (broadcastToSlack) await sendSlackWebhook(slackText);
   } catch (err) {
     console.error("Slack / chat mirror error:", err.message);
   }

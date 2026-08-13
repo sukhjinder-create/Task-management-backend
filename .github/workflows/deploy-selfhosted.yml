@@ -504,6 +504,65 @@ jobs:
             });
           ' < "$ASSURANCE_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
 
+          # Complete the workspace-facing assurance layers before the image that
+          # queries them is started. The migration is additive and idempotent;
+          # verification covers every new contract plus evidence idempotency.
+          ASSURANCE_MOAT_MIGRATION="migrations/20260813c_enterprise_assurance_moat.sql"
+          [ -f "$ASSURANCE_MOAT_MIGRATION" ] || { echo "missing migration: $ASSURANCE_MOAT_MIGRATION"; exit 1; }
+          echo "applying $ASSURANCE_MOAT_MIGRATION ..."
+          sudo docker exec -i app-app-1 node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: { rejectUnauthorized: false },
+              });
+              try {
+                await pool.query(sql);
+                const tables = [
+                  "assurance_workspace_policies",
+                  "assurance_portfolios",
+                  "assurance_portfolio_goals",
+                  "assurance_goal_dependencies",
+                  "assurance_approval_requests",
+                  "assurance_state_snapshots",
+                  "assurance_outcome_observations",
+                  "assurance_memory_patterns",
+                  "assurance_export_manifests",
+                ];
+                const check = await pool.query(
+                  `SELECT
+                     COUNT(*)::int AS table_count,
+                     to_regclass($2) AS evidence_idempotency_index,
+                     EXISTS (
+                       SELECT 1 FROM information_schema.columns
+                       WHERE table_schema=$3 AND table_name=$4 AND column_name=$5
+                     ) AS has_source_provider,
+                     EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conname=$6 AND conrelid=$7::regclass
+                     ) AS has_tenant_user_fk
+                   FROM information_schema.tables
+                   WHERE table_schema=$3 AND table_name = ANY($1::text[])`,
+                  [tables, "public.idx_goal_assurance_evidence_idempotency", "public", "goal_assurance_evidence", "source_provider", "assurance_approval_requested_by_workspace_fkey", "public.assurance_approval_requests"]
+                );
+                const row = check.rows[0];
+                if (row.table_count !== tables.length || !row.evidence_idempotency_index || !row.has_source_provider || !row.has_tenant_user_fk) {
+                  throw new Error("enterprise assurance moat schema verification failed");
+                }
+                console.log("enterprise assurance moat migration verified");
+              } catch (error) {
+                console.error("enterprise assurance moat migration failed:", error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$ASSURANCE_MOAT_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 

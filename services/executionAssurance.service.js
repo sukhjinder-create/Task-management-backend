@@ -5,7 +5,7 @@ import {
   createOperationsAction,
 } from "./operationsAction.service.js";
 
-const MANAGER_ROLES = new Set(["admin", "owner", "manager"]);
+const MANAGER_ROLES = new Set(["admin", "manager"]);
 const PRIORITIES = new Set(["low", "medium", "high", "critical"]);
 const EVIDENCE_TYPES = new Set([
   "result",
@@ -112,7 +112,7 @@ function numeric(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export function calculateAssuranceState(row, now = new Date()) {
+export function calculateAssuranceState(row, now = new Date(), policy = {}) {
   const progress = Math.max(0, Math.min(100, numeric(row.progress)));
   const taskCount = numeric(row.task_count);
   const completedTaskCount = numeric(row.completed_task_count);
@@ -121,6 +121,7 @@ export function calculateAssuranceState(row, now = new Date()) {
   const linkedSprintCount = numeric(row.linked_sprint_count);
   const evidenceCount = numeric(row.evidence_count);
   const resultEvidenceCount = numeric(row.result_evidence_count);
+  const blockedDependencyCount = numeric(row.blocked_dependency_count);
   const targetDate = dateOnly(row.target_date);
   const remainingDays = daysBetween(todayUtc(now), targetDate);
   const hasExecutionEvidence = evidenceCount > 0 || taskCount > 0 || linkedSprintCount > 0;
@@ -142,9 +143,14 @@ export function calculateAssuranceState(row, now = new Date()) {
     explanation = overdueTaskCount > 0
       ? `${overdueTaskCount} connected task${overdueTaskCount === 1 ? " is" : "s are"} overdue.`
       : "The target date has passed without verified completion.";
-  } else if (row.status === "at_risk" || blockedTaskCount > 0 || (remainingDays != null && remainingDays <= 14 && progress < 80)) {
+  } else if (
+    row.status === "at_risk" || blockedTaskCount > 0 || blockedDependencyCount > 0 ||
+    (remainingDays != null && remainingDays <= numeric(policy?.riskWindowDays || policy?.risk_window_days || 14) && progress < 80)
+  ) {
     state = "at_risk";
-    explanation = blockedTaskCount > 0
+    explanation = blockedDependencyCount > 0
+      ? `${blockedDependencyCount} predecessor outcome${blockedDependencyCount === 1 ? " is" : "s are"} not yet complete.`
+      : blockedTaskCount > 0
       ? `${blockedTaskCount} connected task${blockedTaskCount === 1 ? " is" : "s are"} blocked.`
       : "The target date is approaching and the outcome needs review.";
   } else {
@@ -166,6 +172,8 @@ export function calculateAssuranceState(row, now = new Date()) {
       linkedSprints: linkedSprintCount,
       evidence: evidenceCount,
       resultEvidence: resultEvidenceCount,
+      externalEvidence: numeric(row.external_evidence_count),
+      blockedDependencies: blockedDependencyCount,
       governedActions: numeric(row.governed_action_count),
       pendingDecisions: numeric(row.pending_decision_count),
     },
@@ -201,17 +209,17 @@ export function buildAssuranceAttention(commitment) {
   };
 }
 
-function mapCommitment(row, now) {
+function mapCommitment(row, now, policy) {
   return {
     ...row,
     target_date: dateOnly(row.target_date) || null,
     progress: numeric(row.progress),
     evidence_requirements: Array.isArray(row.evidence_requirements) ? row.evidence_requirements : [],
-    assurance: calculateAssuranceState(row, now),
+    assurance: calculateAssuranceState(row, now, policy),
   };
 }
 
-async function queryCommitments({ workspaceId, userId, role, commitmentId = null, database = pool, now = new Date() }) {
+async function queryCommitments({ workspaceId, userId, role, commitmentId = null, database = pool, now = new Date(), policy = null }) {
   const values = [workspaceId];
   // Legacy Goals remain untouched and continue through /okr. Only outcomes
   // created with the assurance contract appear on this surface.
@@ -226,7 +234,29 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
     where.push(`o.id = $${parameter++}`);
     values.push(commitmentId);
   }
-  if (!canManageAssurance(role)) {
+  const normalizedRole = String(role || "user").toLowerCase();
+  if (normalizedRole === "manager") {
+    where.push(`(
+      o.owner_id = $${parameter}
+      OR o.primary_project_id = ANY(COALESCE((
+        SELECT u.projects FROM users u
+        WHERE u.id = $${parameter} AND u.workspace_id = o.workspace_id
+      ), ARRAY[]::uuid[]))
+      OR EXISTS (
+        SELECT 1
+        FROM okr_sprint_links manager_link
+        JOIN sprints manager_sprint ON manager_sprint.id = manager_link.sprint_id
+        WHERE manager_link.objective_id = o.id
+          AND manager_sprint.workspace_id = o.workspace_id
+          AND manager_sprint.project_id = ANY(COALESCE((
+            SELECT u.projects FROM users u
+            WHERE u.id = $${parameter} AND u.workspace_id = o.workspace_id
+          ), ARRAY[]::uuid[]))
+      )
+    )`);
+    values.push(userId);
+    parameter += 1;
+  } else if (normalizedRole !== "admin") {
     where.push(`o.owner_id = $${parameter++}`);
     values.push(userId);
   }
@@ -258,8 +288,10 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       COALESCE(sprints.linked_sprint_count, 0)::int AS linked_sprint_count,
       COALESCE(evidence.evidence_count, 0)::int AS evidence_count,
       COALESCE(evidence.result_evidence_count, 0)::int AS result_evidence_count,
+      COALESCE(evidence.external_evidence_count, 0)::int AS external_evidence_count,
+      COALESCE(dependencies.blocked_dependency_count, 0)::int AS blocked_dependency_count,
       COALESCE(actions.governed_action_count, 0)::int AS governed_action_count,
-      COALESCE(actions.pending_decision_count, 0)::int AS pending_decision_count
+      (COALESCE(actions.pending_decision_count, 0) + COALESCE(approvals.pending_approval_count, 0))::int AS pending_decision_count
     FROM okr_objectives o
     LEFT JOIN users owner
       ON owner.id = o.owner_id AND owner.workspace_id = o.workspace_id
@@ -292,10 +324,22 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
     LEFT JOIN LATERAL (
       SELECT
         COUNT(*) AS evidence_count,
-        COUNT(*) FILTER (WHERE gae.evidence_type = 'result') AS result_evidence_count
+        COUNT(*) FILTER (WHERE gae.evidence_type = 'result') AS result_evidence_count,
+        COUNT(*) FILTER (WHERE gae.source_provider IS NOT NULL) AS external_evidence_count
       FROM goal_assurance_evidence gae
       WHERE gae.workspace_id = o.workspace_id AND gae.goal_id = o.id
     ) evidence ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS blocked_dependency_count
+      FROM assurance_goal_dependencies dependency
+      JOIN okr_objectives predecessor
+        ON predecessor.workspace_id = dependency.workspace_id
+       AND predecessor.id = dependency.predecessor_goal_id
+      WHERE dependency.workspace_id = o.workspace_id
+        AND dependency.successor_goal_id = o.id
+        AND dependency.dependency_type = 'blocks'
+        AND predecessor.status != 'done'
+    ) dependencies ON TRUE
     LEFT JOIN LATERAL (
       SELECT
         COUNT(*) AS governed_action_count,
@@ -303,6 +347,13 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       FROM operations_ai_actions oaa
       WHERE oaa.workspace_id = o.workspace_id AND oaa.goal_id = o.id
     ) actions ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS pending_approval_count
+      FROM assurance_approval_requests approval
+      WHERE approval.workspace_id = o.workspace_id
+        AND approval.goal_id = o.id
+        AND approval.status = 'pending'
+    ) approvals ON TRUE
     WHERE ${where.join(" AND ")}
     ORDER BY
       CASE o.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
@@ -312,10 +363,10 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
     values
   );
 
-  return rows.map((row) => mapCommitment(row, now));
+  return rows.map((row) => mapCommitment(row, now, policy));
 }
 
-async function getAssuranceOptions(workspaceId, database = pool) {
+async function getAssuranceOptions(workspaceId, userId, role, database = pool) {
   const [ownersResult, projectsResult] = await Promise.all([
     database.query(
       `
@@ -331,19 +382,28 @@ async function getAssuranceOptions(workspaceId, database = pool) {
       [workspaceId]
     ),
     database.query(
-      `SELECT id, name FROM projects WHERE workspace_id = $1 ORDER BY name ASC`,
-      [workspaceId]
+      `SELECT p.id, p.name
+       FROM projects p
+       WHERE p.workspace_id = $1
+         AND (
+           $3 = 'admin'
+           OR p.id = ANY(COALESCE((
+             SELECT u.projects FROM users u WHERE u.id = $2 AND u.workspace_id = $1
+           ), ARRAY[]::uuid[]))
+         )
+       ORDER BY p.name ASC`,
+      [workspaceId, userId, String(role || "user").toLowerCase()]
     ),
   ]);
 
   return { owners: ownersResult.rows, projects: projectsResult.rows };
 }
 
-export async function getAssuranceOverview({ workspaceId, userId, role, database = pool, now = new Date() }) {
-  const commitments = await queryCommitments({ workspaceId, userId, role, database, now });
+export async function getAssuranceOverview({ workspaceId, userId, role, database = pool, now = new Date(), policy = null }) {
+  const commitments = await queryCommitments({ workspaceId, userId, role, database, now, policy });
   const attention = commitments.map(buildAssuranceAttention).filter(Boolean);
   const options = canManageAssurance(role)
-    ? await getAssuranceOptions(workspaceId, database)
+    ? await getAssuranceOptions(workspaceId, userId, role, database)
     : { owners: [], projects: [] };
 
   return {
@@ -361,7 +421,7 @@ export async function getAssuranceOverview({ workspaceId, userId, role, database
   };
 }
 
-async function requireCommitment({ id, workspaceId, userId, role, database = pool, now = new Date() }) {
+async function requireCommitment({ id, workspaceId, userId, role, database = pool, now = new Date(), policy = null }) {
   const commitmentId = uuidValue(id, { required: true, label: "Outcome" });
   const rows = await queryCommitments({
     workspaceId,
@@ -370,6 +430,7 @@ async function requireCommitment({ id, workspaceId, userId, role, database = poo
     commitmentId,
     database,
     now,
+    policy,
   });
   if (!rows[0]) throw httpError("Outcome not found", 404, "ASSURANCE_NOT_FOUND");
   return rows[0];
@@ -393,13 +454,27 @@ async function assertWorkspaceOwner(workspaceId, ownerId, database = pool) {
   if (!rows[0]) throw httpError("Owner is not an active member of this workspace");
 }
 
-async function assertWorkspaceProject(workspaceId, projectId, database = pool) {
+async function assertWorkspaceProject({ workspaceId, projectId, actorId, role, database = pool }) {
   if (!projectId) return;
   const { rows } = await database.query(
-    "SELECT id FROM projects WHERE id = $1 AND workspace_id = $2 LIMIT 1",
-    [projectId, workspaceId]
+    `SELECT p.id
+     FROM projects p
+     LEFT JOIN users actor ON actor.id = $3 AND actor.workspace_id = p.workspace_id
+     WHERE p.id = $1 AND p.workspace_id = $2
+       AND (
+         $4 = 'admin'
+         OR ($4 = 'manager' AND p.id = ANY(COALESCE(actor.projects, ARRAY[]::uuid[])))
+       )
+     LIMIT 1`,
+    [projectId, workspaceId, actorId, String(role || "user").toLowerCase()]
   );
-  if (!rows[0]) throw httpError("Project was not found in this workspace");
+  if (!rows[0]) throw httpError("Project is outside your managed scope", 403, "ASSURANCE_FORBIDDEN");
+}
+
+function assertManagerAssignment({ role, actorId, ownerId, projectId }) {
+  if (String(role || "").toLowerCase() === "manager" && !projectId && String(ownerId) !== String(actorId)) {
+    throw httpError("A manager can assign an unconnected outcome only to themselves", 403, "ASSURANCE_FORBIDDEN");
+  }
 }
 
 export async function createAssuranceCommitment({
@@ -409,13 +484,15 @@ export async function createAssuranceCommitment({
   input,
   database = pool,
   now = new Date(),
+  policy = null,
 }) {
   if (!canManageAssurance(role)) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
   const value = normalizeAssuranceInput(input);
   value.ownerId ||= actorId;
+  assertManagerAssignment({ role, actorId, ownerId: value.ownerId, projectId: value.primaryProjectId });
   await Promise.all([
     assertWorkspaceOwner(workspaceId, value.ownerId, database),
-    assertWorkspaceProject(workspaceId, value.primaryProjectId, database),
+    assertWorkspaceProject({ workspaceId, projectId: value.primaryProjectId, actorId, role, database }),
   ]);
 
   const { rows } = await database.query(
@@ -455,7 +532,7 @@ export async function createAssuranceCommitment({
     },
   });
 
-  return requireCommitment({ id: rows[0].id, workspaceId, userId: actorId, role, database, now });
+  return requireCommitment({ id: rows[0].id, workspaceId, userId: actorId, role, database, now, policy });
 }
 
 export async function updateAssuranceCommitment({
@@ -466,9 +543,10 @@ export async function updateAssuranceCommitment({
   input,
   database = pool,
   now = new Date(),
+  policy = null,
 }) {
   if (!canManageAssurance(role)) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
-  const current = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now });
+  const current = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
   const value = normalizeAssuranceInput({
     outcome: input.outcome ?? input.title ?? current.title,
     successMeasure: input.successMeasure ?? input.success_measure ?? current.success_measure,
@@ -483,9 +561,10 @@ export async function updateAssuranceCommitment({
     priority: input.priority ?? current.priority,
     evidenceRequirements: input.evidenceRequirements ?? input.evidence_requirements ?? current.evidence_requirements,
   });
+  assertManagerAssignment({ role, actorId, ownerId: value.ownerId, projectId: value.primaryProjectId });
   await Promise.all([
     assertWorkspaceOwner(workspaceId, value.ownerId, database),
-    assertWorkspaceProject(workspaceId, value.primaryProjectId, database),
+    assertWorkspaceProject({ workspaceId, projectId: value.primaryProjectId, actorId, role, database }),
   ]);
 
   const { rows } = await database.query(
@@ -529,7 +608,7 @@ export async function updateAssuranceCommitment({
     oldValue: { title: current.title, targetDate: current.target_date },
     newValue: { title: value.outcome, targetDate: value.targetDate },
   });
-  return requireCommitment({ id, workspaceId, userId: actorId, role, database, now });
+  return requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
 }
 
 async function assertEvidenceSource({ workspaceId, sourceEntityType, sourceEntityId, database = pool }) {
@@ -553,8 +632,9 @@ export async function addAssuranceEvidence({
   input,
   database = pool,
   now = new Date(),
+  policy = null,
 }) {
-  const commitment = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now });
+  const commitment = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
   if (!canManageAssurance(role) && String(commitment.owner_id) !== String(actorId)) {
     throw httpError("You can only add evidence to outcomes you own", 403, "ASSURANCE_FORBIDDEN");
   }
@@ -609,12 +689,14 @@ export async function completeAssuranceCommitment({
   input = {},
   database = pool,
   now = new Date(),
+  requireResultEvidence = true,
+  policy = null,
 }) {
   if (!canManageAssurance(role)) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
-  const current = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now });
+  const current = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
   const evidenceLabel = cleanText(input.evidenceLabel ?? input.label, 500, { label: "Result evidence" });
   const evidenceNote = cleanText(input.note, 4000, { label: "Evidence note" });
-  if (!evidenceLabel && current.assurance.counts.resultEvidence === 0) {
+  if (requireResultEvidence && !evidenceLabel && current.assurance.counts.resultEvidence === 0) {
     throw httpError("Add a short result statement before marking this outcome complete");
   }
 
@@ -663,7 +745,7 @@ export async function completeAssuranceCommitment({
     oldValue: { status: current.status, progress: current.progress },
     newValue: { status: "done", progress: 100, resultEvidenceRecorded: Boolean(evidenceLabel) },
   });
-  return requireCommitment({ id, workspaceId, userId: actorId, role, database, now });
+  return requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
 }
 
 function recoveryDueDate(targetDate, now = new Date()) {
@@ -683,12 +765,20 @@ export async function createAssuranceRecoveryTask({
   role,
   database = pool,
   now = new Date(),
+  policy = null,
 }) {
   if (!canManageAssurance(role)) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
-  const commitment = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now });
+  const commitment = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
   if (!commitment.primary_project_id) {
     throw httpError("Connect a project before creating recovery work");
   }
+  await assertWorkspaceProject({
+    workspaceId,
+    projectId: commitment.primary_project_id,
+    actorId,
+    role,
+    database,
+  });
   if (commitment.assurance.state === "verified") {
     throw httpError("This outcome is already verified", 409, "ASSURANCE_ALREADY_VERIFIED");
   }
@@ -765,8 +855,9 @@ export async function getAssuranceCommitmentDetail({
   role,
   database = pool,
   now = new Date(),
+  policy = null,
 }) {
-  const commitment = await requireCommitment({ id, workspaceId, userId, role, database, now });
+  const commitment = await requireCommitment({ id, workspaceId, userId, role, database, now, policy });
   const [evidenceResult, actionResult] = await Promise.all([
     database.query(
       `

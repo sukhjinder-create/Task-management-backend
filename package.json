@@ -57,6 +57,7 @@
     "migrate:razorpay-trial-signup": "node --import ./scripts/database-safety-guard.js run-razorpay-trial-signup-migration.js",
     "migrate:no-card-trial-lifecycle": "node --import ./scripts/database-safety-guard.js run-no-card-trial-lifecycle-migration.js",
     "migrate:execution-assurance": "node --import ./scripts/database-safety-guard.js run-execution-assurance-migration.js",
+    "migrate:enterprise-assurance-moat": "node --import ./scripts/database-safety-guard.js run-enterprise-assurance-moat-migration.js",
     "test:execution-assurance": "node --test tests/execution-assurance.test.js",
     "migrate:huddle-sessions": "node --import ./scripts/database-safety-guard.js run-huddle-sessions-migration.js",
     "migrate:huddle-transcript-segments": "node --import ./scripts/database-safety-guard.js run-huddle-transcript-segments-migration.js",
