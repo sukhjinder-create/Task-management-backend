@@ -9,7 +9,7 @@ ALTER TABLE chat_channel_read_status
 UPDATE chat_channel_read_status rs
 SET workspace_id = u.workspace_id
 FROM users u
-WHERE rs.user_id = u.id
+WHERE rs.user_id::text = u.id::text
   AND rs.workspace_id IS NULL
   AND u.workspace_id IS NOT NULL;
 

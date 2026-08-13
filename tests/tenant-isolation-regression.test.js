@@ -73,5 +73,6 @@ test("chat read-state migration is additive, scoped, and idempotent", () => {
 
   assert.match(migration, /ADD COLUMN IF NOT EXISTS workspace_id UUID/i);
   assert.match(migration, /SET workspace_id = u\.workspace_id/i);
+  assert.match(migration, /rs\.user_id::text = u\.id::text/i);
   assert.match(migration, /CREATE INDEX IF NOT EXISTS idx_ccrs_workspace_user/i);
 });
