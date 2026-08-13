@@ -7,6 +7,11 @@ import {
   getUserById,
 } from "../repositories/user.repository.js";
 import { createWorkspace as createWorkspaceWithOwner } from "../repositories/superadminWorkspaces.repository.js";
+import {
+  buildNoCardTrialMetadata,
+  describeTrialLifecycle,
+  trialEndFrom,
+} from "./trialLifecycle.service.js";
 
 async function getDefaultMembershipBillingStatus(workspaceId) {
   const { rows } = await pool.query(
@@ -523,6 +528,7 @@ export async function createSelfServeTrialWorkspace({
   avatarUrl = null,
   skipTrialIpCheck = false,
   plan = "trial",
+  trialContext = null,
 }) {
   const name = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
   const email = normalizeSignupEmail(ownerEmail);
@@ -541,6 +547,11 @@ export async function createSelfServeTrialWorkspace({
     ownerName: username,
     ipHash,
     skipTrialIpCheck,
+    metadata:
+      plan === "trial" && trialContext
+        ? buildNoCardTrialMetadata(trialContext)
+        : null,
+    trialEndsAt: plan === "trial" ? trialEndFrom() : null,
   });
 
   if (avatarUrl) {
@@ -559,7 +570,12 @@ export async function createSelfServeTrialWorkspace({
   );
   const token = generateToken(safeUser);
 
-  return { token, user: safeUser, workspace: result.workspace };
+  return {
+    token,
+    user: safeUser,
+    workspace: result.workspace,
+    trial: describeTrialLifecycle(result.workspace),
+  };
 }
 
 export async function signupWorkspaceWithEmail({
@@ -569,6 +585,7 @@ export async function signupWorkspaceWithEmail({
   password,
   ipHash = null,
   plan = "trial",
+  trialContext = null,
 }) {
   const passwordHash = await bcrypt.hash(validateSignupPassword(password), 10);
 
@@ -578,12 +595,18 @@ export async function signupWorkspaceWithEmail({
     ownerEmail: email,
     ownerPasswordHash: passwordHash,
     ipHash,
-    skipTrialIpCheck: isLocalRuntime(),
+    // Corporate networks frequently share one public IP. Keep the fingerprint
+    // for audit, but never turn a NAT collision into onboarding friction.
+    skipTrialIpCheck: true,
     plan,
+    trialContext,
   });
 }
 
-export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = null, plan = "trial" } = {}) {
+export async function signupWorkspaceWithGoogle(
+  code,
+  { workspaceName, ipHash = null, plan = "trial", trialContext = null } = {}
+) {
   const profile = await fetchGoogleProfileFromCode(code);
   if (!profile.emailVerified) {
     throw new Error("Your Google account email is not verified.");
@@ -596,8 +619,9 @@ export async function signupWorkspaceWithGoogle(code, { workspaceName, ipHash = 
     ownerPasswordHash: null,
     ipHash,
     avatarUrl: profile.picture,
-    skipTrialIpCheck: isLocalRuntime(),
+    skipTrialIpCheck: true,
     plan,
+    trialContext,
   });
 }
 

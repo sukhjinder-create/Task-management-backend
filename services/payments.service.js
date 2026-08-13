@@ -55,6 +55,11 @@ import {
   validateSignupPassword,
 } from "./auth.service.js";
 import { getBackendPublicUrl, getFrontendBaseUrl } from "../config/environment.js";
+import {
+  assertWorkspaceTrialAllowsPaymentSetup,
+  describeTrialLifecycle,
+  getProviderTrialDays,
+} from "./trialLifecycle.service.js";
 
 const STRIPE_API_BASE = "https://api.stripe.com";
 const RAZORPAY_API_BASE = "https://api.razorpay.com/v1";
@@ -1008,7 +1013,8 @@ export async function getWorkspaceBillingSummary(workspaceId) {
               billing_customer_id, billing_subscription_id,
               billing_current_period_end, billing_updated_at,
               member_limit, max_members, billing_cycle_anchor,
-              per_user_price_minor, billing_currency, billing_country
+              per_user_price_minor, billing_currency, billing_country,
+              trial_started_at, trial_ends_at, metadata
        FROM workspaces WHERE id = $1 LIMIT 1`,
       [workspaceId]
     ),
@@ -1038,9 +1044,15 @@ export async function getWorkspaceBillingSummary(workspaceId) {
     ),
   ]);
 
+  const workspace = workspaceRes.rows[0] || null;
+  const trial = describeTrialLifecycle(workspace);
+  // metadata is loaded only to derive the preserved signup intent. Keep the
+  // workspace summary contract scoped to explicit billing fields.
+  const { metadata: _trialMetadata, ...billingWorkspace } = workspace || {};
   return {
     config:            getPublicBillingConfig(),
-    workspace:         workspaceRes.rows[0] || null,
+    workspace:         workspace ? billingWorkspace : null,
+    trial,
     subscription:      subscriptionRes.rows[0] || null,
     activeMemberCount: parseInt(memberCountRes.rows[0]?.count || 0),
   };
@@ -1068,7 +1080,7 @@ async function createRazorpayWorkspaceSubscriptionCheckout({
   const currency = charge.currency;
   const razorpayPlan = await ensurePlanRazorpayPlanForCurrency(dbPlan, currency, billingInterval);
   const seatQuantity = await countBillableWorkspaceUsers(workspace.id);
-  const trialDays = Number(dbPlan.trial_days) || 0;
+  const trialDays = getProviderTrialDays(workspace, dbPlan);
   const verificationAmount = trialDays > 0 ? getTrialSignupVerificationAmount(currency, "razorpay") : 0;
   const nowSeconds = Math.floor(Date.now() / 1000);
   const subscriptionPayload = {
@@ -1217,6 +1229,11 @@ export async function createCheckoutSession({
     throw err;
   }
 
+  // Payment is deliberately absent throughout the workspace trial. Requiring
+  // setup only after expiry keeps signup and the first-week product experience
+  // free of provider redirects, while also preventing a second provider trial.
+  assertWorkspaceTrialAllowsPaymentSetup(workspace);
+
   const requestedCurrency = currency || workspace?.billing_currency || null;
   if (resolvePaymentsProviderForCurrency(requestedCurrency) === "razorpay") {
     return createRazorpayWorkspaceSubscriptionCheckout({
@@ -1261,8 +1278,9 @@ export async function createCheckoutSession({
     "subscription_data[metadata][billing_plan_id]": dbPlan.id,
     "subscription_data[metadata][seat_quantity]": seatQuantity,
   };
-  if (dbPlan.trial_days > 0) {
-    subscriptionData["subscription_data[trial_period_days]"] = dbPlan.trial_days;
+  const providerTrialDays = getProviderTrialDays(workspace, dbPlan);
+  if (providerTrialDays > 0) {
+    subscriptionData["subscription_data[trial_period_days]"] = providerTrialDays;
   }
 
   const payload = qs.stringify(

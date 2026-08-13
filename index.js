@@ -29,6 +29,7 @@ import { startMonthlyIntelligenceCron } from "./cron/monthlyIntelligence.cron.js
 import { startReviewsCron } from "./cron/reviews.cron.js";
 import { startBackupCron } from "./cron/backup.cron.js";
 import { startHuddleIntelligenceCron } from "./cron/huddleIntelligence.cron.js";
+import { startTrialLifecycleCron } from "./cron/trialLifecycle.cron.js";
 
 // 🔵 Chat channels
 import chatMessagesRoutes from "./routes/chatMessages.routes.js";
@@ -512,3 +513,4 @@ startMonthlyIntelligenceCron();
 startReviewsCron();
 startBackupCron();
 startHuddleIntelligenceCron();
+startTrialLifecycleCron();

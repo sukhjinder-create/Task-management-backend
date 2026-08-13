@@ -8,7 +8,6 @@ import {
   loginWithGoogle,
   signupWorkspaceWithEmail,
   signupWorkspaceWithGoogle,
-  fetchGoogleProfileFromCode,
   loginWithMfa,
   getCurrentUser,
   requestPasswordReset,
@@ -21,16 +20,12 @@ import {
 import {
   completeRazorpayTrialSignupCheckoutSession,
   completeTrialSignupCheckoutSession,
-  createRazorpayTrialSignupCheckoutSession,
-  createTrialSignupCheckoutSession,
 } from "../services/payments.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { logAudit } from "../services/audit.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
 import { getPlanById, getPlanBySlug } from "../repositories/billingPlans.repository.js";
-import { detectCountry, resolveRequestCurrency } from "../services/currency.service.js";
-import { providerSupportsCurrency } from "../services/billingPricing.service.js";
 import { getJwtSecret } from "../config/secrets.js";
 import {
   getFrontendBaseUrl,
@@ -57,6 +52,16 @@ function buildFrontendRedirect(path, params = {}) {
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
   }
+  return url.toString();
+}
+
+function buildFrontendHashRedirect(path, params = {}) {
+  const url = new URL(path, FRONTEND_URL);
+  const fragment = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) fragment.set(key, value);
+  }
+  url.hash = fragment.toString();
   return url.toString();
 }
 
@@ -104,11 +109,6 @@ function mapSignupStatus(message = "") {
   return 400;
 }
 
-function trialSignupRequiresPayment() {
-  const explicit = process.env.TRIAL_SIGNUP_REQUIRE_PAYMENT ?? process.env.TRIAL_SIGNUP_REQUIRE_STRIPE;
-  return String(explicit || "true").toLowerCase() !== "false";
-}
-
 function defaultSignupPlanSlug() {
   return String(process.env.TRIAL_SIGNUP_PLAN_SLUG || "pro").trim().toLowerCase();
 }
@@ -132,34 +132,6 @@ function isFreePlan(plan) {
     (Number(plan?.price_monthly_minor) || 0) === 0 &&
     (Number(plan?.price_yearly_minor) || 0) === 0
   );
-}
-
-function signupPlanRequiresPayment(plan) {
-  return trialSignupRequiresPayment() && !isFreePlan(plan);
-}
-
-function getTrialSignupPaymentProvider(currency = null) {
-  const provider = String(
-    process.env.TRIAL_SIGNUP_PAYMENT_PROVIDER ||
-      process.env.PAYMENTS_PROVIDER ||
-      "stripe"
-  ).toLowerCase();
-  const razorpayConfigured = !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
-  const configured = provider === "razorpay" && razorpayConfigured ? "razorpay" : "stripe";
-
-  // Route to a provider that can settle this customer's currency — Razorpay is
-  // INR-only unless International Payments is enabled on the account.
-  if (!currency) return configured;
-  if (providerSupportsCurrency(configured, currency)) return configured;
-  if (configured === "razorpay" && process.env.STRIPE_SECRET_KEY) return "stripe";
-  if (configured === "stripe" && razorpayConfigured && providerSupportsCurrency("razorpay", currency)) {
-    return "razorpay";
-  }
-  return configured;
-}
-
-function isConsentAccepted(value) {
-  return value === true || value === "true" || value === "1" || value === 1;
 }
 
 function captureAuthGrowth(req, eventName, data = {}, properties = {}, id = null) {
@@ -203,54 +175,21 @@ router.post("/signup/workspace", async (req, res) => {
       plan: req.body?.plan,
     });
 
-    if (signupPlanRequiresPayment(selectedPlan)) {
-      // Charge in the currency the visitor was quoted on the pricing page, and
-      // pick a provider that can settle it.
-      const signupCurrency = req.body?.currency || resolveRequestCurrency(req).currency;
-      const paymentProvider = getTrialSignupPaymentProvider(signupCurrency);
-      const createCheckout =
-        paymentProvider === "razorpay"
-          ? createRazorpayTrialSignupCheckoutSession
-          : createTrialSignupCheckoutSession;
-      const data = await createCheckout({
-        workspaceName,
-        name,
-        email,
-        password,
-        planId: selectedPlan.id,
-        plan: selectedPlan.slug,
-        interval: req.body?.interval,
-        currency: signupCurrency,
-        country: detectCountry(req),
-        successUrl: req.body?.successUrl,
-        cancelUrl: req.body?.cancelUrl,
-        ipHash: getRequestIpHash(req),
-        userAgent: req.headers["user-agent"],
-        consentAccepted:
-          isConsentAccepted(req.body?.consentAccepted) ||
-          isConsentAccepted(req.body?.trialBillingConsent),
-      });
-
-      logAudit({
-        workspaceId: null,
-        userId: null,
-        action: "workspace.signup.checkout.created",
-        entityType: "workspace",
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-        metadata: { email, provider: data.provider || paymentProvider, checkoutSessionId: data.id },
-      });
-
-      return res.status(201).json(data);
-    }
-
+    const startsTrial = !isFreePlan(selectedPlan);
     const data = await signupWorkspaceWithEmail({
       workspaceName,
       name,
       email,
       password,
       ipHash: getRequestIpHash(req),
-      plan: isFreePlan(selectedPlan) ? selectedPlan.slug : "trial",
+      plan: startsTrial ? "trial" : selectedPlan.slug,
+      trialContext: startsTrial
+        ? {
+            selectedPlan,
+            interval: req.body?.interval,
+            currency: req.body?.currency,
+          }
+        : null,
     });
 
     data.refreshToken = await createSession(
@@ -269,7 +208,12 @@ router.post("/signup/workspace", async (req, res) => {
       entityId: data.workspace?.id,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-      metadata: { method: "email" },
+      metadata: {
+        method: "email",
+        selectedPlan: selectedPlan.slug,
+        paymentRequiredAtSignup: false,
+        trialEndsAt: data.workspace?.trial_ends_at || null,
+      },
     });
 
     return res.status(201).json(data);
@@ -685,9 +629,6 @@ router.get("/google", async (req, res) => {
   const isSignup = ["signup", "register", "trial"].includes(mode);
   const isMobileClient = client === "mobile";
   const workspaceName = String(req.query.workspaceName || "").trim();
-  const trialBillingConsent =
-    isConsentAccepted(req.query.trialBillingConsent) ||
-    isConsentAccepted(req.query.consentAccepted);
   let selectedPlan = null;
 
   if (isSignup) {
@@ -709,12 +650,6 @@ router.get("/google", async (req, res) => {
       buildFrontendRedirect("/signup", { error: "workspace_required" })
     );
   }
-  if (isSignup && signupPlanRequiresPayment(selectedPlan) && !trialBillingConsent) {
-    return res.redirect(
-      buildFrontendRedirect("/signup", { error: "billing_consent_required" })
-    );
-  }
-
   const params = new URLSearchParams({
     client_id:     GOOGLE_CLIENT_ID,
     redirect_uri:  GOOGLE_CALLBACK_URL,
@@ -730,9 +665,10 @@ router.get("/google", async (req, res) => {
       client: isMobileClient ? "mobile" : "web",
       ...(isSignup ? {
         workspaceName,
-        trialBillingConsent,
         planId: selectedPlan.id,
         plan: selectedPlan.slug,
+        interval: req.query.interval === "yearly" ? "yearly" : "monthly",
+        currency: req.query.currency || null,
       } : {}),
     }));
   }
@@ -769,66 +705,24 @@ router.get("/google/callback", async (req, res) => {
       ? await resolveSignupPlan({ planId: googleState?.planId, plan: googleState?.plan })
       : null;
 
-    if (isSignup && signupPlanRequiresPayment(selectedPlan)) {
-      const profile = await fetchGoogleProfileFromCode(code);
-      if (!profile.emailVerified) {
-        throw new Error("Your Google account email is not verified.");
-      }
-
-      const signupCurrency = googleState.currency || resolveRequestCurrency(req).currency;
-      const paymentProvider = getTrialSignupPaymentProvider(signupCurrency);
-      const createCheckout =
-        paymentProvider === "razorpay"
-          ? createRazorpayTrialSignupCheckoutSession
-          : createTrialSignupCheckoutSession;
-      const checkout = await createCheckout({
-        workspaceName: googleState.workspaceName,
-        name: profile.name,
-        email: profile.email,
-        authProvider: "google",
-        avatarUrl: profile.picture,
-        ipHash: getRequestIpHash(req),
-        userAgent: req.headers["user-agent"],
-        consentAccepted: googleState.trialBillingConsent === true,
-        planId: selectedPlan.id,
-        plan: selectedPlan.slug,
-        currency: signupCurrency,
-        country: detectCountry(req),
-      });
-      logAudit({
-        workspaceId: null,
-        userId: null,
-        action: "workspace.signup.checkout.created",
-        entityType: "workspace",
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-        metadata: {
-          email: profile.email,
-          method: "google",
-          provider: checkout.provider || paymentProvider,
-          checkoutSessionId: checkout.id,
-        },
-      });
-
-      if (checkout.url) return res.redirect(checkout.url);
-      return res.redirect(
-        buildFrontendRedirect("/signup", {
-          checkout_provider: checkout.provider || paymentProvider,
-          razorpay_subscription_id: checkout.subscriptionId,
-          razorpay_pending_signup_id: checkout.notes?.pending_signup_id,
-        })
-      );
-    }
-
+    const startsTrial = isSignup && !isFreePlan(selectedPlan);
     const data = isSignup
       ? await signupWorkspaceWithGoogle(code, {
           workspaceName: googleState.workspaceName,
           ipHash: getRequestIpHash(req),
-          plan: isFreePlan(selectedPlan) ? selectedPlan.slug : "trial",
+          plan: startsTrial ? "trial" : selectedPlan.slug,
+          trialContext: startsTrial
+            ? {
+                selectedPlan,
+                interval: googleState.interval,
+                currency: googleState.currency,
+              }
+            : null,
         })
       : await loginWithGoogle(code);
 
-    // Pass only token — frontend fetches user from /users/me
+    // Web credentials are placed in the URL fragment so they never reach the
+    // frontend host's request logs; the callback fetches the user from /users/me.
     const refreshToken = await createSession(
       data.user.id,
       data.user.workspaceId,
@@ -859,17 +753,25 @@ router.get("/google/callback", async (req, res) => {
       entityId: isSignup ? data.workspace?.id : data.user.id,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-      metadata: { method: "google" },
+      metadata: {
+        method: "google",
+        ...(isSignup ? {
+          selectedPlan: selectedPlan.slug,
+          paymentRequiredAtSignup: false,
+          trialEndsAt: data.workspace?.trial_ends_at || null,
+        } : {}),
+      },
     });
 
     const redirectParams = {
-        token: data.token,
-        refreshToken,
-      };
+      token: data.token,
+      refreshToken,
+      flow: isSignup ? "signup" : "login",
+    };
     res.redirect(
       isMobileClient
         ? buildMobileAuthRedirect(redirectParams)
-        : buildFrontendRedirect("/auth/callback", redirectParams)
+        : buildFrontendHashRedirect("/auth/callback", redirectParams)
     );
   } catch (err) {
     console.error("Google SSO callback error:", err.message);

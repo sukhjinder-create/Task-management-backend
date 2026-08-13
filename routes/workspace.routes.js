@@ -81,8 +81,8 @@ router.get("/my-plan", requireWorkspaceForUser, async (req, res) => {
     const features   = Array.isArray(workspace.planFeatures) ? workspace.planFeatures : [];
     const onTrial    = workspace.onTrial || false;
     const trialEndsAt = workspace.trialEndsAt || null;
-    // trial_expired = trial window has closed AND no paid plan has been assigned yet
-    const trialExpired = !onTrial && !!workspace.trial_ends_at && !planSlug;
+    const trialState = workspace.trialState || {};
+    const trialExpired = !!trialState.paymentSetupRequired;
 
     return res.json({
       plan: planSlug,
@@ -91,6 +91,13 @@ router.get("/my-plan", requireWorkspaceForUser, async (req, res) => {
       on_trial:      onTrial,
       trial_ends_at: trialEndsAt,
       trial_expired: trialExpired,
+      trial_completed: !!trialState.trialCompleted,
+      trial_downgraded: !!trialState.trialDowngraded,
+      payment_setup_required: !!trialState.paymentSetupRequired,
+      trial_plan: trialState.intent?.selectedPlanSlug || null,
+      trial_plan_name: trialState.intent?.selectedPlanName || null,
+      trial_billing_interval: trialState.intent?.billingInterval || null,
+      fallback_plan: trialState.fallbackPlan || "starter",
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });

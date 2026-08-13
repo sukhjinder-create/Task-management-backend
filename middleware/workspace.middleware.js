@@ -18,6 +18,10 @@ import crypto from "crypto";
 import pool from "../db.js";
 import { getWorkspaceById } from "../repositories/workspace.repository.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
+import {
+  describeTrialLifecycle,
+  reconcileExpiredWorkspaceTrial,
+} from "../services/trialLifecycle.service.js";
 
 // All feature keys — granted in full during a free trial
 const ALL_FEATURE_KEYS = [
@@ -80,6 +84,18 @@ export async function requireWorkspaceForUser(req, res, next) {
     });
   }
 
+  // Make the seven-day boundary exact for active users. The scheduled worker
+  // performs the same idempotent transition for dormant workspaces.
+  const initialTrialState = describeTrialLifecycle(workspace);
+  if (initialTrialState.trialCompleted && !initialTrialState.currentPlan) {
+    try {
+      const reconciled = await reconcileExpiredWorkspaceTrial(workspaceId);
+      workspace = reconciled.workspace || workspace;
+    } catch (err) {
+      console.error("Trial expiry reconciliation failed:", err.message);
+    }
+  }
+
   // 🚫 Enforce workspace status
   if (workspace.status && workspace.status !== "active") {
     return res.status(403).json({
@@ -91,14 +107,15 @@ export async function requireWorkspaceForUser(req, res, next) {
   req.workspace = workspace;
 
   // Check if workspace is on an active free trial
-  const trialEndsAt = workspace.trial_ends_at ? new Date(workspace.trial_ends_at) : null;
-  const isOnTrial   = trialEndsAt && trialEndsAt > new Date();
+  const trialState = describeTrialLifecycle(workspace);
+  const isOnTrial = trialState.onTrial;
 
   if (isOnTrial) {
     // Trial active → grant every feature
     req.workspace.planFeatures = ALL_FEATURE_KEYS;
     req.workspace.onTrial      = true;
-    req.workspace.trialEndsAt  = workspace.trial_ends_at;
+    req.workspace.trialEndsAt  = trialState.trialEndsAt;
+    req.workspace.trialState   = trialState;
 
     // Log this IP for trial abuse auditing (fire-and-forget, non-blocking)
     try {
@@ -113,7 +130,8 @@ export async function requireWorkspaceForUser(req, res, next) {
     } catch { /* silent */ }
   } else {
     req.workspace.onTrial     = false;
-    req.workspace.trialEndsAt = workspace.trial_ends_at || null;
+    req.workspace.trialEndsAt = trialState.trialEndsAt;
+    req.workspace.trialState  = trialState;
 
     // Load billing plan features from DB
     try {

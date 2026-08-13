@@ -370,6 +370,41 @@ jobs:
             echo "warning: git sync skipped (fetch of $SYNC_BRANCH failed)"
           fi
 
+          # This release adds only an idempotent partial index for expired
+          # no-card trial reconciliation. Apply it through the already-running
+          # container so DATABASE_URL never leaves the production host. A
+          # failure stops before the image is changed, leaving current traffic
+          # untouched; the SQL itself uses IF NOT EXISTS for safe re-runs.
+          TRIAL_MIGRATION="migrations/20260813_no_card_trial_lifecycle.sql"
+          [ -f "$TRIAL_MIGRATION" ] || { echo "missing migration: $TRIAL_MIGRATION"; exit 1; }
+          echo "applying $TRIAL_MIGRATION ..."
+          sudo docker exec -i app-app-1 node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: { rejectUnauthorized: false },
+              });
+              try {
+                await pool.query(sql);
+                const check = await pool.query(
+                  "SELECT to_regclass($1) AS index_name",
+                  ["public.idx_workspaces_unpaid_trial_expiry"]
+                );
+                if (!check.rows[0]?.index_name) throw new Error("trial expiry index verification failed");
+                console.log("trial lifecycle migration verified");
+              } catch (error) {
+                console.error("trial lifecycle migration failed:", error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$TRIAL_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 

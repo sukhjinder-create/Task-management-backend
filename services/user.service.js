@@ -24,21 +24,39 @@ const WORKSPACE_GLOBAL = "GLOBAL";
 ===================================================== */
 async function determineBillingStatus(workspaceId, role) {
   const wsRes = await pool.query(
-    `SELECT trial_started_at, billing_cycle_anchor FROM workspaces WHERE id = $1 LIMIT 1`,
+    `SELECT w.trial_started_at, w.trial_ends_at, w.billing_cycle_anchor,
+            w.billing_plan, w.plan,
+            bp.price_monthly_minor, bp.price_yearly_minor
+       FROM workspaces w
+       LEFT JOIN billing_plans bp
+         ON bp.slug = COALESCE(w.billing_plan, w.plan)
+      WHERE w.id = $1
+      LIMIT 1`,
     [workspaceId]
   );
   const ws = wsRes.rows[0];
   if (!ws) return 'pending';
 
+  const assignedPlan = ws.billing_plan || ws.plan || null;
+  const assignedPlanIsFree =
+    assignedPlan &&
+    (Number(ws.price_monthly_minor) || 0) === 0 &&
+    (Number(ws.price_yearly_minor) || 0) === 0;
+
+  // Free-plan members do not require a seat activation payment.
+  if (assignedPlanIsFree) return 'active';
+
   // If workspace has an active billing cycle, all new users are pending until paid
   if (ws.billing_cycle_anchor) return 'pending';
 
   // Check if workspace is still within 7-day trial window
-  const trialStart = ws.trial_started_at ? new Date(ws.trial_started_at) : new Date();
-  const trialEnd = new Date(trialStart);
-  trialEnd.setDate(trialEnd.getDate() + 7);
+  const trialEnd = ws.trial_ends_at
+    ? new Date(ws.trial_ends_at)
+    : ws.trial_started_at
+      ? new Date(new Date(ws.trial_started_at).getTime() + 7 * 24 * 60 * 60 * 1000)
+      : null;
 
-  if (new Date() > trialEnd) {
+  if (!trialEnd || new Date() > trialEnd) {
     // Trial expired, admin has not subscribed yet — new users are pending
     return 'pending';
   }

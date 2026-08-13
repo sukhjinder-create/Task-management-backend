@@ -20,6 +20,8 @@ export async function createWorkspace({
   ownerName = null,
   ipHash = null,
   skipTrialIpCheck = false,
+  metadata = null,
+  trialEndsAt = null,
 }) {
   const client = await pool.connect();
 
@@ -67,18 +69,20 @@ export async function createWorkspace({
     // billing_plan stays NULL during trial — features come from trial window
     const billingPlan = isTrial ? null : plan;
     const trialStart  = isTrial ? new Date() : null;
-    const trialEnd    = isTrial ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) : null;
+    const trialEnd    = isTrial
+      ? trialEndsAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+      : null;
 
     // ── Create workspace ─────────────────────────────────────────────────────
     const { rows: [workspace] } = await client.query(
       `INSERT INTO workspaces (
          id, name, plan, member_limit, billing_plan, max_members, is_active,
-         trial_started_at, trial_ends_at, created_at, updated_at
+         trial_started_at, trial_ends_at, metadata, created_at, updated_at
        ) VALUES (
          gen_random_uuid(), $1, $2, $3, $4, $3, true,
-         $5, $6, now(), now()
+         $5, $6, $7, now(), now()
        ) RETURNING *`,
-      [name, billingPlan, memberLimit, billingPlan, trialStart, trialEnd]
+      [name, billingPlan, memberLimit, billingPlan, trialStart, trialEnd, metadata]
     );
 
     // ── Store trial fingerprint + IP marker for future audit/IP protection ───

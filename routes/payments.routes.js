@@ -172,13 +172,14 @@ router.post("/subscribe", requireBillingAdmin, async (req, res) => {
     if (!planId) return res.status(400).json({ error: "planId is required" });
 
     const { rows } = await db.query(
-      `SELECT name, billing_currency FROM workspaces WHERE id = $1 LIMIT 1`,
+      `SELECT name, billing_currency, trial_ends_at FROM workspaces WHERE id = $1 LIMIT 1`,
       [req.workspaceId]
     );
     const workspace = {
       id: req.workspaceId,
       name: req.workspace?.name || rows[0]?.name || "",
       billing_currency: rows[0]?.billing_currency || null,
+      trial_ends_at: req.workspace?.trial_ends_at || rows[0]?.trial_ends_at || null,
     };
     const user      = { id: req.user?.id,   email: req.user?.email || "" };
 
@@ -193,7 +194,12 @@ router.post("/subscribe", requireBillingAdmin, async (req, res) => {
 
     return res.status(201).json(result);
   } catch (err) {
-    return res.status(err.statusCode || 500).json({ error: err.message, details: err.details });
+    return res.status(err.statusCode || 500).json({
+      error: err.message,
+      code: err.code,
+      availableAt: err.availableAt,
+      details: err.details,
+    });
   }
 });
 
