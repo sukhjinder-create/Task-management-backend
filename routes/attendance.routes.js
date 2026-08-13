@@ -7,11 +7,25 @@ import {
   markAws,
   markLunch,
   markAvailableAfterAws,
+  getCurrentAttendanceStatus,
   getLiveAttendanceDashboard,
 } from "../services/attendance.service.js";
 import { emitAttendanceUpdated } from "../realtime/socket.js";
 
 const router = express.Router();
+
+router.get("/status", authMiddleware, async (req, res) => {
+  try {
+    const status = await getCurrentAttendanceStatus({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+    });
+    res.json(status);
+  } catch (err) {
+    console.error("Error loading attendance status:", err);
+    res.status(500).json({ error: "Failed to load attendance status" });
+  }
+});
 
 router.get("/live", authMiddleware, async (req, res) => {
   try {

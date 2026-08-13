@@ -60,6 +60,8 @@ function mapLiveStatus(eventType) {
       return "aws";
     case EVENT.LUNCH_START:
       return "lunch";
+    case EVENT.SIGN_OFF:
+      return "offline";
     default:
       return "available";
   }
@@ -484,6 +486,56 @@ export async function markAvailableAfterAws(userId, workspaceId) {
   return true;
 }
 
+/**
+ * Resolve the authenticated user's current attendance state from the
+ * workspace-scoped open session. Browser storage is never authoritative for
+ * attendance because it can outlive a user or workspace session.
+ */
+export async function getCurrentAttendanceStatus({ workspaceId, userId }) {
+  if (!workspaceId || workspaceId === WORKSPACE_GLOBAL || !userId) {
+    return {
+      source: "attendance_session",
+      status: "offline",
+      signedIn: false,
+      signedInAt: null,
+      statusSince: null,
+    };
+  }
+
+  const { rows } = await pool.query(
+    `
+    SELECT
+      s.sign_in_at,
+      COALESCE(ev.event_type, 'SIGN_IN') AS latest_event_type,
+      COALESCE(ev.started_at, s.sign_in_at) AS latest_event_started_at
+    FROM attendance_sessions s
+    LEFT JOIN LATERAL (
+      SELECT e.event_type, e.started_at
+      FROM attendance_events e
+      WHERE e.session_id = s.id
+      ORDER BY e.started_at DESC
+      LIMIT 1
+    ) ev ON TRUE
+    WHERE s.user_id = $1
+      AND s.workspace_id = $2
+      AND s.sign_off_at IS NULL
+    ORDER BY s.sign_in_at DESC
+    LIMIT 1
+    `,
+    [userId, workspaceId]
+  );
+
+  const session = rows[0] || null;
+  const status = session ? mapLiveStatus(session.latest_event_type) : "offline";
+  return {
+    source: "attendance_session",
+    status,
+    signedIn: status !== "offline",
+    signedInAt: toIso(session?.sign_in_at),
+    statusSince: toIso(session?.latest_event_started_at),
+  };
+}
+
 /* ------------------------------------------------------------
    LEGACY WRAPPERS (UNCHANGED)
 ------------------------------------------------------------ */
@@ -676,6 +728,7 @@ export default {
   markAws,
   markLunch,
   markAvailableAfterAws,
+  getCurrentAttendanceStatus,
   markSignInLegacy,
   markSignOffLegacy,
   markAwsLegacy,
