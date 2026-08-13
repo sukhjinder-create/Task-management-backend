@@ -13,25 +13,82 @@ function riskLevel(score) {
 }
 
 export async function getLegacyUserPerformanceResponse({ workspaceId, userId, month }) {
-  const data = await intelligenceService.getUserPerformance({
-    workspaceId,
-    userId,
-    month,
-  });
+  const [data, { rows: evidenceRows }] = await Promise.all([
+    intelligenceService.getUserPerformance({
+      workspaceId,
+      userId,
+      month,
+    }),
+    pool.query(
+      `SELECT
+         EXISTS (
+           SELECT 1 FROM tasks
+           WHERE workspace_id = $1 AND assigned_to = $2
+         ) AS has_task_evidence,
+         EXISTS (
+           SELECT 1 FROM attendance_daily
+           WHERE workspace_id = $1
+             AND user_id = $2
+             AND date >= NOW()::date - INTERVAL '30 days'
+             AND COALESCE(signed_in_minutes, 0) > 0
+         ) AS has_attendance_evidence`,
+      [workspaceId, userId]
+    ).catch(() => ({ rows: [{}] })),
+  ]);
+  const evidence = evidenceRows[0] || {};
+  const hasEvidence = Boolean(evidence.has_task_evidence || evidence.has_attendance_evidence);
+  const evidenceStatus = {
+    hasEvidence,
+    status: hasEvidence ? "available" : "insufficient_evidence",
+    reason: hasEvidence ? "task_or_attendance_evidence_available" : "no_task_or_attendance_evidence",
+  };
   return {
     ...data,
     source: "legacy_scoring_rollback",
+    evidenceStatus,
+    score: hasEvidence ? data.score : null,
+    explanation: hasEvidence ? data.explanation : "",
+    breakdown: hasEvidence ? data.breakdown : null,
+    coaching: hasEvidence ? data.coaching : [],
+    intelligence: hasEvidence
+      ? data.intelligence
+      : { dimensions: {}, risk: null, signals: [] },
   };
 }
 
 export async function getLegacyAdminInsightsResponse({ workspaceId, month }) {
-  const data = await intelligenceService.getAdminInsights({
-    workspaceId,
-    month: monthKey(month),
-  });
+  const [data, { rows }] = await Promise.all([
+    intelligenceService.getAdminInsights({
+      workspaceId,
+      month: monthKey(month),
+    }),
+    pool.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM tasks WHERE workspace_id = $1) AS has_task_evidence,
+         EXISTS (
+           SELECT 1 FROM attendance_daily
+           WHERE workspace_id = $1
+             AND date >= NOW()::date - INTERVAL '30 days'
+             AND COALESCE(signed_in_minutes, 0) > 0
+         ) AS has_attendance_evidence`,
+      [workspaceId]
+    ).catch(() => ({ rows: [{}] })),
+  ]);
+  const hasEvidence = Boolean(rows[0]?.has_task_evidence || rows[0]?.has_attendance_evidence);
   return {
     source: "legacy_scoring_rollback",
+    evidenceStatus: {
+      hasEvidence,
+      status: hasEvidence ? "available" : "insufficient_evidence",
+      reason: hasEvidence ? "workspace_evidence_available" : "no_workspace_execution_or_attendance_evidence",
+    },
     ...data,
+    ...(hasEvidence ? {} : {
+      forecast: null,
+      leaderboard: [],
+      signals: [],
+      analytics: null,
+    }),
   };
 }
 
@@ -169,22 +226,42 @@ export async function getLegacyWorkspaceDashboardResponse({ workspaceId }) {
 }
 
 export async function getLegacyWorkspaceHealthResponse({ workspaceId }) {
-  const { rows } = await pool.query(
-    `SELECT health_score, updated_at
-     FROM workspace_health
-     WHERE workspace_id = $1
-     LIMIT 1`,
-    [workspaceId]
-  ).catch(() => ({ rows: [] }));
+  const [{ rows }, { rows: evidenceRows }] = await Promise.all([
+    pool.query(
+      `SELECT health_score, updated_at
+       FROM workspace_health
+       WHERE workspace_id = $1
+       LIMIT 1`,
+      [workspaceId]
+    ).catch(() => ({ rows: [] })),
+    pool.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM tasks WHERE workspace_id = $1) AS has_task_evidence,
+         EXISTS (
+           SELECT 1 FROM attendance_daily
+           WHERE workspace_id = $1
+             AND date >= NOW()::date - INTERVAL '30 days'
+             AND COALESCE(signed_in_minutes, 0) > 0
+         ) AS has_attendance_evidence`,
+      [workspaceId]
+    ).catch(() => ({ rows: [{}] })),
+  ]);
   const row = rows[0] || {};
+  const evidence = evidenceRows[0] || {};
+  const hasEvidence = Boolean(evidence.has_task_evidence || evidence.has_attendance_evidence);
   return {
     source: "legacy_scoring_rollback",
-    healthScore: row.health_score == null ? null : Number(row.health_score),
-    band: riskLevel(row.health_score),
+    evidenceStatus: {
+      hasEvidence,
+      status: hasEvidence ? "available" : "insufficient_evidence",
+      reason: hasEvidence ? "workspace_evidence_available" : "no_workspace_execution_or_attendance_evidence",
+    },
+    healthScore: hasEvidence && row.health_score != null ? Number(row.health_score) : null,
+    band: hasEvidence && row.health_score != null ? riskLevel(row.health_score) : null,
     computedAt: row.updated_at || null,
     strengths: [],
     concerns: [],
-    drivers: ["Legacy workspace health rollback row"],
+    drivers: hasEvidence ? ["Legacy workspace health rollback row"] : [],
   };
 }
 

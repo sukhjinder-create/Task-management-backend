@@ -17,6 +17,7 @@ import {
   isChannelAdmin,
   getChannelMembers,
   createHuddleCallLogMessage,
+  validateDmChannelAccess,
 } from "../services/chat.service.js";
 
 import {
@@ -89,6 +90,29 @@ function legacyRoomName(channelKey) {
 function workspaceRoomName(channelKey, workspaceId = WORKSPACE_GLOBAL) {
   const ws = workspaceId || WORKSPACE_GLOBAL;
   return `workspace:${ws}:channel:${channelKey}`;
+}
+
+function joinScopedChannelRoom(socket, channelKey, workspaceId) {
+  if (workspaceId && workspaceId !== WORKSPACE_GLOBAL) {
+    socket.join(workspaceRoomName(channelKey, workspaceId));
+    return;
+  }
+  socket.join(legacyRoomName(channelKey));
+}
+
+function leaveScopedChannelRoom(socket, channelKey, workspaceId) {
+  if (workspaceId && workspaceId !== WORKSPACE_GLOBAL) {
+    socket.leave(workspaceRoomName(channelKey, workspaceId));
+    return;
+  }
+  socket.leave(legacyRoomName(channelKey));
+}
+
+function emitToScopedChannel(target, channelKey, workspaceId, event, payload) {
+  const room = workspaceId && workspaceId !== WORKSPACE_GLOBAL
+    ? workspaceRoomName(channelKey, workspaceId)
+    : legacyRoomName(channelKey);
+  target.to(room).emit(event, payload);
 }
 
 function boolEnv(value, fallback = false) {
@@ -539,31 +563,12 @@ async function getActiveWorkspaceUserIds(workspaceId, exceptUserId = null) {
 }
 
 async function resolveDmScope(channelId, workspaceId, actorUserId) {
-  const participantIds = dmParticipantIds(channelId).map(String);
-  if (participantIds.length !== 2) {
-    return { ok: false, reason: "invalid_dm_channel" };
-  }
-  if (participantIds.some((uid) => !isUuid(uid))) {
-    return { ok: false, reason: "invalid_dm_participant" };
-  }
-  if (!participantIds.includes(String(actorUserId))) {
-    return { ok: false, reason: "dm_participation_required" };
-  }
-
-  const { rows } = await pool.query(
-    `
-    SELECT user_id
-    FROM workspace_users
-    WHERE workspace_id = $1
-      AND user_id = ANY($2::uuid[])
-      AND (billing_status IS NULL OR billing_status != 'pending')
-    `,
-    [workspaceId, participantIds]
-  );
-  const activeIds = new Set(rows.map((row) => String(row.user_id)));
-  if (participantIds.some((uid) => !activeIds.has(uid))) {
-    return { ok: false, reason: "dm_workspace_membership_required" };
-  }
+  const access = await validateDmChannelAccess({
+    channelKey: channelId,
+    workspaceId,
+    userId: actorUserId,
+  });
+  if (!access.allowed) return { ok: false, reason: access.reason };
 
   return {
     ok: true,
@@ -571,7 +576,7 @@ async function resolveDmScope(channelId, workspaceId, actorUserId) {
       type: "dm",
       channelId,
       workspaceId,
-      participantIds,
+      participantIds: access.participantIds,
       isPrivate: true,
     },
   };
@@ -1132,7 +1137,7 @@ if (socket.workspaceId) {
 }
 
   // 🔔 Presence update (workspace-scoped)
-  io.emit("presence:update", {
+  io.to(`workspace:${socket.workspaceId}`).emit("presence:update", {
     userId,
     username,
     status: "online",
@@ -1161,15 +1166,16 @@ socket.on("chat:open", async (channelKey) => {
 
   const workspaceId = socket.workspaceId;
   // ✅ Ensure DM sockets join rooms (CRITICAL)
-if (channelKey.startsWith("dm:")) {
-  const legacyRoom = legacyRoomName(channelKey);
-  const wsRoom = workspaceRoomName(channelKey, workspaceId);
-
-  socket.join(legacyRoom);
-  socket.join(wsRoom);
-}
-
   try {
+    const scope = channelKey.startsWith("dm:")
+      ? await resolveDmScope(channelKey, workspaceId, String(userId))
+      : await resolveChannelScope(channelKey, workspaceId, String(userId));
+    if (!scope.ok) {
+      socket.emit("chat:error", { error: "Conversation is not available" });
+      return;
+    }
+    joinScopedChannelRoom(socket, channelKey, workspaceId);
+
     const res = await pool.query(
   `
   SELECT
@@ -1261,11 +1267,7 @@ socket.emit("chat:history", {
 
         if (socket.disconnected || socket._isCleanedUp) return;
 
-        const legacyRoom = legacyRoomName(channelKey);
-        const wsRoom = workspaceRoomName(channelKey, workspaceId);
-
-        socket.join(legacyRoom);
-        socket.join(wsRoom);
+        joinScopedChannelRoom(socket, channelKey, workspaceId);
 
         const resolvedWorkspaceId = socket.workspaceId;
         const canSeeHuddle =
@@ -1334,11 +1336,7 @@ socket.emit("chat:history", {
     if (!channelKey) return;
 
     const workspaceId = socket.workspaceId || WORKSPACE_GLOBAL;
-    const legacyRoom = legacyRoomName(channelKey);
-    const wsRoom = workspaceRoomName(channelKey, workspaceId);
-
-    socket.leave(legacyRoom);
-    socket.leave(wsRoom);
+    leaveScopedChannelRoom(socket, channelKey, workspaceId);
 
     // join/leave system messages intentionally suppressed
   });
@@ -1374,7 +1372,18 @@ socket.emit("chat:history", {
     const isDM = channelId.startsWith("dm:");
 
     // ✅ ONLY validate channel for non-DM
-    if (!isDM) {
+    if (isDM) {
+      const access = await validateDmChannelAccess({
+        channelKey: channelId,
+        workspaceId,
+        userId,
+      });
+      if (!access.allowed) {
+        socket.emit("chat:error", { error: "Direct message is not available" });
+        if (typeof ack === "function") ack({ ok: false, error: access.reason });
+        return;
+      }
+    } else {
       const channel = await getChannelByKey(channelId, workspaceId);
       if (!channel) {
         socket.emit("chat:error", { error: "Channel does not exist" });
@@ -1426,7 +1435,7 @@ socket.emit("chat:history", {
         // DM: unread-bump + push to each participant
         const dmTargets = channelId.split(":").slice(1).filter((id) => id !== String(userId));
         for (const targetId of dmTargets) {
-          io.to(targetId).emit("chat:unread-bump", { channelKey: channelId });
+          io.to(targetId).emit("chat:unread-bump", { channelKey: channelId, workspaceId });
         }
         const offlineTargets = dmTargets.filter((id) => !isOnline(id));
         if (offlineTargets.length) {
@@ -1441,23 +1450,27 @@ socket.emit("chat:history", {
       } else {
         // Channel: fetch members for push notifications
         const { rows: chMembers } = await pool.query(
-          "SELECT user_id FROM chat_channel_members WHERE channel_id = (SELECT id FROM chat_channels WHERE key = $1 LIMIT 1) AND user_id != $2",
-          [channelId, userId]
+          `SELECT cm.user_id
+           FROM chat_channel_members cm
+           JOIN chat_channels c ON c.id = cm.channel_id
+           WHERE c.key = $1 AND c.workspace_id = $2 AND cm.user_id != $3`,
+          [channelId, workspaceId, userId]
         );
         // Unread-bump: workspace-wide for public channels, per-member for private
         const { rows: chInfo } = await pool.query(
-          "SELECT is_private FROM chat_channels WHERE key = $1 LIMIT 1",
-          [channelId]
+          "SELECT is_private FROM chat_channels WHERE key = $1 AND workspace_id = $2 LIMIT 1",
+          [channelId, workspaceId]
         );
         const isPrivate = chInfo[0]?.is_private;
         if (isPrivate) {
           for (const { user_id } of chMembers) {
-            io.to(user_id).emit("chat:unread-bump", { channelKey: channelId });
+            io.to(user_id).emit("chat:unread-bump", { channelKey: channelId, workspaceId });
           }
         } else {
           io.to(`workspace:${workspaceId}`).emit("chat:unread-bump", {
             channelKey: channelId,
             fromUserId: String(userId),
+            workspaceId,
           });
         }
         // Push notifications go to explicit members only, and only the offline ones
@@ -1504,6 +1517,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
     const updated = await updateChatMessage({
       messageId,
+      userId,
       workspaceId: socket.workspaceId, // ✅ REQUIRED
       textHtml: plainText,
       fallbackText: plainText,
@@ -1525,11 +1539,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       updatedAt: updated.updated_at,
     };
 
-    io.to(legacyRoomName(channelId)).emit("chat:messageEdited", payload);
-    io.to(workspaceRoomName(channelId, workspaceId)).emit(
-      "chat:messageEdited",
-      payload
-    );
+    emitToScopedChannel(io, channelId, workspaceId, "chat:messageEdited", payload);
   } catch (err) {
     console.error("chat:edit error:", err);
   }
@@ -1542,6 +1552,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       const deleted = await softDeleteChatMessage({
         messageId,
         userId,
+        workspaceId: socket.workspaceId,
       });
 
       if (!deleted) return;
@@ -1557,14 +1568,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
         deletedAt: deleted.deleted_at,
       };
 
-      io.to(legacyRoomName(channelId)).emit(
-        "chat:messageDeleted",
-        payload
-      );
-      io.to(workspaceRoomName(channelId, workspaceId)).emit(
-        "chat:messageDeleted",
-        payload
-      );
+      emitToScopedChannel(io, channelId, workspaceId, "chat:messageDeleted", payload);
     } catch (err) {
       console.error("chat:delete error:", err.message);
     }
@@ -1580,8 +1584,11 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   try {
     // 1️⃣ Load current reactions
     const { rows } = await pool.query(
-      `SELECT reactions FROM chat_messages WHERE id = $1 LIMIT 1`,
-      [messageId]
+      `SELECT reactions
+       FROM chat_messages
+       WHERE id = $1 AND workspace_id = $2 AND channel_key = $3
+       LIMIT 1`,
+      [messageId, socket.workspaceId, channelId]
     );
     if (!rows.length) return;
 
@@ -1605,8 +1612,10 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
 
     // 2️⃣ Persist to DB
     await pool.query(
-      `UPDATE chat_messages SET reactions = $1 WHERE id = $2`,
-      [current, messageId]
+      `UPDATE chat_messages
+       SET reactions = $1
+       WHERE id = $2 AND workspace_id = $3 AND channel_key = $4`,
+      [current, messageId, socket.workspaceId, channelId]
     );
 
     // 3️⃣ Emit (unchanged behavior)
@@ -1619,10 +1628,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       workspaceId: socket.workspaceId || WORKSPACE_GLOBAL,
     };
 
-    io.to(legacyRoomName(channelId)).emit("chat:reaction", out);
-    io
-      .to(workspaceRoomName(channelId, out.workspaceId))
-      .emit("chat:reaction", out);
+    emitToScopedChannel(io, channelId, out.workspaceId, "chat:reaction", out);
   } catch (err) {
     console.error("chat:reaction error:", err);
   }
@@ -1636,10 +1642,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       at: new Date().toISOString(),
       workspaceId: socket.workspaceId || WORKSPACE_GLOBAL,
     };
-    socket.to(legacyRoomName(channelId)).emit("chat:typing", out);
-    socket
-      .to(workspaceRoomName(channelId, out.workspaceId))
-      .emit("chat:typing", out);
+    emitToScopedChannel(socket, channelId, out.workspaceId, "chat:typing", out);
   });
 
   socket.on("chat:read", ({ channelId, at }) => {
@@ -1650,10 +1653,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
       at: at || new Date().toISOString(),
       workspaceId: socket.workspaceId || WORKSPACE_GLOBAL,
     };
-    socket.to(legacyRoomName(channelId)).emit("chat:read", out);
-    socket
-      .to(workspaceRoomName(channelId, out.workspaceId))
-      .emit("chat:read", out);
+    emitToScopedChannel(socket, channelId, out.workspaceId, "chat:read", out);
   });
 
   /* -----------------------------------------------------
@@ -2757,7 +2757,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
   ----------------------------------------------------- */
   socket.on("presence:set", (status) => {
     if (!status) return;
-    io.emit("presence:update", {
+    io.to(`workspace:${socket.workspaceId}`).emit("presence:update", {
       userId,
       username,
       status,
@@ -2773,7 +2773,7 @@ socket.on("chat:edit", async ({ channelId, messageId, text }) => {
     socket._isCleanedUp = true;
     console.log("Socket disconnected:", userId);
 
-    io.emit("presence:update", {
+    io.to(`workspace:${socket.workspaceId}`).emit("presence:update", {
       userId,
       username,
       status: "offline",
@@ -2870,12 +2870,12 @@ export function emitPlanUpdated(workspaceId, planSlug) {
 export function emitChannelCreated(channel, workspaceId = WORKSPACE_GLOBAL) {
   if (!io) return;
 
+  if (workspaceId && workspaceId !== WORKSPACE_GLOBAL) {
+    io.to(`workspace:${workspaceId}`).emit("chat:channel_created", channel);
+    return;
+  }
   const key = channel?.key || channel?.id || "unknown";
-  const legacyRoom = legacyRoomName(key);
-  const wsRoom = workspaceRoomName(key, workspaceId);
-
-  io.to(legacyRoom).emit("chat:channel_created", channel);
-  io.to(wsRoom).emit("chat:channel_created", channel);
+  io.to(legacyRoomName(key)).emit("chat:channel_created", channel);
 }
 
 export function emitMemberAdded(
@@ -2885,19 +2885,11 @@ export function emitMemberAdded(
 ) {
   if (!io) return;
   io.to(userId).emit("chat:added_to_channel", { channelId, workspaceId });
-  io.to(legacyRoomName(channelId)).emit("chat:member_added", {
+  emitToScopedChannel(io, channelId, workspaceId, "chat:member_added", {
     channelId,
     userId,
     workspaceId,
   });
-  io.to(workspaceRoomName(channelId, workspaceId)).emit(
-    "chat:member_added",
-    {
-      channelId,
-      userId,
-      workspaceId,
-    }
-  );
 }
 
 export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL) {
@@ -2980,10 +2972,13 @@ export function emitMessage(channelKey, message, workspaceId = WORKSPACE_GLOBAL)
     huddleCall: message.huddleCall || null,
   };
 
-io
-  .to(legacyRoomName(resolvedChannelKey))
-  .to(workspaceRoomName(resolvedChannelKey, resolvedWorkspaceId))
-  .emit("chat:message", payload);
+emitToScopedChannel(
+  io,
+  resolvedChannelKey,
+  resolvedWorkspaceId,
+  "chat:message",
+  payload
+);
 
   // For DM channels: also emit to each participant's personal room so they
   // receive the notification even when they're not on the chat page (and
@@ -3007,10 +3002,7 @@ io
 export function emitAiTyping(channelKey, workspaceId) {
   if (!io || !channelKey || !workspaceId) return;
   const payload = { channelId: channelKey, workspaceId };
-  // Emit to both rooms so every client in the DM sees the indicator,
-  // regardless of which room they joined (legacy or workspace-scoped).
-  io.to(legacyRoomName(channelKey)).emit("chat:ai-typing", payload);
-  io.to(workspaceRoomName(channelKey, workspaceId)).emit("chat:ai-typing", payload);
+  emitToScopedChannel(io, channelKey, workspaceId, "chat:ai-typing", payload);
 }
 
 /**

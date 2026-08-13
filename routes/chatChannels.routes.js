@@ -2,7 +2,7 @@
 // ES module style to match your project (index.js uses import)
 import express from "express";
 import * as chatSvc from "../services/chat.service.js";
-import { getIO } from "../realtime/socket.js";
+import { emitChannelCreated, emitMemberAdded } from "../realtime/socket.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 
 /* ✅ ADD: workspace context (does NOT affect existing behavior) */
@@ -17,6 +17,11 @@ import {
 
 
 const router = express.Router();
+
+async function getWorkspaceChannel(channelId, workspaceId) {
+  const channel = await chatSvc.getChannelById(channelId);
+  return channel && String(channel.workspaceId) === String(workspaceId) ? channel : null;
+}
 
 /* -------------------------------------------------------
    ✅ ALL ROUTES BELOW REQUIRE REAL JWT AUTH
@@ -62,6 +67,17 @@ async function handleCreateChannel(req, res) {
       return res.status(400).json({ error: "Channel name is required" });
     }
 
+    const requestedMembers = Array.isArray(members)
+      ? [...new Set(members.filter(Boolean).map(String))]
+      : [];
+    for (const memberId of requestedMembers) {
+      if (!(await chatSvc.isActiveWorkspaceUser(req.workspaceId, memberId))) {
+        return res.status(400).json({
+          error: "Every channel member must be an active member of this workspace",
+        });
+      }
+    }
+
     const finalKey = key || generateChannelKey(name);
 
     const channel = await chatSvc.createChannel({
@@ -74,16 +90,14 @@ async function handleCreateChannel(req, res) {
       workspaceId: req.workspaceId,
     });
 
-    if (Array.isArray(members) && members.length) {
-      for (const m of members) {
-        if (!m) continue;
+    if (requestedMembers.length) {
+      for (const m of requestedMembers) {
         await chatSvc.addChannelMember(channel.id, m);
       }
     }
 
     try {
-      const io = getIO();
-      if (io) io.emit("chat:channel_created", channel);
+      emitChannelCreated(channel, req.workspaceId);
     } catch (e) {
       console.warn("chat channel emit failed:", e && e.message);
     }
@@ -109,8 +123,8 @@ router.put("/channels/:channelId", async (req, res) => {
     const isPrivate = getIsPrivateFromBody(req.body);
     const currentUserId = req.user.id;
 
-    const channel = await chatSvc.getChannelById(channelId);
-    if (!channel || String(channel.workspaceId) !== String(req.workspaceId)) {
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
+    if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
     }
     if (channel.type === "dm" || channel.key?.startsWith("dm:")) {
@@ -157,6 +171,8 @@ router.put("/channels/:channelId", async (req, res) => {
 router.get("/channels/:channelId/members", async (req, res) => {
   try {
     const { channelId } = req.params;
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
+    if (!channel) return res.status(404).json({ error: "Channel not found" });
     const members = await chatSvc.getChannelMembers(channelId);
     return res.json(members);
   } catch (err) {
@@ -176,9 +192,12 @@ router.post("/channels/:channelId/members", async (req, res) => {
     }
 
     const currentUserId = req.user.id;
-    const channel = await chatSvc.getChannelById(channelId);
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
     if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
+    }
+    if (!(await chatSvc.isActiveWorkspaceUser(req.workspaceId, userIdToAdd))) {
+      return res.status(400).json({ error: "User is not an active member of this workspace" });
     }
 
     const isAdmin = await chatSvc
@@ -198,14 +217,7 @@ router.post("/channels/:channelId/members", async (req, res) => {
     await chatSvc.addChannelMember(channelId, userIdToAdd);
 
     try {
-      const io = getIO();
-      if (io) {
-        io.to(userIdToAdd).emit("chat:added_to_channel", { channelId });
-        io.to(`channel:${channel.key || channelId}`).emit("chat:member_added", {
-          channelId,
-          userId: userIdToAdd,
-        });
-      }
+      emitMemberAdded(channel.key || channelId, userIdToAdd, req.workspaceId);
     } catch {}
 
     return res.json({ channelId, userId: userIdToAdd });
@@ -220,7 +232,7 @@ router.delete("/channels/:channelId/members/:userId", async (req, res) => {
     const { channelId, userId } = req.params;
     const currentUserId = req.user.id;
 
-    const channel = await chatSvc.getChannelById(channelId);
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
     if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
     }
@@ -259,6 +271,8 @@ router.delete("/channels/:channelId/members/:userId", async (req, res) => {
 router.get("/channels/:channelId/admins", async (req, res) => {
   try {
     const { channelId } = req.params;
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
+    if (!channel) return res.status(404).json({ error: "Channel not found" });
     const admins = await chatSvc.getChannelAdmins(channelId);
     return res.json(admins);
   } catch (err) {
@@ -277,9 +291,12 @@ router.post("/channels/:channelId/admins", async (req, res) => {
     }
 
     const currentUserId = req.user.id;
-    const channel = await chatSvc.getChannelById(channelId);
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
     if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
+    }
+    if (!(await chatSvc.isActiveWorkspaceUser(req.workspaceId, userId))) {
+      return res.status(400).json({ error: "User is not an active member of this workspace" });
     }
 
     const isAdmin = await chatSvc
@@ -309,7 +326,7 @@ router.delete("/channels/:channelId/admins/:userId", async (req, res) => {
     const { channelId, userId } = req.params;
     const currentUserId = req.user.id;
 
-    const channel = await chatSvc.getChannelById(channelId);
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
     if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
     }
@@ -348,6 +365,9 @@ router.post("/channels/:channelId/leave", async (req, res) => {
     const { channelId } = req.params;
     const userId = req.user.id;
 
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
+    if (!channel) return res.status(404).json({ error: "Channel not found" });
+
     await chatSvc.leaveChannel(channelId, userId);
     return res.json({ channelId, userId, left: true });
   } catch (err) {
@@ -360,6 +380,9 @@ router.delete("/channels/:channelId", async (req, res) => {
   try {
     const { channelId } = req.params;
     const userId = req.user.id;
+
+    const channel = await getWorkspaceChannel(channelId, req.workspaceId);
+    if (!channel) return res.status(404).json({ error: "Channel not found" });
 
     await chatSvc.deleteChannel(channelId, userId);
     return res.json({ channelId, deleted: true });
@@ -430,6 +453,14 @@ router.post("/:channelKey/members", async (req, res) => {
     if (!channel) {
       return res.status(404).json({ error: "Channel not found" });
     }
+    if (!(await chatSvc.isActiveWorkspaceUser(req.workspaceId, userIdToAdd))) {
+      return res.status(400).json({ error: "User is not an active member of this workspace" });
+    }
+    const currentUserId = req.user.id;
+    const isAdmin = await chatSvc.isChannelAdmin(channel.id, currentUserId).catch(() => false);
+    if (!isAdmin && String(channel.createdBy) !== String(currentUserId)) {
+      return res.status(403).json({ error: "Only channel admins can add members" });
+    }
 
     await chatSvc.addChannelMember(channel.id, userIdToAdd);
 
@@ -488,7 +519,7 @@ router.post("/mark-read", async (req, res) => {
   try {
     const { channelKey } = req.body;
     if (!channelKey) return res.status(400).json({ error: "channelKey required" });
-    await markChannelRead(req.user.id, channelKey);
+    await markChannelRead(req.user.id, channelKey, req.workspaceId);
     res.json({ ok: true });
   } catch (err) {
     console.error("[unread] markChannelRead error:", err.message);

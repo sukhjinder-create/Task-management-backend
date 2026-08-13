@@ -16,6 +16,10 @@ import {
   scoreWithScoringConfig,
 } from "../config/scoringConfig.model.js";
 import { getWorkspaceScoringConfig } from "../repositories/scoringConfig.repository.js";
+import {
+  getUserEvidenceStatus,
+  getWorkspaceEvidenceStatus,
+} from "./evidenceStatus.js";
 
 function monthKey() {
   return new Date().toISOString().slice(0, 7);
@@ -1316,57 +1320,62 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
   const user = snapshot.currentUser;
   if (!user) return null;
 
+  const evidenceStatus = getUserEvidenceStatus(user);
+  const hasEvidence = evidenceStatus.hasEvidence;
   const dimensions = user.dimensions || {};
-  const scoreExplanation = buildUserScoreExplanation(user);
+  const scoreExplanation = hasEvidence ? buildUserScoreExplanation(user) : null;
   return {
     source: "enterprise_intelligence",
     requestedMonth: month || monthKey(),
     effectiveMonth: monthKey(),
     scoreSource: "enterprise_intelligence",
-    score: user.score,
-    explanation: (user.drivers || []).slice(0, 2).join(" ") || "",
-    computedAt: user.computedAt,
-    coverageStart: user.coverageStart,
-    coverageEnd: user.coverageEnd,
-    attendanceClosedThroughDate: user.attendanceClosedThroughDate,
+    score: hasEvidence ? user.score : null,
+    explanation: hasEvidence ? (user.drivers || []).slice(0, 2).join(" ") || "" : "",
+    evidenceStatus,
+    computedAt: hasEvidence ? user.computedAt : null,
+    coverageStart: hasEvidence ? user.coverageStart : null,
+    coverageEnd: hasEvidence ? user.coverageEnd : null,
+    attendanceClosedThroughDate: hasEvidence ? user.attendanceClosedThroughDate : null,
     breakdown: {
-      attendanceScore: user.attendance?.score ?? null,
-      productivityScore: dimensions.deliveryEffectiveness?.score ?? user.score,
-      executionReliability: dimensions.executionReliability?.score ?? null,
-      deliveryEffectiveness: dimensions.deliveryEffectiveness?.score ?? null,
-      collaborationHealth: dimensions.collaborationHealth?.score ?? null,
-      workSustainability: dimensions.workSustainability?.score ?? null,
-      professionalDiscipline: dimensions.professionalDiscipline?.score ?? null,
-      hasAttendanceTracking: user.attendance?.metrics?.expectedWorkingDays > 0,
+      attendanceScore: hasEvidence ? user.attendance?.score ?? null : null,
+      productivityScore: hasEvidence ? dimensions.deliveryEffectiveness?.score ?? user.score : null,
+      executionReliability: hasEvidence ? dimensions.executionReliability?.score ?? null : null,
+      deliveryEffectiveness: hasEvidence ? dimensions.deliveryEffectiveness?.score ?? null : null,
+      collaborationHealth: hasEvidence ? dimensions.collaborationHealth?.score ?? null : null,
+      workSustainability: hasEvidence ? dimensions.workSustainability?.score ?? null : null,
+      professionalDiscipline: hasEvidence ? dimensions.professionalDiscipline?.score ?? null : null,
+      hasAttendanceTracking: hasEvidence && user.attendance?.metrics?.expectedWorkingDays > 0,
     },
     scoreExplanation,
-    scoreTooltip: scoreExplanation.scoreTooltip,
-    scoreTrace: scoreExplanation.scoreTrace,
+    scoreTooltip: scoreExplanation?.scoreTooltip || null,
+    scoreTrace: scoreExplanation?.scoreTrace || null,
     reasoning: {
-      strengths: user.strengths,
-      concerns: user.concerns,
-      drivers: user.drivers,
-      confidence: user.confidence,
-      attendance: user.attendance,
-      dimensions,
+      strengths: hasEvidence ? user.strengths : [],
+      concerns: hasEvidence ? user.concerns : [],
+      drivers: hasEvidence ? user.drivers : [],
+      confidence: hasEvidence ? user.confidence : null,
+      attendance: hasEvidence ? user.attendance : null,
+      dimensions: hasEvidence ? dimensions : {},
     },
-    coaching: [
+    coaching: hasEvidence ? [
       ...(user.concerns || []).map((concern) => ({
         message: concern,
         expectedImpact: "Improves enterprise intelligence indicators",
       })),
-    ],
+    ] : [],
     intelligence: {
       dimensions: {
-        executionDiscipline: dimensions.executionReliability?.score ?? 0,
-        timelinessIndex: dimensions.executionReliability?.metrics?.dueDateDiscipline ?? 0,
-        workloadStress: 100 - (dimensions.workSustainability?.score ?? 0),
-        velocityScore: dimensions.deliveryEffectiveness?.metrics?.velocity ?? 0,
+        executionDiscipline: hasEvidence ? dimensions.executionReliability?.score ?? null : null,
+        timelinessIndex: hasEvidence ? dimensions.executionReliability?.metrics?.dueDateDiscipline ?? null : null,
+        workloadStress: hasEvidence ? 100 - (dimensions.workSustainability?.score ?? 0) : null,
+        velocityScore: hasEvidence ? dimensions.deliveryEffectiveness?.metrics?.velocity ?? null : null,
       },
-      enterpriseDimensions: dimensions,
-      attendance: user.attendance,
-      risk: user.risk,
-      signals: (user.indicators || []).map((item) => item.label || item.type).filter(Boolean),
+      enterpriseDimensions: hasEvidence ? dimensions : {},
+      attendance: hasEvidence ? user.attendance : null,
+      risk: hasEvidence ? user.risk : null,
+      signals: hasEvidence
+        ? (user.indicators || []).map((item) => item.label || item.type).filter(Boolean)
+        : [],
     },
   };
 }
@@ -1374,7 +1383,14 @@ export async function buildUserPerformanceResponse({ workspaceId, userId, role, 
 export async function buildAdminInsightsResponse({ workspaceId, userId, role, range = "30d" }) {
   const rangeMeta = dashboardRangeMeta(range);
   const snapshot = await getUnifiedIntelligenceSnapshot({ workspaceId, userId, role });
-  const { scopedUsers, scopedProjects } = await scopedAdminUsersAndProjects({ workspaceId, userId, role, snapshot });
+  const evidenceStatus = getWorkspaceEvidenceStatus(snapshot);
+  const evidenceUsers = (snapshot.users || []).filter((user) => getUserEvidenceStatus(user).hasEvidence);
+  const { scopedUsers, scopedProjects } = await scopedAdminUsersAndProjects({
+    workspaceId,
+    userId,
+    role,
+    snapshot: { ...snapshot, users: evidenceUsers },
+  });
   const scoreHistory = await getHistoricalSeries({
     workspaceId,
     scopeType: "workspace",
@@ -1391,11 +1407,14 @@ export async function buildAdminInsightsResponse({ workspaceId, userId, role, ra
 
   return {
     source: "enterprise_intelligence",
+    evidenceStatus,
     dashboardRange: rangeMeta,
     orgScore: summarizeUsers(scopedUsers),
     coachingEffectiveness: {},
     riskDistribution: riskDistribution(scopedUsers),
-    forecast: buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext, rangeMeta }),
+    forecast: evidenceStatus.hasEvidence
+      ? buildForecastContract({ scoreHistory, workspace: snapshot.workspace, executionContext, rangeMeta })
+      : null,
     leaderboard: scopedUsers.slice(0, 5).map((user) => ({
       userId: user.userId,
       username: user.username,
@@ -1403,15 +1422,15 @@ export async function buildAdminInsightsResponse({ workspaceId, userId, role, ra
       risk: user.risk,
     })),
     execution: executionContext,
-    signals: [
+    signals: evidenceStatus.hasEvidence ? [
       ...(snapshot.workspace?.indicators || []),
       ...(snapshot.workspace?.concerns || []).map((concern) => ({ type: "concern", label: concern })),
-    ],
+    ] : [],
     analytics: {
-      workspace: snapshot.workspace,
+      workspace: evidenceStatus.hasEvidence ? snapshot.workspace : null,
       users: scopedUsers,
-      projects: scopedProjects,
-      teams: snapshot.teams,
+      projects: evidenceStatus.hasEvidence ? scopedProjects : [],
+      teams: evidenceStatus.hasEvidence ? snapshot.teams : [],
       trend,
     },
   };
@@ -1794,6 +1813,8 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
     getWorkspaceScoringConfig({ workspaceId }),
   ]);
   const workspaceIntel = snapshot.workspace;
+  const evidenceStatus = getWorkspaceEvidenceStatus(snapshot);
+  const hasEvidence = evidenceStatus.hasEvidence;
   const [tasksRes, autopilotRes] = await Promise.all([
     pool.query(
       `SELECT
@@ -1819,12 +1840,15 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
   const autopilot = autopilotRes.rows[0] || {};
   const totalTasks = Number(tasks.total) || 0;
   const completedTasks = Number(tasks.completed) || 0;
-  const scoreExplanation = buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig });
+  const scoreExplanation = hasEvidence
+    ? buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig })
+    : null;
 
   return {
     month,
     source: "enterprise_intelligence",
-    healthScore: workspaceIntel?.score ?? null,
+    evidenceStatus,
+    healthScore: hasEvidence ? workspaceIntel?.score ?? null : null,
     tasks: {
       total: totalTasks,
       completed: completedTasks,
@@ -1834,23 +1858,23 @@ export async function buildWorkspaceDashboardResponse({ workspaceId, userId, rol
       completionRate: totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0,
     },
     performance: {
-      avgScore: workspaceIntel?.analytics?.averageUserScore ?? null,
-      highPerformers: workspaceIntel?.analytics?.highPerformers || 0,
-      atRisk: workspaceIntel?.analytics?.atRiskUsers || 0,
+      avgScore: hasEvidence ? workspaceIntel?.analytics?.averageUserScore ?? null : null,
+      highPerformers: hasEvidence ? workspaceIntel?.analytics?.highPerformers || 0 : 0,
+      atRisk: hasEvidence ? workspaceIntel?.analytics?.atRiskUsers || 0 : 0,
     },
     autopilot: {
       pendingActions: Number(autopilot.pending_actions) || 0,
       overdueActions: Number(autopilot.overdue_actions) || 0,
       escalatedActions: Number(autopilot.escalated_actions) || 0,
     },
-    intelligence: workspaceIntel,
+    intelligence: hasEvidence ? workspaceIntel : null,
     scoreExplanation,
-    scoreTooltip: scoreExplanation.scoreTooltip,
-    scoreTrace: scoreExplanation.scoreTrace,
-    computedAt: workspaceIntel?.computedAt || null,
-    coverageStart: workspaceIntel?.coverageStart || null,
-    coverageEnd: workspaceIntel?.coverageEnd || null,
-    attendanceClosedThroughDate: workspaceIntel?.attendanceClosedThroughDate || null,
+    scoreTooltip: scoreExplanation?.scoreTooltip || null,
+    scoreTrace: scoreExplanation?.scoreTrace || null,
+    computedAt: hasEvidence ? workspaceIntel?.computedAt || null : null,
+    coverageStart: hasEvidence ? workspaceIntel?.coverageStart || null : null,
+    coverageEnd: hasEvidence ? workspaceIntel?.coverageEnd || null : null,
+    attendanceClosedThroughDate: hasEvidence ? workspaceIntel?.attendanceClosedThroughDate || null : null,
   };
 }
 
@@ -1860,25 +1884,30 @@ export async function buildWorkspaceHealthResponse({ workspaceId, userId, role }
     getWorkspaceScoringConfig({ workspaceId }),
   ]);
   const workspaceIntel = snapshot.workspace;
-  const scoreExplanation = buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig });
+  const evidenceStatus = getWorkspaceEvidenceStatus(snapshot);
+  const hasEvidence = evidenceStatus.hasEvidence;
+  const scoreExplanation = hasEvidence
+    ? buildWorkspaceScoreExplanation(workspaceIntel || {}, { scoringConfig })
+    : null;
   return {
     source: "enterprise_intelligence",
-    healthScore: workspaceIntel?.score ?? null,
-    band: workspaceIntel?.band ?? null,
-    trend: workspaceIntel?.trend ?? null,
-    confidence: workspaceIntel?.confidence ?? null,
-    strengths: workspaceIntel?.strengths || [],
-    concerns: workspaceIntel?.concerns || [],
-    drivers: workspaceIntel?.drivers || [],
-    indexes: workspaceIntel?.indexes || {},
+    evidenceStatus,
+    healthScore: hasEvidence ? workspaceIntel?.score ?? null : null,
+    band: hasEvidence ? workspaceIntel?.band ?? null : null,
+    trend: hasEvidence ? workspaceIntel?.trend ?? null : null,
+    confidence: hasEvidence ? workspaceIntel?.confidence ?? null : null,
+    strengths: hasEvidence ? workspaceIntel?.strengths || [] : [],
+    concerns: hasEvidence ? workspaceIntel?.concerns || [] : [],
+    drivers: hasEvidence ? workspaceIntel?.drivers || [] : [],
+    indexes: hasEvidence ? workspaceIntel?.indexes || {} : {},
     scoreExplanation,
-    scoreTooltip: scoreExplanation.scoreTooltip,
-    scoreTrace: scoreExplanation.scoreTrace,
-    risk: workspaceIntel?.risk || null,
-    computedAt: workspaceIntel?.computedAt || null,
-    coverageStart: workspaceIntel?.coverageStart || null,
-    coverageEnd: workspaceIntel?.coverageEnd || null,
-    attendanceClosedThroughDate: workspaceIntel?.attendanceClosedThroughDate || null,
+    scoreTooltip: scoreExplanation?.scoreTooltip || null,
+    scoreTrace: scoreExplanation?.scoreTrace || null,
+    risk: hasEvidence ? workspaceIntel?.risk || null : null,
+    computedAt: hasEvidence ? workspaceIntel?.computedAt || null : null,
+    coverageStart: hasEvidence ? workspaceIntel?.coverageStart || null : null,
+    coverageEnd: hasEvidence ? workspaceIntel?.coverageEnd || null : null,
+    attendanceClosedThroughDate: hasEvidence ? workspaceIntel?.attendanceClosedThroughDate || null : null,
   };
 }
 

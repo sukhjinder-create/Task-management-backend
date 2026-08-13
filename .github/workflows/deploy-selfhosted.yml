@@ -405,6 +405,47 @@ jobs:
             });
           ' < "$TRIAL_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
 
+          # Add and backfill workspace scope on chat read markers before the
+          # tenant-isolated unread query is deployed. Additive and idempotent.
+          CHAT_TENANT_MIGRATION="migrations/20260813_chat_tenant_isolation.sql"
+          [ -f "$CHAT_TENANT_MIGRATION" ] || { echo "missing migration: $CHAT_TENANT_MIGRATION"; exit 1; }
+          echo "applying $CHAT_TENANT_MIGRATION ..."
+          sudo docker exec -i app-app-1 node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: { rejectUnauthorized: false },
+              });
+              try {
+                await pool.query(sql);
+                const check = await pool.query(
+                  `SELECT
+                     EXISTS (
+                       SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = $1
+                         AND table_name = $2
+                         AND column_name = $3
+                     ) AS has_workspace_id,
+                     to_regclass($4) AS index_name`,
+                  ["public", "chat_channel_read_status", "workspace_id", "public.idx_ccrs_workspace_user"]
+                );
+                if (!check.rows[0]?.has_workspace_id || !check.rows[0]?.index_name) {
+                  throw new Error("chat tenant isolation verification failed");
+                }
+                console.log("chat tenant isolation migration verified");
+              } catch (error) {
+                console.error("chat tenant isolation migration failed:", error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$CHAT_TENANT_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 

@@ -395,7 +395,7 @@ app.post("/chat/mark-read", authMiddleware, requireWorkspaceForUser, async (req,
   try {
     const { channelKey } = req.body;
     if (!channelKey) return res.status(400).json({ error: "channelKey required" });
-    await markChannelRead(req.user.id, channelKey);
+    await markChannelRead(req.user.id, channelKey, req.workspaceId);
     res.json({ ok: true });
   } catch (err) {
     console.error("[unread] markChannelRead error:", err.message);

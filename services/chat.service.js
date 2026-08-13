@@ -57,6 +57,51 @@ function mapMessageRow(row) {
   };
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export async function isActiveWorkspaceUser(workspaceId, userId) {
+  if (!workspaceId || !UUID_PATTERN.test(String(userId || ""))) return false;
+  const { rows } = await pool.query(
+    `SELECT 1
+     FROM workspace_users
+     WHERE workspace_id = $1
+       AND user_id = $2
+       AND (billing_status IS NULL OR billing_status != 'pending')
+     LIMIT 1`,
+    [workspaceId, userId]
+  );
+  return rows.length > 0;
+}
+
+export async function validateDmChannelAccess({ channelKey, workspaceId, userId }) {
+  const participantIds = String(channelKey || "").split(":").slice(1).filter(Boolean);
+  if (!workspaceId || participantIds.length !== 2 || new Set(participantIds).size !== 2) {
+    return { allowed: false, reason: "invalid_dm_channel", participantIds: [] };
+  }
+  if (participantIds.some((id) => !UUID_PATTERN.test(id))) {
+    return { allowed: false, reason: "invalid_dm_participant", participantIds: [] };
+  }
+  if (!participantIds.includes(String(userId))) {
+    return { allowed: false, reason: "dm_participation_required", participantIds };
+  }
+
+  const { rows } = await pool.query(
+    `SELECT user_id
+     FROM workspace_users
+     WHERE workspace_id = $1
+       AND user_id = ANY($2::uuid[])
+       AND (billing_status IS NULL OR billing_status != 'pending')`,
+    [workspaceId, participantIds]
+  );
+  const activeIds = new Set(rows.map((row) => String(row.user_id)));
+  const allowed = participantIds.every((id) => activeIds.has(id));
+  return {
+    allowed,
+    reason: allowed ? null : "dm_workspace_membership_required",
+    participantIds,
+  };
+}
+
 function extractAIPlainText(savedMessage) {
   if (!savedMessage) return null;
 
@@ -1038,6 +1083,7 @@ LEFT JOIN users u ON u.id = m.user_id
 export async function updateChatMessage({
   messageId,
   workspaceId,
+  userId,
   textHtml,
   fallbackText,
   encryptedJson,
@@ -1058,6 +1104,7 @@ export async function updateChatMessage({
         updated_at     = now()
       WHERE id = $4
         AND workspace_id = $5
+        AND user_id = $6
         AND deleted_at IS NULL
       RETURNING *
       `,
@@ -1069,6 +1116,7 @@ export async function updateChatMessage({
           : JSON.stringify({ message: safeText }),
         messageId,
         workspaceId,
+        userId,
       ]
     );
 
@@ -1081,6 +1129,7 @@ export async function updateChatMessage({
 
 export async function updateMessageReactions({
   messageId,
+  workspaceId,
   reactions,
 }) {
   const client = await pool.connect();
@@ -1090,8 +1139,9 @@ export async function updateMessageReactions({
       UPDATE chat_messages
       SET reactions = $1
       WHERE id = $2
+        AND workspace_id = $3
       `,
-      [reactions, messageId]
+      [reactions, messageId, workspaceId]
     );
   } finally {
     client.release();
@@ -1131,7 +1181,7 @@ export async function deleteChannel(channelId, userId) {
   await pool.query(`DELETE FROM chat_channels WHERE id = $1`, [channelId]);
 }
 
-export async function softDeleteChatMessage({ messageId, userId }) {
+export async function softDeleteChatMessage({ messageId, userId, workspaceId }) {
   const client = await pool.connect();
   try {
     const res = await client.query(
@@ -1140,10 +1190,11 @@ export async function softDeleteChatMessage({ messageId, userId }) {
       SET deleted_at = now()
       WHERE id = $1
         AND user_id = $2
+        AND workspace_id = $3
         AND deleted_at IS NULL
       RETURNING *
       `,
-      [messageId, userId]
+      [messageId, userId, workspaceId]
     );
 
     if (!res.rows.length) return null;
@@ -1273,23 +1324,30 @@ pool.query(`
   CREATE TABLE IF NOT EXISTS chat_channel_read_status (
     user_id      UUID         NOT NULL,
     channel_key  VARCHAR(500) NOT NULL,
+    workspace_id UUID,
     last_read_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, channel_key)
   );
+  ALTER TABLE chat_channel_read_status
+    ADD COLUMN IF NOT EXISTS workspace_id UUID;
   CREATE INDEX IF NOT EXISTS idx_ccrs_user ON chat_channel_read_status(user_id);
+  CREATE INDEX IF NOT EXISTS idx_ccrs_workspace_user
+    ON chat_channel_read_status(workspace_id, user_id);
 `).catch((e) => console.warn("[chat] chat_channel_read_status init:", e.message));
 
-export async function markChannelRead(userId, channelKey) {
+export async function markChannelRead(userId, channelKey, workspaceId) {
+  if (!workspaceId) throw new Error("workspaceId required");
   await pool.query(
-    `INSERT INTO chat_channel_read_status (user_id, channel_key, last_read_at)
-     VALUES ($1, $2, now())
+    `INSERT INTO chat_channel_read_status (user_id, channel_key, workspace_id, last_read_at)
+     VALUES ($1, $2, $3, now())
      ON CONFLICT (user_id, channel_key)
-     DO UPDATE SET last_read_at = now()`,
-    [userId, channelKey]
+     DO UPDATE SET workspace_id = EXCLUDED.workspace_id, last_read_at = now()`,
+    [userId, channelKey, workspaceId]
   );
 }
 
 export async function getUnreadCounts(userId, workspaceId) {
+  if (!workspaceId) throw new Error("workspaceId required");
   // Returns { channelKey: unreadCount } for all channels + DMs this user receives messages in.
   // Public/system channels are included without requiring a membership record.
   // Private channels require membership. DM channels require user to be a participant.
@@ -1301,11 +1359,14 @@ export async function getUnreadCounts(userId, workspaceId) {
         COUNT(*) AS cnt
       FROM chat_messages m
       WHERE m.user_id::text != $1
+        AND m.workspace_id = $4
         AND m.deleted_at IS NULL
         AND m.channel_key != 'availability-updates'
         AND m.created_at > COALESCE(
           (SELECT rs.last_read_at FROM chat_channel_read_status rs
-           WHERE rs.user_id::text = $1 AND rs.channel_key = m.channel_key),
+           WHERE rs.user_id::text = $1
+             AND rs.channel_key = m.channel_key
+             AND rs.workspace_id = $4),
           '1970-01-01'::timestamptz
         )
       GROUP BY m.channel_key
@@ -1320,20 +1381,25 @@ export async function getUnreadCounts(userId, workspaceId) {
         OR u.channel_key LIKE $3
       ))
       OR
-      -- Non-DM channels: public channels always; private channels only if member
+      -- Non-DM channels: the channel must exist in this workspace. Public
+      -- channels are visible workspace-wide; private channels require membership.
       (u.channel_key NOT LIKE 'dm:%' AND (
-        NOT EXISTS (
+        EXISTS (
           SELECT 1 FROM chat_channels c
-          WHERE c.key = u.channel_key AND c.is_private = true
+          WHERE c.key = u.channel_key
+            AND c.workspace_id = $4
+            AND c.is_private = false
         )
         OR EXISTS (
           SELECT 1 FROM chat_channels c
           JOIN chat_channel_members cm ON cm.channel_id = c.id
-          WHERE c.key = u.channel_key AND cm.user_id::text = $1
+          WHERE c.key = u.channel_key
+            AND c.workspace_id = $4
+            AND cm.user_id::text = $1
         )
       ))
     `,
-    [userId, `dm:${userId}:%`, `dm:%:${userId}`]
+    [userId, `dm:${userId}:%`, `dm:%:${userId}`, workspaceId]
   );
   const result = {};
   for (const row of rows) {

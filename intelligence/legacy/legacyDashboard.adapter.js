@@ -261,7 +261,7 @@ export async function getLegacyDashboardOverview({ workspaceId, userId, role }) 
     attendanceScore: attendance.score,
     band: getScoreBand(unifiedScore),
   };
-  const scoreCard = await legacyScoreCard({
+  const resolvedScoreCard = await legacyScoreCard({
     workspaceId,
     userId,
     role,
@@ -269,6 +269,24 @@ export async function getLegacyDashboardOverview({ workspaceId, userId, role }) 
     projectIds,
     liveScoreCard,
   });
+  const attendanceDays = Number(attendanceRows[0]?.observed_days) || 0;
+  const hasEvidence = role === "manager"
+    ? counts.totalTasks > 0
+    : counts.totalTasks > 0 || attendanceDays > 0;
+  const evidenceStatus = {
+    hasEvidence,
+    status: hasEvidence ? "available" : "insufficient_evidence",
+    reason: hasEvidence ? "task_or_attendance_evidence_available" : "no_task_or_attendance_evidence",
+    counts: { scopedTasks: counts.totalTasks, attendanceDays },
+  };
+  const scoreCard = hasEvidence
+    ? resolvedScoreCard
+    : {
+      unifiedScore: null,
+      productivityScore: null,
+      attendanceScore: null,
+      band: null,
+    };
   const trend = {
     direction: trendDirection(trendRows),
     points: trendRows.map((row) => ({ month: row.month, score: Number(row.score) || 0 })),
@@ -286,19 +304,21 @@ export async function getLegacyDashboardOverview({ workspaceId, userId, role }) 
       score: Math.max(0, Math.min(100, Math.round(0.75 * completionRate + 25 - overduePenalty))),
     };
   });
-  const executiveSummary = buildExecutiveSummary({
+  const executiveSummary = hasEvidence ? buildExecutiveSummary({
     role,
     scopeLabel: scope.label,
     counts,
     scoreCard,
     trend,
     topOverdue: overdueRows,
-  });
+  }) : null;
 
   return {
     role,
     month,
     source: "legacy_scoring_rollback",
+    evidenceStatus,
+    workspaceEvidenceStatus: evidenceStatus,
     scope: {
       type: scope.type,
       label: scope.label,
@@ -312,14 +332,14 @@ export async function getLegacyDashboardOverview({ workspaceId, userId, role }) 
       completed: Number(myRows[0]?.completed || 0),
     },
     scoreCard,
-    dimensions: {
+    dimensions: hasEvidence ? {
       productivity: productivity.dimensions,
       attendance: attendance.dimensions,
-    },
-    trend,
+    } : {},
+    trend: hasEvidence ? trend : { direction: "stable", points: [] },
     topOverdue: overdueRows,
-    projectHealth,
-    healthScore: healthRows[0]?.health_score != null
+    projectHealth: hasEvidence ? projectHealth : [],
+    healthScore: hasEvidence && healthRows[0]?.health_score != null
       ? Number(healthRows[0].health_score)
       : null,
     executiveSummary,

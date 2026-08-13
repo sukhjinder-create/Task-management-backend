@@ -8,6 +8,10 @@ import { buildTrendAnalytics, getHistoricalSeries } from "./historicalAnalytics.
 import { advancedForecast } from "../forecast/forecast.engine.js";
 import { ensureDashboardHistoryMaterialized } from "../snapshots/historicalBackfill.service.js";
 import { getOrCreateWorkspacePeriodExecutiveSummary } from "./periodExecutiveSummary.service.js";
+import {
+  getUserEvidenceStatus,
+  getWorkspaceEvidenceStatus,
+} from "./evidenceStatus.js";
 
 function normalizeTrend(direction) {
   if (direction === "up") return "improving";
@@ -338,21 +342,35 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     : role === "manager"
       ? await getManagerTeamSubject({ workspaceId, userId, teams: snapshot.teams }) || snapshot.workspace
       : snapshot.currentUser;
+  const workspaceEvidenceStatus = getWorkspaceEvidenceStatus(snapshot);
+  const evidenceStatus = role === "user"
+    ? getUserEvidenceStatus(snapshot.currentUser)
+    : role === "manager"
+      ? {
+        hasEvidence: scoped.counts.totalTasks > 0,
+        status: scoped.counts.totalTasks > 0 ? "available" : "insufficient_evidence",
+        reason: scoped.counts.totalTasks > 0 ? "managed_task_evidence_available" : "no_managed_task_evidence",
+        counts: { scopedTasks: scoped.counts.totalTasks },
+      }
+      : workspaceEvidenceStatus;
+  const hasEvidence = evidenceStatus.hasEvidence;
 
   const scoreCard = {
-    unifiedScore: subject?.score || 0,
-    productivityScore:
+    unifiedScore: hasEvidence ? subject?.score ?? null : null,
+    productivityScore: hasEvidence ? (
       subject?.indexes?.productivityIndex
       ?? subject?.indexes?.teamPerformanceIndex
       ?? subject?.dimensions?.deliveryEffectiveness?.score
       ?? subject?.score
-      ?? 0,
-    attendanceScore:
+      ?? null
+    ) : null,
+    attendanceScore: hasEvidence ? (
       subject?.attendance?.score
       ?? subject?.dimensions?.professionalDiscipline?.metrics?.attendanceScore
-      ?? null,
-    band: subject?.band || null,
-    confidence: subject?.confidence || 0,
+      ?? null
+    ) : null,
+    band: hasEvidence ? subject?.band || null : null,
+    confidence: hasEvidence ? subject?.confidence ?? null : null,
     source: "enterprise_intelligence",
   };
 
@@ -360,19 +378,23 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     scopeType: role === "user" ? "user" : role === "manager" ? "team" : "workspace",
     subjectKey: role === "user" ? String(userId) : role === "manager" ? `manager:${userId}` : String(workspaceId),
   };
-  let trendSeries = await getHistoricalSeries({
-    workspaceId,
-    scopeType: historyScope.scopeType,
-    subjectKey: historyScope.subjectKey,
-    range: rangeMeta.value,
-  });
+  let trendSeries = hasEvidence
+    ? await getHistoricalSeries({
+      workspaceId,
+      scopeType: historyScope.scopeType,
+      subjectKey: historyScope.subjectKey,
+      range: rangeMeta.value,
+    })
+    : [];
   let historyMaterialization = {
     materialized: false,
-    reason: trendSeries.length >= 2 ? "sufficient_selected_range_history" : "not_attempted",
+    reason: hasEvidence
+      ? trendSeries.length >= 2 ? "sufficient_selected_range_history" : "not_attempted"
+      : "insufficient_operational_evidence",
     pointCount: trendSeries.length,
   };
 
-  if (trendSeries.length < 2) {
+  if (hasEvidence && trendSeries.length < 2) {
     try {
       historyMaterialization = await ensureDashboardHistoryMaterialized({
         workspaceId,
@@ -399,20 +421,24 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
   }
   const trendAnalytics = buildTrendAnalytics(trendSeries);
 
-  const visualizations = buildDashboardVisualizations({
-    role,
-    trendSeries,
-    snapshot,
-    scopedProjects,
-    rangeMeta,
-  });
-  const forecast = buildDashboardForecast({
+  const visualizations = hasEvidence
+    ? buildDashboardVisualizations({
+      role,
+      trendSeries,
+      snapshot,
+      scopedProjects,
+      rangeMeta,
+    })
+    : { range: rangeMeta, charts: [] };
+  const forecast = hasEvidence ? buildDashboardForecast({
     trendSeries,
     subject,
     counts: scoped.counts,
     rangeMeta,
-  });
-  const executiveSummary = role === "admin"
+  }) : null;
+  const executiveSummary = !hasEvidence
+    ? null
+    : role === "admin"
     ? await getOrCreateWorkspacePeriodExecutiveSummary({
       workspaceId,
       scopeLabel: scope.label,
@@ -442,6 +468,8 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     role,
     month: new Date().toISOString().slice(0, 7),
     dashboardRange: rangeMeta,
+    evidenceStatus,
+    workspaceEvidenceStatus,
     scope: {
       type: scope.type,
       label: scope.label,
@@ -451,7 +479,9 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
     counts: scoped.counts,
     myTasks: scoped.myTasks,
     scoreCard,
-    dimensions: role === "user"
+    dimensions: !hasEvidence
+      ? {}
+      : role === "user"
       ? {
         user: subject?.dimensions || {},
         attendance: subject?.attendance || {},
@@ -468,19 +498,19 @@ export async function getDashboardOverviewFromIntelligence({ workspaceId, userId
       })),
     },
     analytics: {
-      intelligence: subject,
-      workspace: snapshot.workspace,
-      currentUser: snapshot.currentUser,
-      users: snapshot.users,
-      teams: snapshot.teams,
-      projects: snapshot.projects,
+      intelligence: hasEvidence ? subject : null,
+      workspace: workspaceEvidenceStatus.hasEvidence ? snapshot.workspace : null,
+      currentUser: hasEvidence ? snapshot.currentUser : null,
+      users: hasEvidence ? snapshot.users : [],
+      teams: hasEvidence ? snapshot.teams : [],
+      projects: hasEvidence ? snapshot.projects : [],
       trend: trendAnalytics,
       historyMaterialization,
     },
     visualizations,
     topOverdue: scoped.topOverdue,
-    projectHealth: scopedProjects,
-    healthScore: snapshot.workspace?.score ?? null,
+    projectHealth: hasEvidence ? scopedProjects : [],
+    healthScore: workspaceEvidenceStatus.hasEvidence ? snapshot.workspace?.score ?? null : null,
     executiveSummary,
     forecast,
   };

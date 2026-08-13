@@ -11,6 +11,7 @@ import {
   getRecentMessagesByChannelKey,
   markChannelRead,
   getUnreadCounts,
+  validateDmChannelAccess,
 } from "../services/chat.service.js";
 import { getIO } from "../realtime/socket.js";
 
@@ -91,8 +92,12 @@ router.post("/", async (req, res) => {
 
     const isDMChannel = channelId.startsWith("dm:");
     if (isDMChannel) {
-      const participants = channelId.split(":").slice(1).filter(Boolean);
-      if (!participants.includes(String(userId))) {
+      const access = await validateDmChannelAccess({
+        channelKey: channelId,
+        workspaceId: req.workspaceId,
+        userId,
+      });
+      if (!access.allowed) {
         return res.status(403).json({ message: "You are not allowed to post in this DM" });
       }
     }
@@ -182,7 +187,7 @@ router.post("/", async (req, res) => {
         for (let i = 1; i < parts.length; i++) {
           const uid = parts[i];
           if (uid && uid !== String(userId)) {
-            io.to(uid).emit("chat:unread-bump", { channelKey });
+            io.to(uid).emit("chat:unread-bump", { channelKey, workspaceId: req.workspaceId });
           }
         }
       } else if (!isPrivateChannel) {
@@ -190,6 +195,7 @@ router.post("/", async (req, res) => {
         io.to(`workspace:${req.workspaceId}`).emit("chat:unread-bump", {
           channelKey,
           fromUserId: String(userId),
+          workspaceId: req.workspaceId,
         });
       } else {
         // Private channel: only explicit members
@@ -198,7 +204,7 @@ router.post("/", async (req, res) => {
           [channel.id, userId]
         );
         for (const { user_id } of privMembers) {
-          io.to(user_id).emit("chat:unread-bump", { channelKey });
+          io.to(user_id).emit("chat:unread-bump", { channelKey, workspaceId: req.workspaceId });
         }
       }
     } catch (e) {
@@ -277,8 +283,12 @@ router.get("/for-channel/:channelId", async (req, res) => {
     }
     if (!channel) {
       if (channelId.startsWith("dm:")) {
-        const participants = channelId.split(":").slice(1).filter(Boolean);
-        if (!participants.includes(String(userId))) {
+        const access = await validateDmChannelAccess({
+          channelKey: channelId,
+          workspaceId: req.workspaceId,
+          userId,
+        });
+        if (!access.allowed) {
           return res.status(403).json({ message: "You are not allowed to view this DM" });
         }
         const messages = await getRecentMessagesResolved(channelId, limit, req.workspaceId);
@@ -342,7 +352,7 @@ router.post("/mark-read", async (req, res) => {
   try {
     const { channelKey } = req.body;
     if (!channelKey) return res.status(400).json({ error: "channelKey required" });
-    await markChannelRead(req.user.id, channelKey);
+    await markChannelRead(req.user.id, channelKey, req.workspaceId);
     res.json({ ok: true });
   } catch (err) {
     console.error("[unread] markChannelRead error:", err.message);
