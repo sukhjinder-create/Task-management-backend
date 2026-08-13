@@ -3,7 +3,7 @@ import pool from "../../db.js";
 import { saveExecutiveSummary } from "../../events/executive/executiveSummary.store.js";
 import { buildTrendAnalytics } from "./historicalAnalytics.service.js";
 
-export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "enterprise_executive_summary_v5";
+export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "enterprise_executive_summary_v6";
 const SUMMARY_KIND = "dashboard_period_executive_summary";
 
 function dateKey(value) {
@@ -308,7 +308,7 @@ function summaryStoragePeriodKey(bucket = {}) {
     .digest("hex")
     .slice(0, 8)
     .toUpperCase();
-  return `V5${digest}`;
+  return `V6${digest}`;
 }
 
 function summarizeSnapshotEvidence(snapshot = {}, intelligence = {}) {
@@ -324,6 +324,7 @@ function summarizeSnapshotEvidence(snapshot = {}, intelligence = {}) {
     ...users.flatMap((user) => user.dimensions?.collaborationHealth?.drivers || []),
     ...teams.flatMap((team) => team.drivers || []),
   ];
+  const assurance = intelligence?.analytics?.assurance || {};
 
   return {
     users: {
@@ -355,6 +356,24 @@ function summarizeSnapshotEvidence(snapshot = {}, intelligence = {}) {
     capacity: {
       sustainability: qualitativeBand(intelligence?.indexes?.capacitySustainabilityIndex),
       executionReality: qualitativeBand(intelligence?.indexes?.executionRealityIndex),
+    },
+    assurance: {
+      status: assurance.eligible ? "contributing" : "learning",
+      eligible: assurance.eligible === true,
+      outcomeAssurance: assurance.eligible
+        ? qualitativeBand(assurance.outcomeAssuranceIndex)
+        : "not yet conclusive",
+      outcomeAssuranceIndex: assurance.outcomeAssuranceIndex ?? null,
+      outcomeCount: Number(assurance.outcomeCount) || 0,
+      outcomesWithEvidence: Number(assurance.outcomesWithEvidence) || 0,
+      verifiedSampleSize: Number(assurance.verifiedSampleSize) || 0,
+      requiredSampleSize: Math.max(3, Number(assurance.requiredSampleSize) || 3),
+      verifiedOnTimeRate: assurance.verifiedOnTimeRate ?? null,
+      evidenceCoverageRate: assurance.evidenceCoverageRate ?? null,
+      currentHealthyRate: assurance.currentHealthyRate ?? null,
+      attentionOutcomeCount: Number(assurance.attentionOutcomeCount) || 0,
+      contributionPaths: assurance.eligible ? (assurance.contributionPaths || []) : [],
+      finalScoreImpactPoints: assurance.eligible ? (assurance.finalScoreImpactPoints ?? null) : null,
     },
   };
 }
@@ -512,6 +531,9 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     "capacity",
     "sustainability",
     "leadership",
+    "outcome",
+    "assurance",
+    "verified",
   ];
   const scoreCentricPattern = /\b(score|scored|scores|\/100|points?\s+movement|increased\s+from\s+\d|decreased\s+from\s+\d)\b/i;
   const requiredSectionKeys = [
@@ -521,6 +543,7 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     "trendNarrative",
     "attendanceWorkforceReadiness",
     "deliveryExecution",
+    "outcomeAssurance",
     "collaborationOrganizationalHealth",
     "capacitySustainability",
     "leadershipRecommendations",
@@ -565,6 +588,15 @@ function buildRecommendations(analysis) {
       "High Priority",
       "Run a manager-level risk review focused on ownership, blockers, and recovery actions.",
       "The period evidence shows enough delivery or portfolio risk concentration to justify active leadership review."
+    ));
+  }
+
+  const assurance = analysis.operationalEvidence?.assurance || {};
+  if (assurance.eligible && (assurance.attentionOutcomeCount > 0 || Number(assurance.outcomeAssuranceIndex) < 55)) {
+    recommendations.push(recommendation(
+      "High Priority",
+      "Review the verified outcomes that are off track or missing current result evidence.",
+      `${assurance.attentionOutcomeCount || "Some"} governed outcome(s) need attention in the current assurance record.`
     ));
   }
 
@@ -643,6 +675,17 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
     `Capacity sustainability is ${evidence.capacity?.sustainability || "not yet conclusive"}, with workload balance ${evidence.teams?.workloadBalance || "not yet conclusive"}.`,
     "The leadership read should watch for focus fragmentation, repeated overtime, and declining delivery despite longer hours.",
   ]);
+  const assuranceState = evidence.assurance || {};
+  const outcomeAssuranceBody = assuranceState.eligible
+    ? compactSentence([
+      `Outcome assurance is ${assuranceState.outcomeAssurance} across ${assuranceState.verifiedSampleSize} verified outcome(s).`,
+      assuranceState.verifiedOnTimeRate != null && `${assuranceState.verifiedOnTimeRate}% were verified by target date.`,
+      assuranceState.evidenceCoverageRate != null && `Result-evidence coverage is ${assuranceState.evidenceCoverageRate}% across governed outcomes.`,
+      `This verified evidence contributes to Execution Reality and Delivery Confidence; ${assuranceState.attentionOutcomeCount} current outcome(s) need attention.`,
+    ])
+    : assuranceState.outcomeCount > 0
+      ? `Outcome assurance is still learning from ${assuranceState.verifiedSampleSize} verified outcome(s). It will contribute to workspace intelligence only after the configured minimum of ${assuranceState.requiredSampleSize} is reached; no intelligence contribution is made before that gate.`
+      : "No governed outcome-assurance record exists in this scope yet, so it makes no contribution to workspace intelligence or this period's conclusions.";
   const outlook = compactSentence([
     `Outlook: current operational patterns suggest the workspace will remain ${direction} if the strongest behaviours are repeated and ${topConcern} receives active follow-up.`,
     forecast?.confidence === "low"
@@ -663,6 +706,7 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
     section("trendNarrative", "Trend Narrative", trendNarrative),
     section("attendanceWorkforceReadiness", "Attendance & Workforce Readiness", attendanceBody),
     section("deliveryExecution", "Delivery & Execution", deliveryBody),
+    section("outcomeAssurance", "Outcome Assurance", outcomeAssuranceBody),
     section("collaborationOrganizationalHealth", "Collaboration & Organizational Health", collaborationBody),
     section("capacitySustainability", "Capacity & Sustainability", capacityBody),
     section(
@@ -713,6 +757,10 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
       deliveryConfidence: evidence.projects?.deliveryConfidence || null,
       collaborationHealth: evidence.teams?.collaboration || evidence.users?.collaborationHealth || null,
       capacitySustainability: evidence.capacity?.sustainability || null,
+      outcomeAssurance: evidence.assurance?.outcomeAssurance || null,
+      verifiedOutcomes: evidence.assurance?.verifiedSampleSize || 0,
+      outcomeAssuranceStatus: evidence.assurance?.status || "learning",
+      outcomeAssuranceFinalScoreImpactPoints: evidence.assurance?.finalScoreImpactPoints ?? null,
     },
   };
 }

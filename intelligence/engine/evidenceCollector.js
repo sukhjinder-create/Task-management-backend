@@ -336,7 +336,7 @@ export async function collectWorkspaceScope({ workspaceId }) {
 
 export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, now = new Date() }) {
   const range = getRangeFromWindow(windowDays, now);
-  const [internal, external, externalSignals] = await Promise.all([
+  const [internal, external, externalSignals, assurance] = await Promise.all([
     pool.query(
       `SELECT
          COUNT(*)::int AS total,
@@ -375,6 +375,54 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
          AND created_at <= $3::timestamptz`,
       [workspaceId, range.start, range.end]
     ).then((r) => r.rows[0]).catch(() => ({ signal_count: 0, completed: 0 })),
+    pool.query(
+      `SELECT
+         COALESCE((
+           SELECT minimum_pattern_sample
+           FROM assurance_workspace_policies
+           WHERE workspace_id = $1
+         ), 3)::int AS required_sample_size,
+         (SELECT COUNT(*)::int
+          FROM okr_objectives o
+          WHERE o.workspace_id = $1
+            AND o.success_measure IS NOT NULL
+            AND o.target_date IS NOT NULL) AS outcome_count,
+         (SELECT COUNT(DISTINCT e.goal_id)::int
+          FROM goal_assurance_evidence e
+          JOIN okr_objectives o
+            ON o.workspace_id = e.workspace_id AND o.id = e.goal_id
+          WHERE e.workspace_id = $1
+            AND o.success_measure IS NOT NULL
+            AND o.target_date IS NOT NULL) AS outcomes_with_evidence,
+         (SELECT COUNT(*)::int
+          FROM assurance_outcome_observations observation
+          WHERE observation.workspace_id = $1) AS verified_sample_size,
+         (SELECT COUNT(*)::int
+          FROM assurance_outcome_observations observation
+          WHERE observation.workspace_id = $1
+            AND observation.on_time IS TRUE) AS verified_on_time_count,
+         (SELECT COUNT(*)::int
+          FROM assurance_state_snapshots snapshot
+          WHERE snapshot.workspace_id = $1) AS snapshotted_outcome_count,
+         (SELECT COUNT(*)::int
+          FROM assurance_state_snapshots snapshot
+          WHERE snapshot.workspace_id = $1
+            AND snapshot.state IN ('on_track', 'verified')) AS healthy_outcome_count,
+         (SELECT COUNT(*)::int
+          FROM assurance_state_snapshots snapshot
+          WHERE snapshot.workspace_id = $1
+            AND snapshot.state IN ('at_risk', 'off_track', 'needs_evidence')) AS attention_outcome_count`,
+      [workspaceId]
+    ).then((r) => r.rows[0]).catch(() => ({
+      required_sample_size: 3,
+      outcome_count: 0,
+      outcomes_with_evidence: 0,
+      verified_sample_size: 0,
+      verified_on_time_count: 0,
+      snapshotted_outcome_count: 0,
+      healthy_outcome_count: 0,
+      attention_outcome_count: 0,
+    })),
   ]);
 
   const internalTotal = Number(internal?.total) || 0;
@@ -383,6 +431,8 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
   const externalCompleted = Math.min(Number(externalSignals?.completed) || 0, externalTotal);
   const totalWork = internalTotal + externalTotal;
   const completedWork = internalCompleted + externalCompleted;
+  const requiredSampleSize = Math.max(3, Number(assurance?.required_sample_size) || 3);
+  const verifiedSampleSize = Number(assurance?.verified_sample_size) || 0;
 
   return {
     execution: {
@@ -394,6 +444,17 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
       completedWork,
       externalProviderCount: Number(external?.provider_count) || 0,
       externalSignalCount: Number(externalSignals?.signal_count) || 0,
+    },
+    assurance: {
+      eligible: verifiedSampleSize >= requiredSampleSize,
+      requiredSampleSize,
+      outcomeCount: Number(assurance?.outcome_count) || 0,
+      outcomesWithEvidence: Number(assurance?.outcomes_with_evidence) || 0,
+      verifiedSampleSize,
+      verifiedOnTimeCount: Number(assurance?.verified_on_time_count) || 0,
+      snapshottedOutcomeCount: Number(assurance?.snapshotted_outcome_count) || 0,
+      healthyOutcomeCount: Number(assurance?.healthy_outcome_count) || 0,
+      attentionOutcomeCount: Number(assurance?.attention_outcome_count) || 0,
     },
     sourceWindow: {
       startDate: range.startDate,

@@ -823,9 +823,9 @@ const WORKSPACE_INDEX_EXPLANATIONS = {
   workspaceHealthIndex: "Composite workspace health from user, project, team, and execution reality evidence.",
   productivityIndex: "Delivery effectiveness, velocity health, and high-performer distribution.",
   strategicRiskIndex: "Inverse risk posture from at-risk employees, critical projects, and score drag.",
-  deliveryConfidenceIndex: "Project completion confidence and team delivery reliability.",
+  deliveryConfidenceIndex: "Project completion confidence, team delivery reliability, and eligible verified outcome assurance.",
   organizationalAlignmentIndex: "Team predictability, collaboration, and project alignment signals.",
-  executionRealityIndex: "Tracked internal and integration work completion evidence.",
+  executionRealityIndex: "Tracked internal/integration work completion and eligible verified outcome assurance evidence.",
   attendanceReadinessIndex: "Closed attendance readiness and Professional Discipline across users.",
   capacitySustainabilityIndex: "Work sustainability and team workload balance signals.",
 };
@@ -1093,6 +1093,7 @@ function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null }
   const upward = [...domainContributions].sort((a, b) => b.score - a.score).slice(0, 2);
   const attendanceRow = domainContributions.find((row) => row.key === "attendanceReadinessIndex");
   const capacityRow = domainContributions.find((row) => row.key === "capacitySustainabilityIndex");
+  const assurance = workspace.analytics?.assurance || null;
   const scoreCalculation = {
     source: "enterprise_intelligence",
     scoreAuthority: "workspace_intelligence.score",
@@ -1136,6 +1137,28 @@ function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null }
       contributionPath: "direct_workspace_index",
       directOrIndirect: "direct",
       source: capacityRow.source,
+    } : null,
+    outcomeAssuranceContribution: assurance ? {
+      eligible: assurance.eligible === true,
+      status: assurance.status || (assurance.eligible ? "contributing" : "learning"),
+      outcomeAssuranceIndex: scoreOrNull(assurance.outcomeAssuranceIndex),
+      verifiedSampleSize: Number(assurance.verifiedSampleSize) || 0,
+      requiredSampleSize: Math.max(3, Number(assurance.requiredSampleSize) || 3),
+      contributionPath: assurance.eligible
+        ? "indirect_via_execution_reality_and_delivery_confidence"
+        : "no_contribution_before_evidence_gate",
+      affectedWorkspaceIndexes: assurance.eligible
+        ? ["executionRealityIndex", "deliveryConfidenceIndex"]
+        : [],
+      downstreamWorkspaceIndexes: assurance.eligible
+        ? ["workspaceHealthIndex"]
+        : [],
+      indexImpactPoints: assurance.indexImpactPoints || {},
+      finalScoreImpactPoints: assurance.eligible
+        ? Number(assurance.finalScoreImpactPoints) || 0
+        : 0,
+      scoreWithoutOutcomeAssurance: scoreOrNull(assurance.scoreWithoutOutcomeAssurance),
+      guardrail: assurance.guardrail || "No score contribution is made before the verified-outcome evidence gate.",
     } : null,
     userScoreBalancePropagation: {
       intended: true,
@@ -1233,6 +1256,7 @@ function buildWorkspaceScoreExplanation(workspace = {}, { scoringConfig = null }
       weightedContributionPoints: capacityRow.weightedContributionPoints,
       finalScoreImpactVsNeutral: capacityRow.finalScoreImpactVsNeutral,
     } : null,
+    outcomeAssuranceEffect: scoreCalculation.outcomeAssuranceContribution,
     userScoreBalancePropagation: scoreCalculation.userScoreBalancePropagation,
     summary: downward.length
       ? `Workspace Health is ${scoreOrNull(workspace.score)}/100 from workspace_intelligence.score. Main downward pressure: ${downward.map((row) => `${row.label} (${row.score}/100)`).join(" and ")}.`

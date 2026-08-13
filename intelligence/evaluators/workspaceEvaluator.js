@@ -49,28 +49,77 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
   const externalCompleted = Number(execution.externalCompleted) || 0;
   const totalWork = Number(execution.totalWork) || internalTotal + externalTotal;
   const completedWork = Number(execution.completedWork) || internalCompleted + externalCompleted;
-  const executionSignals = [
+  const assuranceEvidence = evidence.assurance || {};
+  const assuranceEligible = assuranceEvidence.eligible === true;
+  const assuranceOutcomeCount = Number(assuranceEvidence.outcomeCount) || 0;
+  const assuranceVerifiedSampleSize = Number(assuranceEvidence.verifiedSampleSize) || 0;
+  const assuranceRequiredSampleSize = Math.max(3, Number(assuranceEvidence.requiredSampleSize) || 3);
+  const assuranceSnapshottedOutcomeCount = Number(assuranceEvidence.snapshottedOutcomeCount) || 0;
+  const assuranceSignals = [
+    assuranceVerifiedSampleSize > 0 && {
+      value: ratio(assuranceEvidence.verifiedOnTimeCount, assuranceVerifiedSampleSize, 0.62) * 100,
+    },
+    assuranceOutcomeCount > 0 && {
+      value: ratio(assuranceEvidence.outcomesWithEvidence, assuranceOutcomeCount, 0.62) * 100,
+    },
+    assuranceSnapshottedOutcomeCount > 0 && {
+      value: ratio(assuranceEvidence.healthyOutcomeCount, assuranceSnapshottedOutcomeCount, 0.62) * 100,
+    },
+  ].filter(Boolean);
+  const outcomeAssuranceIndex = assuranceEligible
+    ? adaptiveScore(assuranceSignals, {
+      neutral: 62,
+      confidence: evidenceConfidence({
+        observed: assuranceVerifiedSampleSize,
+        expected: Math.max(assuranceRequiredSampleSize, 10),
+        breadth: assuranceSignals.length / 3,
+      }),
+    })
+    : null;
+  const baseExecutionSignals = [
     internalTotal > 0 && { value: ratio(internalCompleted, internalTotal, 0.62) * 100 },
     externalTotal > 0 && { value: ratio(externalCompleted, externalTotal, 0.62) * 100 },
     totalWork > 0 && { value: ratio(completedWork, totalWork, 0.62) * 100 },
   ].filter(Boolean);
+  const baseExecutionConfidence = evidenceConfidence({
+    observed: Math.min(totalWork, 24),
+    expected: 24,
+    breadth: externalTotal > 0 ? 1 : 0.82,
+  });
+  const executionRealityWithoutAssurance = adaptiveScore(baseExecutionSignals, {
+    neutral: 62,
+    confidence: baseExecutionConfidence,
+  });
+  const executionSignals = [
+    ...baseExecutionSignals,
+    assuranceEligible && { value: outcomeAssuranceIndex },
+  ].filter(Boolean);
   const executionRealityIndex = adaptiveScore(executionSignals, {
     neutral: 62,
     confidence: evidenceConfidence({
-      observed: Math.min(totalWork, 24),
+      observed: Math.min(totalWork, 24) + (assuranceEligible ? 1 : 0),
       expected: 24,
-      breadth: externalTotal > 0 ? 1 : 0.82,
+      breadth: externalTotal > 0 || assuranceEligible ? 1 : 0.82,
     }),
   });
 
+  const workspaceHealthConfidence = evidenceConfidence({
+    observed: users.length + projects.length + teams.length + (totalWork > 0 ? 1 : 0),
+    expected: 9,
+    breadth: teams.length || totalWork > 0 ? 1 : 0.8,
+  });
+  const workspaceHealthWithoutOutcomeAssurance = adaptiveScore([
+    { value: avg(userScores) || 62 },
+    { value: avg(projectScores) || 62 },
+    { value: avg(teamScores) || avg(userScores) || 62 },
+    { value: executionRealityWithoutAssurance },
+  ], { confidence: workspaceHealthConfidence });
   const workspaceHealthIndex = adaptiveScore([
     { value: avg(userScores) || 62 },
     { value: avg(projectScores) || 62 },
     { value: avg(teamScores) || avg(userScores) || 62 },
     { value: executionRealityIndex },
-  ], {
-    confidence: evidenceConfidence({ observed: users.length + projects.length + teams.length + (totalWork > 0 ? 1 : 0), expected: 9, breadth: teams.length || totalWork > 0 ? 1 : 0.8 }),
-  });
+  ], { confidence: workspaceHealthConfidence });
 
   const productivityIndex = adaptiveScore([
     { value: avg(users.map((row) => row.dimensions?.deliveryEffectiveness?.score ?? 62)) || 62 },
@@ -84,10 +133,25 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
     { value: 100 - (avg(userScores) || 62) },
   ], { confidence: 74 }));
 
-  const deliveryConfidenceIndex = adaptiveScore([
+  const baseDeliverySignals = [
     { value: avg(projects.map((row) => row.indexes?.completionConfidence ?? row.score ?? 62)) || 62 },
     { value: avg(teams.map((row) => row.indexes?.deliveryReliabilityIndex ?? row.score ?? 62)) || 62 },
-  ], { confidence: evidenceConfidence({ observed: projects.length + teams.length, expected: 4, breadth: 1 }) });
+  ];
+  const deliveryConfidenceWithoutAssurance = adaptiveScore(baseDeliverySignals, {
+    confidence: evidenceConfidence({
+      observed: projects.length + teams.length,
+      expected: 4,
+      breadth: 1,
+    }),
+  });
+  const deliveryConfidenceIndex = adaptiveScore([
+    ...baseDeliverySignals,
+    assuranceEligible && { value: outcomeAssuranceIndex },
+  ].filter(Boolean), { confidence: evidenceConfidence({
+    observed: projects.length + teams.length + (assuranceEligible ? 1 : 0),
+    expected: 4,
+    breadth: 1,
+  }) });
 
   const organizationalAlignmentIndex = adaptiveScore([
     { value: avg(teams.map((row) => row.indexes?.executionPredictability ?? row.score ?? 62)) || 62 },
@@ -120,6 +184,14 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
   });
   const scoreModel = appliedScoreModel(scoringConfig, ["workspaceIndexes"]);
   const score = scoreObjectWithScoringConfig(indexes, scoringConfig, "workspaceIndexes", { confidence });
+  const scoreWithoutOutcomeAssurance = assuranceEligible
+    ? scoreObjectWithScoringConfig({
+      ...indexes,
+      workspaceHealthIndex: workspaceHealthWithoutOutcomeAssurance,
+      executionRealityIndex: executionRealityWithoutAssurance,
+      deliveryConfidenceIndex: deliveryConfidenceWithoutAssurance,
+    }, scoringConfig, "workspaceIndexes", { confidence })
+    : score;
   const riskProbability = Math.max(0, 100 - strategicRiskIndex + atRiskUsers * 3 + criticalProjects * 5);
 
   const output = {
@@ -135,6 +207,7 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
       deliveryConfidenceIndex >= 75 && "Delivery confidence is strong",
       organizationalAlignmentIndex >= 75 && "Organizational alignment is healthy",
       executionRealityIndex >= 75 && "Execution reality signals are healthy",
+      assuranceEligible && outcomeAssuranceIndex >= 75 && "Verified outcome assurance is strong",
       attendanceReadinessIndex >= 75 && "Attendance readiness is healthy",
       capacitySustainabilityIndex >= 75 && "Capacity sustainability is healthy",
     ].filter(Boolean)),
@@ -143,17 +216,20 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
       criticalProjects > 0 && `${criticalProjects} high-risk project(s) need portfolio attention`,
       strategicRiskIndex < 55 && "Strategic risk is elevated",
       totalWork > 0 && executionRealityIndex < 55 && "Execution completion evidence is below expected level",
+      assuranceEligible && outcomeAssuranceIndex < 55 && "Verified outcomes show assurance pressure",
       attendanceReadinessIndex < 55 && "Attendance readiness requires follow-up",
       capacitySustainabilityIndex < 55 && "Capacity sustainability risk is elevated",
     ].filter(Boolean)),
     drivers: uniqueStrings([
       `${users.length} user profile(s), ${projects.length} project profile(s), ${teams.length} team profile(s) aggregated`,
       totalWork > 0 && `${completedWork} of ${totalWork} tracked work item(s) completed across internal and integration sources`,
+      assuranceEligible && `${assuranceVerifiedSampleSize} verified outcome(s) contribute to execution reality and delivery confidence`,
     ]),
     indicators: [
       atRiskUsers > 0 && { type: "People Risk", label: `${atRiskUsers} at-risk employee(s)` },
       criticalProjects > 0 && { type: "Portfolio Risk", label: `${criticalProjects} project(s) in high-risk zone` },
       totalWork > 0 && executionRealityIndex < 55 && { type: "Execution Risk", label: "Tracked work completion is under pressure" },
+      assuranceEligible && outcomeAssuranceIndex < 55 && { type: "Outcome Assurance", label: "Verified outcome evidence is under pressure" },
     ].filter(Boolean),
     risk: {
       probability: roundScore(riskProbability),
@@ -180,6 +256,39 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
         completedWork,
         externalProviderCount: Number(execution.externalProviderCount) || 0,
         externalSignalCount: Number(execution.externalSignalCount) || 0,
+      },
+      assurance: {
+        eligible: assuranceEligible,
+        status: assuranceEligible ? "contributing" : "learning",
+        requiredSampleSize: assuranceRequiredSampleSize,
+        verifiedSampleSize: assuranceVerifiedSampleSize,
+        outcomeCount: assuranceOutcomeCount,
+        outcomesWithEvidence: Number(assuranceEvidence.outcomesWithEvidence) || 0,
+        verifiedOnTimeCount: Number(assuranceEvidence.verifiedOnTimeCount) || 0,
+        snapshottedOutcomeCount: assuranceSnapshottedOutcomeCount,
+        healthyOutcomeCount: Number(assuranceEvidence.healthyOutcomeCount) || 0,
+        attentionOutcomeCount: Number(assuranceEvidence.attentionOutcomeCount) || 0,
+        verifiedOnTimeRate: assuranceVerifiedSampleSize > 0
+          ? roundScore(ratio(assuranceEvidence.verifiedOnTimeCount, assuranceVerifiedSampleSize, 0) * 100)
+          : null,
+        evidenceCoverageRate: assuranceOutcomeCount > 0
+          ? roundScore(ratio(assuranceEvidence.outcomesWithEvidence, assuranceOutcomeCount, 0) * 100)
+          : null,
+        currentHealthyRate: assuranceSnapshottedOutcomeCount > 0
+          ? roundScore(ratio(assuranceEvidence.healthyOutcomeCount, assuranceSnapshottedOutcomeCount, 0) * 100)
+          : null,
+        outcomeAssuranceIndex,
+        contributionPaths: assuranceEligible
+          ? ["executionRealityIndex", "deliveryConfidenceIndex"]
+          : [],
+        indexImpactPoints: {
+          workspaceHealthIndex: workspaceHealthIndex - workspaceHealthWithoutOutcomeAssurance,
+          executionRealityIndex: executionRealityIndex - executionRealityWithoutAssurance,
+          deliveryConfidenceIndex: deliveryConfidenceIndex - deliveryConfidenceWithoutAssurance,
+        },
+        scoreWithoutOutcomeAssurance,
+        finalScoreImpactPoints: score - scoreWithoutOutcomeAssurance,
+        guardrail: "No score contribution is made before the workspace reaches its configured verified-outcome sample.",
       },
       scoreModel,
     },

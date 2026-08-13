@@ -7,6 +7,7 @@ import {
   createAssuranceRecoveryTask,
   getAssuranceOverview,
 } from "./executionAssurance.service.js";
+import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
 
 const CONFIGURE_ROLES = new Set(["admin"]);
 const MANAGER_ROLES = new Set(["admin", "manager"]);
@@ -16,6 +17,28 @@ const APPROVAL_ACTIONS = new Set(["complete", "recovery"]);
 const PORTFOLIO_STATUSES = new Set(["active", "completed", "archived"]);
 const DEPENDENCY_TYPES = new Set(["blocks", "informs"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function queueAssuranceIntelligenceRefresh({ workspaceId, sourceId = null, metadata = {}, database = pool }) {
+  // Tests and callers using an explicit transaction/fake database retain full
+  // control over side effects. Production mutations use the coalesced canonical
+  // intelligence queue after their authoritative write succeeds.
+  if (database !== pool) return;
+  queueImpactedIntelligenceRecalculation({
+    workspaceId,
+    reason: "outcome_assurance_changed",
+    sourceType: "outcome_assurance",
+    sourceId,
+    metadata,
+  });
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, stableJson(value[key])])
+  );
+}
 
 export const DEFAULT_ASSURANCE_POLICY = Object.freeze({
   riskWindowDays: 14,
@@ -210,6 +233,12 @@ export async function updateAssurancePolicy({ workspaceId, actorId, role, input,
     entityId: workspaceId,
     oldValue: current,
     newValue: value,
+  });
+  queueAssuranceIntelligenceRefresh({
+    workspaceId,
+    sourceId: workspaceId,
+    metadata: { change: "policy", policyVersion: Number(rows[0]?.version || 1) },
+    database,
   });
   return mapPolicy(rows[0]);
 }
@@ -849,7 +878,7 @@ export async function refreshAssuranceMemory({ workspaceId, database = pool, now
 
 async function reconcileStateSnapshots({ workspaceId, commitments, policy, database = pool, now = new Date(), notify = true }) {
   const { rows: priorRows } = await database.query(
-    "SELECT goal_id, state, transition_count FROM assurance_state_snapshots WHERE workspace_id=$1",
+    "SELECT goal_id, state, state_data, transition_count FROM assurance_state_snapshots WHERE workspace_id=$1",
     [workspaceId]
   );
   const prior = new Map(priorRows.map((row) => [String(row.goal_id), row]));
@@ -892,11 +921,16 @@ async function reconcileStateSnapshots({ workspaceId, commitments, policy, datab
     );
   }
   let transitions = 0;
+  let materialChanges = 0;
+  let verifiedObservations = 0;
   for (const commitment of commitments) {
     const previous = prior.get(String(commitment.id));
     const changed = !previous || previous.state !== commitment.assurance.state;
     const transitionCount = Number(previous?.transition_count || 0) + (changed ? 1 : 0);
     if (changed) transitions += 1;
+    if (!previous || changed || JSON.stringify(stableJson(previous.state_data || {})) !== JSON.stringify(stableJson(commitment.assurance || {}))) {
+      materialChanges += 1;
+    }
     if (
       changed && notify && policy.notifyOnStateChange && commitment.owner_id &&
       ["at_risk", "off_track", "needs_evidence"].includes(commitment.assurance.state)
@@ -914,9 +948,10 @@ async function reconcileStateSnapshots({ workspaceId, commitments, policy, datab
         broadcastToSlack: false,
       }).catch(() => null);
     }
-    await recordVerifiedOutcome({ workspaceId, commitment, preCompletionState: previous?.state || null, database, now });
+    const observation = await recordVerifiedOutcome({ workspaceId, commitment, preCompletionState: previous?.state || null, database, now });
+    if (observation) verifiedObservations += 1;
   }
-  return { transitions };
+  return { transitions, materialChanges, verifiedObservations };
 }
 
 export async function reconcileAssuranceWorkspace({ workspaceId, database = pool, now = new Date(), notify = true }) {
@@ -927,7 +962,27 @@ export async function reconcileAssuranceWorkspace({ workspaceId, database = pool
   const overview = await getAssuranceOverview({ workspaceId, userId: null, role: "admin", database, now, policy });
   const snapshots = await reconcileStateSnapshots({ workspaceId, commitments: overview.commitments, policy, database, now, notify });
   const learning = await refreshAssuranceMemory({ workspaceId, database, now, policy });
-  return { workspaceId, capturedEvidence: ingestion.captured, transitions: snapshots.transitions, learning, overview };
+  if (ingestion.captured > 0 || snapshots.materialChanges > 0 || snapshots.verifiedObservations > 0) {
+    queueAssuranceIntelligenceRefresh({
+      workspaceId,
+      metadata: {
+        capturedEvidence: ingestion.captured,
+        stateTransitions: snapshots.transitions,
+        materialStateChanges: snapshots.materialChanges,
+        verifiedObservations: snapshots.verifiedObservations,
+      },
+      database,
+    });
+  }
+  return {
+    workspaceId,
+    capturedEvidence: ingestion.captured,
+    transitions: snapshots.transitions,
+    materialChanges: snapshots.materialChanges,
+    verifiedObservations: snapshots.verifiedObservations,
+    learning,
+    overview,
+  };
 }
 
 export async function reconcileAllAssuranceWorkspaces({ database = pool, now = new Date(), limit = 50 } = {}) {

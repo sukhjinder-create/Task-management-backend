@@ -279,6 +279,7 @@ function summarySectionStatus(overview = {}) {
       Boolean(summary.persistence?.summaryId || summary.summaryId) &&
       sectionKeys.includes("leadershipRecommendations") &&
       sectionKeys.includes("deliveryExecution") &&
+      sectionKeys.includes("outcomeAssurance") &&
       sectionKeys.includes("capacitySustainability") &&
       summary.quality?.passed !== false,
     summary: summarizeExecutiveSummaryPayload(overview),
@@ -678,7 +679,7 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
 
     const failures = [];
     for (const result of rangeResults) {
-      if (result.second.version !== PERIOD_EXECUTIVE_SUMMARY_VERSION) failures.push(`${result.range} did not return v5`);
+      if (result.second.version !== PERIOD_EXECUTIVE_SUMMARY_VERSION) failures.push(`${result.range} did not return v6`);
       if (result.second.sectionCount < 10) failures.push(`${result.range} missing required sections`);
       if (!result.second.qualityPassed) failures.push(`${result.range} quality check failed`);
       if (!result.second.reused) failures.push(`${result.range} second read did not reuse persisted summary`);
@@ -701,7 +702,7 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
     }
 
     return res.status(failures.length ? 409 : 200).json({
-      source: "enterprise_executive_summary_v5_verification",
+      source: "enterprise_executive_summary_v6_verification",
       generatedAt: new Date().toISOString(),
       workspaceId,
       summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,
@@ -724,9 +725,9 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
       certified: failures.length === 0,
     });
   } catch (err) {
-    console.error("[ENTERPRISE_EXECUTIVE_SUMMARY_V5_VERIFY_ERROR]", err);
+    console.error("[ENTERPRISE_EXECUTIVE_SUMMARY_V6_VERIFY_ERROR]", err);
     return res.status(500).json({
-      error: err.message || "Executive summary v5 verification failed",
+      error: err.message || "Executive summary v6 verification failed",
       code: err.code || null,
     });
   }

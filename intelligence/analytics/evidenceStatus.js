@@ -27,13 +27,17 @@ export function getUserEvidenceStatus(user = null) {
 
 export function getWorkspaceEvidenceStatus(snapshot = {}) {
   const execution = snapshot.workspace?.analytics?.execution || {};
+  const assurance = snapshot.workspace?.analytics?.assurance || {};
   const totalTrackedWork = positiveNumber(execution.totalWork);
   const internalWork = positiveNumber(execution.internalTotal);
   const externalWork = positiveNumber(execution.externalTotal);
   const usersWithEvidence = (snapshot.users || []).filter(
     (user) => getUserEvidenceStatus(user).hasEvidence
   ).length;
-  const hasEvidence = totalTrackedWork > 0 || internalWork > 0 || externalWork > 0 || usersWithEvidence > 0;
+  const verifiedAssuranceOutcomes = assurance.eligible
+    ? positiveNumber(assurance.verifiedSampleSize)
+    : 0;
+  const hasEvidence = totalTrackedWork > 0 || internalWork > 0 || externalWork > 0 || usersWithEvidence > 0 || verifiedAssuranceOutcomes > 0;
 
   return {
     hasEvidence,
@@ -46,6 +50,7 @@ export function getWorkspaceEvidenceStatus(snapshot = {}) {
       internalWork,
       externalWork,
       usersWithEvidence,
+      verifiedAssuranceOutcomes,
     },
   };
 }
