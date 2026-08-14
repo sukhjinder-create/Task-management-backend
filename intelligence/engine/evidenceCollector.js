@@ -338,7 +338,13 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
   const range = getRangeFromWindow(windowDays, now);
   const [internal, external, externalSignals, assurance] = await Promise.all([
     pool.query(
-      `SELECT
+      `WITH latest_decision_reviews AS (
+         SELECT DISTINCT ON (review.decision_id) review.*
+         FROM assurance_decision_reviews review
+         WHERE review.workspace_id=$1
+         ORDER BY review.decision_id, review.reviewed_at DESC, review.id DESC
+       )
+       SELECT
          COUNT(*)::int AS total,
          COUNT(*) FILTER (
            WHERE LOWER(COALESCE(status, '')) = ANY($2::text[])
@@ -411,7 +417,29 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
          (SELECT COUNT(*)::int
           FROM assurance_state_snapshots snapshot
           WHERE snapshot.workspace_id = $1
-            AND snapshot.state IN ('at_risk', 'off_track', 'needs_evidence')) AS attention_outcome_count`,
+            AND snapshot.state IN ('at_risk', 'off_track', 'needs_evidence')) AS attention_outcome_count,
+         (SELECT COUNT(*)::int FROM assurance_decisions decision
+          WHERE decision.workspace_id=$1 AND decision.status='decided') AS explicit_decision_count,
+         (SELECT COUNT(DISTINCT decision.id)::int FROM assurance_decisions decision
+          JOIN latest_decision_reviews review
+            ON review.workspace_id=decision.workspace_id AND review.decision_id=decision.id
+          WHERE decision.workspace_id=$1) AS reviewed_decision_count,
+         (SELECT COUNT(*)::int FROM latest_decision_reviews review
+          WHERE review.workspace_id=$1 AND review.effectiveness='effective') AS effective_decision_count,
+         (SELECT COUNT(*)::int FROM latest_decision_reviews review
+          WHERE review.workspace_id=$1 AND review.effectiveness='mixed') AS mixed_decision_count,
+         (SELECT COUNT(*)::int FROM assurance_experiments experiment
+          WHERE experiment.workspace_id=$1 AND experiment.status IN ('planned','active')) AS active_experiment_count,
+         (SELECT COUNT(*)::int FROM assurance_experiments experiment
+          WHERE experiment.workspace_id=$1 AND experiment.status='completed') AS completed_experiment_count,
+         (SELECT COUNT(*)::int FROM assurance_experiments experiment
+          WHERE experiment.workspace_id=$1 AND experiment.result_status='supported') AS supported_experiment_count,
+         (SELECT COUNT(*)::int FROM assurance_scenario_analyses scenario
+          WHERE scenario.workspace_id=$1) AS scenario_analysis_count,
+         (SELECT COUNT(*)::int FROM assurance_outcome_receipts receipt
+          WHERE receipt.workspace_id=$1) AS outcome_receipt_count,
+         (SELECT COUNT(*)::int FROM assurance_policy_proposals proposal
+          WHERE proposal.workspace_id=$1 AND proposal.status='candidate') AS policy_proposal_count`,
       [workspaceId]
     ).then((r) => r.rows[0]).catch(() => ({
       required_sample_size: 3,
@@ -422,6 +450,16 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
       snapshotted_outcome_count: 0,
       healthy_outcome_count: 0,
       attention_outcome_count: 0,
+      explicit_decision_count: 0,
+      reviewed_decision_count: 0,
+      effective_decision_count: 0,
+      mixed_decision_count: 0,
+      active_experiment_count: 0,
+      completed_experiment_count: 0,
+      supported_experiment_count: 0,
+      scenario_analysis_count: 0,
+      outcome_receipt_count: 0,
+      policy_proposal_count: 0,
     })),
   ]);
 
@@ -455,6 +493,16 @@ export async function collectWorkspaceEvidence({ workspaceId, windowDays = 30, n
       snapshottedOutcomeCount: Number(assurance?.snapshotted_outcome_count) || 0,
       healthyOutcomeCount: Number(assurance?.healthy_outcome_count) || 0,
       attentionOutcomeCount: Number(assurance?.attention_outcome_count) || 0,
+      explicitDecisionCount: Number(assurance?.explicit_decision_count) || 0,
+      reviewedDecisionCount: Number(assurance?.reviewed_decision_count) || 0,
+      effectiveDecisionCount: Number(assurance?.effective_decision_count) || 0,
+      mixedDecisionCount: Number(assurance?.mixed_decision_count) || 0,
+      activeExperimentCount: Number(assurance?.active_experiment_count) || 0,
+      completedExperimentCount: Number(assurance?.completed_experiment_count) || 0,
+      supportedExperimentCount: Number(assurance?.supported_experiment_count) || 0,
+      scenarioAnalysisCount: Number(assurance?.scenario_analysis_count) || 0,
+      outcomeReceiptCount: Number(assurance?.outcome_receipt_count) || 0,
+      policyProposalCount: Number(assurance?.policy_proposal_count) || 0,
     },
     sourceWindow: {
       startDate: range.startDate,

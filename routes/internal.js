@@ -280,6 +280,7 @@ function summarySectionStatus(overview = {}) {
       sectionKeys.includes("leadershipRecommendations") &&
       sectionKeys.includes("deliveryExecution") &&
       sectionKeys.includes("outcomeAssurance") &&
+      sectionKeys.includes("decisionOutcomeIntelligence") &&
       sectionKeys.includes("capacitySustainability") &&
       summary.quality?.passed !== false,
     summary: summarizeExecutiveSummaryPayload(overview),
@@ -679,7 +680,7 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
 
     const failures = [];
     for (const result of rangeResults) {
-      if (result.second.version !== PERIOD_EXECUTIVE_SUMMARY_VERSION) failures.push(`${result.range} did not return v6`);
+      if (result.second.version !== PERIOD_EXECUTIVE_SUMMARY_VERSION) failures.push(`${result.range} did not return v7`);
       if (result.second.sectionCount < 10) failures.push(`${result.range} missing required sections`);
       if (!result.second.qualityPassed) failures.push(`${result.range} quality check failed`);
       if (!result.second.reused) failures.push(`${result.range} second read did not reuse persisted summary`);
@@ -702,7 +703,7 @@ router.post("/enterprise-intelligence/executive-summary-v5-verify", async (req, 
     }
 
     return res.status(failures.length ? 409 : 200).json({
-      source: "enterprise_executive_summary_v6_verification",
+      source: "enterprise_executive_summary_v7_verification",
       generatedAt: new Date().toISOString(),
       workspaceId,
       summaryVersion: PERIOD_EXECUTIVE_SUMMARY_VERSION,

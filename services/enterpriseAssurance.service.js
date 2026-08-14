@@ -8,6 +8,10 @@ import {
   getAssuranceOverview,
 } from "./executionAssurance.service.js";
 import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
+import {
+  getDecisionOutcomeIntelligence,
+  refreshAdaptivePolicyProposals,
+} from "./decisionOutcome.service.js";
 
 const CONFIGURE_ROLES = new Set(["admin"]);
 const MANAGER_ROLES = new Set(["admin", "manager"]);
@@ -46,6 +50,8 @@ export const DEFAULT_ASSURANCE_POLICY = Object.freeze({
   automaticExternalEvidence: true,
   notifyOnStateChange: true,
   minimumPatternSample: 3,
+  decisionReviewDays: 30,
+  requireDecisionRationale: true,
   approvalMatrix: {
     complete: {
       requestRoles: ["user", "manager", "admin"],
@@ -127,6 +133,8 @@ function mapPolicy(row = null) {
     automaticExternalEvidence: row?.automatic_external_evidence ?? DEFAULT_ASSURANCE_POLICY.automaticExternalEvidence,
     notifyOnStateChange: row?.notify_on_state_change ?? DEFAULT_ASSURANCE_POLICY.notifyOnStateChange,
     minimumPatternSample: Number(row?.minimum_pattern_sample ?? DEFAULT_ASSURANCE_POLICY.minimumPatternSample),
+    decisionReviewDays: Number(row?.decision_review_days ?? DEFAULT_ASSURANCE_POLICY.decisionReviewDays),
+    requireDecisionRationale: true,
     approvalMatrix: {
       complete: {
         requestRoles: normalizeRoleList(matrix.complete?.requestRoles, DEFAULT_ASSURANCE_POLICY.approvalMatrix.complete.requestRoles),
@@ -165,6 +173,11 @@ export function normalizeAssurancePolicy(input = {}, current = DEFAULT_ASSURANCE
       input.minimumPatternSample ?? input.minimum_pattern_sample ?? current.minimumPatternSample,
       current.minimumPatternSample, 3, 100, "Minimum learning sample"
     ),
+    decisionReviewDays: boundedInteger(
+      input.decisionReviewDays ?? input.decision_review_days ?? current.decisionReviewDays,
+      current.decisionReviewDays, 1, 180, "Decision review window"
+    ),
+    requireDecisionRationale: true,
     approvalMatrix: {
       complete: {
         requestRoles: normalizeRoleList(matrix.complete?.requestRoles, current.approvalMatrix.complete.requestRoles),
@@ -200,14 +213,17 @@ export async function updateAssurancePolicy({ workspaceId, actorId, role, input,
     INSERT INTO assurance_workspace_policies (
       workspace_id, risk_window_days, require_result_evidence,
       automatic_external_evidence, notify_on_state_change,
-      minimum_pattern_sample, approval_matrix, updated_by
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
+      minimum_pattern_sample, decision_review_days, require_decision_rationale,
+      approval_matrix, updated_by
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
     ON CONFLICT (workspace_id) DO UPDATE SET
       risk_window_days = EXCLUDED.risk_window_days,
       require_result_evidence = EXCLUDED.require_result_evidence,
       automatic_external_evidence = EXCLUDED.automatic_external_evidence,
       notify_on_state_change = EXCLUDED.notify_on_state_change,
       minimum_pattern_sample = EXCLUDED.minimum_pattern_sample,
+      decision_review_days = EXCLUDED.decision_review_days,
+      require_decision_rationale = EXCLUDED.require_decision_rationale,
       approval_matrix = EXCLUDED.approval_matrix,
       version = assurance_workspace_policies.version + 1,
       updated_by = EXCLUDED.updated_by,
@@ -221,6 +237,8 @@ export async function updateAssurancePolicy({ workspaceId, actorId, role, input,
       Boolean(value.automaticExternalEvidence),
       Boolean(value.notifyOnStateChange),
       value.minimumPatternSample,
+      value.decisionReviewDays,
+      true,
       JSON.stringify(value.approvalMatrix),
       actorId,
     ]
@@ -758,7 +776,8 @@ async function recordVerifiedOutcome({ workspaceId, commitment, preCompletionSta
        workspace_id, goal_id, target_date, verified_at, on_time, days_to_verify,
        pre_completion_state, evidence_count, external_evidence_count,
        recovery_action_count, decision_count, approved_decision_count,
-       average_decision_hours, source_snapshot
+       average_decision_hours, explicit_decision_count, reviewed_decision_count,
+       experiment_count, completed_experiment_count, source_snapshot
      )
      SELECT
        $1, o.id, o.target_date, $3::timestamptz,
@@ -773,6 +792,16 @@ async function recordVerifiedOutcome({ workspaceId, commitment, preCompletionSta
        (SELECT ROUND(AVG(EXTRACT(EPOCH FROM (decision.decided_at-decision.requested_at))/3600)::numeric, 2)
         FROM assurance_approval_requests decision
         WHERE decision.workspace_id=$1 AND decision.goal_id=o.id AND decision.decided_at IS NOT NULL),
+       (SELECT COUNT(*)::int FROM assurance_decisions decision
+        WHERE decision.workspace_id=$1 AND decision.goal_id=o.id),
+       (SELECT COUNT(DISTINCT decision.id)::int FROM assurance_decisions decision
+        JOIN assurance_decision_reviews review
+          ON review.workspace_id=decision.workspace_id AND review.decision_id=decision.id
+        WHERE decision.workspace_id=$1 AND decision.goal_id=o.id),
+       (SELECT COUNT(*)::int FROM assurance_experiments experiment
+        WHERE experiment.workspace_id=$1 AND experiment.goal_id=o.id),
+       (SELECT COUNT(*)::int FROM assurance_experiments experiment
+        WHERE experiment.workspace_id=$1 AND experiment.goal_id=o.id AND experiment.status='completed'),
        $4::jsonb
      FROM okr_objectives o
      WHERE o.workspace_id=$1 AND o.id=$2
@@ -786,7 +815,13 @@ async function recordVerifiedOutcome({ workspaceId, commitment, preCompletionSta
 export async function refreshAssuranceMemory({ workspaceId, database = pool, now = new Date(), policy = null }) {
   const currentPolicy = policy || await getAssurancePolicy(workspaceId, database);
   const { rows } = await database.query(
-    `SELECT
+    `WITH latest_decision_reviews AS (
+       SELECT DISTINCT ON (review.decision_id) review.*
+       FROM assurance_decision_reviews review
+       WHERE review.workspace_id=$1
+       ORDER BY review.decision_id, review.reviewed_at DESC, review.id DESC
+     )
+     SELECT
        COUNT(*)::int AS sample_size,
        COUNT(*) FILTER (WHERE on_time IS TRUE)::int AS on_time_count,
        COUNT(*) FILTER (WHERE recovery_action_count > 0)::int AS recovery_sample_size,
@@ -795,6 +830,26 @@ export async function refreshAssuranceMemory({ workspaceId, database = pool, now
        COUNT(*) FILTER (WHERE decision_count > 0 AND on_time IS TRUE)::int AS decision_on_time_count,
        ROUND(AVG(average_decision_hours) FILTER (WHERE decision_count > 0), 1) AS average_decision_hours,
        ROUND(AVG(days_to_verify)::numeric, 1) AS average_days_to_verify,
+       (SELECT COUNT(DISTINCT decision.id)::int
+        FROM assurance_decisions decision
+        JOIN latest_decision_reviews review
+          ON review.workspace_id=decision.workspace_id AND review.decision_id=decision.id
+        WHERE decision.workspace_id=$1) AS explicit_decision_review_sample,
+       (SELECT COUNT(*)::int
+        FROM latest_decision_reviews review
+        JOIN assurance_decisions decision
+          ON decision.workspace_id=review.workspace_id AND decision.id=review.decision_id
+        WHERE review.workspace_id=$1 AND review.effectiveness='effective') AS explicit_decision_effective_count,
+       (SELECT COUNT(*)::int
+        FROM latest_decision_reviews review
+        JOIN assurance_decisions decision
+          ON decision.workspace_id=review.workspace_id AND decision.id=review.decision_id
+        WHERE review.workspace_id=$1 AND review.effectiveness='mixed') AS explicit_decision_mixed_count,
+       (SELECT COUNT(*)::int FROM assurance_experiments experiment
+        WHERE experiment.workspace_id=$1 AND experiment.status='completed') AS completed_experiment_sample,
+       (SELECT COUNT(*)::int FROM assurance_experiments experiment
+        WHERE experiment.workspace_id=$1 AND experiment.status='completed'
+          AND experiment.result_status='supported') AS supported_experiment_count,
        ARRAY_AGG(id ORDER BY verified_at DESC) AS observation_ids
      FROM assurance_outcome_observations WHERE workspace_id=$1`,
     [workspaceId]
@@ -848,6 +903,39 @@ export async function refreshAssuranceMemory({ workspaceId, database = pool, now
         onTimeRate: decisionOnTimeRate,
         averageDecisionHours: aggregate.average_decision_hours == null ? null : Number(aggregate.average_decision_hours),
         interpretation: "Observed association only; this does not prove the decision caused the delivery result.",
+      },
+    });
+  }
+  const explicitDecisionSample = Number(aggregate.explicit_decision_review_sample || 0);
+  if (explicitDecisionSample >= currentPolicy.minimumPatternSample) {
+    const effectiveEquivalent = Number(aggregate.explicit_decision_effective_count || 0)
+      + Number(aggregate.explicit_decision_mixed_count || 0) * 0.5;
+    const effectivenessRate = Math.round((effectiveEquivalent / explicitDecisionSample) * 100);
+    patterns.push({
+      key: "decision_effectiveness_observation",
+      title: "Decision effectiveness",
+      statement: `Across ${explicitDecisionSample} reviewed decisions, ${effectivenessRate}% were observed as effective or partly effective.`,
+      sampleSize: explicitDecisionSample,
+      evidence: {
+        effectiveCount: Number(aggregate.explicit_decision_effective_count || 0),
+        mixedCount: Number(aggregate.explicit_decision_mixed_count || 0),
+        effectiveEquivalentRate: effectivenessRate,
+        interpretation: "Human-reviewed outcomes only; the record does not prove the decision caused the result.",
+      },
+    });
+  }
+  const experimentSample = Number(aggregate.completed_experiment_sample || 0);
+  if (experimentSample >= currentPolicy.minimumPatternSample) {
+    const supportedRate = Math.round((Number(aggregate.supported_experiment_count || 0) / experimentSample) * 100);
+    patterns.push({
+      key: "reversible_experiment_observation",
+      title: "Reversible experiment learning",
+      statement: `${Number(aggregate.supported_experiment_count || 0)} of ${experimentSample} completed experiments supported their recorded hypothesis.`,
+      sampleSize: experimentSample,
+      evidence: {
+        supportedCount: Number(aggregate.supported_experiment_count || 0),
+        supportedRate,
+        interpretation: "The result records what the tests observed; it is not a cross-workspace benchmark.",
       },
     });
   }
@@ -962,6 +1050,12 @@ export async function reconcileAssuranceWorkspace({ workspaceId, database = pool
   const overview = await getAssuranceOverview({ workspaceId, userId: null, role: "admin", database, now, policy });
   const snapshots = await reconcileStateSnapshots({ workspaceId, commitments: overview.commitments, policy, database, now, notify });
   const learning = await refreshAssuranceMemory({ workspaceId, database, now, policy });
+  const adaptivePolicy = await refreshAdaptivePolicyProposals({
+    workspaceId,
+    database,
+    now,
+    system: true,
+  });
   if (ingestion.captured > 0 || snapshots.materialChanges > 0 || snapshots.verifiedObservations > 0) {
     queueAssuranceIntelligenceRefresh({
       workspaceId,
@@ -981,6 +1075,7 @@ export async function reconcileAssuranceWorkspace({ workspaceId, database = pool
     materialChanges: snapshots.materialChanges,
     verifiedObservations: snapshots.verifiedObservations,
     learning,
+    adaptivePolicy,
     overview,
   };
 }
@@ -1095,7 +1190,7 @@ export async function getExecutiveAssuranceReport({ workspaceId, userId, role, d
   const policy = await getAssurancePolicy(workspaceId, database);
   const overview = await getAssuranceOverview({ workspaceId, userId, role, database, now, policy });
   const visibleGoalIds = overview.commitments.map((item) => item.id);
-  const [portfolio, approvalResult, evidenceResult, exportResult, learning] = await Promise.all([
+  const [portfolio, approvalResult, evidenceResult, exportResult, learning, decisionOutcome] = await Promise.all([
     getAssurancePortfolio({ workspaceId, userId, role, database, now }),
     database.query(
       `SELECT status, action_type, COUNT(*)::int AS count FROM assurance_approval_requests
@@ -1121,9 +1216,16 @@ export async function getExecutiveAssuranceReport({ workspaceId, userId, role, d
     String(role || "").toLowerCase() === "admin"
       ? refreshAssuranceMemory({ workspaceId, database, now, policy })
       : getScopedAssuranceLearning({ workspaceId, goalIds: visibleGoalIds, database, policy }),
+    getDecisionOutcomeIntelligence({
+      workspaceId,
+      goalIds: visibleGoalIds,
+      role,
+      database,
+      requiredSampleSize: policy.minimumPatternSample,
+    }),
   ]);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: now.toISOString(),
     evidencePolicy: overview.evidencePolicy,
     summary: overview.summary,
@@ -1132,6 +1234,7 @@ export async function getExecutiveAssuranceReport({ workspaceId, userId, role, d
     portfolios: portfolio.portfolios,
     dependencies: portfolio.dependencies,
     decisions: approvalResult.rows,
+    decisionOutcome,
     learning,
     policy,
     recentExports: exportResult.rows,
@@ -1180,7 +1283,7 @@ export async function generateAssuranceExport({ workspaceId, userId, role, forma
         exportId,
         workspaceId,
         generatedAt: now.toISOString(),
-        schemaVersion: 1,
+        schemaVersion: 2,
         digestAlgorithm: "SHA-256",
         digestScope: "data",
         sha256: digest,
@@ -1192,7 +1295,7 @@ export async function generateAssuranceExport({ workspaceId, userId, role, forma
   await database.query(
     `INSERT INTO assurance_export_manifests
        (id, workspace_id, requested_by, format, schema_version, record_count, sha256, filters, generated_at)
-     VALUES ($1,$2,$3,$4,1,$5,$6,$7::jsonb,$8)`,
+     VALUES ($1,$2,$3,$4,2,$5,$6,$7::jsonb,$8)`,
     [exportId, workspaceId, userId, normalizedFormat, report.commitments.length, sha256, JSON.stringify({ scope: "workspace_assurance" }), now.toISOString()]
   );
   await logAudit({ workspaceId, userId, action: "assurance.export.generate", entityType: "assurance_export", entityId: exportId, newValue: { format: normalizedFormat, sha256, recordCount: report.commitments.length } });

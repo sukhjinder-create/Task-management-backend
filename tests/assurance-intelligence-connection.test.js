@@ -89,8 +89,9 @@ test("assurance evidence, executive narrative, explanation, and refresh paths re
 
   assert.match(collector, /assurance_outcome_observations observation[\s\S]*observation\.workspace_id = \$1/);
   assert.match(collector, /goal_assurance_evidence e[\s\S]*e\.workspace_id = \$1/);
-  assert.match(summary, /enterprise_executive_summary_v6/);
+  assert.match(summary, /enterprise_executive_summary_v7/);
   assert.match(summary, /section\("outcomeAssurance", "Outcome Assurance"/);
+  assert.match(summary, /section\("decisionOutcomeIntelligence", "Decision-to-Outcome Intelligence"/);
   assert.match(summary, /verified evidence contributes to Execution Reality and Delivery Confidence/);
   assert.match(explanation, /outcomeAssuranceEffect/);
   assert.match(explanation, /indirect_via_execution_reality_and_delivery_confidence/);

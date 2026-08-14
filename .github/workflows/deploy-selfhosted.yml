@@ -563,6 +563,62 @@ jobs:
             });
           ' < "$ASSURANCE_MOAT_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
 
+          # Install the additive verified decision-to-outcome records before the
+          # API and executive summary v7 are started. Verification covers every
+          # new tenant-scoped table, the policy extension, and receipt digest.
+          DECISION_OUTCOME_MIGRATION="migrations/20260814_verified_decision_outcome_os.sql"
+          [ -f "$DECISION_OUTCOME_MIGRATION" ] || { echo "missing migration: $DECISION_OUTCOME_MIGRATION"; exit 1; }
+          echo "applying $DECISION_OUTCOME_MIGRATION ..."
+          sudo docker exec -i app-app-1 node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+              });
+              try {
+                await pool.query(sql);
+                const tables = [
+                  "assurance_decisions",
+                  "assurance_decision_reviews",
+                  "assurance_experiments",
+                  "assurance_scenario_analyses",
+                  "assurance_policy_proposals",
+                  "assurance_outcome_receipts",
+                ];
+                const check = await pool.query(
+                  `SELECT
+                     (SELECT COUNT(*)::int FROM information_schema.tables
+                      WHERE table_schema=$1 AND table_name=ANY($2::text[])) AS table_count,
+                     EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_schema=$1 AND table_name=$3 AND column_name=$4) AS has_review_window,
+                     EXISTS (SELECT 1 FROM pg_constraint
+                      WHERE conname=$5 AND conrelid=$6::regclass) AS has_tenant_decision_fk,
+                     EXISTS (SELECT 1 FROM pg_constraint
+                      WHERE conname=$7 AND conrelid=$8::regclass) AS has_receipt_digest`,
+                  [
+                    "public", tables, "assurance_workspace_policies", "decision_review_days",
+                    "assurance_decision_recorded_by_workspace_fkey", "public.assurance_decisions",
+                    "assurance_receipt_digest_check", "public.assurance_outcome_receipts",
+                  ]
+                );
+                const row = check.rows[0];
+                if (row.table_count !== tables.length || !row.has_review_window || !row.has_tenant_decision_fk || !row.has_receipt_digest) {
+                  throw new Error("verified decision-to-outcome schema verification failed");
+                }
+                console.log("verified decision-to-outcome migration verified");
+              } catch (error) {
+                console.error("verified decision-to-outcome migration failed:", error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$DECISION_OUTCOME_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 

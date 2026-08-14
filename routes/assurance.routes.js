@@ -26,6 +26,21 @@ import {
   updateAssurancePolicy,
   updateAssurancePortfolio,
 } from "../services/enterpriseAssurance.service.js";
+import {
+  analyzeAssuranceScenario,
+  createAssuranceDecision,
+  createAssuranceExperiment,
+  generateOutcomeReceipt,
+  getDecisionLab,
+  getDecisionOperatingInbox,
+  getDecisionOutcomeRecord,
+  getOutcomeReceipt,
+  listAdaptivePolicyProposals,
+  refreshAdaptivePolicyProposals,
+  reviewAdaptivePolicyProposal,
+  reviewAssuranceDecision,
+  updateAssuranceExperiment,
+} from "../services/decisionOutcome.service.js";
 
 const router = express.Router();
 
@@ -280,13 +295,202 @@ router.delete("/dependencies/:id", allowRoles("manager", "admin"), async (req, r
 
 router.get("/inbox", async (req, res) => {
   try {
-    res.json(await getAssuranceInbox({
+    const [base, operating] = await Promise.all([
+      getAssuranceInbox({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+      getDecisionOperatingInbox({
+        workspaceId: req.workspaceId,
+        userId: req.user.id,
+        role: req.user.role,
+      }),
+    ]);
+    const decisionReviews = operating.decisionsNeedingReview?.length || 0;
+    const experiments = operating.experimentsNeedingAttention?.length || 0;
+    res.json({
+      ...base,
+      ...operating,
+      summary: {
+        ...base.summary,
+        decisionReviews,
+        experiments,
+        total: Number(base.summary?.total || 0) + decisionReviews + experiments,
+      },
+    });
+  } catch (error) {
+    sendError(res, error, "Failed to load assurance inbox");
+  }
+});
+
+router.get("/commitments/:id/operating-record", async (req, res) => {
+  try {
+    res.json(await getDecisionOutcomeRecord({
       workspaceId: req.workspaceId,
-      userId: req.user.id,
+      goalId: req.params.id,
+      actorId: req.user.id,
       role: req.user.role,
     }));
   } catch (error) {
-    sendError(res, error, "Failed to load assurance inbox");
+    sendError(res, error, "Failed to load the decision-to-outcome record");
+  }
+});
+
+router.get("/commitments/:id/decision-lab", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    res.json(await getDecisionLab({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to load decision guidance");
+  }
+});
+
+router.post("/commitments/:id/decisions", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const decision = await createAssuranceDecision({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ decision });
+  } catch (error) {
+    sendError(res, error, "Failed to record the decision");
+  }
+});
+
+router.post("/decisions/:id/reviews", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const review = await reviewAssuranceDecision({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ review });
+  } catch (error) {
+    sendError(res, error, "Failed to review the decision result");
+  }
+});
+
+router.post("/commitments/:id/experiments", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const experiment = await createAssuranceExperiment({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ experiment });
+  } catch (error) {
+    sendError(res, error, "Failed to create the reversible experiment");
+  }
+});
+
+router.patch("/experiments/:id", async (req, res) => {
+  try {
+    const experiment = await updateAssuranceExperiment({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.json({ experiment });
+  } catch (error) {
+    sendError(res, error, "Failed to update the experiment");
+  }
+});
+
+router.post("/commitments/:id/scenarios", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const scenario = await analyzeAssuranceScenario({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ scenario });
+  } catch (error) {
+    sendError(res, error, "Failed to compare the scenario");
+  }
+});
+
+router.post("/commitments/:id/receipts", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const receipt = await generateOutcomeReceipt({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ receipt });
+  } catch (error) {
+    sendError(res, error, "Failed to generate the outcome receipt");
+  }
+});
+
+router.get("/receipts/:id", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const result = await getOutcomeReceipt({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+    });
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+    res.setHeader("X-Outcome-Receipt-Sha256", result.receipt.sha256);
+    res.send(result.content);
+  } catch (error) {
+    sendError(res, error, "Failed to download the outcome receipt");
+  }
+});
+
+router.get("/adaptive-policy-proposals", allowRoles("admin"), async (req, res) => {
+  try {
+    res.json(await listAdaptivePolicyProposals({
+      workspaceId: req.workspaceId,
+      role: req.user.role,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to load adaptive policy proposals");
+  }
+});
+
+router.post("/adaptive-policy-proposals/refresh", allowRoles("admin"), async (req, res) => {
+  try {
+    res.json(await refreshAdaptivePolicyProposals({
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to refresh adaptive policy proposals");
+  }
+});
+
+router.post("/adaptive-policy-proposals/:id/decision", allowRoles("admin"), async (req, res) => {
+  try {
+    res.json(await reviewAdaptivePolicyProposal({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to review the adaptive policy proposal");
   }
 });
 

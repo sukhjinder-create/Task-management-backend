@@ -55,6 +55,10 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
   const assuranceVerifiedSampleSize = Number(assuranceEvidence.verifiedSampleSize) || 0;
   const assuranceRequiredSampleSize = Math.max(3, Number(assuranceEvidence.requiredSampleSize) || 3);
   const assuranceSnapshottedOutcomeCount = Number(assuranceEvidence.snapshottedOutcomeCount) || 0;
+  const reviewedDecisionCount = Number(assuranceEvidence.reviewedDecisionCount) || 0;
+  const decisionEffectivenessEligible = reviewedDecisionCount >= assuranceRequiredSampleSize;
+  const effectiveDecisionEquivalent = (Number(assuranceEvidence.effectiveDecisionCount) || 0)
+    + (Number(assuranceEvidence.mixedDecisionCount) || 0) * 0.5;
   const assuranceSignals = [
     assuranceVerifiedSampleSize > 0 && {
       value: ratio(assuranceEvidence.verifiedOnTimeCount, assuranceVerifiedSampleSize, 0.62) * 100,
@@ -289,6 +293,23 @@ export function evaluateWorkspaceIntelligence({ workspaceId, users = [], project
         scoreWithoutOutcomeAssurance,
         finalScoreImpactPoints: score - scoreWithoutOutcomeAssurance,
         guardrail: "No score contribution is made before the workspace reaches its configured verified-outcome sample.",
+        decisionOutcome: {
+          decisionsRecorded: Number(assuranceEvidence.explicitDecisionCount) || 0,
+          decisionsReviewed: reviewedDecisionCount,
+          decisionsAwaitingReview: Math.max(0, (Number(assuranceEvidence.explicitDecisionCount) || 0) - reviewedDecisionCount),
+          effectivenessStatus: decisionEffectivenessEligible ? "measured" : "learning",
+          effectiveEquivalentRate: decisionEffectivenessEligible
+            ? roundScore((effectiveDecisionEquivalent / reviewedDecisionCount) * 100)
+            : null,
+          activeExperiments: Number(assuranceEvidence.activeExperimentCount) || 0,
+          completedExperiments: Number(assuranceEvidence.completedExperimentCount) || 0,
+          supportedExperiments: Number(assuranceEvidence.supportedExperimentCount) || 0,
+          scenarioAnalyses: Number(assuranceEvidence.scenarioAnalysisCount) || 0,
+          receiptsIssued: Number(assuranceEvidence.outcomeReceiptCount) || 0,
+          adaptivePolicyProposals: Number(assuranceEvidence.policyProposalCount) || 0,
+          scoreContribution: "none",
+          guardrail: "Decision activity is executive evidence, not a productivity score. Effectiveness appears only after the configured reviewed-decision sample.",
+        },
       },
       scoreModel,
     },

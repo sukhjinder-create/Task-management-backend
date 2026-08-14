@@ -3,7 +3,7 @@ import pool from "../../db.js";
 import { saveExecutiveSummary } from "../../events/executive/executiveSummary.store.js";
 import { buildTrendAnalytics } from "./historicalAnalytics.service.js";
 
-export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "enterprise_executive_summary_v6";
+export const PERIOD_EXECUTIVE_SUMMARY_VERSION = "enterprise_executive_summary_v7";
 const SUMMARY_KIND = "dashboard_period_executive_summary";
 
 function dateKey(value) {
@@ -308,7 +308,7 @@ function summaryStoragePeriodKey(bucket = {}) {
     .digest("hex")
     .slice(0, 8)
     .toUpperCase();
-  return `V6${digest}`;
+  return `V7${digest}`;
 }
 
 function summarizeSnapshotEvidence(snapshot = {}, intelligence = {}) {
@@ -374,6 +374,20 @@ function summarizeSnapshotEvidence(snapshot = {}, intelligence = {}) {
       attentionOutcomeCount: Number(assurance.attentionOutcomeCount) || 0,
       contributionPaths: assurance.eligible ? (assurance.contributionPaths || []) : [],
       finalScoreImpactPoints: assurance.eligible ? (assurance.finalScoreImpactPoints ?? null) : null,
+      decisionOutcome: {
+        decisionsRecorded: Number(assurance.decisionOutcome?.decisionsRecorded) || 0,
+        decisionsReviewed: Number(assurance.decisionOutcome?.decisionsReviewed) || 0,
+        decisionsAwaitingReview: Number(assurance.decisionOutcome?.decisionsAwaitingReview) || 0,
+        effectivenessStatus: assurance.decisionOutcome?.effectivenessStatus || "learning",
+        effectiveEquivalentRate: assurance.decisionOutcome?.effectiveEquivalentRate ?? null,
+        activeExperiments: Number(assurance.decisionOutcome?.activeExperiments) || 0,
+        completedExperiments: Number(assurance.decisionOutcome?.completedExperiments) || 0,
+        supportedExperiments: Number(assurance.decisionOutcome?.supportedExperiments) || 0,
+        scenarioAnalyses: Number(assurance.decisionOutcome?.scenarioAnalyses) || 0,
+        receiptsIssued: Number(assurance.decisionOutcome?.receiptsIssued) || 0,
+        adaptivePolicyProposals: Number(assurance.decisionOutcome?.adaptivePolicyProposals) || 0,
+        scoreContribution: "none",
+      },
     },
   };
 }
@@ -534,6 +548,8 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     "outcome",
     "assurance",
     "verified",
+    "decision",
+    "experiment",
   ];
   const scoreCentricPattern = /\b(score|scored|scores|\/100|points?\s+movement|increased\s+from\s+\d|decreased\s+from\s+\d)\b/i;
   const requiredSectionKeys = [
@@ -544,6 +560,7 @@ export function assessExecutiveSummaryQuality(summary = {}) {
     "attendanceWorkforceReadiness",
     "deliveryExecution",
     "outcomeAssurance",
+    "decisionOutcomeIntelligence",
     "collaborationOrganizationalHealth",
     "capacitySustainability",
     "leadershipRecommendations",
@@ -597,6 +614,21 @@ function buildRecommendations(analysis) {
       "High Priority",
       "Review the verified outcomes that are off track or missing current result evidence.",
       `${assurance.attentionOutcomeCount || "Some"} governed outcome(s) need attention in the current assurance record.`
+    ));
+  }
+
+  const decisionOutcome = assurance.decisionOutcome || {};
+  if (Number(decisionOutcome.decisionsAwaitingReview) > 0) {
+    recommendations.push(recommendation(
+      "High Priority",
+      "Review the observed result of decisions whose review window has arrived.",
+      `${decisionOutcome.decisionsAwaitingReview} decision(s) are recorded without a completed effectiveness review.`
+    ));
+  } else if (Number(decisionOutcome.activeExperiments) > 0) {
+    recommendations.push(recommendation(
+      "Medium Priority",
+      "Close the active reversible experiments before making a larger commitment.",
+      `${decisionOutcome.activeExperiments} active validation experiment(s) are still reducing execution uncertainty.`
     ));
   }
 
@@ -686,6 +718,17 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
     : assuranceState.outcomeCount > 0
       ? `Outcome assurance is still learning from ${assuranceState.verifiedSampleSize} verified outcome(s). It will contribute to workspace intelligence only after the configured minimum of ${assuranceState.requiredSampleSize} is reached; no intelligence contribution is made before that gate.`
       : "No governed outcome-assurance record exists in this scope yet, so it makes no contribution to workspace intelligence or this period's conclusions.";
+  const decisionOutcomeState = assuranceState.decisionOutcome || {};
+  const decisionOutcomeBody = decisionOutcomeState.decisionsRecorded > 0
+    ? compactSentence([
+      `${decisionOutcomeState.decisionsRecorded} material decision(s) are retained in the decision-to-outcome record; ${decisionOutcomeState.decisionsReviewed} have an observed-result review and ${decisionOutcomeState.decisionsAwaitingReview} still await review.`,
+      decisionOutcomeState.effectivenessStatus === "measured"
+        ? `Observed effective-equivalent decision rate is ${decisionOutcomeState.effectiveEquivalentRate}% across the eligible reviewed sample.`
+        : `Decision effectiveness remains in learning status until at least ${assuranceState.requiredSampleSize} decisions have reviewed outcomes.`,
+      `${decisionOutcomeState.activeExperiments} reversible experiment(s) are active, ${decisionOutcomeState.completedExperiments} are complete, and ${decisionOutcomeState.receiptsIssued} outcome receipt(s) preserve decision-to-evidence lineage.`,
+      "Decision activity does not increase employee or workspace scores; it contributes only as governed executive evidence.",
+    ])
+    : "No material decision record exists for governed outcomes in this scope. The executive summary therefore makes no claim about decision effectiveness, interventions, or experimental learning.";
   const outlook = compactSentence([
     `Outlook: current operational patterns suggest the workspace will remain ${direction} if the strongest behaviours are repeated and ${topConcern} receives active follow-up.`,
     forecast?.confidence === "low"
@@ -707,6 +750,7 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
     section("attendanceWorkforceReadiness", "Attendance & Workforce Readiness", attendanceBody),
     section("deliveryExecution", "Delivery & Execution", deliveryBody),
     section("outcomeAssurance", "Outcome Assurance", outcomeAssuranceBody),
+    section("decisionOutcomeIntelligence", "Decision-to-Outcome Intelligence", decisionOutcomeBody),
     section("collaborationOrganizationalHealth", "Collaboration & Organizational Health", collaborationBody),
     section("capacitySustainability", "Capacity & Sustainability", capacityBody),
     section(
@@ -761,6 +805,12 @@ function buildNarrative({ scopeLabel, analysis, forecast, materialization }) {
       verifiedOutcomes: evidence.assurance?.verifiedSampleSize || 0,
       outcomeAssuranceStatus: evidence.assurance?.status || "learning",
       outcomeAssuranceFinalScoreImpactPoints: evidence.assurance?.finalScoreImpactPoints ?? null,
+      decisionsRecorded: evidence.assurance?.decisionOutcome?.decisionsRecorded || 0,
+      decisionsReviewed: evidence.assurance?.decisionOutcome?.decisionsReviewed || 0,
+      decisionEffectivenessStatus: evidence.assurance?.decisionOutcome?.effectivenessStatus || "learning",
+      decisionEffectiveEquivalentRate: evidence.assurance?.decisionOutcome?.effectiveEquivalentRate ?? null,
+      activeDecisionExperiments: evidence.assurance?.decisionOutcome?.activeExperiments || 0,
+      outcomeReceiptsIssued: evidence.assurance?.decisionOutcome?.receiptsIssued || 0,
     },
   };
 }

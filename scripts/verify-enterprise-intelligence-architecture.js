@@ -348,7 +348,8 @@ assertIncludes(aiContextBuilder, "workspace_intelligence", "AI intelligence quer
 assertIncludes(aiContextBuilder, "workspace_executive_summaries", "AI intelligence query must use canonical persisted summary context");
 assertNotIncludes(aiContextBuilder, "workspace_monthly_scores", "AI intelligence query must not read legacy monthly scores");
 assertNotIncludes(aiContextBuilder, "workspace_project_monthly_scores", "AI intelligence query must not read legacy project monthly scores");
-assertIncludes(periodExecutiveSummary, "enterprise_executive_summary_v6", "Executive summaries must use the enterprise-grade v6 evidence-driven summary artifact");
+assertIncludes(periodExecutiveSummary, "enterprise_executive_summary_v7", "Executive summaries must use the enterprise-grade v7 decision-to-outcome summary artifact");
+assertIncludes(periodExecutiveSummary, 'section("decisionOutcomeIntelligence", "Decision-to-Outcome Intelligence"', "Executive summaries must include the governed decision-to-outcome intelligence section");
 assertIncludes(periodExecutiveSummary, "assessExecutiveSummaryQuality", "Executive summaries must persist quality assessment metadata");
 assertIncludes(periodExecutiveSummary, "operationalEvidenceHash", "Executive summaries must reuse based on operational evidence, not score weighting changes");
 assertIncludes(periodExecutiveSummary, "scoreWeightageChangesInvalidateSummary: false", "Executive summaries must not be invalidated by score weightage changes alone");
