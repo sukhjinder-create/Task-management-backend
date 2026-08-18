@@ -44,6 +44,16 @@ const DEFAULT_APP_DOMAIN = "app.asystence.com";
 const DEFAULT_ROOT_DOMAIN = "asystence.com";
 const DEFAULT_API_ORIGIN = "https://api.asystence.com";
 
+// Bump to orphan every cached slug lookup at once.
+//
+// Slug results are cached at the edge, so a slug probed before it existed
+// stays "not found" for the full miss TTL even after it is created. That is
+// exactly what happened when slugs were first backfilled: workspaces whose
+// names had been probed during debugging 404'd while untouched ones resolved.
+// Waiting out an hour is not an option mid-rollout, and the Cache API has no
+// purge -- but changing the key makes every old entry unreachable instantly.
+const CACHE_KEY_VERSION = "v2";
+
 const HIT_CACHE_SECONDS = 300;
 const MISS_CACHE_SECONDS = 3600;
 
@@ -108,7 +118,7 @@ async function slugIsRoutable(slug, env, ctx) {
 
   const cache = caches.default;
   const cacheKey = new Request(
-    `https://${env.ROOT_DOMAIN}/__workspace-slug/${encodeURIComponent(slug)}`,
+    `https://${env.ROOT_DOMAIN}/__workspace-slug/${CACHE_KEY_VERSION}/${encodeURIComponent(slug)}`,
     { method: "GET" }
   );
 

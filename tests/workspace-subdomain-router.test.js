@@ -186,13 +186,31 @@ test("non-document responses are not given a workspace cookie", async () => {
 test("a cached negative result answers without re-asking the origin", async () => {
   const { response, calls } = await run("https://zz-cached.asystence.com/", {
     cacheSeed: {
-      key: "/__workspace-slug/zz-cached",
+      // Includes the cache-key version: bumping it must orphan old entries.
+      key: "/__workspace-slug/v2/zz-cached",
       response: new Response(null, { status: 404 }),
     },
   });
 
   assert.equal(response.status, 404);
   assert.equal(calls.length, 0);
+});
+
+test("a stale entry under an old cache-key version is ignored", async () => {
+  // The rollout hit this: slugs probed before they existed stayed cached as
+  // "not found" for the full miss TTL, 404ing real workspaces. The Cache API
+  // has no purge, so bumping the key version is the invalidation mechanism --
+  // an entry written under the previous version must not be honoured.
+  const { response, calls } = await run("https://acme.asystence.com/", {
+    cacheSeed: {
+      key: "/__workspace-slug/zz-old-version/acme",
+      response: new Response(null, { status: 404 }),
+    },
+    routes: { "/public/workspaces/": lookupHit },
+  });
+
+  assert.equal(response.status, 200, "stale-version entry must not deny the slug");
+  assert.ok(calls.some((call) => call.includes("/public/workspaces/")), "must re-ask the origin");
 });
 
 test("origin failure fails open so a database blip cannot black out customers", async () => {
