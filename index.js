@@ -139,6 +139,7 @@ import paymentsRoutes, {
   webhookRouter as paymentsWebhookRouter,
 } from "./routes/payments.routes.js";
 import publicBillingRoutes from "./routes/publicBilling.routes.js";
+import publicWorkspaceRoutes from "./routes/publicWorkspace.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
 import huddleArtifactRoutes from "./routes/huddleArtifact.routes.js";
@@ -313,6 +314,7 @@ app.get("/readyz", (_req, res) => res.status(STARTUP_REPORT.ok ? 200 : 503).json
 
 app.use("/auth", authLimiter, authRoutes);
 app.use("/public/billing", publicLimiter, publicBillingRoutes);
+app.use("/public/workspaces", publicLimiter, publicWorkspaceRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);

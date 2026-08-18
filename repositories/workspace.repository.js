@@ -140,3 +140,33 @@ export async function getWorkspaceForEnforcement(workspaceId) {
   );
   return rows[0] || null;
 }
+
+/* ==================================================
+   Public slug resolution (edge routing)
+   ================================================== */
+
+/**
+ * Resolve a workspace slug for the edge router.
+ *
+ * Deliberately returns the smallest useful projection: the subdomain router
+ * only needs to know whether serving the app for this slug is legitimate, and
+ * this endpoint is reachable unauthenticated. Matching is case-insensitive to
+ * line up with the `idx_workspaces_slug` unique index on `lower(slug)`.
+ *
+ * Workspaces with status 'deleted' resolve to null — the edge should 404 them
+ * rather than serve an app shell that can never be signed into.
+ */
+export async function findPublicWorkspaceBySlug(slug) {
+  const normalized = String(slug || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  const { rows } = await pool.query(
+    `SELECT slug, COALESCE(status, 'active') AS status
+       FROM workspaces
+      WHERE lower(slug) = $1
+        AND COALESCE(status, 'active') <> 'deleted'
+      LIMIT 1`,
+    [normalized]
+  );
+  return rows[0] || null;
+}

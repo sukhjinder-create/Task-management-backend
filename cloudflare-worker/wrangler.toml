@@ -1,0 +1,31 @@
+# Cloudflare Worker: workspace subdomain router.
+#
+# NOTE: this Worker predates the config file and was created in the dashboard.
+# Set `name` to the existing Worker's exact name before running `wrangler
+# deploy`, or you will publish a second Worker alongside it and the old one
+# will keep serving traffic.
+
+name = "asystence-workspace-router"
+main = "worker.js"
+compatibility_date = "2026-08-18"
+
+# Wildcard route. `app`, `www`, and `api` still MATCH this pattern and are
+# therefore still billed one Worker request each, even though worker.js passes
+# them straight through. Removing that cost needs bypass routes (a route bound
+# to no Worker), which cannot be expressed here — run ./setup-routes.mjs.
+routes = [
+  { pattern = "*.asystence.com/*", zone_name = "asystence.com" }
+]
+
+[vars]
+APP_DOMAIN = "app.asystence.com"
+ROOT_DOMAIN = "asystence.com"
+API_ORIGIN = "https://api.asystence.com"
+
+# Merged with the Worker's built-in reserved list; add any new non-workspace
+# subdomain here rather than editing worker.js.
+RESERVED_SUBDOMAINS = ""
+
+# Emergency escape hatch. Set to "off" to serve every shape-valid slug without
+# consulting API_ORIGIN — only if slug resolution itself is causing an outage.
+SLUG_VALIDATION = "on"
