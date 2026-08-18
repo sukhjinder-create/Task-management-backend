@@ -3,6 +3,7 @@
 // Backwards compatible: keeps legacy room names and emits, while also
 // adding optional workspace-scoped rooms for newer clients.
 import pool from "../db.js";
+import { isAllowedCorsOrigin } from "../config/environment.js";
 import { Server } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { createClient } from "redis";
@@ -1006,7 +1007,10 @@ async function canManageHuddle({ scope, room, active, membership, userId }) {
 export function initSocket(server, frontendUrl) {
   io = new Server(server, {
     cors: {
-      origin: frontendUrl || process.env.FRONTEND_BASE_URL,
+      // Was a single origin, which silently excluded every workspace
+      // subdomain -- chat and huddles would connect on app.<domain> and fail
+      // everywhere else. Shares the HTTP layer's authority so the two agree.
+      origin: (origin, callback) => callback(null, isAllowedCorsOrigin(origin)),
       credentials: true,
     },
   });

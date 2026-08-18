@@ -1,5 +1,6 @@
 // services/workspace.service.js
 import * as repo from "../repositories/workspace.repository.js";
+import { generateUniqueSlug, validateSlug } from "./workspaceSlug.service.js";
 import { getUserById } from "../repositories/user.repository.js";
 
 // ✅ ADD: chat helpers for default channels
@@ -87,9 +88,22 @@ class WorkspaceService {
   }) {
     if (!name) throw new Error("Workspace name required");
 
+    // Every workspace gets a routable slug. It becomes `<slug>.asystence.com`,
+    // which the edge router validates on every request, so a workspace without
+    // one simply cannot be reached by subdomain. An explicit slug is validated
+    // rather than corrected -- silently rewriting what someone typed produces a
+    // URL they did not ask for.
+    let resolvedSlug = String(slug || "").trim().toLowerCase();
+    if (resolvedSlug) {
+      const reason = validateSlug(resolvedSlug);
+      if (reason) throw new Error(reason);
+    } else {
+      resolvedSlug = await generateUniqueSlug(name);
+    }
+
     const ws = await repo.createWorkspace({
       name,
-      slug,
+      slug: resolvedSlug,
       createdBy,
       billing_plan,
       max_members,

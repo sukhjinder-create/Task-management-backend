@@ -10,6 +10,7 @@ import { requireWorkspaceForUser } from "../middleware/workspace.middleware.js";
 import { ensureWorkspaceMember } from "../middleware/ensureWorkspaceMember.middleware.js";
 import pool from "../db.js";
 import { logAudit } from "../services/audit.service.js";
+import { validateSlug } from "../services/workspaceSlug.service.js";
 import { getRequestAuditContext } from "../utils/requestContext.util.js";
 
 const router = express.Router();
@@ -261,8 +262,15 @@ router.put("/:id", requireWorkspaceForUser, async (req, res) => {
       values.push(req.body.name);
     }
     if (req.body.slug) {
+      // A slug is a hostname and a shared link, not a display field. Renaming
+      // one breaks every bookmark pointing at the old subdomain, so the value
+      // is validated strictly and stored normalised -- never silently coerced
+      // into something the caller did not ask for.
+      const nextSlug = String(req.body.slug).trim().toLowerCase();
+      const reason = validateSlug(nextSlug);
+      if (reason) return res.status(400).json({ error: reason });
       fields.push(`slug = $${idx++}`);
-      values.push(req.body.slug);
+      values.push(nextSlug);
     }
     if (req.body.billing_plan !== undefined) {
       fields.push(`billing_plan = $${idx++}`);

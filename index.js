@@ -87,7 +87,7 @@ import customWebhookReceiverRoutes from "./integrations/custom/customWebhook.rec
 import { bootstrapAdaptivePlatform } from "./adaptive/bootstrap.js";
 import { bootstrapEnterpriseIntelligence } from "./ei/bootstrap.js";
 import { startEnterpriseIntelligenceOrchestratorWorker } from "./ei/orchestrator/worker.js";
-import { getCorsAllowedOrigins, isProductionRuntime } from "./config/environment.js";
+import { getCorsAllowedOrigins, isProductionRuntime, isAllowedCorsOrigin } from "./config/environment.js";
 import { generalLimiter, authLimiter, publicLimiter } from "./middleware/rateLimit.middleware.js";
 
 // 🔥 NEW: Service observer (NON-INVASIVE)
@@ -173,17 +173,10 @@ app.use(
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow web dev server, Electron, Capacitor (Android/iOS), and direct API calls
-      const allowed = getCorsAllowedOrigins();
-      if (!origin || allowed.has(origin)) {
-        callback(null, true);
-      } else if (!isProductionRuntime()) {
-        callback(null, true);
-      } else {
-        callback(null, false);
-      }
-    },
+    // Web dev server, Electron, Capacitor (Android/iOS), direct API calls, and
+    // every `<workspace>.<WORKSPACE_DOMAIN>` subdomain. Delegated so HTTP and
+    // Socket.IO cannot drift apart on what they trust.
+    origin: (origin, callback) => callback(null, isAllowedCorsOrigin(origin)),
     credentials: true,
     methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
     allowedHeaders: [
