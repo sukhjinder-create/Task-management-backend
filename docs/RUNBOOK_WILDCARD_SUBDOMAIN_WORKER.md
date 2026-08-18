@@ -29,6 +29,34 @@ Worker requests/day):
 Subdomain enumeration is routine bot behaviour; against that surface it does not
 take real users to reach 100k/day.
 
+## The subdomain feature is dark in production
+
+Verified 2026-08-18 by reading the deployed bundle
+(`app.asystence.com/assets/index-*.js`, built from `6c0d510`). `runtime.js`
+reads `VITE_WORKSPACE_DOMAIN` dynamically, so Vite injects the whole env object
+rather than inlining the value — and **that object contains no
+`VITE_WORKSPACE_DOMAIN` key** (nor `VITE_APP_PRIMARY_HOST`).
+
+Consequently, in production today:
+
+- `buildWorkspaceRedirectUrl()` returns `""` for every input
+- `isConfiguredWorkspaceDomainHost()` is always `false`
+
+Nothing in the app ever sends a user to `<slug>.asystence.com`. Two things
+follow:
+
+1. **Essentially all wildcard subdomain traffic is bots.** There are no real
+   users on those hostnames to lose.
+2. **Slug validation cannot break real users.** No probed slug currently
+   resolves, so the Worker will 404 the entire wildcard space — which is the
+   correct posture while the feature is off, and which starts passing real
+   slugs through automatically if `VITE_WORKSPACE_DOMAIN` is ever set and the
+   `workspaces.slug` column populated.
+
+`workspaces.slug` is nullable with no NOT NULL constraint. Before enabling the
+feature, confirm slugs are actually populated — otherwise the app will redirect
+users to subdomains the edge then 404s.
+
 ## What changed
 
 | Change | File |
@@ -73,9 +101,12 @@ breaks, but nothing is filtered either.
 
    ```
    curl -I https://zz-nonexistent-test.asystence.com/   # expect 404
-   curl -I https://<real-slug>.asystence.com/           # expect 200 + workspace_slug cookie
-   curl -I https://api.asystence.com/health             # unchanged
+   curl -I https://api.asystence.com/health             # unchanged (401, not hijacked)
+   curl -I https://app.asystence.com/                   # unchanged (200)
    ```
+
+   While the feature is dark there is no real slug to test the 200 path with;
+   the reserved hostnames above are the checks that matter.
 
 3. **Bypass routes** — dry run, then apply. The server already holds a
    Cloudflare API token at `~/.cloudflare-api-token` (chmod 600); it needs
