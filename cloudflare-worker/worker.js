@@ -11,11 +11,15 @@
  * (the HTML plus its hashed asset chunks), which is how a bot sweep exhausts a
  * daily Workers quota without a single real user involved.
  *
- * Environment bindings:
- *   APP_DOMAIN   (required)  app.example.com  — proxy target
- *   ROOT_DOMAIN  (required)  example.com      — zone apex
- *   API_ORIGIN   (required unless WORKSPACE_SLUG_ALLOWLIST is set)
- *                            https://api.example.com — slug resolution origin
+ * Environment bindings. Each falls back to its production value rather than
+ * failing: the Worker fronts every hostname on the zone, so treating a missing
+ * binding as fatal turns a config slip into a total outage of the domain. The
+ * script that ran here before this one hardcoded these as constants and so
+ * could never fail that way; these defaults keep that property while still
+ * allowing an override.
+ *   APP_DOMAIN   app.asystence.com       — proxy target
+ *   ROOT_DOMAIN  asystence.com           — zone apex
+ *   API_ORIGIN   https://api.asystence.com — slug resolution origin
  *   RESERVED_SUBDOMAINS      comma-separated; merged with DEFAULT_RESERVED
  *   WORKSPACE_SLUG_ALLOWLIST comma-separated; when set, resolves slugs from
  *                            this list alone and never calls API_ORIGIN
@@ -33,6 +37,12 @@ const DEFAULT_RESERVED = [
 // A slug is one DNS label: lowercase alphanumerics and inner hyphens. Anything
 // else is rejected without touching the origin.
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// Fallbacks for unset bindings. See the note on environment bindings above:
+// a 500 here would take down every hostname on the zone at once.
+const DEFAULT_APP_DOMAIN = "app.asystence.com";
+const DEFAULT_ROOT_DOMAIN = "asystence.com";
+const DEFAULT_API_ORIGIN = "https://api.asystence.com";
 
 const HIT_CACHE_SECONDS = 300;
 const MISS_CACHE_SECONDS = 3600;
@@ -94,11 +104,7 @@ async function slugIsRoutable(slug, env, ctx) {
   const allowlist = csv(env.WORKSPACE_SLUG_ALLOWLIST);
   if (allowlist.length) return allowlist.includes(slug);
 
-  const apiOrigin = String(env.API_ORIGIN || "").trim().replace(/\/+$/, "");
-  if (!apiOrigin) {
-    console.error("[worker] API_ORIGIN unset and no allowlist — skipping slug validation");
-    return true;
-  }
+  const apiOrigin = String(env.API_ORIGIN || DEFAULT_API_ORIGIN).trim().replace(/\/+$/, "");
 
   const cache = caches.default;
   const cacheKey = new Request(
@@ -146,11 +152,8 @@ async function slugIsRoutable(slug, env, ctx) {
 
 export default {
   async fetch(request, env, ctx) {
-    const appDomain = String(env.APP_DOMAIN || "").trim();
-    const rootDomain = String(env.ROOT_DOMAIN || "").trim().toLowerCase();
-    if (!appDomain || !rootDomain) {
-      return new Response("APP_DOMAIN and ROOT_DOMAIN are required", { status: 500 });
-    }
+    const appDomain = String(env.APP_DOMAIN || DEFAULT_APP_DOMAIN).trim();
+    const rootDomain = String(env.ROOT_DOMAIN || DEFAULT_ROOT_DOMAIN).trim().toLowerCase();
 
     const url = new URL(request.url);
     const hostname = url.hostname.toLowerCase();

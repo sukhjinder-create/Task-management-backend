@@ -3,8 +3,9 @@
  * Create Cloudflare "bypass" routes so high-volume hostnames stop invoking the
  * subdomain router.
  *
- * A Worker route bound to an empty script tells Cloudflare to run no Worker for
- * that pattern. More-specific routes win over the `*.asystence.com/*` wildcard,
+ * A Worker route created with no `script` field at all tells Cloudflare to run
+ * no Worker for that pattern. Sending `script: ""` is rejected with "Cannot
+ * configure a route for a Worker which does not exist". More-specific routes win over the `*.asystence.com/*` wildcard,
  * so `app.` and `www.` traffic — every HTML document and every hashed asset
  * chunk real users load — stops being billed as Worker requests.
  *
@@ -81,7 +82,7 @@ async function main() {
       if (APPLY) {
         await cf(`/zones/${zoneId}/workers/routes/${match.id}`, {
           method: "PUT",
-          body: JSON.stringify({ pattern, script: "" }),
+          body: JSON.stringify({ pattern }),
         });
         console.log(`        unbound`);
       }
@@ -92,7 +93,7 @@ async function main() {
     if (APPLY) {
       await cf(`/zones/${zoneId}/workers/routes`, {
         method: "POST",
-        body: JSON.stringify({ pattern, script: "" }),
+        body: JSON.stringify({ pattern }),
       });
       console.log(`        created`);
     }

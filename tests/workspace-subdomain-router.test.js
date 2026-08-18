@@ -77,6 +77,28 @@ const lookupMiss = () => new Response(JSON.stringify({ error: "Unknown workspace
   headers: { "content-type": "application/json" },
 });
 
+test("unset bindings fall back instead of 500ing the whole zone", async () => {
+  // The live Worker this replaced had no bindings at all. Treating that as
+  // fatal would have taken down every hostname on the zone the moment it
+  // deployed, so a missing binding must degrade to the production value.
+  const { response, calls } = await run("https://acme.asystence.com/", {
+    env: {},
+    routes: { "/public/workspaces/": lookupHit },
+  });
+
+  assert.equal(response.status, 200);
+  assert.ok(calls.some((call) => call === "https://app.asystence.com/"));
+  assert.match(response.headers.get("set-cookie") || "", /workspace_slug=acme/);
+});
+
+test("reserved hosts still pass through with no bindings set", async () => {
+  for (const host of ["app", "www", "api", "api-tunnel"]) {
+    const { response, calls } = await run(`https://${host}.asystence.com/`, { env: {} });
+    assert.equal(response.status, 200, host);
+    assert.ok(!calls.some((call) => call.includes("/public/workspaces/")), host);
+  }
+});
+
 test("apex passes through without a slug lookup", async () => {
   const { response, calls } = await run("https://asystence.com/");
   assert.equal(response.status, 200);
