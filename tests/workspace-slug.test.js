@@ -81,3 +81,35 @@ test("the Worker's reserved hostnames are a subset of the backend's list", () =>
     assert.equal(backend.has(slug), true, `${slug} is reserved at the edge but not in the backend list`);
   }
 });
+
+test("a batch never issues the same slug twice", async () => {
+  // Regression: the backfill's dry run showed two workspaces both getting
+  // "apyhub", because uniqueness was checked only against what the database
+  // could see and a dry run writes nothing. A preview that disagrees with the
+  // real run is worse than no preview -- the operator approves one thing and
+  // something else happens.
+  const { generateUniqueSlug } = await import("../services/workspaceSlug.service.js");
+
+  // Stands in for a database that never sees the writes, which is exactly the
+  // dry-run case and also any batch that commits only at the end.
+  const client = { query: async () => ({ rows: [] }) };
+  const claimed = new Set();
+
+  const slugs = [];
+  for (const name of ["Apyhub", "apyhub", "APYHUB"]) {
+    slugs.push(await generateUniqueSlug(name, { client, claimed }));
+  }
+
+  assert.deepEqual(slugs, ["apyhub", "apyhub-2", "apyhub-3"]);
+  assert.equal(new Set(slugs).size, slugs.length, "slugs must be distinct");
+});
+
+test("a batch also avoids slugs that already exist in the database", async () => {
+  const { generateUniqueSlug } = await import("../services/workspaceSlug.service.js");
+
+  // Seeded the way the runner seeds it: from the slugs already stored.
+  const claimed = new Set(["acme"]);
+  const client = { query: async () => ({ rows: [] }) };
+
+  assert.equal(await generateUniqueSlug("Acme", { client, claimed }), "acme-2");
+});

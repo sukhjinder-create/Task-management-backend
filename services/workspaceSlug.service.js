@@ -71,8 +71,17 @@ export function validateSlug(slug) {
   return null;
 }
 
-/** Is this slug already taken by a workspace other than `excludeWorkspaceId`? */
-async function slugIsTaken(client, slug, excludeWorkspaceId) {
+/**
+ * Is this slug already taken?
+ *
+ * `claimed` holds slugs handed out earlier in this run but not yet visible to
+ * a query -- true for any caller assigning several slugs before committing,
+ * and for a dry run that writes nothing at all. Without it a batch happily
+ * issues the same slug twice and only the unique index notices.
+ */
+async function slugIsTaken(client, slug, excludeWorkspaceId, claimed) {
+  if (claimed?.has(slug)) return true;
+
   const { rows } = await client.query(
     `SELECT 1 FROM workspaces
       WHERE lower(slug) = $1
@@ -92,11 +101,17 @@ async function slugIsTaken(client, slug, excludeWorkspaceId) {
  * a random suffix rather than scanning forever, which only happens on absurd
  * collision counts.
  *
+ * Pass `claimed` when assigning several slugs in one run, so each is checked
+ * against the ones already issued and not only against what a query can see.
+ *
  * Pass an existing `client` to run inside a caller's transaction -- important
  * on the creation path, where the uniqueness check and the insert must not be
  * separated by another request claiming the same slug.
  */
-export async function generateUniqueSlug(name, { excludeWorkspaceId = null, client = null } = {}) {
+export async function generateUniqueSlug(
+  name,
+  { excludeWorkspaceId = null, client = null, claimed = null } = {}
+) {
   const db = client || pool;
 
   let base = slugify(name);
@@ -107,16 +122,25 @@ export async function generateUniqueSlug(name, { excludeWorkspaceId = null, clie
     base = `workspace-${base}`.replace(/-+$/g, "").slice(0, MAX_BASE_LENGTH);
   }
 
-  if (!(await slugIsTaken(db, base, excludeWorkspaceId))) return base;
+  if (!(await slugIsTaken(db, base, excludeWorkspaceId, claimed))) {
+    claimed?.add(base);
+    return base;
+  }
 
   for (let suffix = 2; suffix <= 999; suffix += 1) {
     const candidate = `${base}-${suffix}`;
-    if (!(await slugIsTaken(db, candidate, excludeWorkspaceId))) return candidate;
+    if (!(await slugIsTaken(db, candidate, excludeWorkspaceId, claimed))) {
+      claimed?.add(candidate);
+      return candidate;
+    }
   }
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const candidate = `${base}-${Math.random().toString(36).slice(2, 8)}`;
-    if (!(await slugIsTaken(db, candidate, excludeWorkspaceId))) return candidate;
+    if (!(await slugIsTaken(db, candidate, excludeWorkspaceId, claimed))) {
+      claimed?.add(candidate);
+      return candidate;
+    }
   }
 
   throw new Error(`Could not derive a unique slug for "${name}"`);

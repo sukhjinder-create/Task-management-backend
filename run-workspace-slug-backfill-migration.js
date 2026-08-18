@@ -60,10 +60,15 @@ async function main() {
 
     if (APPLY) await client.query("BEGIN");
 
+    // Slugs issued in this run. A dry run writes nothing, so without this the
+    // preview hands the same slug to two workspaces with matching names and
+    // shows the operator something the real run would never do.
+    const claimed = new Set(existing.map((w) => String(w.slug).toLowerCase()));
+
     for (const workspace of missing) {
       // Generated inside the transaction so the uniqueness check and the write
       // are not separated by a concurrent insert claiming the same slug.
-      const slug = await generateUniqueSlug(workspace.name, { client });
+      const slug = await generateUniqueSlug(workspace.name, { client, claimed });
 
       if (APPLY) {
         await client.query(
