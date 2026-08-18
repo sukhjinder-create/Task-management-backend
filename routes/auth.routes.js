@@ -22,6 +22,7 @@ import {
   completeTrialSignupCheckoutSession,
 } from "../services/payments.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
+import { createHandoffCode, consumeHandoffCode, HANDOFF_TTL_SECONDS } from "../services/authHandoff.service.js";
 import { logAudit } from "../services/audit.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
 import { deterministicGrowthEventId, requestGrowthContext } from "../growth/growthEvent.js";
@@ -790,6 +791,53 @@ router.get("/me", authMiddleware, async (req, res) => {
     res.json(user);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+/* ------------------------------------------------------------------
+   CROSS-ORIGIN SESSION HANDOFF (workspace subdomains)
+
+   app.<domain> and <slug>.<domain> are different origins, so a signed-in
+   session does not survive the redirect between them. Carrying the tokens in
+   the redirect URL would put them in browser history, Referer headers and
+   every access log in the path, so this is an authorization-code exchange
+   instead: a single-use code that expires in seconds, swapped for real tokens
+   over POST.
+------------------------------------------------------------------- */
+
+/**
+ * POST /auth/handoff
+ * Authenticated. Mints a code the caller can put in a redirect URL.
+ */
+router.post("/handoff", authMiddleware, async (req, res) => {
+  try {
+    const { code, expiresIn } = await createHandoffCode(
+      req.user.id,
+      req.user.workspaceId || req.user.workspace_id || null,
+      { ip: req.headers["cf-connecting-ip"] || req.ip || null }
+    );
+    return res.json({ code, expires_in: expiresIn });
+  } catch (err) {
+    console.error("[auth.handoff] error:", err?.message || err);
+    return res.status(500).json({ error: "Could not start handoff" });
+  }
+});
+
+/**
+ * POST /auth/handoff/exchange
+ * Public. Redeems a code for a fresh session.
+ */
+router.post("/handoff/exchange", async (req, res) => {
+  try {
+    const { user, token, refreshToken } = await consumeHandoffCode(req.body?.code, {
+      ip: req.headers["cf-connecting-ip"] || req.ip || null,
+      userAgent: req.headers["user-agent"] || null,
+    });
+    return res.json({ user, token, refreshToken });
+  } catch (err) {
+    // Deliberately uniform: a caller must not be able to tell an unknown code
+    // from an expired or already-spent one.
+    return res.status(401).json({ error: "Invalid or expired code" });
   }
 });
 

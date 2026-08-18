@@ -1007,9 +1007,11 @@ async function canManageHuddle({ scope, room, active, membership, userId }) {
 export function initSocket(server, frontendUrl) {
   io = new Server(server, {
     cors: {
-      // Was a single origin, which silently excluded every workspace
-      // subdomain -- chat and huddles would connect on app.<domain> and fail
-      // everywhere else. Shares the HTTP layer's authority so the two agree.
+      // Was the fixed allowlist passed in from index.js, which excludes every
+      // workspace subdomain -- chat and huddles would connect on app.<domain>
+      // and fail everywhere else. Delegating to the shared authority keeps the
+      // same origins trusted and adds the wildcard the HTTP layer accepts, so
+      // the two cannot drift.
       origin: (origin, callback) => callback(null, isAllowedCorsOrigin(origin)),
       credentials: true,
     },
