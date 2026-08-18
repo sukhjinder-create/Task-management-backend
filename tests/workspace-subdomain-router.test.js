@@ -182,6 +182,38 @@ test("origin failure fails open so a database blip cannot black out customers", 
   assert.ok(calls.some((call) => call.includes("app.asystence.com")));
 });
 
+test("only a 404 may deny a slug — every other status fails open", async () => {
+  // This API answers 401 for any unknown path, so a renamed or unmounted
+  // lookup route must not read as "no such workspace" and 404 every customer
+  // subdomain at once.
+  for (const status of [401, 403, 429, 500, 503]) {
+    const { response, calls } = await run("https://acme.asystence.com/", {
+      routes: { "/public/workspaces/": () => new Response("nope", { status }) },
+    });
+
+    assert.equal(response.status, 200, `status ${status} must fail open`);
+    assert.ok(
+      calls.some((call) => call.includes("app.asystence.com")),
+      `status ${status} must still reach the app`
+    );
+  }
+});
+
+test("a failed-open lookup is not written to the edge cache", async () => {
+  // Caching "unknown" from a transient failure would extend a blip into an
+  // hour-long outage for that slug.
+  let lookups = 0;
+  const flaky = () => {
+    lookups += 1;
+    return new Response("nope", { status: 401 });
+  };
+
+  await run("https://acme.asystence.com/", { routes: { "/public/workspaces/": flaky } });
+  await run("https://acme.asystence.com/", { routes: { "/public/workspaces/": flaky } });
+
+  assert.equal(lookups, 2, "each request must re-ask rather than reuse a poisoned entry");
+});
+
 test("allowlist mode resolves slugs without any origin call", async () => {
   const env = { ...ENV, WORKSPACE_SLUG_ALLOWLIST: "acme, globex" };
 

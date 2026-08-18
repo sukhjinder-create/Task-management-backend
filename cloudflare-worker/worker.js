@@ -121,8 +121,15 @@ async function slugIsRoutable(slug, env, ctx) {
     return true;
   }
 
-  // 5xx means we learned nothing. Fail open and do not poison the cache.
-  if (originStatus >= 500) return true;
+  // Only a definitive answer from the lookup endpoint is allowed to deny a
+  // slug. Anything else -- 5xx, or the 401 this API returns for every unknown
+  // path -- means we learned nothing about the slug, only that the endpoint is
+  // not where we expected. Denying on that would 404 every customer subdomain
+  // at once over a renamed route. Fail open and do not poison the cache.
+  if (originStatus !== 200 && originStatus !== 404) {
+    console.error(`[worker] unexpected slug lookup status ${originStatus} — failing open`);
+    return true;
+  }
 
   const routable = originStatus === 200;
   const ttl = routable ? HIT_CACHE_SECONDS : MISS_CACHE_SECONDS;
