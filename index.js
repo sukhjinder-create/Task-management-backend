@@ -140,6 +140,9 @@ import paymentsRoutes, {
 } from "./routes/payments.routes.js";
 import publicBillingRoutes from "./routes/publicBilling.routes.js";
 import publicWorkspaceRoutes from "./routes/publicWorkspace.routes.js";
+import publicBlogRoutes from "./routes/publicBlog.routes.js";
+import workspaceBlogRoutes from "./routes/workspaceBlog.routes.js";
+import superadminBlogRoutes from "./routes/superadminBlog.routes.js";
 import pushRoutes from "./routes/push.routes.js";
 import appVersionRoutes from "./routes/appVersion.routes.js";
 import huddleArtifactRoutes from "./routes/huddleArtifact.routes.js";
@@ -308,6 +311,7 @@ app.get("/readyz", (_req, res) => res.status(STARTUP_REPORT.ok ? 200 : 503).json
 app.use("/auth", authLimiter, authRoutes);
 app.use("/public/billing", publicLimiter, publicBillingRoutes);
 app.use("/public/workspaces", publicLimiter, publicWorkspaceRoutes);
+app.use("/public/blog", publicLimiter, publicBlogRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
@@ -320,6 +324,7 @@ app.use("/internal", agentExecutionRoutes);
 app.use("/superadmin", superadminAuthRoutes);
 app.use("/superadmin/workspaces", superadminWorkspaceRoutes);
 app.use("/superadmin/plans", superadminPlansRoutes);
+app.use("/superadmin/blog", superadminBlogRoutes);
 app.use("/superadmin/backups", backupRoutes);
 app.use("/superadmin/growth", superadminGrowthRoutes);
 app.use("/superadmin/adaptive-intelligence", superadminAdaptiveIntelligenceRoutes);
@@ -361,6 +366,9 @@ app.use("/dashboard",     dashboardRoutes);
 app.use("/operations",    authMiddleware, requireWorkspaceForUser, allowRoles("admin"), requirePlanFeature("workspace_search_memory"), operationsRoutes);
 app.use("/assurance",     authMiddleware, requireWorkspaceForUser, requirePlanFeature("okr_goals"), assuranceRoutes);
 app.use("/ai-studio",     authMiddleware, requireWorkspaceForUser, allowRoles("admin"), aiStudioWorkspaceRoutes);
+// ✍️ Asystence Insights authoring. Workspace admins draft and submit; only
+// /superadmin/blog can publish. Mounted ahead of the root-mounted sprintRoutes.
+app.use("/blog",          authMiddleware, requireWorkspaceForUser, allowRoles("admin"), workspaceBlogRoutes);
 // 🧪 Testing Agent — plan-gated
 app.use("/testing-agent", authMiddleware, requireWorkspaceForUser, requirePlanFeature("ai_testing_agent"), testingAgentRoutes);
 
