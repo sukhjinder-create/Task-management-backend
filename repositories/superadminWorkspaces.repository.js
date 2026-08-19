@@ -1,5 +1,6 @@
 // repositories/superadminWorkspaces.repository.js
 import pool from "../db.js";
+import { generateUniqueSlug } from "../services/workspaceSlug.service.js";
 import crypto from "crypto";
 import { ensureDefaultChannelsForWorkspace } from "../services/workspace.service.js";
 import { ensureSystemUser } from "../services/ai.system.service.js";
@@ -74,15 +75,24 @@ export async function createWorkspace({
       : null;
 
     // ── Create workspace ─────────────────────────────────────────────────────
+    // The slug is what makes the workspace reachable at <slug>.asystence.com.
+    // This insert previously omitted it, so every workspace created through
+    // this path -- superadmin creation and self-serve trial signup, i.e. most
+    // real workspaces -- was born unroutable, and the edge 404s a slug it
+    // cannot resolve. Generated inside the caller's transaction so the
+    // uniqueness check and the insert cannot be separated by a concurrent
+    // signup claiming the same slug.
+    const slug = await generateUniqueSlug(name, { client });
+
     const { rows: [workspace] } = await client.query(
       `INSERT INTO workspaces (
-         id, name, plan, member_limit, billing_plan, max_members, is_active,
+         id, name, slug, plan, member_limit, billing_plan, max_members, is_active,
          trial_started_at, trial_ends_at, metadata, created_at, updated_at
        ) VALUES (
-         gen_random_uuid(), $1, $2, $3, $4, $3, true,
-         $5, $6, $7, now(), now()
+         gen_random_uuid(), $1, $2, $3, $4, $5, $4, true,
+         $6, $7, $8, now(), now()
        ) RETURNING *`,
-      [name, billingPlan, memberLimit, billingPlan, trialStart, trialEnd, metadata]
+      [name, slug, billingPlan, memberLimit, billingPlan, trialStart, trialEnd, metadata]
     );
 
     // ── Store trial fingerprint + IP marker for future audit/IP protection ───
