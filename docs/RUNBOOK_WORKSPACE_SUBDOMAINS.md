@@ -64,6 +64,22 @@ Order matters. Each step is safe to stop at.
    This is what makes CORS trust `https://<slug>.asystence.com`. Until it is
    set, no wildcard origin is trusted at all — the safe default.
 
+   **Restart with `IMAGE_REF` set, always:**
+   ```
+   cd ~/app
+   IMAGE_REF=ghcr.io/sukhjinder-create/task-management-backend:<commit-sha>      docker compose -f docker-compose.prod.yml up -d --force-recreate app
+   ```
+   `docker-compose.prod.yml` declares `image: ${IMAGE_REF:-app-app:latest}`, and
+   CI supplies `IMAGE_REF` at deploy time. A bare `docker compose up` therefore
+   silently falls back to a **stale local `app-app:latest`** and rolls
+   production back several commits — it did exactly that during this rollout,
+   and the only symptom was CORS quietly refusing workspace origins while the
+   app kept answering 200. `docker images` lists the SHA-tagged images; use the
+   newest, and confirm afterwards:
+   ```
+   docker inspect -f '{{.Config.Image}}' $(docker ps -qf name=app-app-1)
+   ```
+
 4. **Frontend** — set `VITE_WORKSPACE_DOMAIN=asystence.com` in the Vercel
    project, then `vercel --prod`. This is the switch that starts redirecting
    users. Note the project has **no git integration**; pushing does not deploy.
@@ -90,8 +106,12 @@ frontend is still sending people there.
 
 ## Operating notes
 
-- Slug lookups are edge-cached: 300s on a hit, 3600s on a miss. A workspace
-  created while its slug was being probed can take up to 5 minutes to route.
+- Slug lookups are edge-cached: 300s on a hit, 3600s on a miss. **A slug probed
+  before it existed stays "not found" for the full hour.** That bit this
+  rollout: `apyhub` and `razorpay` had been probed during debugging and 404'd
+  at the edge while untouched slugs resolved. The Cache API has no purge and
+  redeploying the Worker does not clear it — bump `CACHE_KEY_VERSION` in
+  `cloudflare-worker/worker.js` and redeploy to orphan every entry at once.
 - Handoff codes are single-use with a 60s TTL. "Invalid or expired code" is
   returned for unknown, expired and already-spent alike — that is deliberate,
   so the endpoint cannot be used to probe.
