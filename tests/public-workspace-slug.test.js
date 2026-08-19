@@ -35,13 +35,17 @@ test("slug shape check rejects everything that cannot be a DNS label", () => {
   }
 });
 
-test("a missing workspace becomes a long-cached 404", () => {
+test("a missing workspace 404s, and is cached only briefly", () => {
   const decision = workspaceRoutingDecision(null);
 
   assert.equal(decision.status, 404);
   assert.deepEqual(decision.body, { error: "Unknown workspace" });
-  // Enumeration noise must not come back to the origin every few minutes.
-  assert.ok(decision.cacheSeconds >= 3600);
+
+  // Deliberately short. A long miss TTL does not deter enumeration -- every
+  // probe uses a different slug, so every probe misses the cache anyway -- and
+  // it kept newly created workspaces unreachable for an hour, twice, during
+  // rollout. See MISS_CACHE_SECONDS in cloudflare-worker/worker.js.
+  assert.ok(decision.cacheSeconds <= 120, `got ${decision.cacheSeconds}`);
 });
 
 test("an active workspace is routable and exposes nothing but slug and status", () => {
@@ -59,10 +63,12 @@ test("a suspended workspace stays routable so the app can explain itself", () =>
   assert.equal(decision.body.status, "suspended");
 });
 
-test("hit responses are cached for a shorter window than misses", () => {
+test("a miss expires sooner than a hit, so new workspaces appear quickly", () => {
   const hit = workspaceRoutingDecision({ slug: "acme", status: "active" });
   const miss = workspaceRoutingDecision(null);
 
-  // A new workspace must become reachable quickly; a bogus one need not.
-  assert.ok(hit.cacheSeconds < miss.cacheSeconds);
+  // The relationship that matters: a slug probed before it existed must stop
+  // reading as "unknown" quickly. A hit can be held longer -- a workspace that
+  // exists is not about to stop existing.
+  assert.ok(miss.cacheSeconds < hit.cacheSeconds, `miss=${miss.cacheSeconds} hit=${hit.cacheSeconds}`);
 });

@@ -52,10 +52,18 @@ const DEFAULT_API_ORIGIN = "https://api.asystence.com";
 // names had been probed during debugging 404'd while untouched ones resolved.
 // Waiting out an hour is not an option mid-rollout, and the Cache API has no
 // purge -- but changing the key makes every old entry unreachable instantly.
-const CACHE_KEY_VERSION = "v2";
+const CACHE_KEY_VERSION = "v3";
 
 const HIT_CACHE_SECONDS = 300;
-const MISS_CACHE_SECONDS = 3600;
+
+// Short on purpose. An hour-long miss TTL looked like cheap protection against
+// subdomain enumeration, but enumeration uses a *different* random slug every
+// time, so each request misses the cache regardless of how long entries live.
+// The only thing a long TTL actually achieved was keeping newly created
+// workspaces unreachable -- which happened twice during rollout. A minute still
+// absorbs repeated probing of the same name, at a cost of one origin lookup per
+// slug per minute in the worst case.
+const MISS_CACHE_SECONDS = 60;
 
 function csv(value) {
   return String(value || "")

@@ -27,7 +27,11 @@ const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 // Misses are cached far longer: unknown slugs are overwhelmingly enumeration
 // noise, and a newly created workspace is a known slug, not an unknown one.
 const HIT_CACHE_SECONDS = 300;
-const MISS_CACHE_SECONDS = 3600;
+
+// Kept in step with MISS_CACHE_SECONDS in cloudflare-worker/worker.js. A long
+// miss TTL does not deter enumeration (every probe uses a new slug, so every
+// probe misses anyway) and only delays a new workspace becoming reachable.
+const MISS_CACHE_SECONDS = 60;
 
 /**
  * Is this string shaped like a workspace slug (a single DNS label)?

@@ -187,7 +187,7 @@ test("a cached negative result answers without re-asking the origin", async () =
   const { response, calls } = await run("https://zz-cached.asystence.com/", {
     cacheSeed: {
       // Includes the cache-key version: bumping it must orphan old entries.
-      key: "/__workspace-slug/v2/zz-cached",
+      key: "/__workspace-slug/v3/zz-cached",
       response: new Response(null, { status: 404 }),
     },
   });
