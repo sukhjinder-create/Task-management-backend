@@ -39,6 +39,10 @@ async function ensureWorkspaceUser(userId, workspaceId, billingStatus = null) {
 import { verifyMagicToken } from "./magicLink.service.js";
 import { verifyMfaToken } from "./mfa.service.js";
 import { sendPasswordResetEmail } from "./email.service.js";
+import {
+  consumeEmailVerification,
+  requestEmailVerification,
+} from "./emailVerification.service.js";
 import pool from "../db.js";
 import { getJwtSecret } from "../config/secrets.js";
 import {
@@ -82,6 +86,8 @@ function normalizeUserRow(user) {
     workspace_id: role === "superadmin" ? WORKSPACE_GLOBAL : workspaceId,
     workspace_slug: user.workspace_slug || null,
     workspace_name: user.workspace_name || null,
+    email_verified_at: user.email_verified_at || null,
+    email_verification_method: user.email_verification_method || null,
   };
 }
 
@@ -130,6 +136,11 @@ export async function loginWithEmail(email, password) {
 
   const match = await bcrypt.compare(password, user.password_hash);
   if (!match) throw new Error("Invalid email or password");
+  if (!user.email_verified_at) {
+    throw Object.assign(new Error("Verify your email before signing in."), {
+      code: "EMAIL_VERIFICATION_REQUIRED",
+    });
+  }
 
   // If MFA enabled, issue a short-lived session token (5 min) instead of full JWT
   if (user.mfa_enabled) {
@@ -203,6 +214,9 @@ export async function loginWithDevelopmentUser({
     ownerEmail: normalizedEmail,
     ownerPasswordHash: passwordHash,
     skipTrialIpCheck: true,
+    ownerEmailVerifiedAt: new Date(),
+    ownerEmailVerificationMethod: "development",
+    signupMethod: "development",
   });
 }
 
@@ -221,7 +235,21 @@ export async function getCurrentUser(userId) {
  * Used by imported users (Slack, Asana, YouTrack, etc.)
  */
 export async function loginWithMagicToken(token) {
-  const user     = await verifyMagicToken(token);
+  const verifiedUser = await verifyMagicToken(token);
+  await pool.query(
+    `UPDATE users
+        SET email_verified_at = CASE
+              WHEN email_verified_at IS NULL OR email_verification_method = 'legacy' THEN now()
+              ELSE email_verified_at
+            END,
+            email_verification_method = CASE
+              WHEN email_verification_method IS NULL OR email_verification_method = 'legacy' THEN 'magic_link'
+              ELSE email_verification_method
+            END
+      WHERE id = $1`,
+    [verifiedUser.id]
+  );
+  const user = await getUserById(verifiedUser.id);
   const safeUser = normalizeUserRow(user);
   await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
   const jwt      = generateToken(safeUser);
@@ -283,7 +311,18 @@ export async function resetPassword(token, newPassword) {
 
   // Update user password
   await pool.query(
-    `UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`,
+    `UPDATE users
+        SET password_hash = $1,
+            email_verified_at = CASE
+              WHEN email_verified_at IS NULL OR email_verification_method = 'legacy' THEN now()
+              ELSE email_verified_at
+            END,
+            email_verification_method = CASE
+              WHEN email_verification_method IS NULL OR email_verification_method = 'legacy' THEN 'password_reset'
+              ELSE email_verification_method
+            END,
+            updated_at = now()
+      WHERE id = $2`,
     [passwordHash, record.user_id]
   );
 
@@ -355,6 +394,10 @@ export async function refreshSession(refreshToken, ipAddress, userAgent) {
 
   const user = await getUserById(session.user_id);
   if (!user) throw new Error("User not found");
+  if (!user.email_verified_at || user.email_verification_method === "legacy") {
+    await pool.query("DELETE FROM user_sessions WHERE id = $1", [session.id]);
+    throw new Error("Verify your email before signing in.");
+  }
 
   const safeUser    = normalizeUserRow(user);
   const newJwt      = generateToken(safeUser);
@@ -529,6 +572,11 @@ export async function createSelfServeTrialWorkspace({
   skipTrialIpCheck = false,
   plan = "trial",
   trialContext = null,
+  signupCountryCode = null,
+  signupMethod = null,
+  ownerEmailVerifiedAt = null,
+  ownerEmailVerificationMethod = null,
+  issueToken = true,
 }) {
   const name = cleanRequiredString(workspaceName, "Workspace name", { min: 2, max: 120 });
   const email = normalizeSignupEmail(ownerEmail);
@@ -552,6 +600,10 @@ export async function createSelfServeTrialWorkspace({
         ? buildNoCardTrialMetadata(trialContext)
         : null,
     trialEndsAt: plan === "trial" ? trialEndFrom() : null,
+    signupCountryCode,
+    signupMethod,
+    ownerEmailVerifiedAt,
+    ownerEmailVerificationMethod,
   });
 
   if (avatarUrl) {
@@ -568,10 +620,10 @@ export async function createSelfServeTrialWorkspace({
     safeUser.workspace_id,
     plan === "trial" ? "trial" : "active"
   );
-  const token = generateToken(safeUser);
+  const token = issueToken ? generateToken(safeUser) : null;
 
   return {
-    token,
+    ...(token ? { token } : {}),
     user: safeUser,
     workspace: result.workspace,
     trial: describeTrialLifecycle(result.workspace),
@@ -586,10 +638,11 @@ export async function signupWorkspaceWithEmail({
   ipHash = null,
   plan = "trial",
   trialContext = null,
+  signupCountryCode = null,
 }) {
   const passwordHash = await bcrypt.hash(validateSignupPassword(password), 10);
 
-  return createSelfServeTrialWorkspace({
+  const result = await createSelfServeTrialWorkspace({
     workspaceName,
     ownerName: name,
     ownerEmail: email,
@@ -600,12 +653,23 @@ export async function signupWorkspaceWithEmail({
     skipTrialIpCheck: true,
     plan,
     trialContext,
+    signupCountryCode,
+    signupMethod: "email",
+    issueToken: false,
   });
+  const verification = await requestEmailVerification(result.user.id);
+  return { ...result, verificationRequired: true, verification };
 }
 
 export async function signupWorkspaceWithGoogle(
   code,
-  { workspaceName, ipHash = null, plan = "trial", trialContext = null } = {}
+  {
+    workspaceName,
+    ipHash = null,
+    plan = "trial",
+    trialContext = null,
+    signupCountryCode = null,
+  } = {}
 ) {
   const profile = await fetchGoogleProfileFromCode(code);
   if (!profile.emailVerified) {
@@ -622,7 +686,31 @@ export async function signupWorkspaceWithGoogle(
     skipTrialIpCheck: true,
     plan,
     trialContext,
+    signupCountryCode,
+    signupMethod: "google",
+    ownerEmailVerifiedAt: new Date(),
+    ownerEmailVerificationMethod: "google",
   });
+}
+
+export async function resendEmailVerification(email) {
+  let normalized;
+  try {
+    normalized = normalizeSignupEmail(email);
+  } catch {
+    return { delivered: false };
+  }
+  const user = await getUserByEmail(normalized);
+  if (!user || user.email_verified_at) return { delivered: false };
+  return requestEmailVerification(user.id);
+}
+
+export async function verifyEmailAddress(token) {
+  const userId = await consumeEmailVerification(token);
+  const user = await getUserById(userId);
+  const safeUser = normalizeUserRow(user);
+  await ensureWorkspaceUser(safeUser.id, safeUser.workspace_id);
+  return { token: generateToken(safeUser), user: safeUser };
 }
 
 /**
@@ -632,11 +720,25 @@ export async function signupWorkspaceWithGoogle(
  */
 export async function loginWithGoogle(code) {
   const profile = await fetchGoogleProfileFromCode(code);
+  if (!profile.emailVerified) {
+    throw new Error("Your Google account email is not verified.");
+  }
 
   // Must already exist (invite-only model)
   const user = await getUserByEmail(profile.email);
   if (!user) {
     throw new Error("No account found for this Google email. Contact your admin.");
+  }
+
+  if (!user.email_verified_at) {
+    await pool.query(
+      `UPDATE users
+          SET email_verified_at = now(), email_verification_method = 'google', updated_at = now()
+        WHERE id = $1`,
+      [user.id]
+    );
+    user.email_verified_at = new Date();
+    user.email_verification_method = "google";
   }
 
   const safeUser = normalizeUserRow(user);

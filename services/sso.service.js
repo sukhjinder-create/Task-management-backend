@@ -81,8 +81,11 @@ export async function processSamlAssertion(workspaceId, profile, ipAddress) {
     const displayName = profile[config.attribute_name] || profile.displayName || email.split("@")[0];
     const inserted = await db.query(
       `WITH new_user AS (
-         INSERT INTO users (username, email, role, workspace_id)
-         VALUES ($1, $2, 'user', $3)
+         INSERT INTO users (
+           username, email, role, workspace_id,
+           email_verified_at, email_verification_method
+         )
+         VALUES ($1, $2, 'user', $3, now(), 'sso')
          RETURNING *
        ),
        _wu AS (
@@ -94,6 +97,17 @@ export async function processSamlAssertion(workspaceId, profile, ipAddress) {
       [displayName, email.toLowerCase().trim(), workspaceId]
     );
     user = { ...inserted.rows[0], role: "user" };
+  }
+
+  if (!user.email_verified_at || user.email_verification_method === "legacy") {
+    await db.query(
+      `UPDATE users
+          SET email_verified_at = now(), email_verification_method = 'sso', updated_at = now()
+        WHERE id = $1`,
+      [user.id]
+    );
+    user.email_verified_at = new Date();
+    user.email_verification_method = "sso";
   }
 
   await logAudit({

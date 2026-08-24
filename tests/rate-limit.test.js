@@ -6,7 +6,12 @@ import crypto from "node:crypto";
 process.env.JWT_SECRET ||= "rate-limit-test-secret-not-used-in-production";
 process.env.RATE_LIMIT_ENABLED = "true";
 
-const { generalLimiter, authLimiter } = await import("../middleware/rateLimit.middleware.js");
+const {
+  generalLimiter,
+  authLimiter,
+  signupLimiter,
+  emailVerificationLimiter,
+} = await import("../middleware/rateLimit.middleware.js");
 
 function b64url(value) {
   return Buffer.from(value).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -30,6 +35,8 @@ function startTestServer() {
   app.get("/livez", (_req, res) => res.json({ ok: true }));
   app.get("/api/thing", (_req, res) => res.json({ ok: true }));
   app.use("/auth", authLimiter, (_req, res) => res.status(401).json({ error: "bad creds" }));
+  app.get("/signup", signupLimiter, (_req, res) => res.status(202).json({ ok: true }));
+  app.get("/verify-email", emailVerificationLimiter, (_req, res) => res.json({ ok: true }));
 
   const server = app.listen(0);
   const { port } = server.address();
@@ -76,5 +83,17 @@ test("rate limiting protects the API without disrupting real usage", async (t) =
     const codes = [];
     for (let i = 0; i < 60; i++) codes.push(await request(base, "/auth/login", { ip: "198.51.100.7" }));
     assert.ok(codes.every((c) => c === 401), `expected all 401 (limiter not engaged), saw ${[...new Set(codes)]}`);
+  });
+
+  await t.test("successful workspace signup abuse is limited", async () => {
+    const codes = [];
+    for (let i = 0; i < 11; i++) codes.push(await request(base, "/signup", { ip: "198.51.100.8" }));
+    assert.equal(codes.at(-1), 429);
+  });
+
+  await t.test("verification email flooding is limited", async () => {
+    const codes = [];
+    for (let i = 0; i < 11; i++) codes.push(await request(base, "/verify-email", { ip: "198.51.100.9" }));
+    assert.equal(codes.at(-1), 429);
   });
 });

@@ -22,7 +22,7 @@ function getTransporter() {
         pass: process.env.SMTP_PASS,
       },
     });
-  } else {
+  } else if (process.env.NODE_ENV !== "production") {
     // Dev fallback: log to console instead of sending
     _transporter = {
       sendMail: async (opts) => {
@@ -30,6 +30,8 @@ function getTransporter() {
         return { messageId: "dev-" + Date.now() };
       },
     };
+  } else {
+    throw new Error("SMTP is not configured");
   }
   return _transporter;
 }
@@ -84,6 +86,16 @@ function wrap(title, body) {
   </div>
   <div class="footer">&copy; ${new Date().getFullYear()} ${FROM_NAME}. All rights reserved.</div>
 </div></body></html>`;
+}
+
+function escapeHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
 }
 
 // ─── Email templates ───────────────────────────────────────────────────────────
@@ -221,6 +233,19 @@ export async function sendPasswordResetEmail({ to, username, resetUrl }) {
       <p>We received a request to reset your password. Click the button below — this link expires in 1 hour.</p>
       <a class="btn" href="${resetUrl}">Reset Password</a>
       <p style="color:#6b7280;font-size:14px">If you didn't request this, you can safely ignore this email.</p>
+    `),
+  });
+}
+
+export async function sendEmailVerificationEmail({ to, username, workspaceName, verificationUrl }) {
+  return send({
+    to,
+    subject: `Verify your email for ${FROM_NAME}`,
+    html: wrap("Verify your email", `
+      <p>Hi ${escapeHtml(username)},</p>
+      <p>Confirm this email address to activate <strong>${escapeHtml(workspaceName || "your workspace")}</strong>.</p>
+      <a class="btn" href="${escapeHtml(verificationUrl)}">Verify email and continue</a>
+      <p style="color:#6b7280;font-size:14px">This secure link expires in 30 minutes and can be used once. If you did not request it, ignore this email.</p>
     `),
   });
 }

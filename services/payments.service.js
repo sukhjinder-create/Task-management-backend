@@ -54,6 +54,7 @@ import {
   normalizeSignupEmail,
   validateSignupPassword,
 } from "./auth.service.js";
+import { requestEmailVerification } from "./emailVerification.service.js";
 import { getBackendPublicUrl, getFrontendBaseUrl } from "../config/environment.js";
 import {
   assertWorkspaceTrialAllowsPaymentSetup,
@@ -1619,6 +1620,44 @@ async function buildProvisionedTrialSignupResult(pending) {
   };
 }
 
+async function completeProvisionedTrialSignup(provisioned) {
+  const userId = provisioned.user?.id || provisioned.userId;
+  const user = await getUserById(userId);
+  const workspace = provisioned.workspace || { id: provisioned.workspaceId };
+
+  if (!user.email_verified_at) {
+    const { rows } = await db.query(
+      `SELECT expires_at
+         FROM email_verification_tokens
+        WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > now()
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [user.id]
+    );
+    const verification = rows[0]
+      ? { delivered: true, expiresAt: rows[0].expires_at?.toISOString?.() || rows[0].expires_at }
+      : await requestEmailVerification(user.id);
+    return {
+      verificationRequired: true,
+      email: user.email,
+      emailDelivered: verification.delivered === true,
+      expiresAt: verification.expiresAt || null,
+      user,
+      workspace,
+      refundId: provisioned.refundId,
+    };
+  }
+
+  return {
+    token: provisioned.token || generateToken(user),
+    user,
+    workspace,
+    refundId: provisioned.refundId,
+    verificationAmount: provisioned.verificationAmount,
+    currency: provisioned.currency,
+  };
+}
+
 async function refundTrialSignupVerification({ pending, session, subscription, workspaceId }) {
   if (pending.refund_id) {
     return { refundId: pending.refund_id, paymentIntentId: pending.payment_intent_id || null };
@@ -1731,6 +1770,11 @@ export async function provisionTrialSignupCheckoutSession(sessionOrId) {
     ipHash: pending.consent_ip_hash || null,
     avatarUrl: pending.avatar_url || null,
     skipTrialIpCheck: true,
+    signupCountryCode: pending.billing_country || null,
+    signupMethod: `${pending.auth_provider}_${pending.provider}`,
+    ownerEmailVerifiedAt: pending.auth_provider === "google" ? new Date() : null,
+    ownerEmailVerificationMethod: pending.auth_provider === "google" ? "google" : null,
+    issueToken: pending.auth_provider === "google",
   });
 
   if (session.customer) {
@@ -1890,16 +1934,7 @@ export async function provisionTrialSignupCheckoutSession(sessionOrId) {
 
 export async function completeTrialSignupCheckoutSession(sessionId) {
   const provisioned = await provisionTrialSignupCheckoutSession(sessionId);
-  const user = provisioned.user || (await getUserById(provisioned.userId));
-  const token = provisioned.token || generateToken(user);
-  return {
-    token,
-    user,
-    workspace: provisioned.workspace || { id: provisioned.workspaceId },
-    refundId: provisioned.refundId,
-    verificationAmount: provisioned.verificationAmount,
-    currency: provisioned.currency,
-  };
+  return completeProvisionedTrialSignup(provisioned);
 }
 
 function verifyRazorpaySubscriptionCheckoutSignature({ subscriptionId, paymentId, signature }) {
@@ -2487,6 +2522,11 @@ export async function provisionRazorpayTrialSignupCheckout({
     ipHash: pending.consent_ip_hash || null,
     avatarUrl: pending.avatar_url || null,
     skipTrialIpCheck: true,
+    signupCountryCode: pending.billing_country || null,
+    signupMethod: `${pending.auth_provider}_${pending.provider}`,
+    ownerEmailVerifiedAt: pending.auth_provider === "google" ? new Date() : null,
+    ownerEmailVerificationMethod: pending.auth_provider === "google" ? "google" : null,
+    issueToken: pending.auth_provider === "google",
   });
 
   const customerId = subscription.customer_id || payment.customer_id || null;
@@ -2727,6 +2767,11 @@ export async function provisionRazorpayTrialSignupOrderCheckout({
     ipHash: pending.consent_ip_hash || null,
     avatarUrl: pending.avatar_url || null,
     skipTrialIpCheck: true,
+    signupCountryCode: pending.billing_country || null,
+    signupMethod: `${pending.auth_provider}_${pending.provider}`,
+    ownerEmailVerifiedAt: pending.auth_provider === "google" ? new Date() : null,
+    ownerEmailVerificationMethod: pending.auth_provider === "google" ? "google" : null,
+    issueToken: pending.auth_provider === "google",
   });
 
   await db.query(
@@ -2859,16 +2904,7 @@ export async function completeRazorpayTrialSignupCheckoutSession({
         signature,
         pendingSignupId,
       });
-  const user = provisioned.user || (await getUserById(provisioned.userId));
-  const token = provisioned.token || generateToken(user);
-  return {
-    token,
-    user,
-    workspace: provisioned.workspace || { id: provisioned.workspaceId },
-    refundId: provisioned.refundId,
-    verificationAmount: provisioned.verificationAmount,
-    currency: provisioned.currency,
-  };
+  return completeProvisionedTrialSignup(provisioned);
 }
 
 export async function verifyRazorpayWorkspaceSubscriptionPayment({

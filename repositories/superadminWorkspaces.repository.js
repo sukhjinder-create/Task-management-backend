@@ -23,6 +23,10 @@ export async function createWorkspace({
   skipTrialIpCheck = false,
   metadata = null,
   trialEndsAt = null,
+  signupCountryCode = null,
+  signupMethod = null,
+  ownerEmailVerifiedAt = null,
+  ownerEmailVerificationMethod = null,
 }) {
   const client = await pool.connect();
 
@@ -87,12 +91,24 @@ export async function createWorkspace({
     const { rows: [workspace] } = await client.query(
       `INSERT INTO workspaces (
          id, name, slug, plan, member_limit, billing_plan, max_members, is_active,
-         trial_started_at, trial_ends_at, metadata, created_at, updated_at
+         trial_started_at, trial_ends_at, metadata, signup_country_code,
+         signup_method, created_at, updated_at
        ) VALUES (
          gen_random_uuid(), $1, $2, $3, $4, $5, $4, true,
-         $6, $7, $8, now(), now()
+         $6, $7, $8, $9, $10, now(), now()
        ) RETURNING *`,
-      [name, slug, billingPlan, memberLimit, billingPlan, trialStart, trialEnd, metadata]
+      [
+        name,
+        slug,
+        billingPlan,
+        memberLimit,
+        billingPlan,
+        trialStart,
+        trialEnd,
+        metadata,
+        signupCountryCode,
+        signupMethod,
+      ]
     );
 
     // ── Store trial fingerprint + IP marker for future audit/IP protection ───
@@ -107,11 +123,19 @@ export async function createWorkspace({
     // ── Create owner (admin) user ────────────────────────────────────────────
     const { rows: [owner] } = await client.query(
       `INSERT INTO users (
-         id, username, email, password_hash, role, workspace_id, created_at
+         id, username, email, password_hash, role, workspace_id,
+         email_verified_at, email_verification_method, created_at
        ) VALUES (
-         gen_random_uuid(), $1, $2, $3, 'admin', $4, now()
+         gen_random_uuid(), $1, $2, $3, 'admin', $4, $5, $6, now()
        ) RETURNING id, username, email, role, workspace_id`,
-      [ownerName || normalizedOwnerEmail.split("@")[0], normalizedOwnerEmail, ownerPasswordHash || null, workspace.id]
+      [
+        ownerName || normalizedOwnerEmail.split("@")[0],
+        normalizedOwnerEmail,
+        ownerPasswordHash || null,
+        workspace.id,
+        ownerEmailVerifiedAt,
+        ownerEmailVerificationMethod,
+      ]
     );
 
     await client.query(
@@ -163,10 +187,13 @@ export async function listWorkspaces() {
       u.email  AS owner_email,
       u.username AS owner_name,
       u.id     AS owner_id,
-      (SELECT COUNT(*)::int FROM users WHERE workspace_id = w.id) AS user_count
+      u.email_verified_at AS owner_email_verified_at,
+      u.email_verification_method AS owner_email_verification_method,
+      (SELECT COUNT(*)::int FROM users WHERE workspace_id = w.id) AS user_count,
+      (SELECT COUNT(*)::int FROM projects WHERE workspace_id = w.id) AS project_count
     FROM workspaces w
     LEFT JOIN LATERAL (
-      SELECT id, email, username
+      SELECT id, email, username, email_verified_at, email_verification_method
       FROM users
       WHERE workspace_id = w.id AND role = 'admin'
       ORDER BY created_at ASC
@@ -196,6 +223,31 @@ export async function getWorkspace(id) {
     [id]
   );
   return res.rows[0] || null;
+}
+
+export async function listWorkspaceProjects(workspaceId) {
+  const { rows } = await pool.query(
+    `SELECT
+       p.id,
+       p.name,
+       p.project_code,
+       COALESCE(creator.username, creator.email) AS added_by_name,
+       p.created_at,
+       p.updated_at,
+       COUNT(t.id)::int AS task_count
+     FROM projects p
+     LEFT JOIN tasks t
+       ON t.project_id = p.id
+      AND t.workspace_id = p.workspace_id
+     LEFT JOIN users creator
+       ON creator.id = p.added_by
+      AND creator.workspace_id = p.workspace_id
+     WHERE p.workspace_id = $1
+     GROUP BY p.id, creator.username, creator.email
+     ORDER BY p.created_at DESC`,
+    [workspaceId]
+  );
+  return rows;
 }
 
 export async function updateWorkspace(id, data = {}) {

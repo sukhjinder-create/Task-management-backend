@@ -15,6 +15,7 @@ import { notifyUser } from "./notification.service.js";
 import { sendWelcomeMagicLink } from "./magicLink.service.js";
 import { countWorkspaceMembers, getWorkspaceById } from "../repositories/workspace.repository.js";
 import { syncStripeSubscriptionSeatQuantity } from "./payments.service.js";
+import { requestEmailVerification } from "./emailVerification.service.js";
 
 const WORKSPACE_GLOBAL = "GLOBAL";
 
@@ -146,12 +147,16 @@ export async function createUserService({
   if (!username || !email || !password) {
     throw new Error("username, email, password are required");
   }
+  const normalizedEmail = String(email).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error("A valid email is required");
+  }
 
   if (!workspace_id || workspace_id === WORKSPACE_GLOBAL) {
     throw new Error("Invalid workspace context");
   }
 
-  const existing = await getUserByEmail(email);
+  const existing = await getUserByEmail(normalizedEmail);
   if (existing) {
     throw new Error("Email is already in use");
   }
@@ -172,7 +177,7 @@ export async function createUserService({
 
     const user = await createUserRepo({
     username,
-    email,
+    email: normalizedEmail,
     password_hash,
     role,
     added_by: added_by || "admin",
@@ -183,6 +188,7 @@ export async function createUserService({
   // 🔐 REQUIRED: bind user to workspace_users with correct billing status
   const billingStatus = await determineBillingStatus(workspace_id, role);
   await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus);
+  await requestEmailVerification(user.id);
 
   return user;
 }
@@ -212,6 +218,10 @@ export async function updateUserService(
   if (!username || !email || !role) {
     throw new Error("username, email and role are required");
   }
+  const normalizedEmail = String(email).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error("A valid email is required");
+  }
 
   const existing = await getUserById(id);
   if (!existing) {
@@ -225,10 +235,14 @@ export async function updateUserService(
 
   const updated = await updateUserRepo(id, {
     username,
-    email,
+    email: normalizedEmail,
     role,
     projects,
   });
+  if (String(existing.email).toLowerCase() !== updated.email) {
+    await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [updated.id]);
+    await requestEmailVerification(updated.id);
+  }
 
   // Notify user about newly assigned projects
   try {

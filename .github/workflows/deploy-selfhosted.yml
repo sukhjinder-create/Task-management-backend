@@ -342,7 +342,8 @@ jobs:
           set -uo pipefail
           cd ~/app
 
-          PREV_IMAGE="$(sudo docker inspect app-app-1 --format '{{.Config.Image}}' 2>/dev/null || echo '')"
+          CONTAINER=app-app-1
+          PREV_IMAGE="$(sudo docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo '')"
           echo "previously running image: ${PREV_IMAGE:-none}"
 
           echo "$REGISTRY_TOKEN" | sudo docker login ghcr.io -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1 \
@@ -369,6 +370,79 @@ jobs:
           else
             echo "warning: git sync skipped (fetch of $SYNC_BRANCH failed)"
           fi
+
+          # Password signup now requires mailbox proof. Refuse the release if
+          # production cannot deliver that email; otherwise every new account
+          # would be correctly locked but unable to activate.
+          sudo docker exec "$CONTAINER" node -e '
+            const missing = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS"]
+              .filter((name) => !String(process.env[name] || "").trim());
+            if (missing.length) {
+              console.error(`missing required email configuration: ${missing.join(", ")}`);
+              process.exit(1);
+            }
+            const nodemailer = require("nodemailer");
+            const transport = nodemailer.createTransport({
+              host: process.env.SMTP_HOST,
+              port: Number(process.env.SMTP_PORT || 587),
+              secure: process.env.SMTP_SECURE === "true",
+              auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+            });
+            transport.verify()
+              .then(() => console.log("signup email delivery verified"))
+              .catch((error) => {
+                console.error(`signup email delivery failed: ${error.code || error.message}`);
+                process.exitCode = 1;
+              });
+          ' || { echo "email configuration check failed; current image remains active"; exit 1; }
+
+          # Install the email-identity schema before the image that requires it
+          # is started. The SQL is additive and safe to re-run.
+          IDENTITY_MIGRATION="migrations/20260824_signup_identity_assurance.sql"
+          [ -f "$IDENTITY_MIGRATION" ] || { echo "missing migration: $IDENTITY_MIGRATION"; exit 1; }
+          echo "applying $IDENTITY_MIGRATION ..."
+          sudo docker exec -i "$CONTAINER" node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: { rejectUnauthorized: false },
+              });
+              try {
+                await pool.query(sql);
+                const check = await pool.query(`
+                  SELECT
+                    COUNT(*) FILTER (
+                      WHERE table_schema = $1 AND table_name = $2
+                        AND column_name IN ($3, $4)
+                    )::int AS user_columns,
+                    COUNT(*) FILTER (
+                      WHERE table_schema = $1 AND table_name = $5
+                        AND column_name IN ($6, $7)
+                    )::int AS workspace_columns,
+                    to_regclass($8) AS token_table,
+                    (SELECT relrowsecurity FROM pg_class WHERE oid = $8::regclass) AS token_rls
+                  FROM information_schema.columns`, [
+                    "public", "users", "email_verified_at", "email_verification_method",
+                    "workspaces", "signup_country_code", "signup_method",
+                    "public.email_verification_tokens",
+                  ]);
+                const row = check.rows[0];
+                if (row.user_columns !== 2 || row.workspace_columns !== 2 || !row.token_table || !row.token_rls) {
+                  throw new Error("signup identity schema verification failed");
+                }
+                console.log("signup identity migration verified");
+              } catch (error) {
+                console.error("signup identity migration failed:", error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$IDENTITY_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
 
           # This release adds only an idempotent partial index for expired
           # no-card trial reconciliation. Apply it through the already-running

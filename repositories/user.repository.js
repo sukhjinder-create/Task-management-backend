@@ -99,6 +99,8 @@ export async function getUserById(id) {
       u.projects,
       u.workspace_id,
       u.avatar_url,
+      u.email_verified_at,
+      u.email_verification_method,
       u.created_at,
       u.updated_at,
       w.name AS workspace_name,
@@ -250,6 +252,8 @@ export async function updateUserRepo(id, { username, email, role, projects }) {
     SET
       username = $1,
       email = $2,
+      email_verified_at = CASE WHEN email IS DISTINCT FROM $2 THEN NULL ELSE email_verified_at END,
+      email_verification_method = CASE WHEN email IS DISTINCT FROM $2 THEN NULL ELSE email_verification_method END,
       role = $3,
       projects = $4,
       updated_at = CURRENT_TIMESTAMP
@@ -262,6 +266,8 @@ export async function updateUserRepo(id, { username, email, role, projects }) {
       projects,
       workspace_id,
       avatar_url,
+      email_verified_at,
+      email_verification_method,
       created_at,
       updated_at;
   `;

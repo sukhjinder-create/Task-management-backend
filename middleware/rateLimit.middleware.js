@@ -100,6 +100,28 @@ export const authLimiter = rateLimit({
   handler: jsonLimitHandler("Too many login attempts from this network. Please wait a few minutes and try again."),
 });
 
+/** Workspace creation is rarer than login and successful abuse still counts. */
+export const signupLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: Math.max(1, Number(process.env.SIGNUP_RATE_LIMIT_PER_HOUR) || 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipOnlyKey,
+  skip: skipInfrastructure,
+  handler: jsonLimitHandler("Too many workspace signups from this network. Please try again later."),
+});
+
+/** Prevent verification emails from being used as an inbox-flooding primitive. */
+export const emailVerificationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: Math.max(1, Number(process.env.EMAIL_VERIFICATION_RATE_LIMIT_PER_HOUR) || 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipOnlyKey,
+  skip: skipInfrastructure,
+  handler: jsonLimitHandler("Too many verification requests. Please try again later."),
+});
+
 /**
  * Unauthenticated public endpoints (pricing, signup pages) — cheap to abuse,
  * no user context available.

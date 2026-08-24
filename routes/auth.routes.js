@@ -16,6 +16,8 @@ import {
   refreshSession,
   revokeSession,
   changePassword,
+  resendEmailVerification,
+  verifyEmailAddress,
 } from "../services/auth.service.js";
 import {
   completeRazorpayTrialSignupCheckoutSession,
@@ -33,6 +35,12 @@ import {
   getGoogleCallbackUrl,
   getMobileAuthCallbackUrl,
 } from "../config/environment.js";
+import { detectCountry } from "../services/currency.service.js";
+import { verifyTurnstile } from "../services/turnstile.service.js";
+import {
+  emailVerificationLimiter,
+  signupLimiter,
+} from "../middleware/rateLimit.middleware.js";
 
 const router = express.Router();
 
@@ -46,6 +54,10 @@ const GOOGLE_STATE_TTL_MS = 15 * 60 * 1000;
 function getRequestIpHash(req) {
   const rawIp = req.ip || req.socket?.remoteAddress || "";
   return rawIp ? crypto.createHash("sha256").update(rawIp).digest("hex") : null;
+}
+
+function emailAuditHash(email) {
+  return crypto.createHash("sha256").update(String(email || "").trim().toLowerCase()).digest("hex");
 }
 
 function buildFrontendRedirect(path, params = {}) {
@@ -168,9 +180,14 @@ function captureCompletedSignup(req, data, method) {
   }, deterministicGrowthEventId(`product.workspace_created:${workspaceId}`));
 }
 
-router.post("/signup/workspace", async (req, res) => {
+router.post("/signup/workspace", signupLimiter, async (req, res) => {
   try {
     const { workspaceName, name, email, password } = req.body || {};
+    await verifyTurnstile(
+      req.body?.turnstileToken || req.body?.["cf-turnstile-response"],
+      req.ip,
+      "signup"
+    );
     const selectedPlan = await resolveSignupPlan({
       planId: req.body?.planId,
       plan: req.body?.plan,
@@ -183,6 +200,7 @@ router.post("/signup/workspace", async (req, res) => {
       email,
       password,
       ipHash: getRequestIpHash(req),
+      signupCountryCode: detectCountry(req),
       plan: startsTrial ? "trial" : selectedPlan.slug,
       trialContext: startsTrial
         ? {
@@ -193,31 +211,29 @@ router.post("/signup/workspace", async (req, res) => {
         : null,
     });
 
-    data.refreshToken = await createSession(
-      data.user.id,
-      data.user.workspaceId,
-      req.ip,
-      req.headers["user-agent"]
-    );
-    captureCompletedSignup(req, data, "email");
-
     logAudit({
       workspaceId: data.user.workspaceId || data.user.workspace_id,
       userId: data.user.id,
-      action: "workspace.signup",
+      action: "workspace.signup.pending_verification",
       entityType: "workspace",
       entityId: data.workspace?.id,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
       metadata: {
         method: "email",
+        country: detectCountry(req),
         selectedPlan: selectedPlan.slug,
         paymentRequiredAtSignup: false,
         trialEndsAt: data.workspace?.trial_ends_at || null,
       },
     });
 
-    return res.status(201).json(data);
+    return res.status(202).json({
+      verificationRequired: true,
+      email: data.user.email,
+      emailDelivered: data.verification?.delivered === true,
+      expiresAt: data.verification?.expiresAt || null,
+    });
   } catch (err) {
     logAudit({
       workspaceId: null,
@@ -226,7 +242,7 @@ router.post("/signup/workspace", async (req, res) => {
       entityType: "workspace",
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-      metadata: { email: req.body?.email, reason: err.message },
+      metadata: { email_hash: emailAuditHash(req.body?.email), reason: err.message },
     });
     console.error("Signup error:", err);
     return res.status(err.statusCode || mapSignupStatus(err.message)).json({
@@ -236,12 +252,59 @@ router.post("/signup/workspace", async (req, res) => {
   }
 });
 
+router.post("/email-verification/resend", emailVerificationLimiter, async (req, res) => {
+  try {
+    await resendEmailVerification(req.body?.email);
+    return res.json({
+      message: "If this address has an unverified account, a new verification email has been sent.",
+    });
+  } catch (err) {
+    console.error("Email verification resend error:", err);
+    return res.status(500).json({ error: "Unable to send a verification email right now." });
+  }
+});
+
+router.post("/email-verification/confirm", async (req, res) => {
+  try {
+    const data = await verifyEmailAddress(req.body?.token);
+    data.refreshToken = await createSession(
+      data.user.id,
+      data.user.workspaceId,
+      req.ip,
+      req.headers["user-agent"]
+    );
+    const signupData = { ...data, workspace: { id: data.user.workspaceId } };
+    captureCompletedSignup(req, signupData, "email");
+    logAudit({
+      workspaceId: data.user.workspaceId,
+      userId: data.user.id,
+      action: "workspace.signup.verified",
+      entityType: "workspace",
+      entityId: data.user.workspaceId,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { method: "email_link" },
+    });
+    return res.json(data);
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
 router.get("/signup/workspace/complete", async (req, res) => {
   try {
     const { session_id: sessionId } = req.query;
     if (!sessionId) return res.status(400).json({ error: "session_id is required" });
 
     const data = await completeTrialSignupCheckoutSession(String(sessionId));
+    if (data.verificationRequired) {
+      return res.status(202).json({
+        verificationRequired: true,
+        email: data.email,
+        emailDelivered: data.emailDelivered,
+        expiresAt: data.expiresAt,
+      });
+    }
     data.refreshToken = await createSession(
       data.user.id,
       data.user.workspaceId || data.user.workspace_id,
@@ -289,6 +352,14 @@ router.post("/signup/workspace/complete/razorpay", async (req, res) => {
       signature: String(razorpaySignature),
       pendingSignupId: pendingSignupId ? String(pendingSignupId) : null,
     });
+    if (data.verificationRequired) {
+      return res.status(202).json({
+        verificationRequired: true,
+        email: data.email,
+        emailDelivered: data.emailDelivered,
+        expiresAt: data.expiresAt,
+      });
+    }
     data.refreshToken = await createSession(
       data.user.id,
       data.user.workspaceId || data.user.workspace_id,
@@ -323,6 +394,9 @@ router.get("/signup/workspace/complete/redirect", async (req, res) => {
     }
 
     const data = await completeTrialSignupCheckoutSession(String(sessionId));
+    if (data.verificationRequired) {
+      return res.redirect(buildFrontendRedirect("/signup", { verification: "pending" }));
+    }
     const refreshToken = await createSession(
       data.user.id,
       data.user.workspaceId || data.user.workspace_id,
@@ -410,10 +484,10 @@ router.post("/login", async (req, res) => {
       entityType: "user",
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-      metadata: { email: req.body?.email, reason: err.message },
+      metadata: { email_hash: emailAuditHash(req.body?.email), reason: err.message },
     });
     console.error("Login error:", err);
-    res.status(401).json({ error: err.message });
+    res.status(401).json({ error: err.message, code: err.code || undefined });
   }
 });
 
@@ -711,6 +785,7 @@ router.get("/google/callback", async (req, res) => {
       ? await signupWorkspaceWithGoogle(code, {
           workspaceName: googleState.workspaceName,
           ipHash: getRequestIpHash(req),
+          signupCountryCode: detectCountry(req),
           plan: startsTrial ? "trial" : selectedPlan.slug,
           trialContext: startsTrial
             ? {

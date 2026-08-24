@@ -9,6 +9,9 @@ import {
   updateWorkspacePlan,
 } from "../repositories/workspace.repository.js";
 import { emitPlanUpdated } from "../realtime/socket.js";
+import { detectCountry } from "../services/currency.service.js";
+import { requestEmailVerification } from "../services/emailVerification.service.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = express.Router();
 
@@ -49,6 +52,10 @@ router.post("/", async (req, res) => {
       ownerPasswordHash: passwordHash,
       ownerName: ownerName ? String(ownerName).trim() : null,
       ipHash,
+      signupCountryCode: detectCountry(req),
+      signupMethod: "superadmin",
+      ownerEmailVerifiedAt: new Date(),
+      ownerEmailVerificationMethod: "superadmin",
     });
 
     return res.status(201).json(workspace);
@@ -213,7 +220,8 @@ router.put("/:workspaceId/status-v2", async (req, res) => {
 router.get("/:workspaceId/users", async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, username, email, role, created_at
+      `SELECT id, username, email, role, email_verified_at,
+              email_verification_method, created_at
        FROM users
        WHERE workspace_id = $1
        ORDER BY role DESC, created_at ASC`,
@@ -223,6 +231,52 @@ router.get("/:workspaceId/users", async (req, res) => {
   } catch (err) {
     console.error("[superadmin] listUsers error:", err);
     return res.status(500).json({ error: err.message || "Failed to list users" });
+  }
+});
+
+router.post("/:workspaceId/users/:userId/require-email-verification", async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE users
+          SET email_verified_at = NULL, email_verification_method = NULL, updated_at = now()
+        WHERE id = $1 AND workspace_id = $2 AND role <> 'system'
+        RETURNING id, username, email, role, email_verified_at, email_verification_method, created_at`,
+      [req.params.userId, req.params.workspaceId]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "User not found in this workspace" });
+
+    await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [rows[0].id]);
+    const verification = await requestEmailVerification(rows[0].id);
+    await logAudit({
+      workspaceId: req.params.workspaceId,
+      action: "user.email_verification.required",
+      entityType: "user",
+      entityId: rows[0].id,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      metadata: { superadmin_id: req.superadmin.id, email_delivered: verification.delivered === true },
+    });
+    return res.json({
+      user: rows[0],
+      emailDelivered: verification.delivered === true,
+      expiresAt: verification.expiresAt || null,
+    });
+  } catch (err) {
+    console.error("[superadmin] requireEmailVerification error:", err);
+    return res.status(500).json({ error: err.message || "Failed to require email verification" });
+  }
+});
+
+/**
+ * GET /superadmin/workspaces/:workspaceId/projects
+ * List projects and their task counts for a workspace.
+ */
+router.get("/:workspaceId/projects", async (req, res) => {
+  try {
+    return res.json(await repo.listWorkspaceProjects(req.params.workspaceId));
+  } catch (err) {
+    console.error("[superadmin] listProjects error:", err);
+    return res.status(500).json({ error: err.message || "Failed to list projects" });
   }
 });
 
@@ -239,7 +293,17 @@ router.put("/:workspaceId/users/:userId", async (req, res) => {
     let idx = 1;
 
     if (username !== undefined) { sets.push(`username = $${idx++}`); values.push(String(username).trim()); }
-    if (email    !== undefined) { sets.push(`email = $${idx++}`);    values.push(String(email).trim().toLowerCase()); }
+    if (email !== undefined) {
+      const normalizedEmail = String(email).trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ error: "A valid email is required" });
+      }
+      const emailParam = idx++;
+      sets.push(`email = $${emailParam}`);
+      sets.push(`email_verified_at = CASE WHEN email IS DISTINCT FROM $${emailParam} THEN NULL ELSE email_verified_at END`);
+      sets.push(`email_verification_method = CASE WHEN email IS DISTINCT FROM $${emailParam} THEN NULL ELSE email_verification_method END`);
+      values.push(normalizedEmail);
+    }
     if (role     !== undefined) {
       if (!allowed.includes(role)) return res.status(400).json({ error: "role must be admin | user | owner" });
       sets.push(`role = $${idx++}`); values.push(role);
@@ -249,10 +313,14 @@ router.put("/:workspaceId/users/:userId", async (req, res) => {
     values.push(req.params.userId, req.params.workspaceId);
     const { rows, rowCount } = await pool.query(
       `UPDATE users SET ${sets.join(", ")} WHERE id = $${idx} AND workspace_id = $${idx + 1}
-       RETURNING id, username, email, role, created_at`,
+       RETURNING id, username, email, role, email_verified_at, email_verification_method, created_at`,
       values
     );
     if (!rowCount) return res.status(404).json({ error: "User not found in this workspace" });
+    if (email !== undefined && !rows[0].email_verified_at) {
+      await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [rows[0].id]);
+      await requestEmailVerification(rows[0].id);
+    }
     return res.json(rows[0]);
   } catch (err) {
     console.error("[superadmin] editUser error:", err);
