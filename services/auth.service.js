@@ -91,11 +91,20 @@ function normalizeUserRow(user) {
   };
 }
 
+export function assertEmailVerified(user) {
+  if (!user?.email_verified_at) {
+    throw Object.assign(new Error("Verify your email before signing in."), {
+      code: "EMAIL_VERIFICATION_REQUIRED",
+    });
+  }
+}
+
 /**
  * Generate JWT token
  * 🔐 workspaceId is mandatory for normal users
  */
 export function generateToken(user) {
+  assertEmailVerified(user);
   const role = user.role || "user";
 
   const workspaceId =
@@ -136,11 +145,7 @@ export async function loginWithEmail(email, password) {
 
   const match = await bcrypt.compare(password, user.password_hash);
   if (!match) throw new Error("Invalid email or password");
-  if (!user.email_verified_at) {
-    throw Object.assign(new Error("Verify your email before signing in."), {
-      code: "EMAIL_VERIFICATION_REQUIRED",
-    });
-  }
+  assertEmailVerified(user);
 
   // If MFA enabled, issue a short-lived session token (5 min) instead of full JWT
   if (user.mfa_enabled) {

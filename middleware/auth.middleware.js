@@ -1,11 +1,12 @@
 import jwt from "jsonwebtoken";
 import { attachOperationalEventCapture } from "../adaptive/events/operationalEvent.middleware.js";
 import { getJwtSecret } from "../config/secrets.js";
+import { getUserById } from "../repositories/user.repository.js";
 
 const JWT_SECRET = getJwtSecret();
 const WORKSPACE_GLOBAL = "GLOBAL";
 
-export function authMiddleware(req, res, next) {
+export async function authMiddleware(req, res, next) {
   if (req.method === "OPTIONS") {
     return next();
   }
@@ -33,6 +34,25 @@ export function authMiddleware(req, res, next) {
 
     if (!userId) {
       return res.status(401).json({ error: "Invalid token: missing user id" });
+    }
+
+    // Re-read the identity so a superadmin revocation takes effect immediately,
+    // even for access tokens issued before verification was required.
+    let currentUser;
+    try {
+      currentUser = await getUserById(userId);
+    } catch (err) {
+      console.error("Auth user validation error:", err.message);
+      return res.status(503).json({ error: "Unable to validate session" });
+    }
+    if (!currentUser) {
+      return res.status(401).json({ error: "Invalid token: user not found" });
+    }
+    if (!currentUser.email_verified_at) {
+      return res.status(401).json({
+        error: "Verify your email before signing in.",
+        code: "EMAIL_VERIFICATION_REQUIRED",
+      });
     }
 
     // 🔐 STRICT workspace resolution

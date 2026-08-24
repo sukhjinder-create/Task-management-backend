@@ -125,6 +125,7 @@ export async function processSamlAssertion(workspaceId, profile, ipAddress) {
     role: user.role,
     workspaceId,
     workspace_id: workspaceId,
+    email_verified_at: user.email_verified_at,
   });
 
   return { token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workspaceId } };
