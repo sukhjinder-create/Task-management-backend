@@ -185,7 +185,7 @@ router.post("/signup/workspace", signupLimiter, async (req, res) => {
     const { workspaceName, name, email, password } = req.body || {};
     await verifyTurnstile(
       req.body?.turnstileToken || req.body?.["cf-turnstile-response"],
-      req.ip,
+      req.headers["cf-connecting-ip"] || req.ip,
       "signup"
     );
     const selectedPlan = await resolveSignupPlan({
@@ -247,6 +247,7 @@ router.post("/signup/workspace", signupLimiter, async (req, res) => {
     console.error("Signup error:", err);
     return res.status(err.statusCode || mapSignupStatus(err.message)).json({
       error: err.message,
+      code: err.code,
       checkoutSessionId: err.checkoutSessionId,
     });
   }

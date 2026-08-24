@@ -46,7 +46,7 @@
     "test:growth-intelligence": "node --test tests/growth-intelligence.test.js",
     "test:product-discovery": "node --test tests/product-discovery.test.js",
     "test:trial-lifecycle": "node --test tests/trial-lifecycle.test.js",
-    "test:signup-security": "node --test tests/email-verification.test.js tests/rate-limit.test.js tests/migrations-rls-guard.test.js",
+    "test:signup-security": "node --test tests/email-verification.test.js tests/turnstile.test.js tests/rate-limit.test.js tests/migrations-rls-guard.test.js",
     "growth:product-discovery:weekly": "node scripts/generate-product-discovery-insights.js --persist",
     "test:growth-intelligence:db": "node scripts/test-growth-intelligence-db.js",
     "verify:enterprise-intelligence": "node scripts/verify-enterprise-intelligence-architecture.js",

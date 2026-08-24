@@ -38,7 +38,19 @@ export async function verifyTurnstile(token, remoteIp, expectedAction = "signup"
     (!result.hostname || !allowedHostnames.includes(String(result.hostname).toLowerCase()));
 
   if (!response.ok || !result.success || wrongAction || wrongHostname) {
-    throw Object.assign(new Error("Security check failed. Please try again."), { statusCode: 400 });
+    const errorCodes = Array.isArray(result["error-codes"]) ? result["error-codes"] : [];
+    console.warn("[turnstile] verification rejected", {
+      errorCodes,
+      hostname: result.hostname || null,
+      action: result.action || null,
+      wrongAction,
+      wrongHostname,
+    });
+    const expired = errorCodes.includes("timeout-or-duplicate");
+    throw Object.assign(
+      new Error(expired ? "Security check expired. Please try again." : "Security check failed. Please try again."),
+      { statusCode: 400, code: "TURNSTILE_FAILED" }
+    );
   }
   return result;
 }
