@@ -240,7 +240,7 @@ export async function listWorkspaceProjects(workspaceId) {
        ON t.project_id = p.id
       AND t.workspace_id = p.workspace_id
      LEFT JOIN users creator
-       ON creator.id = p.added_by
+       ON creator.id::text = p.added_by
       AND creator.workspace_id = p.workspace_id
      WHERE p.workspace_id = $1
      GROUP BY p.id, creator.username, creator.email

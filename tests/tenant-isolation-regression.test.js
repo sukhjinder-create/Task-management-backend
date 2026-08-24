@@ -76,3 +76,10 @@ test("chat read-state migration is additive, scoped, and idempotent", () => {
   assert.match(migration, /rs\.user_id::text = u\.id::text/i);
   assert.match(migration, /CREATE INDEX IF NOT EXISTS idx_ccrs_workspace_user/i);
 });
+
+test("superadmin project drill-down supports the legacy text creator column", () => {
+  const repository = read("repositories/superadminWorkspaces.repository.js");
+
+  assert.match(repository, /ON creator\.id::text = p\.added_by/);
+  assert.match(repository, /AND creator\.workspace_id = p\.workspace_id/);
+});
