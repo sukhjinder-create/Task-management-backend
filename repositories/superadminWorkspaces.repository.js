@@ -375,6 +375,33 @@ export async function hardDeleteWorkspace(id) {
     await purgeHuddleMembership(client, "workspace_id", id);
     await client.query(`DELETE FROM users             WHERE workspace_id = $1`, [id]);
 
+    // ── Level 6.5: blog authorship ──
+    // blog_posts.author_workspace_id is ON DELETE SET NULL, but
+    // blog_posts_author_origin_check requires exactly one origin — a workspace
+    // or the platform — so letting the cascade null it leaves both origins
+    // NULL and aborts the delete. Unpublished drafts are workspace-private
+    // working state and go with the workspace, like tasks and projects.
+    // Anything already public is not destroyed with its author: its origin
+    // moves to the superadmin who reviewed it, which the publish flow always
+    // records. The public byline is author_display_name and never referenced
+    // the workspace, so nothing changes for readers.
+    await client.query(
+      `DELETE FROM blog_posts
+        WHERE author_workspace_id = $1
+          AND status NOT IN ('published', 'archived')`,
+      [id]
+    );
+    await client.query(
+      `UPDATE blog_posts
+          SET author_workspace_id = NULL,
+              author_user_id = NULL,
+              author_superadmin_id = reviewed_by,
+              updated_at = now()
+        WHERE author_workspace_id = $1
+          AND reviewed_by IS NOT NULL`,
+      [id]
+    );
+
     // ── Level 7: workspace itself (cascades payments, subscriptions, billing, etc.) ──
     await client.query(`DELETE FROM workspaces        WHERE id = $1`, [id]);
 
