@@ -1,4 +1,5 @@
 const SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const CANONICAL_HOSTNAMES = ["app.asystence.com", "asystence.com", "www.asystence.com"];
 
 export async function verifyTurnstile(token, remoteIp, expectedAction = "signup") {
   const secret = String(process.env.TURNSTILE_SECRET_KEY || "").trim();
@@ -28,10 +29,13 @@ export async function verifyTurnstile(token, remoteIp, expectedAction = "signup"
   }
 
   const result = await response.json().catch(() => ({}));
-  const allowedHostnames = String(process.env.TURNSTILE_ALLOWED_HOSTNAMES || "")
-    .split(",")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
+  const allowedHostnames = [...new Set([
+    ...CANONICAL_HOSTNAMES,
+    ...String(process.env.TURNSTILE_ALLOWED_HOSTNAMES || "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  ])];
   const wrongAction = expectedAction && result.action !== expectedAction;
   const wrongHostname =
     allowedHostnames.length > 0 &&

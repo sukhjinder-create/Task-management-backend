@@ -25,3 +25,27 @@ test("Turnstile failures remain closed and expose a retryable error code", async
     else process.env.TURNSTILE_SECRET_KEY = originalSecret;
   }
 });
+
+test("canonical production hostnames remain allowed when deployed configuration is stale", async () => {
+  const originalFetch = global.fetch;
+  const originalSecret = process.env.TURNSTILE_SECRET_KEY;
+  const originalHostnames = process.env.TURNSTILE_ALLOWED_HOSTNAMES;
+  process.env.TURNSTILE_SECRET_KEY = "test-secret";
+  process.env.TURNSTILE_ALLOWED_HOSTNAMES = "app.asystence.com,asystence.com";
+  global.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    hostname: "www.asystence.com",
+    action: "signup",
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const result = await verifyTurnstile("valid-token", "203.0.113.10", "signup");
+    assert.equal(result.success, true);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalSecret === undefined) delete process.env.TURNSTILE_SECRET_KEY;
+    else process.env.TURNSTILE_SECRET_KEY = originalSecret;
+    if (originalHostnames === undefined) delete process.env.TURNSTILE_ALLOWED_HOSTNAMES;
+    else process.env.TURNSTILE_ALLOWED_HOSTNAMES = originalHostnames;
+  }
+});
