@@ -298,6 +298,46 @@ export async function updateWorkspaceStatus(id, is_active) {
   return res.rows[0];
 }
 
+/**
+ * Huddle membership rows must be removed before the users they belong to.
+ * huddle_transcript_segments and its sibling tables carry BEFORE-UPDATE
+ * ownership triggers that reject the half-updated state a bare `DELETE FROM
+ * users` produces -- a segment whose participant_id has been nulled by one
+ * cascade while its participant_device_id still points at a device row a
+ * different cascade has not reached yet. Clearing the membership explicitly,
+ * devices before participants, means those triggers only ever see consistent
+ * rows. `scope` is the column to match on: "user_id" for a single user,
+ * "workspace_id" when the whole workspace is going.
+ */
+async function purgeHuddleMembership(client, scope, value) {
+  const column = scope === "workspace_id" ? "workspace_id" : "user_id";
+  await client.query(`DELETE FROM huddle_participant_devices WHERE ${column} = $1`, [value]);
+  await client.query(`DELETE FROM huddle_session_participants WHERE ${column} = $1`, [value]);
+}
+
+export async function hardDeleteUser(userId, workspaceId) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    await purgeHuddleMembership(client, "user_id", userId);
+
+    const { rowCount } = await client.query(
+      `DELETE FROM users WHERE id = $1 AND workspace_id = $2`,
+      [userId, workspaceId]
+    );
+
+    await client.query("COMMIT");
+    return rowCount;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("hardDeleteUser error:", err.message);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function hardDeleteWorkspace(id) {
   const client = await pool.connect();
   try {
@@ -331,7 +371,8 @@ export async function hardDeleteWorkspace(id) {
     await client.query(`DELETE FROM workspace_users   WHERE workspace_id = $1`, [id]);
     await client.query(`DELETE FROM system_users      WHERE workspace_id = $1`, [id]);
 
-    // ── Level 6: users ──
+    // ── Level 6: users (huddle membership first — see purgeHuddleMembership) ──
+    await purgeHuddleMembership(client, "workspace_id", id);
     await client.query(`DELETE FROM users             WHERE workspace_id = $1`, [id]);
 
     // ── Level 7: workspace itself (cascades payments, subscriptions, billing, etc.) ──

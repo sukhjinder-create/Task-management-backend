@@ -334,10 +334,7 @@ router.put("/:workspaceId/users/:userId", async (req, res) => {
  */
 router.delete("/:workspaceId/users/:userId", async (req, res) => {
   try {
-    const { rowCount } = await pool.query(
-      `DELETE FROM users WHERE id = $1 AND workspace_id = $2`,
-      [req.params.userId, req.params.workspaceId]
-    );
+    const rowCount = await repo.hardDeleteUser(req.params.userId, req.params.workspaceId);
     if (!rowCount) return res.status(404).json({ error: "User not found in this workspace" });
     return res.json({ success: true });
   } catch (err) {
