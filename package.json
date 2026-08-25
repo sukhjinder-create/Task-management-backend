@@ -32,6 +32,7 @@
     "verify:adaptive-runtime": "node scripts/verify-adaptive-runtime.js",
     "migrate:universal-integrations": "node --import ./scripts/database-safety-guard.js run-universal-integrations-migration.js",
     "migrate:blog-publishing": "node --import ./scripts/database-safety-guard.js run-blog-publishing-migration.js",
+    "migrate:user-delete-fk-cleanup": "node --import ./scripts/database-safety-guard.js run-user-delete-fk-cleanup-migration.js",
     "seed:blog": "node --import ./scripts/database-safety-guard.js scripts/seed-blog-from-landing.js",
     "test:blog-publishing": "node --test tests/blog-publishing.test.js",
     "verify:smart-automations-e2e": "node scripts/verify-smart-automations-e2e.js",
