@@ -69,7 +69,14 @@ export async function recalcGoalFromSprints(objectiveId) {
   else                       status = "off_track";
 
   await pool.query(
-    `UPDATE okr_objectives SET progress = $1, status = $2, updated_at = NOW() WHERE id = $3`,
+    `UPDATE okr_objectives SET
+       progress = $1,
+       status = CASE
+         WHEN success_measure IS NOT NULL AND target_date IS NOT NULL THEN status
+         ELSE $2
+       END,
+       updated_at = NOW()
+     WHERE id = $3`,
     [progress, status, objectiveId]
   );
 }

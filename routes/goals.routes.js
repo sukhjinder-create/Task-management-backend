@@ -23,7 +23,7 @@ const router = express.Router();
 router.get("/goals", async (req, res) => {
   try {
     const { timePeriod, ownerId } = req.query;
-    const conditions = ["o.workspace_id = $1"];
+    const conditions = ["o.workspace_id = $1", "(o.success_measure IS NULL OR o.target_date IS NULL)"];
     const params = [req.workspaceId];
     let i = 2;
 
@@ -120,6 +120,7 @@ router.put("/goals/:id", allowRoles("admin", "manager"), async (req, res) => {
          owner_id    = COALESCE($6, owner_id),
          updated_at  = NOW()
        WHERE id = $7 AND workspace_id = $8
+         AND (success_measure IS NULL OR target_date IS NULL)
        RETURNING *`,
       [title, description, time_period, status, progress, owner_id, req.params.id, req.workspaceId]
     );
@@ -134,10 +135,14 @@ router.put("/goals/:id", allowRoles("admin", "manager"), async (req, res) => {
 
 router.delete("/goals/:id", allowRoles("admin", "manager"), async (req, res) => {
   try {
-    await db.query(
-      "DELETE FROM okr_objectives WHERE id = $1 AND workspace_id = $2",
+    const { rows } = await db.query(
+      `DELETE FROM okr_objectives
+       WHERE id = $1 AND workspace_id = $2
+         AND (success_measure IS NULL OR target_date IS NULL)
+       RETURNING id`,
       [req.params.id, req.workspaceId]
     );
+    if (!rows[0]) return res.status(404).json({ error: "Goal not found" });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -161,7 +166,9 @@ router.post("/goals/:id/sprints", allowRoles("admin", "manager"), async (req, re
     if (!sprint_id) return res.status(400).json({ error: "sprint_id is required" });
 
     const { rows: goal } = await db.query(
-      "SELECT id FROM okr_objectives WHERE id = $1 AND workspace_id = $2",
+      `SELECT id FROM okr_objectives
+       WHERE id = $1 AND workspace_id = $2
+         AND (success_measure IS NULL OR target_date IS NULL)`,
       [req.params.id, req.workspaceId]
     );
     if (!goal[0]) return res.status(404).json({ error: "Goal not found" });
@@ -195,6 +202,14 @@ router.post("/goals/:id/sprints", allowRoles("admin", "manager"), async (req, re
 
 router.delete("/goals/:id/sprints/:sprintId", allowRoles("admin", "manager"), async (req, res) => {
   try {
+    const { rows: goal } = await db.query(
+      `SELECT id FROM okr_objectives
+       WHERE id = $1 AND workspace_id = $2
+         AND (success_measure IS NULL OR target_date IS NULL)`,
+      [req.params.id, req.workspaceId]
+    );
+    if (!goal[0]) return res.status(404).json({ error: "Goal not found" });
+
     await db.query(
       "DELETE FROM okr_sprint_links WHERE objective_id = $1 AND sprint_id = $2",
       [req.params.id, req.params.sprintId]
@@ -233,7 +248,9 @@ router.delete("/goals/:id/sprints/:sprintId", allowRoles("admin", "manager"), as
 router.get("/goals/:id/assessment", async (req, res) => {
   try {
     const { rows: [goal] } = await db.query(
-      `SELECT * FROM okr_objectives WHERE id = $1 AND workspace_id = $2`,
+      `SELECT * FROM okr_objectives
+       WHERE id = $1 AND workspace_id = $2
+         AND (success_measure IS NULL OR target_date IS NULL)`,
       [req.params.id, req.workspaceId]
     );
     if (!goal) return res.status(404).json({ error: "Goal not found" });
@@ -423,6 +440,7 @@ router.get("/goals/workspace/health", allowRoles("admin", "manager"), async (req
        FROM okr_objectives o
        LEFT JOIN users u ON u.id = o.owner_id
        WHERE o.workspace_id = $1
+         AND (o.success_measure IS NULL OR o.target_date IS NULL)
        ORDER BY o.created_at DESC`,
       [req.workspaceId]
     );

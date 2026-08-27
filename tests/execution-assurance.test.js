@@ -46,6 +46,7 @@ test("outcome creation stays a four-question contract with safe defaults", () =>
   assert.equal(value.successMeasure, "Customers can activate without support");
   assert.equal(value.targetDate, "2026-10-31");
   assert.equal(value.priority, "high");
+  assert.deepEqual(value.sprintIds, []);
   assert.deepEqual(value.evidenceRequirements, []);
   assert.equal(deriveTimePeriod(value.targetDate), "Q4 2026");
   assert.throws(() => normalizeAssuranceInput({ outcome: "X", targetDate: "2026-10-31" }), /Success measure is required/);
@@ -55,6 +56,21 @@ test("outcome creation stays a four-question contract with safe defaults", () =>
     targetDate: "2026-10-31",
     ownerId: "another-workspace-user",
   }), /Owner is not valid/);
+  assert.deepEqual(normalizeAssuranceInput({
+    outcome: "X",
+    successMeasure: "Y",
+    targetDate: "2026-10-31",
+    sprintIds: [
+      "33333333-3333-4333-8333-333333333333",
+      "33333333-3333-4333-8333-333333333333",
+    ],
+  }).sprintIds, ["33333333-3333-4333-8333-333333333333"]);
+  assert.throws(() => normalizeAssuranceInput({
+    outcome: "X",
+    successMeasure: "Y",
+    targetDate: "2026-10-31",
+    sprintIds: ["not-a-sprint"],
+  }), /Sprint is not valid/);
 });
 
 test("an empty workspace never receives an invented health state", () => {
@@ -63,6 +79,7 @@ test("an empty workspace never receives an invented health state", () => {
   assert.equal(assurance.evidenceStatus, "insufficient_evidence");
   assert.equal(assurance.taskProgress, null);
   assert.match(assurance.explanation, /Connect a project or record evidence/);
+  assert.equal(calculateAssuranceState(row({ linked_sprint_count: 1 }), NOW).state, "insufficient_evidence");
 });
 
 test("empty workspace overview returns zeros without querying another tenant", async () => {
@@ -181,6 +198,23 @@ test("governed recovery actions reuse the existing approval and execution trail"
   assert.match(operations, /u\.workspace_id = a\.workspace_id/);
   assert.match(operations, /p\.workspace_id = a\.workspace_id/);
   assert.match(operations, /t\.workspace_id = a\.workspace_id/);
+});
+
+test("outcome work scope is precise and legacy goals cannot mutate assurance outcomes", () => {
+  const assurance = read("services/executionAssurance.service.js");
+  const enterprise = read("services/enterpriseAssurance.service.js");
+  const goals = read("routes/goals.routes.js");
+  const sprints = read("services/sprint.service.js");
+
+  assert.match(assurance, /NOT EXISTS \(SELECT 1 FROM okr_sprint_links scope_link/);
+  assert.match(assurance, /linked_sprint_ids/);
+  assert.match(assurance, /UNNEST\(\$11::uuid\[\]\)/);
+  assert.match(assurance, /removed AS \([\s\S]*RETURNING objective_id[\s\S]*UNNEST\(\$12::uuid\[\]\)/);
+  assert.match(assurance, /\$4 = 'admin' OR is_hidden = FALSE/);
+  assert.match(assurance, /assigned_experiment\.owner_id/);
+  assert.match(enterprise, /NOT EXISTS \(SELECT 1 FROM okr_sprint_links scope_link/);
+  assert.ok((goals.match(/(?:o\.)?success_measure IS NULL OR (?:o\.)?target_date IS NULL/g) || []).length >= 6);
+  assert.match(sprints, /WHEN success_measure IS NOT NULL AND target_date IS NOT NULL THEN status/);
 });
 
 test("production deploy applies and verifies the additive schema before image cutover", () => {

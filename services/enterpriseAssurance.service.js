@@ -354,7 +354,7 @@ export async function getAssurancePortfolio({ workspaceId, userId, role, databas
       summary: {
         total: commitments.length,
         verified: commitments.filter((item) => item.assurance.state === "verified").length,
-        needsAttention: commitments.filter((item) => ["at_risk", "off_track", "needs_evidence"].includes(item.assurance.state)).length,
+        needsAttention: commitments.filter((item) => ["at_risk", "off_track", "needs_evidence", "insufficient_evidence"].includes(item.assurance.state)).length,
       },
     };
   }).filter((portfolio) => (
@@ -688,7 +688,7 @@ export async function getAssuranceInbox({ workspaceId, userId, role, database = 
       generatedAt: now.toISOString(),
       attention,
       approvals: [],
-      summary: { attention: attention.length, pendingApprovals: 0, total: attention.length },
+      summary: { outcomeTotal: 0, attention: attention.length, pendingApprovals: 0, total: attention.length },
     };
   }
   const { rows } = await database.query(
@@ -714,6 +714,7 @@ export async function getAssuranceInbox({ workspaceId, userId, role, database = 
       canApprove: item.action_type === "complete" ? canApproveComplete : canApproveRecovery,
     })),
     summary: {
+      outcomeTotal: overview.summary.total,
       attention: attention.length,
       pendingApprovals: rows.length,
       total: attention.length + rows.length,
@@ -751,7 +752,11 @@ export async function ingestExternalAssuranceEvidence({ workspaceId, database = 
      FROM okr_objectives o
      JOIN tasks t ON t.workspace_id=o.workspace_id
        AND (
-         (o.primary_project_id IS NOT NULL AND t.project_id=o.primary_project_id)
+         (
+           NOT EXISTS (SELECT 1 FROM okr_sprint_links scope_link WHERE scope_link.objective_id=o.id)
+           AND o.primary_project_id IS NOT NULL
+           AND t.project_id=o.primary_project_id
+         )
          OR EXISTS (
            SELECT 1 FROM okr_sprint_links osl
            WHERE osl.objective_id=o.id AND osl.sprint_id=t.sprint_id

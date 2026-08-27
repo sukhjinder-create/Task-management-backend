@@ -39,6 +39,12 @@ function uuidValue(value, { required = false, label = "Identifier" } = {}) {
   return normalized;
 }
 
+function uuidList(value, label = "Identifier") {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw httpError(`${label} list is not valid`);
+  return [...new Set(value.map((item) => uuidValue(item, { required: true, label })))].slice(0, 100);
+}
+
 function dateOnly(value) {
   if (value instanceof Date && Number.isFinite(value.getTime())) {
     return value.toISOString().slice(0, 10);
@@ -102,6 +108,7 @@ export function normalizeAssuranceInput(input = {}) {
     targetDate,
     ownerId: uuidValue(input.ownerId ?? input.owner_id, { label: "Owner" }),
     primaryProjectId: uuidValue(input.primaryProjectId ?? input.primary_project_id, { label: "Project" }),
+    sprintIds: uuidList(input.sprintIds ?? input.sprint_ids, "Sprint"),
     priority,
     evidenceRequirements: requirements,
   };
@@ -124,7 +131,7 @@ export function calculateAssuranceState(row, now = new Date(), policy = {}) {
   const blockedDependencyCount = numeric(row.blocked_dependency_count);
   const targetDate = dateOnly(row.target_date);
   const remainingDays = daysBetween(todayUtc(now), targetDate);
-  const hasExecutionEvidence = evidenceCount > 0 || taskCount > 0 || linkedSprintCount > 0;
+  const hasExecutionEvidence = evidenceCount > 0 || taskCount > 0;
   const markedComplete = row.status === "done" || progress >= 100;
 
   let state;
@@ -257,8 +264,18 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
     values.push(userId);
     parameter += 1;
   } else if (normalizedRole !== "admin") {
-    where.push(`o.owner_id = $${parameter++}`);
+    where.push(`(
+      o.owner_id = $${parameter}
+      OR EXISTS (
+        SELECT 1 FROM assurance_experiments assigned_experiment
+        WHERE assigned_experiment.workspace_id = o.workspace_id
+          AND assigned_experiment.goal_id = o.id
+          AND assigned_experiment.owner_id = $${parameter}
+          AND assigned_experiment.status IN ('planned', 'active')
+      )
+    )`);
     values.push(userId);
+    parameter += 1;
   }
 
   const { rows } = await database.query(
@@ -286,6 +303,8 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       COALESCE(work.overdue_task_count, 0)::int AS overdue_task_count,
       COALESCE(work.blocked_task_count, 0)::int AS blocked_task_count,
       COALESCE(sprints.linked_sprint_count, 0)::int AS linked_sprint_count,
+      COALESCE(sprints.linked_sprint_ids, ARRAY[]::uuid[]) AS linked_sprint_ids,
+      COALESCE(sprints.linked_sprints, '[]'::json) AS linked_sprints,
       COALESCE(evidence.evidence_count, 0)::int AS evidence_count,
       COALESCE(evidence.result_evidence_count, 0)::int AS result_evidence_count,
       COALESCE(evidence.external_evidence_count, 0)::int AS external_evidence_count,
@@ -308,7 +327,11 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       FROM tasks t
       WHERE t.workspace_id = o.workspace_id
         AND (
-          (o.primary_project_id IS NOT NULL AND t.project_id = o.primary_project_id)
+          (
+            NOT EXISTS (SELECT 1 FROM okr_sprint_links scope_link WHERE scope_link.objective_id = o.id)
+            AND o.primary_project_id IS NOT NULL
+            AND t.project_id = o.primary_project_id
+          )
           OR EXISTS (
             SELECT 1 FROM okr_sprint_links osl
             WHERE osl.objective_id = o.id AND osl.sprint_id = t.sprint_id
@@ -316,7 +339,15 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
         )
     ) work ON TRUE
     LEFT JOIN LATERAL (
-      SELECT COUNT(*) AS linked_sprint_count
+      SELECT
+        COUNT(*) AS linked_sprint_count,
+        ARRAY_AGG(s.id ORDER BY s.created_at) AS linked_sprint_ids,
+        JSON_AGG(json_build_object(
+          'id', s.id,
+          'name', s.name,
+          'status', s.status,
+          'projectId', s.project_id
+        ) ORDER BY s.created_at) AS linked_sprints
       FROM okr_sprint_links osl
       JOIN sprints s ON s.id = osl.sprint_id AND s.workspace_id = o.workspace_id
       WHERE osl.objective_id = o.id
@@ -367,7 +398,7 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
 }
 
 async function getAssuranceOptions(workspaceId, userId, role, database = pool) {
-  const [ownersResult, projectsResult] = await Promise.all([
+  const [ownersResult, projectsResult, sprintsResult] = await Promise.all([
     database.query(
       `
       SELECT u.id, u.username, u.role
@@ -394,14 +425,32 @@ async function getAssuranceOptions(workspaceId, userId, role, database = pool) {
        ORDER BY p.name ASC`,
       [workspaceId, userId, String(role || "user").toLowerCase()]
     ),
+    database.query(
+      `SELECT s.id, s.name, s.status, s.project_id, p.name AS project_name
+       FROM sprints s
+       JOIN projects p ON p.id = s.project_id AND p.workspace_id = s.workspace_id
+       WHERE s.workspace_id = $1
+         AND (
+           $3 = 'admin'
+           OR (
+             s.is_hidden = FALSE
+             AND s.project_id = ANY(COALESCE((
+               SELECT u.projects FROM users u WHERE u.id = $2 AND u.workspace_id = $1
+             ), ARRAY[]::uuid[]))
+           )
+         )
+       ORDER BY p.name ASC, s.created_at DESC`,
+      [workspaceId, userId, String(role || "user").toLowerCase()]
+    ),
   ]);
 
-  return { owners: ownersResult.rows, projects: projectsResult.rows };
+  return { owners: ownersResult.rows, projects: projectsResult.rows, sprints: sprintsResult.rows };
 }
 
 export async function getAssuranceOverview({ workspaceId, userId, role, database = pool, now = new Date(), policy = null }) {
   const commitments = await queryCommitments({ workspaceId, userId, role, database, now, policy });
   const attention = commitments.map(buildAssuranceAttention).filter(Boolean);
+  const normalizedRole = String(role || "user").toLowerCase();
   const options = canManageAssurance(role)
     ? await getAssuranceOptions(workspaceId, userId, role, database)
     : { owners: [], projects: [] };
@@ -409,6 +458,13 @@ export async function getAssuranceOverview({ workspaceId, userId, role, database
   return {
     generatedAt: now.toISOString(),
     evidencePolicy: "No status is inferred until workspace-scoped work or evidence exists.",
+    capabilities: {
+      canManage: canManageAssurance(role),
+      canRequestCompletion: (policy?.approvalMatrix?.complete?.requestRoles || ["user", "manager", "admin"]).includes(normalizedRole),
+      canApproveCompletion: (policy?.approvalMatrix?.complete?.approveRoles || ["manager", "admin"]).includes(normalizedRole),
+      canRequestRecovery: (policy?.approvalMatrix?.recovery?.requestRoles || ["manager", "admin"]).includes(normalizedRole),
+      canApproveRecovery: (policy?.approvalMatrix?.recovery?.approveRoles || ["manager", "admin"]).includes(normalizedRole),
+    },
     summary: {
       total: commitments.length,
       needsAttention: attention.length,
@@ -471,6 +527,20 @@ async function assertWorkspaceProject({ workspaceId, projectId, actorId, role, d
   if (!rows[0]) throw httpError("Project is outside your managed scope", 403, "ASSURANCE_FORBIDDEN");
 }
 
+async function assertWorkspaceSprints({ workspaceId, projectId, sprintIds, role, database = pool }) {
+  if (!sprintIds.length) return;
+  if (!projectId) throw httpError("Connect a project before selecting delivery sprints");
+  const { rows } = await database.query(
+    `SELECT id FROM sprints
+     WHERE workspace_id = $1 AND project_id = $2 AND id = ANY($3::uuid[])
+       AND ($4 = 'admin' OR is_hidden = FALSE)`,
+    [workspaceId, projectId, sprintIds, String(role || "user").toLowerCase()]
+  );
+  if (rows.length !== sprintIds.length) {
+    throw httpError("Every selected sprint must belong to the connected project");
+  }
+}
+
 function assertManagerAssignment({ role, actorId, ownerId, projectId }) {
   if (String(role || "").toLowerCase() === "manager" && !projectId && String(ownerId) !== String(actorId)) {
     throw httpError("A manager can assign an unconnected outcome only to themselves", 403, "ASSURANCE_FORBIDDEN");
@@ -493,16 +563,25 @@ export async function createAssuranceCommitment({
   await Promise.all([
     assertWorkspaceOwner(workspaceId, value.ownerId, database),
     assertWorkspaceProject({ workspaceId, projectId: value.primaryProjectId, actorId, role, database }),
+    assertWorkspaceSprints({ workspaceId, projectId: value.primaryProjectId, sprintIds: value.sprintIds, role, database }),
   ]);
 
   const { rows } = await database.query(
     `
-    INSERT INTO okr_objectives (
-      workspace_id, owner_id, title, description, time_period, status, progress,
-      success_measure, target_date, primary_project_id, priority, evidence_requirements
+    WITH created AS (
+      INSERT INTO okr_objectives (
+        workspace_id, owner_id, title, description, time_period, status, progress,
+        success_measure, target_date, primary_project_id, priority, evidence_requirements
+      )
+      VALUES ($1,$2,$3,$4,$5,'on_track',0,$6,$7,$8,$9,$10::jsonb)
+      RETURNING id
+    ), linked AS (
+      INSERT INTO okr_sprint_links (objective_id, sprint_id)
+      SELECT created.id, selected.id
+      FROM created CROSS JOIN UNNEST($11::uuid[]) AS selected(id)
+      ON CONFLICT DO NOTHING
     )
-    VALUES ($1,$2,$3,$4,$5,'on_track',0,$6,$7,$8,$9,$10::jsonb)
-    RETURNING id
+    SELECT id FROM created
     `,
     [
       workspaceId,
@@ -515,6 +594,7 @@ export async function createAssuranceCommitment({
       value.primaryProjectId,
       value.priority,
       JSON.stringify(value.evidenceRequirements),
+      value.sprintIds,
     ]
   );
 
@@ -529,6 +609,7 @@ export async function createAssuranceCommitment({
       targetDate: value.targetDate,
       ownerId: value.ownerId,
       primaryProjectId: value.primaryProjectId,
+      sprintIds: value.sprintIds,
     },
   });
 
@@ -547,17 +628,28 @@ export async function updateAssuranceCommitment({
 }) {
   if (!canManageAssurance(role)) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
   const current = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
+  const projectProvided = Object.prototype.hasOwnProperty.call(input, "primaryProjectId")
+    || Object.prototype.hasOwnProperty.call(input, "primary_project_id");
+  const nextProjectId = Object.prototype.hasOwnProperty.call(input, "primaryProjectId")
+    ? input.primaryProjectId
+    : Object.prototype.hasOwnProperty.call(input, "primary_project_id")
+      ? input.primary_project_id
+      : current.primary_project_id;
+  const sprintIds = Object.prototype.hasOwnProperty.call(input, "sprintIds")
+    ? input.sprintIds
+    : Object.prototype.hasOwnProperty.call(input, "sprint_ids")
+      ? input.sprint_ids
+      : projectProvided && String(nextProjectId || "") !== String(current.primary_project_id || "")
+        ? []
+        : current.linked_sprint_ids;
   const value = normalizeAssuranceInput({
     outcome: input.outcome ?? input.title ?? current.title,
     successMeasure: input.successMeasure ?? input.success_measure ?? current.success_measure,
     whyItMatters: input.whyItMatters ?? input.description ?? current.description,
     targetDate: input.targetDate ?? input.target_date ?? current.target_date,
     ownerId: input.ownerId ?? input.owner_id ?? current.owner_id,
-    primaryProjectId: Object.prototype.hasOwnProperty.call(input, "primaryProjectId")
-      ? input.primaryProjectId
-      : Object.prototype.hasOwnProperty.call(input, "primary_project_id")
-        ? input.primary_project_id
-        : current.primary_project_id,
+    primaryProjectId: nextProjectId,
+    sprintIds,
     priority: input.priority ?? current.priority,
     evidenceRequirements: input.evidenceRequirements ?? input.evidence_requirements ?? current.evidence_requirements,
   });
@@ -565,23 +657,37 @@ export async function updateAssuranceCommitment({
   await Promise.all([
     assertWorkspaceOwner(workspaceId, value.ownerId, database),
     assertWorkspaceProject({ workspaceId, projectId: value.primaryProjectId, actorId, role, database }),
+    assertWorkspaceSprints({ workspaceId, projectId: value.primaryProjectId, sprintIds: value.sprintIds, role, database }),
   ]);
 
   const { rows } = await database.query(
     `
-    UPDATE okr_objectives SET
-      owner_id = $1,
-      title = $2,
-      description = $3,
-      time_period = $4,
-      success_measure = $5,
-      target_date = $6,
-      primary_project_id = $7,
-      priority = $8,
-      evidence_requirements = $9::jsonb,
-      updated_at = NOW()
-    WHERE id = $10 AND workspace_id = $11
-    RETURNING id
+    WITH updated AS (
+      UPDATE okr_objectives SET
+        owner_id = $1,
+        title = $2,
+        description = $3,
+        time_period = $4,
+        success_measure = $5,
+        target_date = $6,
+        primary_project_id = $7,
+        priority = $8,
+        evidence_requirements = $9::jsonb,
+        updated_at = NOW()
+      WHERE id = $10 AND workspace_id = $11
+      RETURNING id
+    ), removed AS (
+      DELETE FROM okr_sprint_links WHERE objective_id = (SELECT id FROM updated)
+      RETURNING objective_id
+    ), linked AS (
+      INSERT INTO okr_sprint_links (objective_id, sprint_id)
+      SELECT updated.id, selected.id
+      FROM updated
+      CROSS JOIN (SELECT COUNT(*) FROM removed) cleared
+      CROSS JOIN UNNEST($12::uuid[]) AS selected(id)
+      ON CONFLICT DO NOTHING
+    )
+    SELECT id FROM updated
     `,
     [
       value.ownerId,
@@ -595,6 +701,7 @@ export async function updateAssuranceCommitment({
       JSON.stringify(value.evidenceRequirements),
       id,
       workspaceId,
+      value.sprintIds,
     ]
   );
   if (!rows[0]) throw httpError("Outcome not found", 404, "ASSURANCE_NOT_FOUND");
@@ -606,7 +713,7 @@ export async function updateAssuranceCommitment({
     entityType: "goal",
     entityId: id,
     oldValue: { title: current.title, targetDate: current.target_date },
-    newValue: { title: value.outcome, targetDate: value.targetDate },
+    newValue: { title: value.outcome, targetDate: value.targetDate, primaryProjectId: value.primaryProjectId, sprintIds: value.sprintIds },
   });
   return requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
 }
