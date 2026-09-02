@@ -631,7 +631,12 @@ export async function exchangePortalMagicLink({ token, ipAddress, userAgent, dat
 }
 
 export async function authenticatePortalSession({ token, database = pool, now = new Date() }) {
-  const rawToken = normalizePortalToken(token);
+  let rawToken;
+  try {
+    rawToken = normalizePortalToken(token);
+  } catch {
+    throw httpError("Client portal session is invalid or expired", 401, "CLIENT_PORTAL_SESSION_INVALID");
+  }
   const { rows } = await database.query(
     `SELECT s.id AS session_id, s.workspace_id, s.contact_id, s.expires_at,
             contact.name AS contact_name, c.id AS client_id, c.name AS client_name,

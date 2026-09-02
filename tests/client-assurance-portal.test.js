@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import {
+  authenticatePortalSession,
   hashPortalToken,
   listPortalCommitments,
   normalizeClientAssignmentInput,
@@ -75,6 +76,13 @@ test("portal credentials are deterministic digests but never the raw token", () 
   assert.notEqual(digest, token);
   assert.equal(hashPortalToken(token), digest);
   assert.notEqual(hashPortalToken(`${token}b`), digest);
+});
+
+test("missing or malformed portal session credentials use the authentication boundary", async () => {
+  await assert.rejects(
+    authenticatePortalSession({ token: "bad" }),
+    (error) => error.statusCode === 401 && error.code === "CLIENT_PORTAL_SESSION_INVALID"
+  );
 });
 
 test("portal responses expose only the client-safe outcome contract", async () => {
