@@ -354,7 +354,14 @@ export async function getAssurancePortfolio({ workspaceId, userId, role, databas
       summary: {
         total: commitments.length,
         verified: commitments.filter((item) => item.assurance.state === "verified").length,
-        needsAttention: commitments.filter((item) => ["at_risk", "off_track", "needs_evidence", "insufficient_evidence"].includes(item.assurance.state)).length,
+        needsAttention: commitments.filter((item) => [
+          "at_risk",
+          "off_track",
+          "needs_evidence",
+          "insufficient_evidence",
+          "awaiting_client_acceptance",
+          "client_changes_requested",
+        ].includes(item.assurance.state)).length,
       },
     };
   }).filter((portfolio) => (
@@ -1026,7 +1033,7 @@ async function reconcileStateSnapshots({ workspaceId, commitments, policy, datab
     }
     if (
       changed && notify && policy.notifyOnStateChange && commitment.owner_id &&
-      ["at_risk", "off_track", "needs_evidence"].includes(commitment.assurance.state)
+      ["at_risk", "off_track", "needs_evidence", "client_changes_requested"].includes(commitment.assurance.state)
     ) {
       await notifyUser({
         user_id: commitment.owner_id,

@@ -122,6 +122,17 @@ export const emailVerificationLimiter = rateLimit({
   handler: jsonLimitHandler("Too many verification requests. Please try again later."),
 });
 
+/** Passwordless client links are email-bearing credentials; limit sends, not reads. */
+export const clientPortalAccessLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: Math.max(1, Number(process.env.CLIENT_PORTAL_ACCESS_RATE_LIMIT_PER_HOUR) || 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipOnlyKey,
+  skip: skipInfrastructure,
+  handler: jsonLimitHandler("Too many client portal access requests. Please try again later."),
+});
+
 /**
  * Unauthenticated public endpoints (pricing, signup pages) — cheap to abuse,
  * no user context available.

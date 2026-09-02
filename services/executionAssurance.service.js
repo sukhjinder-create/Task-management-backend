@@ -4,6 +4,7 @@ import {
   approveOperationsAction,
   createOperationsAction,
 } from "./operationsAction.service.js";
+import { getClientDirectory, resolveClientAssignment } from "./clientPortal.service.js";
 
 const MANAGER_ROLES = new Set(["admin", "manager"]);
 const PRIORITIES = new Set(["low", "medium", "high", "critical"]);
@@ -136,7 +137,20 @@ export function calculateAssuranceState(row, now = new Date(), policy = {}) {
 
   let state;
   let explanation;
-  if (markedComplete && resultEvidenceCount > 0) {
+  if (markedComplete && resultEvidenceCount > 0 && row.is_client_facing) {
+    if (row.client_review_status === "accepted") {
+      state = "verified";
+      explanation = "The outcome is complete, evidenced, and accepted by the client.";
+    } else if (row.client_review_status === "changes_requested") {
+      state = "client_changes_requested";
+      explanation = "The client requested changes before accepting this outcome.";
+    } else {
+      state = "awaiting_client_acceptance";
+      explanation = row.client_review_status === "pending"
+        ? "Result evidence was sent and is awaiting client acceptance."
+        : "Result evidence is ready to send for client acceptance.";
+    }
+  } else if (markedComplete && resultEvidenceCount > 0) {
     state = "verified";
     explanation = "The outcome is complete and has recorded result evidence.";
   } else if (markedComplete) {
@@ -190,14 +204,17 @@ export function calculateAssuranceState(row, now = new Date(), policy = {}) {
 export function buildAssuranceAttention(commitment) {
   const state = commitment.assurance?.state;
   if (["verified", "on_track"].includes(state)) return null;
+  if (state === "awaiting_client_acceptance" && commitment.client_review_status === "pending") return null;
 
-  const action = state === "needs_evidence"
-    ? "add_evidence"
-    : state === "insufficient_evidence"
-      ? "connect_work"
-      : commitment.primary_project_id
-        ? "create_recovery_task"
-        : "connect_work";
+  const action = ["awaiting_client_acceptance", "client_changes_requested"].includes(state)
+    ? "request_client_acceptance"
+    : state === "needs_evidence"
+      ? "add_evidence"
+      : state === "insufficient_evidence"
+        ? "connect_work"
+        : commitment.primary_project_id
+          ? "create_recovery_task"
+          : "connect_work";
 
   return {
     id: `commitment:${commitment.id}:${state}`,
@@ -210,6 +227,7 @@ export function buildAssuranceAttention(commitment) {
       add_evidence: "Add result evidence",
       connect_work: "Connect work",
       create_recovery_task: "Create recovery task",
+      request_client_acceptance: "Request client acceptance",
     }[action],
     targetDate: dateOnly(commitment.target_date) || null,
     projectName: commitment.project_name || null,
@@ -294,10 +312,16 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       o.primary_project_id,
       o.priority,
       o.evidence_requirements,
+      o.is_client_facing,
+      o.client_id,
+      o.client_approver_contact_id,
       o.created_at,
       o.updated_at,
       owner.username AS owner_name,
       project.name AS project_name,
+      client.name AS client_name,
+      client_contact.name AS client_approver_name,
+      client_contact.email AS client_approver_email,
       COALESCE(work.task_count, 0)::int AS task_count,
       COALESCE(work.completed_task_count, 0)::int AS completed_task_count,
       COALESCE(work.overdue_task_count, 0)::int AS overdue_task_count,
@@ -308,14 +332,31 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       COALESCE(evidence.evidence_count, 0)::int AS evidence_count,
       COALESCE(evidence.result_evidence_count, 0)::int AS result_evidence_count,
       COALESCE(evidence.external_evidence_count, 0)::int AS external_evidence_count,
+      evidence.latest_result_evidence_label,
+      evidence.latest_result_evidence_note,
+      evidence.latest_result_evidence_at,
       COALESCE(dependencies.blocked_dependency_count, 0)::int AS blocked_dependency_count,
       COALESCE(actions.governed_action_count, 0)::int AS governed_action_count,
-      (COALESCE(actions.pending_decision_count, 0) + COALESCE(approvals.pending_approval_count, 0))::int AS pending_decision_count
+      latest_client_review.id AS client_review_id,
+      latest_client_review.status AS client_review_status,
+      latest_client_review.delivery_status AS client_review_delivery_status,
+      latest_client_review.delivery_error AS client_review_delivery_error,
+      latest_client_review.requested_at AS client_review_requested_at,
+      latest_client_review.decided_at AS client_review_decided_at,
+      latest_client_review.decision_note AS client_review_decision_note,
+      (COALESCE(actions.pending_decision_count, 0) + COALESCE(approvals.pending_approval_count, 0)
+        + CASE WHEN latest_client_review.status='pending' THEN 1 ELSE 0 END)::int AS pending_decision_count
     FROM okr_objectives o
     LEFT JOIN users owner
       ON owner.id = o.owner_id AND owner.workspace_id = o.workspace_id
     LEFT JOIN projects project
       ON project.id = o.primary_project_id AND project.workspace_id = o.workspace_id
+    LEFT JOIN assurance_clients client
+      ON client.id = o.client_id AND client.workspace_id = o.workspace_id
+    LEFT JOIN assurance_client_contacts client_contact
+      ON client_contact.id = o.client_approver_contact_id
+     AND client_contact.client_id = o.client_id
+     AND client_contact.workspace_id = o.workspace_id
     LEFT JOIN LATERAL (
       SELECT
         COUNT(*) AS task_count,
@@ -356,7 +397,12 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
       SELECT
         COUNT(*) AS evidence_count,
         COUNT(*) FILTER (WHERE gae.evidence_type = 'result') AS result_evidence_count,
-        COUNT(*) FILTER (WHERE gae.source_provider IS NOT NULL) AS external_evidence_count
+        COUNT(*) FILTER (WHERE gae.source_provider IS NOT NULL) AS external_evidence_count,
+        (ARRAY_AGG(gae.label ORDER BY gae.recorded_at DESC)
+          FILTER (WHERE gae.evidence_type = 'result'))[1] AS latest_result_evidence_label,
+        (ARRAY_AGG(gae.note ORDER BY gae.recorded_at DESC)
+          FILTER (WHERE gae.evidence_type = 'result'))[1] AS latest_result_evidence_note,
+        MAX(gae.recorded_at) FILTER (WHERE gae.evidence_type = 'result') AS latest_result_evidence_at
       FROM goal_assurance_evidence gae
       WHERE gae.workspace_id = o.workspace_id AND gae.goal_id = o.id
     ) evidence ON TRUE
@@ -385,6 +431,15 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
         AND approval.goal_id = o.id
         AND approval.status = 'pending'
     ) approvals ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT review.id, review.status, review.delivery_status, review.delivery_error,
+             review.requested_at, review.decided_at, review.decision_note
+      FROM assurance_client_reviews review
+      WHERE review.workspace_id=o.workspace_id AND review.goal_id=o.id
+        AND review.status<>'cancelled'
+      ORDER BY review.requested_at DESC
+      LIMIT 1
+    ) latest_client_review ON TRUE
     WHERE ${where.join(" AND ")}
     ORDER BY
       CASE o.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
@@ -398,7 +453,7 @@ async function queryCommitments({ workspaceId, userId, role, commitmentId = null
 }
 
 async function getAssuranceOptions(workspaceId, userId, role, database = pool) {
-  const [ownersResult, projectsResult, sprintsResult] = await Promise.all([
+  const [ownersResult, projectsResult, sprintsResult, clientDirectory] = await Promise.all([
     database.query(
       `
       SELECT u.id, u.username, u.role
@@ -442,9 +497,55 @@ async function getAssuranceOptions(workspaceId, userId, role, database = pool) {
        ORDER BY p.name ASC, s.created_at DESC`,
       [workspaceId, userId, String(role || "user").toLowerCase()]
     ),
+    getClientDirectory({ workspaceId, userId, role, database }),
   ]);
 
-  return { owners: ownersResult.rows, projects: projectsResult.rows, sprints: sprintsResult.rows };
+  return {
+    owners: ownersResult.rows,
+    projects: projectsResult.rows,
+    sprints: sprintsResult.rows,
+    clients: clientDirectory.clients,
+  };
+}
+
+async function withTransaction(database, work) {
+  const client = typeof database.connect === "function" ? await database.connect() : database;
+  try {
+    await client.query("BEGIN");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    if (client !== database) client.release();
+  }
+}
+
+async function lockMutableCommitment(client, workspaceId, id) {
+  const goal = await client.query(
+    "SELECT is_client_facing FROM okr_objectives WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+    [id, workspaceId]
+  );
+  if (!goal.rows[0]) throw httpError("Outcome not found", 404, "ASSURANCE_NOT_FOUND");
+  if (!goal.rows[0].is_client_facing) return;
+
+  const latest = await client.query(
+    `SELECT status FROM assurance_client_reviews
+     WHERE workspace_id=$1 AND goal_id=$2 AND status<>'cancelled'
+     ORDER BY requested_at DESC LIMIT 1
+     FOR UPDATE`,
+    [workspaceId, id]
+  );
+  if (!["pending", "accepted"].includes(latest.rows[0]?.status)) return;
+  throw httpError(
+    latest.rows[0].status === "pending"
+      ? "Withdraw the pending client review before changing this outcome"
+      : "A client-accepted outcome is immutable; create a new outcome for revised scope",
+    409,
+    "CLIENT_REVIEW_LOCKED"
+  );
 }
 
 export async function getAssuranceOverview({ workspaceId, userId, role, database = pool, now = new Date(), policy = null }) {
@@ -566,54 +667,65 @@ export async function createAssuranceCommitment({
     assertWorkspaceSprints({ workspaceId, projectId: value.primaryProjectId, sprintIds: value.sprintIds, role, database }),
   ]);
 
-  const { rows } = await database.query(
-    `
-    WITH created AS (
-      INSERT INTO okr_objectives (
-        workspace_id, owner_id, title, description, time_period, status, progress,
-        success_measure, target_date, primary_project_id, priority, evidence_requirements
+  const created = await withTransaction(database, async (client) => {
+    const assignment = await resolveClientAssignment({ workspaceId, actorId, role, input, database: client });
+    const { rows } = await client.query(
+      `
+      WITH created AS (
+        INSERT INTO okr_objectives (
+          workspace_id, owner_id, title, description, time_period, status, progress,
+          success_measure, target_date, primary_project_id, priority, evidence_requirements,
+          is_client_facing, client_id, client_approver_contact_id
+        )
+        VALUES ($1,$2,$3,$4,$5,'on_track',0,$6,$7,$8,$9,$10::jsonb,$11,$12,$13)
+        RETURNING id
+      ), linked AS (
+        INSERT INTO okr_sprint_links (objective_id, sprint_id)
+        SELECT created.id, selected.id
+        FROM created CROSS JOIN UNNEST($14::uuid[]) AS selected(id)
+        ON CONFLICT DO NOTHING
       )
-      VALUES ($1,$2,$3,$4,$5,'on_track',0,$6,$7,$8,$9,$10::jsonb)
-      RETURNING id
-    ), linked AS (
-      INSERT INTO okr_sprint_links (objective_id, sprint_id)
-      SELECT created.id, selected.id
-      FROM created CROSS JOIN UNNEST($11::uuid[]) AS selected(id)
-      ON CONFLICT DO NOTHING
-    )
-    SELECT id FROM created
-    `,
-    [
-      workspaceId,
-      value.ownerId,
-      value.outcome,
-      value.whyItMatters,
-      deriveTimePeriod(value.targetDate),
-      value.successMeasure,
-      value.targetDate,
-      value.primaryProjectId,
-      value.priority,
-      JSON.stringify(value.evidenceRequirements),
-      value.sprintIds,
-    ]
-  );
+      SELECT id FROM created
+      `,
+      [
+        workspaceId,
+        value.ownerId,
+        value.outcome,
+        value.whyItMatters,
+        deriveTimePeriod(value.targetDate),
+        value.successMeasure,
+        value.targetDate,
+        value.primaryProjectId,
+        value.priority,
+        JSON.stringify(value.evidenceRequirements),
+        assignment.isClientFacing,
+        assignment.clientId,
+        assignment.contactId,
+        value.sprintIds,
+      ]
+    );
+    return { id: rows[0].id, assignment };
+  });
 
   await logAudit({
     workspaceId,
     userId: actorId,
     action: "assurance.outcome.create",
     entityType: "goal",
-    entityId: rows[0].id,
+    entityId: created.id,
     newValue: {
       title: value.outcome,
       targetDate: value.targetDate,
       ownerId: value.ownerId,
       primaryProjectId: value.primaryProjectId,
       sprintIds: value.sprintIds,
+      isClientFacing: created.assignment.isClientFacing,
+      clientId: created.assignment.clientId,
+      clientApproverContactId: created.assignment.contactId,
     },
   });
 
-  return requireCommitment({ id: rows[0].id, workspaceId, userId: actorId, role, database, now, policy });
+  return requireCommitment({ id: created.id, workspaceId, userId: actorId, role, database, now, policy });
 }
 
 export async function updateAssuranceCommitment({
@@ -628,6 +740,15 @@ export async function updateAssuranceCommitment({
 }) {
   if (!canManageAssurance(role)) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
   const current = await requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
+  if (["pending", "accepted"].includes(current.client_review_status)) {
+    throw httpError(
+      current.client_review_status === "pending"
+        ? "Withdraw the pending client review before editing this outcome"
+        : "A client-accepted outcome is immutable; create a new outcome for revised scope",
+      409,
+      "CLIENT_REVIEW_LOCKED"
+    );
+  }
   const projectProvided = Object.prototype.hasOwnProperty.call(input, "primaryProjectId")
     || Object.prototype.hasOwnProperty.call(input, "primary_project_id");
   const nextProjectId = Object.prototype.hasOwnProperty.call(input, "primaryProjectId")
@@ -660,51 +781,71 @@ export async function updateAssuranceCommitment({
     assertWorkspaceSprints({ workspaceId, projectId: value.primaryProjectId, sprintIds: value.sprintIds, role, database }),
   ]);
 
-  const { rows } = await database.query(
-    `
-    WITH updated AS (
-      UPDATE okr_objectives SET
-        owner_id = $1,
-        title = $2,
-        description = $3,
-        time_period = $4,
-        success_measure = $5,
-        target_date = $6,
-        primary_project_id = $7,
-        priority = $8,
-        evidence_requirements = $9::jsonb,
-        updated_at = NOW()
-      WHERE id = $10 AND workspace_id = $11
-      RETURNING id
-    ), removed AS (
-      DELETE FROM okr_sprint_links WHERE objective_id = (SELECT id FROM updated)
-      RETURNING objective_id
-    ), linked AS (
-      INSERT INTO okr_sprint_links (objective_id, sprint_id)
-      SELECT updated.id, selected.id
-      FROM updated
-      CROSS JOIN (SELECT COUNT(*) FROM removed) cleared
-      CROSS JOIN UNNEST($12::uuid[]) AS selected(id)
-      ON CONFLICT DO NOTHING
-    )
-    SELECT id FROM updated
-    `,
-    [
-      value.ownerId,
-      value.outcome,
-      value.whyItMatters,
-      deriveTimePeriod(value.targetDate),
-      value.successMeasure,
-      value.targetDate,
-      value.primaryProjectId,
-      value.priority,
-      JSON.stringify(value.evidenceRequirements),
-      id,
-      workspaceId,
-      value.sprintIds,
-    ]
-  );
-  if (!rows[0]) throw httpError("Outcome not found", 404, "ASSURANCE_NOT_FOUND");
+  const clientInput = {
+    isClientFacing: input.isClientFacing ?? input.is_client_facing ?? current.is_client_facing,
+    clientId: input.clientId ?? input.client_id ?? current.client_id,
+    clientApproverContactId:
+      input.clientApproverContactId ?? input.client_approver_contact_id ?? current.client_approver_contact_id,
+    clientName: input.clientName ?? input.client_name,
+    clientApproverName: input.clientApproverName ?? input.client_approver_name,
+    clientApproverEmail: input.clientApproverEmail ?? input.client_approver_email,
+  };
+  const assignment = await withTransaction(database, async (client) => {
+    await lockMutableCommitment(client, workspaceId, id);
+    const resolved = await resolveClientAssignment({ workspaceId, actorId, role, input: clientInput, database: client });
+    const { rows } = await client.query(
+      `
+      WITH updated AS (
+        UPDATE okr_objectives SET
+          owner_id = $1,
+          title = $2,
+          description = $3,
+          time_period = $4,
+          success_measure = $5,
+          target_date = $6,
+          primary_project_id = $7,
+          priority = $8,
+          evidence_requirements = $9::jsonb,
+          is_client_facing = $10,
+          client_id = $11,
+          client_approver_contact_id = $12,
+          updated_at = NOW()
+        WHERE id = $13 AND workspace_id = $14
+        RETURNING id
+      ), removed AS (
+        DELETE FROM okr_sprint_links WHERE objective_id = (SELECT id FROM updated)
+        RETURNING objective_id
+      ), linked AS (
+        INSERT INTO okr_sprint_links (objective_id, sprint_id)
+        SELECT updated.id, selected.id
+        FROM updated
+        CROSS JOIN (SELECT COUNT(*) FROM removed) cleared
+        CROSS JOIN UNNEST($15::uuid[]) AS selected(id)
+        ON CONFLICT DO NOTHING
+      )
+      SELECT id FROM updated
+      `,
+      [
+        value.ownerId,
+        value.outcome,
+        value.whyItMatters,
+        deriveTimePeriod(value.targetDate),
+        value.successMeasure,
+        value.targetDate,
+        value.primaryProjectId,
+        value.priority,
+        JSON.stringify(value.evidenceRequirements),
+        resolved.isClientFacing,
+        resolved.clientId,
+        resolved.contactId,
+        id,
+        workspaceId,
+        value.sprintIds,
+      ]
+    );
+    if (!rows[0]) throw httpError("Outcome not found", 404, "ASSURANCE_NOT_FOUND");
+    return resolved;
+  });
 
   await logAudit({
     workspaceId,
@@ -713,7 +854,15 @@ export async function updateAssuranceCommitment({
     entityType: "goal",
     entityId: id,
     oldValue: { title: current.title, targetDate: current.target_date },
-    newValue: { title: value.outcome, targetDate: value.targetDate, primaryProjectId: value.primaryProjectId, sprintIds: value.sprintIds },
+    newValue: {
+      title: value.outcome,
+      targetDate: value.targetDate,
+      primaryProjectId: value.primaryProjectId,
+      sprintIds: value.sprintIds,
+      isClientFacing: assignment.isClientFacing,
+      clientId: assignment.clientId,
+      clientApproverContactId: assignment.contactId,
+    },
   });
   return requireCommitment({ id, workspaceId, userId: actorId, role, database, now, policy });
 }
@@ -754,28 +903,32 @@ export async function addAssuranceEvidence({
   const sourceEntityId = cleanText(input.sourceEntityId ?? input.source_entity_id, 200);
   await assertEvidenceSource({ workspaceId, sourceEntityType, sourceEntityId, database });
 
-  const { rows } = await database.query(
-    `
-    INSERT INTO goal_assurance_evidence (
-      workspace_id, goal_id, evidence_type, label, note,
-      source_entity_type, source_entity_id, recorded_by, provenance, recorded_at
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
-    RETURNING *
-    `,
-    [
-      workspaceId,
-      id,
-      evidenceType,
-      label,
-      note,
-      sourceEntityType,
-      sourceEntityId,
-      actorId,
-      JSON.stringify({ source: "workspace_user", schemaVersion: 1 }),
-      now.toISOString(),
-    ]
-  );
+  const evidence = await withTransaction(database, async (client) => {
+    await lockMutableCommitment(client, workspaceId, id);
+    const { rows } = await client.query(
+      `
+      INSERT INTO goal_assurance_evidence (
+        workspace_id, goal_id, evidence_type, label, note,
+        source_entity_type, source_entity_id, recorded_by, provenance, recorded_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+      RETURNING *
+      `,
+      [
+        workspaceId,
+        id,
+        evidenceType,
+        label,
+        note,
+        sourceEntityType,
+        sourceEntityId,
+        actorId,
+        JSON.stringify({ source: "workspace_user", schemaVersion: 1 }),
+        now.toISOString(),
+      ]
+    );
+    return rows[0];
+  });
 
   await logAudit({
     workspaceId,
@@ -783,9 +936,9 @@ export async function addAssuranceEvidence({
     action: "assurance.evidence.record",
     entityType: "goal",
     entityId: id,
-    newValue: { evidenceId: rows[0].id, evidenceType, label },
+    newValue: { evidenceId: evidence.id, evidenceType, label },
   });
-  return rows[0];
+  return evidence;
 }
 
 export async function completeAssuranceCommitment({
@@ -810,7 +963,7 @@ export async function completeAssuranceCommitment({
   const client = await database.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT id FROM okr_objectives WHERE id = $1 AND workspace_id = $2 FOR UPDATE", [id, workspaceId]);
+    await lockMutableCommitment(client, workspaceId, id);
     if (evidenceLabel) {
       await client.query(
         `
@@ -965,7 +1118,7 @@ export async function getAssuranceCommitmentDetail({
   policy = null,
 }) {
   const commitment = await requireCommitment({ id, workspaceId, userId, role, database, now, policy });
-  const [evidenceResult, actionResult] = await Promise.all([
+  const [evidenceResult, actionResult, clientReviewResult] = await Promise.all([
     database.query(
       `
       SELECT gae.*, u.username AS recorded_by_name
@@ -987,7 +1140,25 @@ export async function getAssuranceCommitmentDetail({
       `,
       [workspaceId, id]
     ),
+    database.query(
+      `SELECT review.id, review.status, review.snapshot, review.decision_note,
+              review.delivery_status, review.delivery_error, review.requested_at,
+              review.decided_at, review.last_delivered_at,
+              contact.name AS contact_name, contact.email AS contact_email
+       FROM assurance_client_reviews review
+       JOIN assurance_client_contacts contact
+         ON contact.workspace_id=review.workspace_id AND contact.id=review.contact_id
+       WHERE review.workspace_id=$1 AND review.goal_id=$2
+       ORDER BY review.requested_at DESC
+       LIMIT 50`,
+      [workspaceId, id]
+    ),
   ]);
 
-  return { commitment, evidence: evidenceResult.rows, decisions: actionResult.rows };
+  return {
+    commitment,
+    evidence: evidenceResult.rows,
+    decisions: actionResult.rows,
+    clientReviews: clientReviewResult.rows,
+  };
 }

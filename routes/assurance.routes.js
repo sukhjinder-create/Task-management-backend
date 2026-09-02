@@ -41,6 +41,12 @@ import {
   reviewAssuranceDecision,
   updateAssuranceExperiment,
 } from "../services/decisionOutcome.service.js";
+import {
+  cancelClientReview,
+  getClientDirectory,
+  requestClientReview,
+  setClientContactStatus,
+} from "../services/clientPortal.service.js";
 
 const router = express.Router();
 
@@ -170,6 +176,83 @@ router.post("/commitments/:id/recovery-task", allowRoles("manager", "admin"), as
     });
   } catch (error) {
     sendError(res, error, "Failed to create recovery task");
+  }
+});
+
+router.get("/clients", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    res.json(await getClientDirectory({
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to load client access");
+  }
+});
+
+router.patch("/clients/:clientId/contacts/:contactId", allowRoles("admin"), async (req, res) => {
+  try {
+    const contact = await setClientContactStatus({
+      workspaceId: req.workspaceId,
+      clientId: req.params.clientId,
+      contactId: req.params.contactId,
+      actorId: req.user.id,
+      status: req.body?.status,
+    });
+    res.json({ contact });
+  } catch (error) {
+    sendError(res, error, "Failed to update client access");
+  }
+});
+
+router.post("/commitments/:id/client-review", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const policy = await getAssurancePolicy(req.workspaceId);
+    const detail = await getAssuranceCommitmentDetail({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      policy,
+    });
+    const review = await requestClientReview({
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      commitment: detail.commitment,
+      input: req.body || {},
+    });
+    if (review.delivery_status !== "sent") {
+      return res.status(502).json({
+        error: review.delivery_error || "The client review was saved, but email delivery failed",
+        code: "CLIENT_REVIEW_DELIVERY_FAILED",
+        review,
+      });
+    }
+    res.status(201).json({ review });
+  } catch (error) {
+    sendError(res, error, "Failed to request client acceptance");
+  }
+});
+
+router.post("/commitments/:id/client-review/cancel", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const policy = await getAssurancePolicy(req.workspaceId);
+    const detail = await getAssuranceCommitmentDetail({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      userId: req.user.id,
+      role: req.user.role,
+      policy,
+    });
+    const review = await cancelClientReview({
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      commitment: detail.commitment,
+    });
+    res.json({ review });
+  } catch (error) {
+    sendError(res, error, "Failed to withdraw the client review");
   }
 });
 

@@ -50,9 +50,16 @@ for (const table of [
   "adaptive_intelligence_evaluations",
   "exec_decisions",
   "ei_events",
+  "assurance_clients",
+  "assurance_client_contacts",
+  "goal_assurance_evidence",
+  "assurance_client_reviews",
 ]) {
   includes(recoveryService, `table: "${table}"`, `Recovery table plan must include ${table}`);
 }
+
+notIncludes(recoveryService, 'table: "client_portal_magic_links"', "Recovery must not resurrect one-time client links");
+notIncludes(recoveryService, 'table: "client_portal_sessions"', "Recovery must not resurrect client portal sessions");
 
 includes(recoveryService, "syncTableSequences", "Recovery must resync serial/bigserial sequences after explicit ID restore");
 includes(recoveryService, "isRecoverableSchemaMismatch", "Recovery must skip old-schema mismatches instead of aborting");

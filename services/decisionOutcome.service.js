@@ -354,6 +354,8 @@ export function buildDecisionLabRecommendation(commitment, { unreviewedDecisions
     return { ...common, action: "review_decision", label: "Review the decision result", why: `${unreviewedDecisions} recorded decision(s) do not yet have an observed result.`, confidence: "high", experimentDraft: null };
   }
   if (assurance.state === "verified") return { ...common, action: null, label: "No intervention needed", why: "The outcome is verified and no decision review is due.", confidence: "high", experimentDraft: null };
+  if (assurance.state === "awaiting_client_acceptance") return { ...common, action: null, label: "Await client acceptance", why: assurance.explanation, confidence: "high", experimentDraft: null };
+  if (assurance.state === "client_changes_requested") return { ...common, action: "add_evidence", label: "Address the client request", why: assurance.explanation, confidence: "high", experimentDraft: null };
   if (assurance.state === "insufficient_evidence") return { ...common, action: "connect_work", label: "Connect one execution source", why: assurance.explanation, confidence: "high", experimentDraft: null };
   if (assurance.state === "needs_evidence") return { ...common, action: "add_evidence", label: "Verify the observed result", why: assurance.explanation, confidence: "high", experimentDraft: null };
   if (Number(counts.blockedDependencies) > 0) return { ...common, action: "review_dependency", label: "Resolve the predecessor decision", why: assurance.explanation, confidence: "high", experimentDraft: null };

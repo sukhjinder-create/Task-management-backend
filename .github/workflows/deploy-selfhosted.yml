@@ -695,6 +695,57 @@ jobs:
             });
           ' < "$DECISION_OUTCOME_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
 
+          # Install the external client identity and review boundary before the
+          # public portal route is started. Tokens are digest-only and every new
+          # table is tenant scoped with RLS enabled.
+          CLIENT_PORTAL_MIGRATION="migrations/20260902_client_assurance_portal.sql"
+          [ -f "$CLIENT_PORTAL_MIGRATION" ] || { echo "missing migration: $CLIENT_PORTAL_MIGRATION"; exit 1; }
+          echo "applying $CLIENT_PORTAL_MIGRATION ..."
+          sudo docker exec -i app-app-1 node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+              });
+              try {
+                await pool.query(sql);
+                const tables = [
+                  "assurance_clients",
+                  "assurance_client_contacts",
+                  "assurance_client_reviews",
+                  "client_portal_magic_links",
+                  "client_portal_sessions",
+                ];
+                const check = await pool.query(
+                  `SELECT
+                     (SELECT COUNT(*)::int FROM information_schema.tables
+                      WHERE table_schema=$1 AND table_name=ANY($2::text[])) AS table_count,
+                     (SELECT COUNT(*)::int FROM information_schema.columns
+                      WHERE table_schema=$1 AND table_name=$3
+                        AND column_name=ANY($4::text[])) AS column_count,
+                     (SELECT COUNT(*)::int FROM pg_class c
+                      JOIN pg_namespace n ON n.oid=c.relnamespace
+                      WHERE n.nspname=$1 AND c.relname=ANY($2::text[]) AND c.relrowsecurity) AS rls_count`,
+                  ["public", tables, "okr_objectives", ["is_client_facing", "client_id", "client_approver_contact_id"]]
+                );
+                const row = check.rows[0];
+                if (row.table_count !== tables.length || row.column_count !== 3 || row.rls_count !== tables.length) {
+                  throw new Error(`client portal verification failed: ${JSON.stringify(row)}`);
+                }
+                console.log("client assurance portal migration verified");
+              } catch (error) {
+                console.error(error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$CLIENT_PORTAL_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 

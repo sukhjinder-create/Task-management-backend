@@ -208,8 +208,8 @@ test("outcome work scope is precise and legacy goals cannot mutate assurance out
 
   assert.match(assurance, /NOT EXISTS \(SELECT 1 FROM okr_sprint_links scope_link/);
   assert.match(assurance, /linked_sprint_ids/);
-  assert.match(assurance, /UNNEST\(\$11::uuid\[\]\)/);
-  assert.match(assurance, /removed AS \([\s\S]*RETURNING objective_id[\s\S]*UNNEST\(\$12::uuid\[\]\)/);
+  assert.match(assurance, /UNNEST\(\$14::uuid\[\]\)/);
+  assert.match(assurance, /removed AS \([\s\S]*RETURNING objective_id[\s\S]*UNNEST\(\$15::uuid\[\]\)/);
   assert.match(assurance, /\$4 = 'admin' OR is_hidden = FALSE/);
   assert.match(assurance, /assigned_experiment\.owner_id/);
   assert.match(enterprise, /NOT EXISTS \(SELECT 1 FROM okr_sprint_links scope_link/);

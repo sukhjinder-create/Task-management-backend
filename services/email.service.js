@@ -63,7 +63,7 @@ export function isEmailDeliveryConfigured() {
 }
 
 // ─── HTML template wrapper ─────────────────────────────────────────────────────
-function wrap(title, body) {
+function wrap(title, body, meta = `You're receiving this email because you're a member of a ${FROM_NAME} workspace.`) {
   return `
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
@@ -82,7 +82,7 @@ function wrap(title, body) {
   <div class="body">
     <h2 style="margin:0 0 16px;color:#111827">${title}</h2>
     ${body}
-    <div class="meta">You're receiving this email because you're a member of a ${FROM_NAME} workspace.</div>
+    <div class="meta">${meta}</div>
   </div>
   <div class="footer">&copy; ${new Date().getFullYear()} ${FROM_NAME}. All rights reserved.</div>
 </div></body></html>`;
@@ -247,6 +247,32 @@ export async function sendEmailVerificationEmail({ to, username, workspaceName, 
       <a class="btn" href="${escapeHtml(verificationUrl)}">Verify email and continue</a>
       <p style="color:#6b7280;font-size:14px">This secure link expires in 30 minutes and can be used once. If you did not request it, ignore this email.</p>
     `),
+  });
+}
+
+export async function sendClientPortalAccessEmail({
+  to,
+  contactName,
+  clientName,
+  workspaceName,
+  accessUrl,
+  outcomeTitle = null,
+}) {
+  const safeWorkspace = escapeHtml(workspaceName || "the workspace");
+  const reviewCopy = outcomeTitle
+    ? `<p><strong>${safeWorkspace}</strong> has shared an outcome for your review: <strong>${escapeHtml(outcomeTitle)}</strong>.</p>`
+    : `<p>Use the secure link below to open every outcome that <strong>${safeWorkspace}</strong> has shared with <strong>${escapeHtml(clientName)}</strong>.</p>`;
+  return send({
+    to,
+    subject: outcomeTitle
+      ? `${workspaceName}: outcome ready for your review`
+      : `Your ${workspaceName} client portal access link`,
+    html: wrap("Secure client portal access", `
+      <p>Hi ${escapeHtml(contactName)},</p>
+      ${reviewCopy}
+      <a class="btn" href="${escapeHtml(accessUrl)}">Open secure client portal</a>
+      <p style="color:#6b7280;font-size:14px">This passwordless link expires in 20 minutes and can be used once. Do not forward it. You can request a new link from the portal at any time.</p>
+    `, `You are receiving this because ${safeWorkspace} granted ${escapeHtml(clientName)} access to its client assurance portal.`),
   });
 }
 
