@@ -16,6 +16,7 @@ import { sendWelcomeMagicLink } from "./magicLink.service.js";
 import { countWorkspaceMembers, getWorkspaceById } from "../repositories/workspace.repository.js";
 import { syncStripeSubscriptionSeatQuantity } from "./payments.service.js";
 import { requestEmailVerification } from "./emailVerification.service.js";
+import { describeTrialLifecycle } from "./trialLifecycle.service.js";
 
 const WORKSPACE_GLOBAL = "GLOBAL";
 
@@ -26,6 +27,7 @@ const WORKSPACE_GLOBAL = "GLOBAL";
 async function determineBillingStatus(workspaceId, role) {
   const wsRes = await pool.query(
     `SELECT w.trial_started_at, w.trial_ends_at, w.billing_cycle_anchor,
+            w.complimentary_access,
             w.billing_plan, w.plan,
             bp.price_monthly_minor, bp.price_yearly_minor
        FROM workspaces w
@@ -37,6 +39,7 @@ async function determineBillingStatus(workspaceId, role) {
   );
   const ws = wsRes.rows[0];
   if (!ws) return 'pending';
+  if (describeTrialLifecycle(ws).complimentaryAccess) return 'active';
 
   const assignedPlan = ws.billing_plan || ws.plan || null;
   const assignedPlanIsFree =
@@ -163,7 +166,7 @@ export async function createUserService({
 
   // Enforce member limit
   const ws = await getWorkspaceById(workspace_id);
-  if (ws) {
+  if (ws && !describeTrialLifecycle(ws).complimentaryAccess) {
     const limit = ws.max_members ?? ws.member_limit ?? null;
     if (limit !== null) {
       const current = await countWorkspaceMembers(workspace_id);

@@ -23,14 +23,14 @@ import {
   reconcileExpiredWorkspaceTrial,
 } from "../services/trialLifecycle.service.js";
 
-// All feature keys — granted in full during a free trial
+// All feature keys — granted in full during a free trial or complimentary access
 const ALL_FEATURE_KEYS = [
   "task_management","project_management","my_tasks","subtasks","comments","file_uploads",
   "notifications","tags","dashboard","profile","time_tracking","sprints","custom_workflows",
   "issue_templates","saved_filters","basic_reporting","advanced_analytics","export_data",
   "leave_management","attendance","okr_goals","performance_reviews","wiki_docs","team_chat",
    "video_huddle","ai_hub","ai_autopilot","ai_testing_agent","strategic_intel",
-   "workspace_search_memory",
+   "workspace_search_memory","workspace_intelligence",
    "integrations_basic","integrations_pro","integrations_unlimited","slack_migration",
   "asana_migration","git_automation","mfa","sso_saml","audit_logs_30d","audit_logs_full",
   "gdpr_tools","api_access","webhooks","custom_branding","dedicated_manager",
@@ -106,19 +106,19 @@ export async function requireWorkspaceForUser(req, res, next) {
   // 🔐 Attach full workspace for downstream use
   req.workspace = workspace;
 
-  // Check if workspace is on an active free trial
+  // Check if workspace is on an active free trial or has a lifetime exemption
   const trialState = describeTrialLifecycle(workspace);
   const isOnTrial = trialState.onTrial;
 
-  if (isOnTrial) {
-    // Trial active → grant every feature
+  if (isOnTrial || trialState.complimentaryAccess) {
+    // Trial or complimentary access → grant every feature
     req.workspace.planFeatures = ALL_FEATURE_KEYS;
-    req.workspace.onTrial      = true;
+    req.workspace.onTrial      = isOnTrial;
     req.workspace.trialEndsAt  = trialState.trialEndsAt;
     req.workspace.trialState   = trialState;
 
     // Log this IP for trial abuse auditing (fire-and-forget, non-blocking)
-    try {
+    if (isOnTrial) try {
       const rawIp = req.ip || req.socket?.remoteAddress || "";
       if (rawIp) {
         const ipHash = crypto.createHash("sha256").update(rawIp).digest("hex");

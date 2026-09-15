@@ -36,8 +36,8 @@ export function requirePlanFeature(featureKey) {
       return res.status(500).json({ error: "Workspace context missing for plan enforcement" });
     }
 
-    // Active free trial → all features unlocked
-    if (workspace.onTrial) return next();
+    // Active free trial or lifetime exemption → all features unlocked
+    if (workspace.onTrial || workspace.complimentary_access === true) return next();
 
     // Resolve alias if old key is used
     const resolvedKey = KEY_ALIASES[featureKey] ?? featureKey;

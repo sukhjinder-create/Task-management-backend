@@ -66,10 +66,11 @@ export function describeTrialLifecycle(
   now = new Date(),
   fallbackPlanSlug = TRIAL_FALLBACK_PLAN_SLUG
 ) {
+  const complimentaryAccess = workspace?.complimentary_access === true;
   const trialEndsAt = validDate(workspace?.trial_ends_at);
   const currentPlan = workspace?.billing_plan || workspace?.plan || null;
-  const onTrial = !!trialEndsAt && trialEndsAt.getTime() > now.getTime();
-  const trialCompleted = !!trialEndsAt && !onTrial;
+  const onTrial = !complimentaryAccess && !!trialEndsAt && trialEndsAt.getTime() > now.getTime();
+  const trialCompleted = !complimentaryAccess && !!trialEndsAt && !onTrial;
   const intent = getTrialIntent(workspace);
   const isFallbackPlan = String(currentPlan || "").toLowerCase() === fallbackPlanSlug;
   const paymentSetupRequired =
@@ -78,6 +79,7 @@ export function describeTrialLifecycle(
     (!currentPlan || isFallbackPlan);
 
   return {
+    complimentaryAccess,
     onTrial,
     trialCompleted,
     trialEndsAt: trialEndsAt ? trialEndsAt.toISOString() : null,

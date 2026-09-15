@@ -40,13 +40,13 @@ export async function listWorkspaces({ limit = 50, offset = 0 } = {}) {
 
 /* -------------- Membership helpers -------------- */
 
-export async function addWorkspaceUser(workspaceId, userId, role = "member") {
+export async function addWorkspaceUser(workspaceId, userId, role = "member", billingStatus = "pending") {
   const client = await pool.connect();
   try {
     await client.query(
-      `INSERT INTO workspace_users (id, workspace_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, now())`,
-      [workspaceId, userId, role]
+      `INSERT INTO workspace_users (id, workspace_id, user_id, role, billing_status, created_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`,
+      [workspaceId, userId, role, billingStatus]
     );
   } finally {
     client.release();

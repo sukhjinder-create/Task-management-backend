@@ -46,6 +46,7 @@ import {
 } from "../services/huddleCallDeliveryTrace.service.js";
 
 import workspaceService from "../services/workspace.service.js";
+import { describeTrialLifecycle } from "../services/trialLifecycle.service.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
 import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
 import { getWorkspaceHealthScore } from "../services/workspaceHealth.service.js";
@@ -475,15 +476,14 @@ async function getWorkspaceHuddleContext(socket) {
     return { ok: false, reason: "workspace_member_pending" };
   }
 
-  const trialEndsAt = workspace.trial_ends_at ? new Date(workspace.trial_ends_at) : null;
-  const onTrial = trialEndsAt && trialEndsAt > new Date();
-  if (onTrial) {
+  const trialState = describeTrialLifecycle(workspace);
+  if (trialState.onTrial || trialState.complimentaryAccess) {
     return {
       ok: true,
       workspace,
       membership,
       huddleEntitlement: {
-        onTrial: true,
+        onTrial: trialState.onTrial,
         features: [],
         liveKit: true,
         canaryLiveKit: isLiveKitCanaryWorkspaceAllowed(workspaceId),

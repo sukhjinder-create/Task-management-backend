@@ -398,6 +398,39 @@ jobs:
               });
           ' || { echo "email configuration check failed; current image remains active"; exit 1; }
 
+          # Install the trusted workspace-level billing exemption before code
+          # reads it. The column is additive and defaults off for every tenant.
+          COMPLIMENTARY_MIGRATION="migrations/20260915_complimentary_workspace_access.sql"
+          [ -f "$COMPLIMENTARY_MIGRATION" ] || { echo "missing migration: $COMPLIMENTARY_MIGRATION"; exit 1; }
+          echo "applying $COMPLIMENTARY_MIGRATION ..."
+          sudo docker exec -i "$CONTAINER" node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({
+                connectionString: process.env.DATABASE_URL,
+                ssl: { rejectUnauthorized: false },
+              });
+              try {
+                await pool.query(sql);
+                const check = await pool.query(`
+                  SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+                  ) AS installed`, ["public", "workspaces", "complimentary_access"]);
+                if (!check.rows[0]?.installed) throw new Error("complimentary access column verification failed");
+                console.log("complimentary workspace access migration verified");
+              } catch (error) {
+                console.error("complimentary workspace access migration failed:", error.message);
+                process.exitCode = 1;
+              } finally {
+                await pool.end();
+              }
+            });
+          ' < "$COMPLIMENTARY_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
           # Install the email-identity schema before the image that requires it
           # is started. The SQL is additive and safe to re-run.
           IDENTITY_MIGRATION="migrations/20260824_signup_identity_assurance.sql"

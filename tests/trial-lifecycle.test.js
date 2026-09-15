@@ -11,6 +11,8 @@ import {
   reconcileExpiredWorkspaceTrial,
   trialEndFrom,
 } from "../services/trialLifecycle.service.js";
+import workspaceService from "../services/workspace.service.js";
+import { requirePlanFeature } from "../middleware/plan.middleware.js";
 
 const START = new Date("2026-08-13T10:00:00.000Z");
 
@@ -108,6 +110,33 @@ test("active trials keep full access and defer payment setup", () => {
     () => assertWorkspaceTrialAllowsPaymentSetup(workspace, START),
     (error) => error.code === "TRIAL_STILL_ACTIVE" && error.statusCode === 409
   );
+});
+
+test("complimentary workspaces never expire or require payment setup", () => {
+  const state = describeTrialLifecycle({
+    complimentary_access: true,
+    trial_ends_at: "2026-08-12T10:00:00.000Z",
+    billing_plan: null,
+    metadata: noCardMetadata(),
+  }, START);
+
+  assert.equal(state.complimentaryAccess, true);
+  assert.equal(state.onTrial, false);
+  assert.equal(state.trialCompleted, false);
+  assert.equal(state.paymentSetupRequired, false);
+  assert.equal(workspaceService.getEffectiveMaxMembers({
+    complimentary_access: true,
+    billing_plan: "starter",
+    max_members: 1,
+  }), null);
+
+  let featureAllowed = false;
+  requirePlanFeature("future_feature")(
+    { workspace: { complimentary_access: true } },
+    {},
+    () => { featureAllowed = true; }
+  );
+  assert.equal(featureAllowed, true);
 });
 
 test("a consumed workspace trial never creates a second provider trial", () => {

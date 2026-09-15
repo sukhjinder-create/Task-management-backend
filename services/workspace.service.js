@@ -2,6 +2,7 @@
 import * as repo from "../repositories/workspace.repository.js";
 import { generateUniqueSlug, validateSlug } from "./workspaceSlug.service.js";
 import { getUserById } from "../repositories/user.repository.js";
+import { describeTrialLifecycle } from "./trialLifecycle.service.js";
 
 // ✅ ADD: chat helpers for default channels
 import { createChannel, getChannelByKey } from "./chat.service.js";
@@ -153,6 +154,8 @@ await ensureDefaultChannelsForWorkspace(ws.id, createdBy);
   }
 
   getEffectiveMaxMembers(workspace) {
+    if (describeTrialLifecycle(workspace).complimentaryAccess) return null;
+
     const planRules = this.getPlanRules(workspace.billing_plan);
 
     const planLimit = planRules.max_members;
@@ -196,7 +199,12 @@ await ensureDefaultChannelsForWorkspace(ws.id, createdBy);
     if (!user) throw new Error("User not found");
 
     try {
-      await repo.addWorkspaceUser(workspaceId, userId, role);
+      await repo.addWorkspaceUser(
+        workspaceId,
+        userId,
+        role,
+        describeTrialLifecycle(ws).complimentaryAccess ? "active" : "pending"
+      );
     } catch (err) {
       if (err?.code === "23505") {
         throw new Error(
