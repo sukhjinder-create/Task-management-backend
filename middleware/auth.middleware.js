@@ -57,6 +57,7 @@ export async function authMiddleware(req, res, next) {
 
     // 🔐 STRICT workspace resolution
     let workspaceId =
+      currentUser.workspace_id ||
       decoded.workspaceId ||
       req.headers["x-workspace-id"] ||
       null;
@@ -67,7 +68,7 @@ export async function authMiddleware(req, res, next) {
     }
 
     // Superadmin is allowed GLOBAL
-    const role = decoded.role || "user";
+    const role = currentUser.role || "user";
     if (role === "superadmin") {
       workspaceId = WORKSPACE_GLOBAL;
     }
@@ -86,6 +87,8 @@ if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) {
     req.user = {
       ...decoded,
       id: userId,
+      username: currentUser.username,
+      email: currentUser.email,
       role,
       workspaceId,
     };

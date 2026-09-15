@@ -53,7 +53,7 @@ export async function createUserRepo({
    ADD USER TO WORKSPACE (REQUIRED FOR SYSTEM CHAT)
    billingStatus: 'trial' | 'active' | 'pending'
 ===================================================== */
-export async function addUserToWorkspaceRepo(userId, workspaceId, billingStatus = 'active') {
+export async function addUserToWorkspaceRepo(userId, workspaceId, billingStatus = 'active', role = 'user') {
   if (!userId || !workspaceId || workspaceId === WORKSPACE_GLOBAL) {
     return;
   }
@@ -61,12 +61,14 @@ export async function addUserToWorkspaceRepo(userId, workspaceId, billingStatus 
   const validStatus = ['trial', 'active', 'pending'].includes(billingStatus) ? billingStatus : 'active';
 
   const q = `
-    INSERT INTO workspace_users (user_id, workspace_id, billing_status)
-    VALUES ($1, $2, $3)
-    ON CONFLICT (user_id) DO UPDATE SET billing_status = EXCLUDED.billing_status
+    INSERT INTO workspace_users (user_id, workspace_id, billing_status, role)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (user_id) DO UPDATE SET
+      billing_status = EXCLUDED.billing_status,
+      role = EXCLUDED.role
   `;
 
-  await pool.query(q, [userId, workspaceId, validStatus]);
+  await pool.query(q, [userId, workspaceId, validStatus, role]);
 }
 
 
@@ -246,30 +248,39 @@ export async function getAllUsersIncludingPendingRepo(workspaceId) {
    UPDATE USER
    🔐 Workspace is checked at SERVICE layer
 ===================================================== */
-export async function updateUserRepo(id, { username, email, role, projects }) {
+export async function updateUserRepo(id, { username, email, role, projects }, workspaceId) {
   const q = `
-    UPDATE users
-    SET
-      username = $1,
-      email = $2,
-      email_verified_at = CASE WHEN email IS DISTINCT FROM $2 THEN NULL ELSE email_verified_at END,
-      email_verification_method = CASE WHEN email IS DISTINCT FROM $2 THEN NULL ELSE email_verification_method END,
-      role = $3,
-      projects = $4,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = $5
-    RETURNING
-      id,
-      username,
-      email,
-      role,
-      projects,
-      workspace_id,
-      avatar_url,
-      email_verified_at,
-      email_verification_method,
-      created_at,
-      updated_at;
+    WITH updated_user AS (
+      UPDATE users
+      SET
+        username = $1,
+        email = $2,
+        email_verified_at = CASE WHEN email IS DISTINCT FROM $2 THEN NULL ELSE email_verified_at END,
+        email_verification_method = CASE WHEN email IS DISTINCT FROM $2 THEN NULL ELSE email_verification_method END,
+        role = $3,
+        projects = $4,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $5 AND workspace_id = $6
+      RETURNING
+        id,
+        username,
+        email,
+        role,
+        projects,
+        workspace_id,
+        avatar_url,
+        email_verified_at,
+        email_verification_method,
+        created_at,
+        updated_at
+    ), updated_membership AS (
+      UPDATE workspace_users
+      SET role = $3
+      WHERE user_id = $5
+        AND workspace_id = $6
+        AND EXISTS (SELECT 1 FROM updated_user)
+    )
+    SELECT * FROM updated_user;
   `;
 
   const { rows } = await pool.query(q, [
@@ -278,6 +289,7 @@ export async function updateUserRepo(id, { username, email, role, projects }) {
     role,
     projects || [],
     id,
+    workspaceId,
   ]);
 
   return rows[0] || null;

@@ -16,6 +16,7 @@ import {
 import { getUserById, updateAvatarUrl } from "../repositories/user.repository.js";
 import { logAudit } from "../services/audit.service.js";
 import { getRequestAuditContext } from "../utils/requestContext.util.js";
+import { emitUserRoleUpdated } from "../realtime/socket.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -366,14 +367,10 @@ router.put("/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid role" });
     }
 
-    if (role === "manager" && (!Array.isArray(projects) || projects.length === 0)) {
-      return res.status(400).json({ error: "At least one project must be assigned to a manager" });
-    }
-
     // ✅ FIX: pass workspaceId
     const updated = await updateUserService(
       req.params.id,
-      { username, email, role, projects: projects || [] },
+      { username, email, role, projects },
       req.workspaceId
     );
 
@@ -390,6 +387,10 @@ router.put("/:id", async (req, res) => {
         targetUsername: updated.username,
       }),
     });
+
+    if (targetUser.role !== updated.role) {
+      emitUserRoleUpdated(req.workspaceId, updated.id, updated.role);
+    }
 
     res.json(updated);
   } catch (err) {

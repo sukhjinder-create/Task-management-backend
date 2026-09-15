@@ -8,10 +8,11 @@ import {
   updateWorkspaceStatus as updateWorkspaceStatusV2,
   updateWorkspacePlan,
 } from "../repositories/workspace.repository.js";
-import { emitPlanUpdated } from "../realtime/socket.js";
+import { emitPlanUpdated, emitUserRoleUpdated } from "../realtime/socket.js";
 import { detectCountry } from "../services/currency.service.js";
 import { requestEmailVerification } from "../services/emailVerification.service.js";
 import { logAudit } from "../services/audit.service.js";
+import { updateUserService } from "../services/user.service.js";
 
 const router = express.Router();
 
@@ -287,41 +288,23 @@ router.get("/:workspaceId/projects", async (req, res) => {
 router.put("/:workspaceId/users/:userId", async (req, res) => {
   try {
     const { username, email, role } = req.body;
-    const allowed = ["admin", "user", "owner"];
-    const sets = [];
-    const values = [];
-    let idx = 1;
-
-    if (username !== undefined) { sets.push(`username = $${idx++}`); values.push(String(username).trim()); }
-    if (email !== undefined) {
-      const normalizedEmail = String(email).trim().toLowerCase();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-        return res.status(400).json({ error: "A valid email is required" });
-      }
-      const emailParam = idx++;
-      sets.push(`email = $${emailParam}`);
-      sets.push(`email_verified_at = CASE WHEN email IS DISTINCT FROM $${emailParam} THEN NULL ELSE email_verified_at END`);
-      sets.push(`email_verification_method = CASE WHEN email IS DISTINCT FROM $${emailParam} THEN NULL ELSE email_verification_method END`);
-      values.push(normalizedEmail);
+    const allowed = ["admin", "manager", "user", "owner"];
+    if (role !== undefined && !allowed.includes(role)) {
+      return res.status(400).json({ error: "role must be admin | manager | user | owner" });
     }
-    if (role     !== undefined) {
-      if (!allowed.includes(role)) return res.status(400).json({ error: "role must be admin | user | owner" });
-      sets.push(`role = $${idx++}`); values.push(role);
+    if (username === undefined && email === undefined && role === undefined) {
+      return res.status(400).json({ error: "Nothing to update" });
     }
-    if (!sets.length) return res.status(400).json({ error: "Nothing to update" });
 
-    values.push(req.params.userId, req.params.workspaceId);
-    const { rows, rowCount } = await pool.query(
-      `UPDATE users SET ${sets.join(", ")} WHERE id = $${idx} AND workspace_id = $${idx + 1}
-       RETURNING id, username, email, role, email_verified_at, email_verification_method, created_at`,
-      values
+    const updated = await updateUserService(
+      req.params.userId,
+      { username, email, role },
+      req.params.workspaceId
     );
-    if (!rowCount) return res.status(404).json({ error: "User not found in this workspace" });
-    if (email !== undefined && !rows[0].email_verified_at) {
-      await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [rows[0].id]);
-      await requestEmailVerification(rows[0].id);
+    if (role !== undefined) {
+      emitUserRoleUpdated(req.params.workspaceId, updated.id, updated.role);
     }
-    return res.json(rows[0]);
+    return res.json(updated);
   } catch (err) {
     console.error("[superadmin] editUser error:", err);
     return res.status(500).json({ error: err.message || "Failed to update user" });

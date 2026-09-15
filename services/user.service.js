@@ -119,7 +119,7 @@ export async function createImportedUser({
   });
 
   const billingStatus = await determineBillingStatus(workspace_id, role);
-  await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus);
+  await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus, role);
 
   if (avatar_url) {
     await pool.query(
@@ -190,7 +190,7 @@ export async function createUserService({
 
   // 🔐 REQUIRED: bind user to workspace_users with correct billing status
   const billingStatus = await determineBillingStatus(workspace_id, role);
-  await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus);
+  await addUserToWorkspaceRepo(user.id, workspace_id, billingStatus, role);
   await requestEmailVerification(user.id);
 
   return user;
@@ -218,14 +218,6 @@ export async function updateUserService(
   { username, email, role, projects },
   workspaceId
 ) {
-  if (!username || !email || !role) {
-    throw new Error("username, email and role are required");
-  }
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    throw new Error("A valid email is required");
-  }
-
   const existing = await getUserById(id);
   if (!existing) {
     throw new Error("User not found");
@@ -236,12 +228,30 @@ export async function updateUserService(
     throw new Error("Workspace access denied");
   }
 
+  const nextUsername = username ?? existing.username;
+  const normalizedEmail = String(email ?? existing.email).trim().toLowerCase();
+  const nextRole = role ?? existing.role;
+  const nextProjects = projects ?? existing.projects ?? [];
+  if (!nextUsername || !normalizedEmail || !nextRole) {
+    throw new Error("username, email and role are required");
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error("A valid email is required");
+  }
+  if (!["admin", "manager", "user", "owner"].includes(nextRole)) {
+    throw new Error("Invalid role");
+  }
+  if (!Array.isArray(nextProjects)) {
+    throw new Error("projects must be an array");
+  }
+
   const updated = await updateUserRepo(id, {
-    username,
+    username: nextUsername,
     email: normalizedEmail,
-    role,
-    projects,
-  });
+    role: nextRole,
+    projects: nextProjects,
+  }, workspaceId);
+  if (!updated) throw new Error("User not found");
   if (String(existing.email).toLowerCase() !== updated.email) {
     await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [updated.id]);
     await requestEmailVerification(updated.id);
@@ -250,7 +260,7 @@ export async function updateUserService(
   // Notify user about newly assigned projects
   try {
     const existingProjects = Array.isArray(existing.projects) ? existing.projects : [];
-    const newProjects      = Array.isArray(projects)          ? projects          : [];
+    const newProjects      = nextProjects;
     const addedProjects    = newProjects.filter((p) => !existingProjects.includes(p));
 
     for (const projectId of addedProjects) {

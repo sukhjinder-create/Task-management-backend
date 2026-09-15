@@ -30,9 +30,9 @@ async function ensureWorkspaceUser(userId, workspaceId, billingStatus = null) {
   if (!userId || !workspaceId || workspaceId === "GLOBAL") return;
   const status = billingStatus || (await getDefaultMembershipBillingStatus(workspaceId));
   await pool.query(
-    `INSERT INTO workspace_users (user_id, workspace_id, billing_status)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (user_id) DO NOTHING`,
+    `INSERT INTO workspace_users (user_id, workspace_id, billing_status, role)
+     SELECT id, $2, $3, COALESCE(role, 'user') FROM users WHERE id = $1
+     ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role`,
     [userId, workspaceId, status]
   );
 }

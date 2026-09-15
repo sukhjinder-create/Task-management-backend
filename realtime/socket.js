@@ -2874,6 +2874,11 @@ export function emitPlanUpdated(workspaceId, planSlug) {
   });
 }
 
+export function emitUserRoleUpdated(workspaceId, userId, role) {
+  if (!io || !workspaceId || !userId) return;
+  io.to(String(userId)).emit("user:role_updated", { workspaceId, userId, role });
+}
+
 export function emitChannelCreated(channel, workspaceId = WORKSPACE_GLOBAL) {
   if (!io) return;
 
