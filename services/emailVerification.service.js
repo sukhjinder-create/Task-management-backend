@@ -98,7 +98,7 @@ export async function consumeEmailVerification(token) {
         WHERE id = $1`,
       [record.user_id]
     );
-    await client.query(
+    const trialWorkspace = await client.query(
       `UPDATE workspaces w
           SET trial_ends_at = now() + (w.trial_ends_at - w.trial_started_at),
               trial_started_at = now(),
@@ -106,10 +106,21 @@ export async function consumeEmailVerification(token) {
          FROM users u
         WHERE u.id = $1
           AND w.id = u.workspace_id
+          AND COALESCE(w.owner_user_id, w.created_by) = u.id
           AND w.trial_started_at IS NOT NULL
-          AND w.trial_ends_at > w.trial_started_at`,
+          AND w.trial_ends_at > w.trial_started_at
+        RETURNING w.id`,
       [record.user_id]
     );
+    if (trialWorkspace.rows[0]) {
+      await client.query(
+        `UPDATE workspace_users
+            SET billing_status = 'trial'
+          WHERE workspace_id = $1
+            AND billing_status = 'pending'`,
+        [trialWorkspace.rows[0].id]
+      );
+    }
     await client.query(
       `UPDATE email_verification_tokens
           SET consumed_at = now()

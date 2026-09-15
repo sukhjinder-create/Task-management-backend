@@ -1177,7 +1177,8 @@ socket.on("chat:open", async (channelKey) => {
       ? await resolveDmScope(channelKey, workspaceId, String(userId))
       : await resolveChannelScope(channelKey, workspaceId, String(userId));
     if (!scope.ok) {
-      socket.emit("chat:error", { error: "Conversation is not available" });
+      socket.emit("chat:history", { channelId: channelKey, workspaceId, messages: [] });
+      socket.emit("chat:error", { channelId: channelKey, error: "Conversation is not available" });
       return;
     }
     joinScopedChannelRoom(socket, channelKey, workspaceId);

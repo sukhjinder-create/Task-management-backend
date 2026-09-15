@@ -2,7 +2,10 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import db from "../db.js";
-import { createEmailVerificationSecret } from "../services/emailVerification.service.js";
+import {
+  consumeEmailVerification,
+  createEmailVerificationSecret,
+} from "../services/emailVerification.service.js";
 import { generateToken } from "../services/auth.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 
@@ -68,4 +71,36 @@ test("requiring email verification blocks new and already-issued access tokens",
   assert.equal(nextCalled, false);
   assert.equal(statusCode, 401);
   assert.equal(body.code, "EMAIL_VERIFICATION_REQUIRED");
+});
+
+test("owner verification starts the workspace trial for pending members", async () => {
+  const statements = [];
+  const client = {
+    async query(sql, params = []) {
+      const statement = String(sql).replace(/\s+/g, " ").trim();
+      statements.push({ statement, params });
+      if (statement.startsWith("SELECT user_id FROM email_verification_tokens")) {
+        return { rows: [{ user_id: "10000000-0000-4000-8000-000000000001" }] };
+      }
+      if (statement.startsWith("UPDATE workspaces")) {
+        return { rows: [{ id: "20000000-0000-4000-8000-000000000002" }] };
+      }
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const originalConnect = db.connect;
+  db.connect = async () => client;
+
+  try {
+    await consumeEmailVerification("valid-token");
+  } finally {
+    db.connect = originalConnect;
+  }
+
+  const workspaceUpdate = statements.find(({ statement }) => statement.startsWith("UPDATE workspaces"));
+  const memberUpdate = statements.find(({ statement }) => statement.startsWith("UPDATE workspace_users"));
+  assert.match(workspaceUpdate.statement, /COALESCE\(w\.owner_user_id, w\.created_by\) = u\.id/);
+  assert.deepEqual(memberUpdate.params, ["20000000-0000-4000-8000-000000000002"]);
+  assert.match(memberUpdate.statement, /billing_status = 'trial'.*billing_status = 'pending'/);
 });

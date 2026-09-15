@@ -62,6 +62,7 @@ test("chat mutation and socket paths preserve tenant and actor boundaries", () =
   assert.match(chat, /AND workspace_id = \$5\s+AND user_id = \$6/);
   assert.match(chat, /export async function softDeleteChatMessage\(\{ messageId, userId, workspaceId \}\)/);
   assert.match(socket, /validateDmChannelAccess\(\{/);
+  assert.match(socket, /socket\.emit\("chat:history", \{ channelId: channelKey, workspaceId, messages: \[\] \}\);/);
   assert.match(socket, /WHERE id = \$1 AND workspace_id = \$2 AND channel_key = \$3/);
   assert.match(routes, /getWorkspaceChannel\(channelId, req\.workspaceId\)/);
   assert.match(routes, /isActiveWorkspaceUser\(req\.workspaceId, memberId\)/);
