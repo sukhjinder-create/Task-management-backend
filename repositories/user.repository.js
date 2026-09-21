@@ -103,6 +103,8 @@ export async function getUserById(id) {
       u.avatar_url,
       u.email_verified_at,
       u.email_verification_method,
+      to_jsonb(u)->>'disabled_at' AS disabled_at,
+      COALESCE((to_jsonb(u)->>'mfa_enabled')::boolean, false) AS mfa_enabled,
       u.created_at,
       u.updated_at,
       w.name AS workspace_name,

@@ -134,6 +134,10 @@ import reviewsRoutes  from "./routes/reviews.routes.js";
 import gdprRoutes     from "./routes/gdpr.routes.js";
 import apiKeysRoutes  from "./routes/apiKeys.routes.js";
 import webhooksRoutes    from "./routes/webhooks.routes.js";
+import enterpriseSecurityRoutes from "./routes/enterpriseSecurity.routes.js";
+import scimRoutes from "./routes/scim.routes.js";
+import oauthRoutes from "./routes/oauth.routes.js";
+import { startWebhookDeliveryWorker } from "./services/webhook.service.js";
 import aiFeaturesRoutes from "./routes/aiFeatures.routes.js";
 import paymentsRoutes, {
   razorpayWebhookRouter,
@@ -142,6 +146,8 @@ import paymentsRoutes, {
 import publicBillingRoutes from "./routes/publicBilling.routes.js";
 import publicWorkspaceRoutes from "./routes/publicWorkspace.routes.js";
 import publicBlogRoutes from "./routes/publicBlog.routes.js";
+import publicReceiptsRoutes from "./routes/publicReceipts.routes.js";
+import developerRoutes from "./routes/developer.routes.js";
 import workspaceBlogRoutes from "./routes/workspaceBlog.routes.js";
 import superadminBlogRoutes from "./routes/superadminBlog.routes.js";
 import pushRoutes from "./routes/push.routes.js";
@@ -163,7 +169,8 @@ app.set("trust proxy", true);
 app.disable("x-powered-by");
 
 app.use((req, res, next) => {
-  console.log("🌍 GLOBAL REQUEST:", req.method, req.originalUrl);
+  // OAuth codes and one-time links live in query strings; never log them.
+  console.log("GLOBAL REQUEST:", req.method, req.path);
   next();
 });
 
@@ -313,7 +320,11 @@ app.use("/auth", authLimiter, authRoutes);
 app.use("/public/billing", publicLimiter, publicBillingRoutes);
 app.use("/public/workspaces", publicLimiter, publicWorkspaceRoutes);
 app.use("/public/blog", publicLimiter, publicBlogRoutes);
+app.use("/public/receipts", publicLimiter, publicReceiptsRoutes);
+app.use("/developer", publicLimiter, developerRoutes);
 app.use("/client-portal", clientPortalRoutes);
+app.use("/scim/v2", publicLimiter, scimRoutes);
+app.use("/oauth", authLimiter, oauthRoutes);
 app.use("/growth", growthRoutes);
 app.use("/crypto", cryptoRoutes);
 app.use("/ai", aiRoutes);
@@ -440,9 +451,10 @@ app.use("/saved-filters",   authMiddleware, requireWorkspaceForUser, requirePlan
 // plan, every endpoint inside it is blocked — URL-bypass proof.
 const enterpriseGate = requirePlanFeature("custom_branding");
 app.use("/audit",     authMiddleware, requireWorkspaceForUser, enterpriseGate, auditRoutes);
-app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, enterpriseGate, gdprRoutes);
+app.use("/gdpr",      authMiddleware, requireWorkspaceForUser, gdprRoutes);
 app.use("/api-keys",  authMiddleware, requireWorkspaceForUser, enterpriseGate, apiKeysRoutes);
 app.use("/webhooks",  authMiddleware, requireWorkspaceForUser, enterpriseGate, webhooksRoutes);
+app.use("/enterprise-security", authMiddleware, requireWorkspaceForUser, enterpriseGate, enterpriseSecurityRoutes);
 app.use("/mfa",       mfaRoutes);   // authMiddleware applied inside the router
 app.use("/auth/sso",  ssoRoutes);   // public SAML endpoints + auth-protected config
 app.use("/wiki",      authMiddleware, requireWorkspaceForUser, requirePlanFeature("wiki_docs"),            wikiRoutes);
@@ -523,3 +535,4 @@ startBackupCron();
 startHuddleIntelligenceCron();
 startTrialLifecycleCron();
 startAssuranceReconciliationCron();
+startWebhookDeliveryWorker();

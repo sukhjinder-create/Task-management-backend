@@ -7,6 +7,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "test": "node scripts/run-test-suite.js",
+    "security:secrets": "node scripts/scan-secrets.js",
+    "migrate:enterprise-completion": "node --import ./scripts/database-safety-guard.js run-enterprise-completion-migration.js",
     "migrate:git-automation": "node --import ./scripts/database-safety-guard.js run-git-automation-migration.js",
     "configure:git-automation": "node auto-configure-git-automation.js",
     "migrate:testing-agent": "node --import ./scripts/database-safety-guard.js run-testing-agent-migration.js",
@@ -129,9 +132,13 @@
     "verify:rls": "node scripts/verify-rls.js",
     "test:rls-guard": "node --test tests/migrations-rls-guard.test.js"
   },
+  "engines": {
+    "node": ">=22.12"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",
     "@aws-sdk/s3-request-presigner": "^3.1014.0",
+    "@node-saml/node-saml": "^5.1.0",
     "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.13.2",
     "bcryptjs": "^3.0.3",
@@ -139,13 +146,14 @@
     "dotenv": "^17.2.3",
     "express": "^4.19.2",
     "express-rate-limit": "^7.5.1",
-    "firebase-admin": "^12.7.0",
+    "firebase-admin": "^14.4.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "^2.15.4",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^9.0.3",
+    "openid-client": "^6.8.8",
     "otplib": "^13.4.0",
     "passport": "^0.7.0",
     "pg": "^8.11.3",

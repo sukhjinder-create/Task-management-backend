@@ -1118,7 +1118,7 @@ export async function getAssuranceCommitmentDetail({
   policy = null,
 }) {
   const commitment = await requireCommitment({ id, workspaceId, userId, role, database, now, policy });
-  const [evidenceResult, actionResult, clientReviewResult] = await Promise.all([
+  const [evidenceResult, actionResult, clientReviewResult, obligationResult] = await Promise.all([
     database.query(
       `
       SELECT gae.*, u.username AS recorded_by_name
@@ -1143,14 +1143,45 @@ export async function getAssuranceCommitmentDetail({
     database.query(
       `SELECT review.id, review.status, review.snapshot, review.decision_note,
               review.delivery_status, review.delivery_error, review.requested_at,
-              review.decided_at, review.last_delivered_at,
-              contact.name AS contact_name, contact.email AS contact_email
+              review.decided_at, review.last_delivered_at, review.required_approvals,
+              review.approval_count, review.change_request_count,
+              contact.name AS contact_name, contact.email AS contact_email,
+              COALESCE(approvers.items, '[]'::json) AS approvers
        FROM assurance_client_reviews review
        JOIN assurance_client_contacts contact
          ON contact.workspace_id=review.workspace_id AND contact.id=review.contact_id
+       LEFT JOIN LATERAL (
+         SELECT json_agg(json_build_object(
+           'contactId', item.contact_id, 'name', person.name, 'email', person.email,
+           'status', item.status, 'decisionNote', item.decision_note, 'decidedAt', item.decided_at
+         ) ORDER BY person.name) AS items
+         FROM assurance_client_review_approvers item
+         JOIN assurance_client_contacts person
+           ON person.workspace_id=item.workspace_id AND person.id=item.contact_id
+         WHERE item.workspace_id=review.workspace_id AND item.review_id=review.id
+       ) approvers ON TRUE
        WHERE review.workspace_id=$1 AND review.goal_id=$2
        ORDER BY review.requested_at DESC
        LIMIT 50`,
+      [workspaceId, id]
+    ),
+    database.query(
+      `SELECT obligation.*, owner.username AS owner_name,
+              COALESCE(evidence.items, '[]'::json) AS evidence
+       FROM assurance_obligations obligation
+       LEFT JOIN users owner ON owner.workspace_id=obligation.workspace_id AND owner.id=obligation.owner_id
+       LEFT JOIN LATERAL (
+         SELECT json_agg(json_build_object(
+           'id', item.id, 'label', item.label, 'type', item.evidence_type,
+           'recordedAt', item.recorded_at, 'linkedAt', link.linked_at
+         ) ORDER BY link.linked_at DESC) AS items
+         FROM assurance_obligation_evidence link
+         JOIN goal_assurance_evidence item
+           ON item.workspace_id=link.workspace_id AND item.goal_id=link.goal_id AND item.id=link.evidence_id
+         WHERE link.workspace_id=obligation.workspace_id AND link.obligation_id=obligation.id
+       ) evidence ON TRUE
+       WHERE obligation.workspace_id=$1 AND obligation.goal_id=$2
+       ORDER BY obligation.status, obligation.due_date NULLS LAST, obligation.created_at`,
       [workspaceId, id]
     ),
   ]);
@@ -1160,5 +1191,6 @@ export async function getAssuranceCommitmentDetail({
     evidence: evidenceResult.rows,
     decisions: actionResult.rows,
     clientReviews: clientReviewResult.rows,
+    obligations: obligationResult.rows,
   };
 }

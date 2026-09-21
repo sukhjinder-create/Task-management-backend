@@ -1,8 +1,10 @@
 // routes/webhooks.routes.js
 import express from "express";
 import db from "../db.js";
-import { testWebhook } from "../services/webhook.service.js";
+import { replayWebhookDelivery, testWebhook } from "../services/webhook.service.js";
 import { logAudit } from "../services/audit.service.js";
+import { assertSafeUrl, UnsafeUrlError } from "../integrations/core/safeFetch.js";
+import { encryptSecret } from "../config/dataEncryption.js";
 
 const router = express.Router();
 
@@ -12,7 +14,12 @@ const VALID_EVENTS = [
   "user.joined", "user.left", "sprint.started", "sprint.completed",
   "leave.requested", "leave.approved", "leave.rejected",
   "review.submitted", "ping",
+  "audit.event",
 ];
+
+router.get("/events/list", (_req, res) => {
+  res.json(VALID_EVENTS);
+});
 
 router.get("/", async (req, res) => {
   try {
@@ -31,19 +38,19 @@ router.post("/", async (req, res) => {
     if (!["admin", "owner"].includes(req.user.role)) return res.status(403).json({ error: "Admin required" });
     const { name, url, secret, events = [] } = req.body;
     if (!name || !url) return res.status(400).json({ error: "name and url required" });
-    if (!url.startsWith("https://") && !url.startsWith("http://")) return res.status(400).json({ error: "Invalid URL" });
+    await assertSafeUrl(url);
 
     const validEvents = events.filter(e => VALID_EVENTS.includes(e));
 
     const row = await db.query(
       "INSERT INTO webhooks (workspace_id, name, url, secret, events) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-      [req.workspaceId, name, url, secret || null, validEvents]
+      [req.workspaceId, name, url, encryptSecret(secret), validEvents]
     );
 
     await logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "webhook.create", entityType: "webhook", entityId: row.rows[0].id, newValue: { name, url } });
     res.status(201).json(row.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(err instanceof UnsafeUrlError ? 400 : 500).json({ error: err.message });
   }
 });
 
@@ -51,6 +58,7 @@ router.put("/:id", async (req, res) => {
   try {
     if (!["admin", "owner"].includes(req.user.role)) return res.status(403).json({ error: "Admin required" });
     const { name, url, secret, events, is_active } = req.body;
+    if (url) await assertSafeUrl(url);
     const validEvents = events ? events.filter(e => VALID_EVENTS.includes(e)) : undefined;
 
     const row = await db.query(
@@ -61,11 +69,11 @@ router.put("/:id", async (req, res) => {
          events    = COALESCE($4, events),
          is_active = COALESCE($5, is_active)
        WHERE id = $6 AND workspace_id = $7 RETURNING *`,
-      [name, url, secret, validEvents, is_active, req.params.id, req.workspaceId]
+      [name, url, secret === undefined ? null : encryptSecret(secret), validEvents, is_active, req.params.id, req.workspaceId]
     );
     res.json(row.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(err instanceof UnsafeUrlError ? 400 : 500).json({ error: err.message });
   }
 });
 
@@ -81,6 +89,7 @@ router.delete("/:id", async (req, res) => {
 
 router.post("/:id/test", async (req, res) => {
   try {
+    if (!["admin", "owner"].includes(req.user.role)) return res.status(403).json({ error: "Admin required" });
     const result = await testWebhook(req.params.id, req.workspaceId);
     res.json(result);
   } catch (err) {
@@ -91,8 +100,14 @@ router.post("/:id/test", async (req, res) => {
 router.get("/:id/deliveries", async (req, res) => {
   try {
     const rows = await db.query(
-      "SELECT * FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC LIMIT 50",
-      [req.params.id]
+      `SELECT delivery.*
+         FROM webhook_deliveries delivery
+         JOIN webhooks webhook
+           ON webhook.id = delivery.webhook_id
+          AND webhook.workspace_id = delivery.workspace_id
+        WHERE delivery.webhook_id = $1 AND delivery.workspace_id = $2
+        ORDER BY delivery.created_at DESC LIMIT 50`,
+      [req.params.id, req.workspaceId]
     );
     res.json(rows.rows);
   } catch (err) {
@@ -100,8 +115,22 @@ router.get("/:id/deliveries", async (req, res) => {
   }
 });
 
-router.get("/events/list", (_req, res) => {
-  res.json(VALID_EVENTS);
+router.post("/:id/deliveries/:deliveryId/replay", async (req, res) => {
+  try {
+    if (!["admin", "owner"].includes(req.user.role)) return res.status(403).json({ error: "Admin required" });
+    const delivery = await db.query(
+      `SELECT delivery.id
+         FROM webhook_deliveries delivery
+         JOIN webhooks webhook ON webhook.id = delivery.webhook_id
+        WHERE delivery.id = $1 AND delivery.webhook_id = $2
+          AND webhook.workspace_id = $3 AND delivery.workspace_id = $3`,
+      [req.params.deliveryId, req.params.id, req.workspaceId]
+    );
+    if (!delivery.rows[0]) return res.status(404).json({ error: "Webhook delivery not found" });
+    res.json(await replayWebhookDelivery(req.params.deliveryId, req.workspaceId));
+  } catch (err) {
+    res.status(err.message?.includes("not found") ? 404 : 500).json({ error: err.message });
+  }
 });
 
 export default router;

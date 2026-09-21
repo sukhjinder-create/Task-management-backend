@@ -92,7 +92,7 @@ jobs:
             const { Pool } = require("pg");
             const pool = new Pool({
               connectionString: process.env.DATABASE_URL,
-              ssl: { rejectUnauthorized: false },
+              ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
             });
             pool.query("SELECT * FROM billing_plans ORDER BY display_order")
               .then((r) => { console.log(JSON.stringify(r.rows, null, 2)); })
@@ -112,7 +112,7 @@ jobs:
             const { Pool } = require("pg");
             const pool = new Pool({
               connectionString: process.env.DATABASE_URL,
-              ssl: { rejectUnauthorized: false },
+              ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
             });
             pool.query(`SELECT slug, name, is_active,
                                price_monthly_paise, price_yearly_paise,
@@ -151,7 +151,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -173,7 +173,7 @@ jobs:
             const { Pool } = require("pg");
             const pool = new Pool({
               connectionString: process.env.DATABASE_URL,
-              ssl: { rejectUnauthorized: false },
+              ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
             });
             pool.query(`SELECT slug, price_monthly_paise, price_monthly_minor,
                                price_yearly_paise, price_yearly_minor, base_currency

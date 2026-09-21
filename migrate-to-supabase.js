@@ -17,6 +17,10 @@ import pg from "pg";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+  getDatabaseSslOptions,
+  getPoolConfigFromConnectionString,
+} from "./backup/databaseTarget.js";
 
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,7 +32,7 @@ const source = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port:     Number(process.env.DB_PORT) || 5432,
-  ssl:      process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
+  ...getDatabaseSslOptions(process.env.DB_SSL === "true"),
   connectionTimeoutMillis: 15000,
 });
 
@@ -40,8 +44,7 @@ if (!process.env.NEW_DATABASE_URL) {
 }
 
 const dest = new Pool({
-  connectionString: process.env.NEW_DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ...getPoolConfigFromConnectionString(process.env.NEW_DATABASE_URL),
   connectionTimeoutMillis: 15000,
 });
 

@@ -11,12 +11,17 @@ Set these env vars in production:
 ```env
 DATABASE_URL=postgres://...
 BACKUP_RETENTION_DAYS=30
+BACKUP_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+BACKUP_ENCRYPTION_KEY_ID=primary
+BACKUP_OBJECT_LOCK_DAYS=30
 ```
 
 Notes:
 - Backup schedule is fixed to daily at 2:00 AM (Asia/Kolkata) in app code.
 - `BACKUP_RETENTION_DAYS` only controls local file pruning.
 - If S3 envs are configured, backups are uploaded off-machine.
+- Production backups are encrypted with AES-256-GCM before they touch disk. Keep old keys available until every backup encrypted with them has expired.
+- `BACKUP_OBJECT_LOCK_DAYS` asks compatible S3 storage for a compliance-mode retention lock; the bucket must have Object Lock enabled.
 - Backup and managed recovery use the same `DATABASE_URL` / `DB_HOST` target resolution as the main app.
 
 ## 2) Workspace Recovery (From App)
@@ -51,10 +56,12 @@ High-level safe flow:
 
 ### Step A: Restore snapshot into temp DB
 
-Example:
+For legacy unencrypted backups:
 ```bash
 gunzip -c backups/asystence_backup_YYYY-MM-DD_HH-MM-SS.sql.gz | psql "$TEMP_DB_URL"
 ```
+
+For current encrypted backups, use the Superadmin recovery flow. It authenticates and decrypts the artifact before decompression; a wrong key or modified artifact fails closed. Never decrypt a production backup into a shared directory.
 
 ### Step B: Dry run (no writes to prod)
 

@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { assertSafeUrl, UnsafeUrlError, __testables } from "../integrations/core/safeFetch.js";
 
 const { isBlockedIp, buildAuth } = __testables;
+const source = fs.readFileSync(new URL("../integrations/core/safeFetch.js", import.meta.url), "utf8");
 
 test("cloud metadata and loopback addresses are blocked", () => {
   // 169.254.169.254 is the AWS/GCP/Azure instance metadata endpoint — reaching it
@@ -75,6 +77,13 @@ test("literal private IPs in a URL are rejected", async () => {
   await assert.rejects(() => assertSafeUrl("http://169.254.169.254/latest/meta-data/"), UnsafeUrlError);
   await assert.rejects(() => assertSafeUrl("http://10.0.0.5/internal"), UnsafeUrlError);
   await assert.rejects(() => assertSafeUrl("http://[::1]:3000/"), UnsafeUrlError);
+});
+
+test("outbound requests pin validated DNS and strip auth on cross-origin redirects", () => {
+  assert.match(source, /lookup: \(_hostname, options, callback\)/);
+  assert.match(source, /callback\(null, address, family\)/);
+  assert.doesNotMatch(source, /await fetch\(url\.toString\(\)/);
+  assert.match(source, /sameOrigin \? authType : "none"/);
 });
 
 test("auth schemes build the right headers and never leak into the wrong place", () => {

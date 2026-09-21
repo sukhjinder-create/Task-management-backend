@@ -8,6 +8,7 @@
 
 import pg from "pg";
 import { readFileSync } from "fs";
+import { getPoolConfigFromConnectionString } from "./backup/databaseTarget.js";
 
 // Prefer DATABASE_URL; otherwise build it from the DB_* parts (Cloud Run env / envvars-deploy.yaml).
 function resolveConnectionString() {
@@ -28,8 +29,7 @@ const connectionString = resolveConnectionString();
 if (!connectionString) throw new Error("DATABASE_URL (or DB_HOST/DB_USER/DB_PASSWORD/DB_NAME) is required to run migrations");
 
 const pool = new pg.Pool({
-  connectionString,
-  ssl: process.env.DB_SSL === "false" ? undefined : { rejectUnauthorized: false },
+  ...getPoolConfigFromConnectionString(connectionString),
 });
 
 const MIGRATIONS = [

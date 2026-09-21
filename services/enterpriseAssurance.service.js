@@ -104,6 +104,50 @@ function boundedInteger(value, fallback, minimum, maximum, label) {
   return parsed ?? fallback;
 }
 
+export function portfolioSlaStatus(portfolio, commitments, now = new Date()) {
+  const today = now.toISOString().slice(0, 10);
+  const graceDays = Number(portfolio.sla_grace_days || 0);
+  const deadline = (date) => {
+    const value = new Date(`${String(date).slice(0, 10)}T00:00:00Z`);
+    value.setUTCDate(value.getUTCDate() + graceDays);
+    return value.toISOString().slice(0, 10);
+  };
+  const due = commitments.filter((item) => item.target_date && String(item.target_date).slice(0, 10) <= today);
+  const overdue = commitments.filter((item) => (
+    item.target_date && deadline(item.target_date) < today && item.assurance?.state !== "verified"
+  )).map((item) => ({
+    type: "outcome_overdue",
+    outcomeId: item.id,
+    title: item.title,
+    targetDate: String(item.target_date).slice(0, 10),
+    state: item.assurance?.state,
+  }));
+  const verifiedDue = due.filter((item) => item.assurance?.state === "verified").length;
+  const verifiedPercent = due.length ? Math.round((verifiedDue / due.length) * 100) : 100;
+  const reviewBase = portfolio.last_reviewed_at || portfolio.created_at;
+  const nextReview = new Date(reviewBase);
+  nextReview.setUTCDate(nextReview.getUTCDate() + Number(portfolio.review_cadence_days || 30));
+  const exceptions = [...overdue];
+  if (due.length && verifiedPercent < Number(portfolio.minimum_verified_percent || 0)) {
+    exceptions.push({
+      type: "verified_coverage_below_target",
+      verifiedPercent,
+      minimumVerifiedPercent: Number(portfolio.minimum_verified_percent),
+      dueOutcomes: due.length,
+    });
+  }
+  if (nextReview.getTime() < now.getTime()) {
+    exceptions.push({ type: "portfolio_review_overdue", nextReviewAt: nextReview.toISOString() });
+  }
+  return {
+    healthy: exceptions.length === 0,
+    graceDays,
+    verifiedPercent,
+    nextReviewAt: nextReview.toISOString(),
+    exceptions,
+  };
+}
+
 function booleanValue(value, label) {
   if (typeof value !== "boolean") throw httpError(`${label} must be true or false`);
   return value;
@@ -363,6 +407,7 @@ export async function getAssurancePortfolio({ workspaceId, userId, role, databas
           "client_changes_requested",
         ].includes(item.assurance.state)).length,
       },
+      sla: portfolioSlaStatus(portfolio, commitments, now),
     };
   }).filter((portfolio) => (
     String(role || "").toLowerCase() === "admin"
@@ -396,11 +441,16 @@ export async function createAssurancePortfolio({ workspaceId, actorId, role, inp
     ? (input.ownerId || input.owner_id || actorId)
     : actorId;
   const targetDate = dateValue(input.targetDate ?? input.target_date, "Target date");
+  const slaGraceDays = boundedInteger(input.slaGraceDays ?? input.sla_grace_days ?? 0, 0, 0, 365, "SLA grace days");
+  const minimumVerifiedPercent = boundedInteger(input.minimumVerifiedPercent ?? input.minimum_verified_percent ?? 90, 90, 0, 100, "Minimum verified percent");
+  const reviewCadenceDays = boundedInteger(input.reviewCadenceDays ?? input.review_cadence_days ?? 30, 30, 1, 365, "Review cadence");
   await assertActiveWorkspaceUser(workspaceId, ownerId, database);
   const { rows } = await database.query(
-    `INSERT INTO assurance_portfolios (workspace_id, name, description, owner_id, target_date, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [workspaceId, name, description, ownerId, targetDate, actorId]
+    `INSERT INTO assurance_portfolios
+       (workspace_id, name, description, owner_id, target_date, created_by,
+        sla_grace_days, minimum_verified_percent, review_cadence_days)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [workspaceId, name, description, ownerId, targetDate, actorId, slaGraceDays, minimumVerifiedPercent, reviewCadenceDays]
   );
   await logAudit({ workspaceId, userId: actorId, action: "assurance.portfolio.create", entityType: "assurance_portfolio", entityId: rows[0].id, newValue: { name, ownerId, targetDate } });
   return rows[0];
@@ -421,19 +471,37 @@ export async function updateAssurancePortfolio({ id, workspaceId, actorId, role,
     : actorId;
   if (ownerId) await assertActiveWorkspaceUser(workspaceId, ownerId, database);
   const { rows } = await database.query(
-    `UPDATE assurance_portfolios SET name=$1, description=$2, owner_id=$3, target_date=$4, status=$5, updated_at=now()
-     WHERE id=$6 AND workspace_id=$7 RETURNING *`,
+    `UPDATE assurance_portfolios SET name=$1, description=$2, owner_id=$3, target_date=$4, status=$5,
+       sla_grace_days=$6, minimum_verified_percent=$7, review_cadence_days=$8, updated_at=now()
+     WHERE id=$9 AND workspace_id=$10 RETURNING *`,
     [
       cleanText(input.name ?? existing[0].name, 200, { required: true, label: "Portfolio name" }),
       cleanText(input.description ?? existing[0].description, 2000, { label: "Description" }),
       ownerId,
       dateValue(input.targetDate ?? input.target_date ?? existing[0].target_date, "Target date"),
       status,
+      boundedInteger(input.slaGraceDays ?? input.sla_grace_days ?? existing[0].sla_grace_days ?? 0, 0, 0, 365, "SLA grace days"),
+      boundedInteger(input.minimumVerifiedPercent ?? input.minimum_verified_percent ?? existing[0].minimum_verified_percent ?? 90, 90, 0, 100, "Minimum verified percent"),
+      boundedInteger(input.reviewCadenceDays ?? input.review_cadence_days ?? existing[0].review_cadence_days ?? 30, 30, 1, 365, "Review cadence"),
       portfolioId,
       workspaceId,
     ]
   );
   await logAudit({ workspaceId, userId: actorId, action: "assurance.portfolio.update", entityType: "assurance_portfolio", entityId: portfolioId, oldValue: existing[0], newValue: rows[0] });
+  return rows[0];
+}
+
+export async function recordAssurancePortfolioReview({ id, workspaceId, actorId, role, database = pool, now = new Date() }) {
+  if (!MANAGER_ROLES.has(String(role || "").toLowerCase())) throw httpError("Manager access is required", 403, "ASSURANCE_FORBIDDEN");
+  const portfolioId = uuidValue(id, "Portfolio");
+  const { rows } = await database.query(
+    `UPDATE assurance_portfolios SET last_reviewed_at=$1, updated_at=$1
+     WHERE workspace_id=$2 AND id=$3 AND ($4='admin' OR owner_id=$5)
+     RETURNING *`,
+    [now.toISOString(), workspaceId, portfolioId, String(role || "").toLowerCase(), actorId]
+  );
+  if (!rows[0]) throw httpError("Portfolio not found", 404, "ASSURANCE_NOT_FOUND");
+  await logAudit({ workspaceId, userId: actorId, action: "assurance.portfolio.review", entityType: "assurance_portfolio", entityId: portfolioId, newValue: { reviewedAt: now.toISOString() } });
   return rows[0];
 }
 

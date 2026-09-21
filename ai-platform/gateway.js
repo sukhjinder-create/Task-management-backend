@@ -31,6 +31,7 @@ import { estimateCost, recordCost } from "./cost/costEngine.js";
 import { runInputSafety, runOutputSafety, mergeSafety } from "./safety/pipeline.js";
 import { safetyEnforcementMode, evaluateBlock } from "./safety/enforcement.js";
 import { recordSafetyEvent } from "./safety/safetyEvents.js";
+import { redactPii } from "./safety/pii.js";
 
 /**
  * Reconstruct the provider call ({prompt} XOR {messages}) from Part[] input,
@@ -100,8 +101,8 @@ export async function invoke(request, ctx = {}) {
 
     // 3) Prompt resolution (workspace → platform → code fallback → caller verbatim).
     const template = await resolvePrompt({ promptKey: cfg.promptKey, workspaceId, capabilityKey: cfg.capabilityKey, variables });
-    const call = partsToProviderCall(request?.input);
-    const finalPrompt = template?.body ?? call.prompt;
+    let call = partsToProviderCall(request?.input);
+    let finalPrompt = template?.body ?? call.prompt;
 
     // 4) Runtime options (profile + per-call overrides; call values win).
     opts = resolveRuntimeOptions({ profileKey: cfg.profileKey, profileOverride: cfg.profileParams, callOverrides });
@@ -129,7 +130,7 @@ export async function invoke(request, ctx = {}) {
     // 5c) Input safety. Detection always runs; whether a finding STOPS the
     // request depends on the enforcement mode, which is "off" by default.
     const inputSafety = runInputSafety({ prompt: finalPrompt, messages: call.messages, variables });
-    const safetyMode = safetyEnforcementMode(workspaceId);
+    const safetyMode = policy.safetyMode || safetyEnforcementMode(workspaceId);
     const inputDecision = evaluateBlock(inputSafety.findings, safetyMode);
 
     // Blocking happens BEFORE the adapter call: a request refused on safety
@@ -156,6 +157,25 @@ export async function invoke(request, ctx = {}) {
       throw err;
     }
 
+    const safetyRedactions = [];
+    if (["input", "both"].includes(policy.piiRedaction)) {
+      if (finalPrompt != null) {
+        const redacted = redactPii(finalPrompt);
+        finalPrompt = redacted.text;
+        safetyRedactions.push(...redacted.redactions.map((item) => ({ ...item, stage: "input" })));
+      }
+      if (call.messages) {
+        call = {
+          ...call,
+          messages: call.messages.map((message) => {
+            const redacted = redactPii(message.content);
+            safetyRedactions.push(...redacted.redactions.map((item) => ({ ...item, stage: "input" })));
+            return { ...message, content: redacted.text };
+          }),
+        };
+      }
+    }
+
     // 6) Execute through the resolved adapter, with transient retry.
     const adapter = getAdapterFor(cfg.adapterType);
     const result = await withTransientRetry(
@@ -175,14 +195,30 @@ export async function invoke(request, ctx = {}) {
     const costActual = recordCost({ usage: result.usage, providerKey: cfg.providerKey, modelKey: resolvedModel });
 
     // 6c) Output safety (P7; permissive) + best-effort safety-event persistence.
-    const outputSafety = runOutputSafety({ text: result.text, outputSchemaRef: cfg.outputSchema || null });
-    const safety = mergeSafety(inputSafety, outputSafety, { mode: safetyMode });
+    const outputSchema = policy.outputSchema || cfg.outputSchema || null;
+    const outputSafety = runOutputSafety({ text: result.text, outputSchemaRef: outputSchema });
+    const schemaInvalid = policy.outputSchemaMode === "enforce"
+      && outputSafety.findings.some((finding) => finding.type === "output_schema");
+    let outputText = result.text;
+    if (["output", "both"].includes(policy.piiRedaction)) {
+      const redacted = redactPii(outputText);
+      outputText = redacted.text;
+      safetyRedactions.push(...redacted.redactions.map((item) => ({ ...item, stage: "output" })));
+    }
+    const safety = mergeSafety(inputSafety, outputSafety, { mode: safetyMode, redactions: safetyRedactions });
     if (safety.findings.length) {
       await recordSafetyEvent({
         workspaceId, capabilityKey: cfg.capabilityKey,
         inputVerdict: safety.inputVerdict, outputVerdict: safety.outputVerdict,
         findings: safety.findings, correlationId: corr,
       });
+    }
+    if (schemaInvalid) {
+      const err = new Error("AI output did not match the configured schema");
+      err.code = "AI_OUTPUT_SCHEMA_INVALID";
+      err.retryable = false;
+      err.safety = safety;
+      throw err;
     }
 
     // 7) Telemetry (best-effort; never throws).
@@ -209,7 +245,7 @@ export async function invoke(request, ctx = {}) {
     return createAIResponse({
       requestId: request?.requestId,
       status: "succeeded",
-      output: [textPart({ text: result.text })],
+      output: [textPart({ text: outputText })],
       // §14: surface provider tool calls when the caller asked for tools. Omitted
       // entirely otherwise, so the response shape is unchanged for every existing caller.
       ...(Array.isArray(result.toolCalls) && result.toolCalls.length ? { toolCalls: result.toolCalls } : {}),

@@ -162,6 +162,7 @@ jobs:
           APP_SECRET_NAMES: >-
             ASANA_CLIENT_SECRET ATTENDANCE_SLACK_WEBHOOK_URL
             AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+            BACKUP_ENCRYPTION_KEY DATA_ENCRYPTION_KEY
             DB_PASSWORD DEEPGRAM_API_KEY
             GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GROQ_API_KEY
             LIVEKIT_API_KEY LIVEKIT_API_SECRET LIVEKIT_URL
@@ -174,6 +175,8 @@ jobs:
           ATTENDANCE_SLACK_WEBHOOK_URL: ${{ secrets.ATTENDANCE_SLACK_WEBHOOK_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -373,6 +376,23 @@ jobs:
             echo "warning: git sync skipped (fetch of $SYNC_BRANCH failed)"
           fi
 
+          # Enterprise ciphertext must survive restarts and redeploys. Generate
+          # each deployment-owned key once on the production host when absent;
+          # existing values are never printed or replaced.
+          ensure_encryption_key() {
+            local name="$1" current value
+            current="$(sed -n "s/^${name}=//p" .env 2>/dev/null | tail -1 | tr -d '\r')"
+            [ -n "$current" ] && return 0
+            sed -i "/^${name}=/d" .env 2>/dev/null || true
+            value="$(sudo docker exec "$CONTAINER" node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))')"
+            [ -n "$value" ] || { echo "could not generate $name"; exit 1; }
+            printf '%s=%s\n' "$name" "$value" >> .env
+            chmod 600 .env
+            echo "generated missing $name"
+          }
+          ensure_encryption_key DATA_ENCRYPTION_KEY
+          ensure_encryption_key BACKUP_ENCRYPTION_KEY
+
           # Password signup now requires mailbox proof. Refuse the release if
           # production cannot deliver that email; otherwise every new account
           # would be correctly locked but unable to activate.
@@ -411,7 +431,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -444,7 +464,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -495,7 +515,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -527,7 +547,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -569,7 +589,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -627,7 +647,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: { rejectUnauthorized: false },
+                ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
               });
               try {
                 await pool.query(sql);
@@ -686,7 +706,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+                ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" } : false,
               });
               try {
                 await pool.query(sql);
@@ -742,7 +762,7 @@ jobs:
             process.stdin.on("end", async () => {
               const pool = new Pool({
                 connectionString: process.env.DATABASE_URL,
-                ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+                ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" } : false,
               });
               try {
                 await pool.query(sql);
@@ -778,6 +798,31 @@ jobs:
               }
             });
           ' < "$CLIENT_PORTAL_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
+
+          # Enterprise completion is additive and must land before the image
+          # starts using identity, governance, signed receipts, and durable delivery.
+          ENTERPRISE_MIGRATION="migrations/20260921_enterprise_completion.sql"
+          [ -f "$ENTERPRISE_MIGRATION" ] || { echo "missing migration: $ENTERPRISE_MIGRATION"; exit 1; }
+          echo "applying $ENTERPRISE_MIGRATION ..."
+          sudo docker exec -i app-app-1 node -e '
+            const { Pool } = require("pg");
+            let sql = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", chunk => { sql += chunk; });
+            process.stdin.on("end", async () => {
+              const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" } : false });
+              try {
+                await pool.query(sql);
+                const tables = ["oauth_service_accounts", "workspace_security_policies", "workspace_domains", "enterprise_roles", "scim_tokens", "outcome_signing_keys", "assurance_client_review_approvers", "assurance_obligations"];
+                const check = await pool.query("SELECT COUNT(*)::int AS count FROM information_schema.tables WHERE table_schema=$1 AND table_name=ANY($2::text[])", ["public", tables]);
+                if (check.rows[0].count !== tables.length) throw new Error(`enterprise completion verification failed: ${JSON.stringify(check.rows[0])}`);
+                console.log("enterprise completion migration verified");
+              } catch (error) {
+                console.error(error.message);
+                process.exitCode = 1;
+              } finally { await pool.end(); }
+            });
+          ' < "$ENTERPRISE_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
 
           echo "pulling $IMAGE_REF ..."
           sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }

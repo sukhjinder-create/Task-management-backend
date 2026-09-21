@@ -1,5 +1,6 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import pool from "../db.js";
+import { getBackendPublicUrl } from "../config/environment.js";
 import { logAudit } from "./audit.service.js";
 import { notifyUser } from "./notification.service.js";
 import {
@@ -7,6 +8,12 @@ import {
   getAssuranceOverview,
 } from "./executionAssurance.service.js";
 import { queueImpactedIntelligenceRecalculation } from "../intelligence/realtime/recalculation.service.js";
+import {
+  buildSignedReceiptDocument,
+  getOrCreateReceiptSigningKey,
+  RECEIPT_SIGNATURE_ALGORITHM,
+  signReceiptDocument,
+} from "./outcomeReceiptSigning.service.js";
 
 const MANAGER_ROLES = new Set(["manager", "admin"]);
 const DECISION_TYPES = new Set(["execution", "scope", "capacity", "risk", "evidence", "experiment", "policy", "other"]);
@@ -920,6 +927,26 @@ function buildReceiptSnapshot({ workspaceId, outcomeDetail, operatingRecord, red
       requestedAt: item.requested_at,
       decidedAt: item.decided_at,
     })),
+    obligations: (outcomeDetail.obligations || []).map((item) => ({
+      id: item.id,
+      type: item.obligation_type,
+      title: item.title,
+      description: item.description,
+      controlReference: item.control_reference,
+      owner: person(item.owner_name),
+      dueDate: item.due_date,
+      severity: item.severity,
+      status: item.status,
+      waiverReason: item.waiver_reason,
+      satisfiedAt: item.satisfied_at,
+      evidence: (item.evidence || []).map((evidence) => ({
+        id: evidence.id,
+        label: evidence.label,
+        type: evidence.type,
+        recordedAt: evidence.recordedAt,
+        linkedAt: evidence.linkedAt,
+      })),
+    })),
     redaction,
     assurance: {
       statement: "This receipt preserves the recorded outcome, evidence, decisions, experiments, and approvals at generation time.",
@@ -936,6 +963,7 @@ export async function generateOutcomeReceipt({ workspaceId, goalId, actorId, rol
   const generatedAt = now.toISOString();
   const snapshot = buildReceiptSnapshot({ workspaceId, outcomeDetail, operatingRecord, redaction, generatedAt });
   const sha256 = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+  if (input.publish !== undefined && typeof input.publish !== "boolean") throw httpError("Publish must be true or false");
   const client = await database.connect();
   let receipt;
   try {
@@ -947,11 +975,30 @@ export async function generateOutcomeReceipt({ workspaceId, goalId, actorId, rol
       [workspaceId, goalId]
     );
     const version = Number(versionResult.rows[0]?.next_version) || 1;
+    const key = await getOrCreateReceiptSigningKey({ workspaceId, actorId, database: client });
+    const draft = {
+      id: randomUUID(),
+      public_id: randomUUID(),
+      goal_id: goalId,
+      version,
+      schema_version: 1,
+      generated_at: generatedAt,
+      sha256,
+      signature_algorithm: RECEIPT_SIGNATURE_ALGORITHM,
+      signing_key_id: key.id,
+      snapshot,
+    };
+    const signature = signReceiptDocument(buildSignedReceiptDocument(draft), key);
     const inserted = await client.query(
       `INSERT INTO assurance_outcome_receipts
-         (workspace_id, goal_id, version, schema_version, snapshot, sha256, redaction, requested_by, generated_at)
-       VALUES ($1,$2,$3,1,$4::jsonb,$5,$6::jsonb,$7,$8) RETURNING id, version, schema_version, sha256, redaction, generated_at`,
-      [workspaceId, goalId, version, JSON.stringify(snapshot), sha256, JSON.stringify(redaction), actorId, generatedAt]
+         (id, workspace_id, goal_id, version, schema_version, snapshot, sha256, redaction,
+          requested_by, generated_at, public_id, signing_key_id, signature_algorithm, signature, published_at)
+       VALUES ($1,$2,$3,$4,1,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING id, goal_id, version, schema_version, sha256, redaction, snapshot, generated_at,
+                 public_id, signing_key_id, signature_algorithm, signature, published_at, revoked_at`,
+      [draft.id, workspaceId, goalId, version, JSON.stringify(snapshot), sha256, JSON.stringify(redaction), actorId,
+        generatedAt, draft.public_id, key.id, RECEIPT_SIGNATURE_ALGORITHM, signature,
+        input.publish === true ? generatedAt : null]
     );
     receipt = inserted.rows[0];
     await client.query("COMMIT");
@@ -970,7 +1017,10 @@ export async function generateOutcomeReceipt({ workspaceId, goalId, actorId, rol
     newValue: { goalId, version: receipt.version, sha256, redaction },
   });
   queueRefresh({ workspaceId, sourceId: receipt.id, change: "receipt_generated", database });
-  return receipt;
+  return {
+    ...receipt,
+    verificationUrl: receipt.published_at ? `${getBackendPublicUrl()}/public/receipts/${receipt.public_id}` : null,
+  };
 }
 
 export async function getOutcomeReceipt({ id, workspaceId, actorId, role, database = pool, now = new Date() }) {
@@ -983,25 +1033,55 @@ export async function getOutcomeReceipt({ id, workspaceId, actorId, role, databa
   const receipt = rows[0];
   if (!receipt) throw httpError("Outcome receipt not found", 404, "ASSURANCE_NOT_FOUND");
   await requireVisibleOutcome({ workspaceId, goalId: receipt.goal_id, actorId, role, database, now });
+  const document = buildSignedReceiptDocument(receipt);
   const content = JSON.stringify({
-    manifest: {
-      receiptId: receipt.id,
-      workspaceId,
-      outcomeId: receipt.goal_id,
-      version: receipt.version,
-      schemaVersion: receipt.schema_version,
-      generatedAt: receipt.generated_at,
-      digestAlgorithm: "SHA-256",
-      digestScope: "snapshot",
-      sha256: receipt.sha256,
-    },
-    snapshot: receipt.snapshot,
+    ...document,
+    signature: receipt.signature ? {
+      algorithm: receipt.signature_algorithm,
+      keyId: receipt.signing_key_id,
+      value: receipt.signature,
+    } : null,
+    verificationUrl: receipt.published_at ? `${getBackendPublicUrl()}/public/receipts/${receipt.public_id}` : null,
   }, null, 2);
   return {
     receipt,
     content,
     contentType: "application/json; charset=utf-8",
     filename: `outcome-receipt-v${receipt.version}-${String(receipt.goal_id).slice(0, 8)}.json`,
+  };
+}
+
+export async function updateOutcomeReceiptPublication({ id, workspaceId, actorId, role, input = {}, database = pool, now = new Date() }) {
+  assertManager(role);
+  const receiptId = uuidValue(id, "Receipt");
+  if (typeof input.published !== "boolean" && input.revoke !== true) {
+    throw httpError("Published must be true or false, or revoke must be true");
+  }
+  const { rows } = await database.query(
+    `UPDATE assurance_outcome_receipts SET
+       published_at=CASE
+         WHEN $1::boolean THEN COALESCE(published_at,$2)
+         WHEN $3::boolean THEN published_at
+         ELSE NULL
+       END,
+       revoked_at=CASE WHEN $3::boolean THEN COALESCE(revoked_at,$2) ELSE revoked_at END
+     WHERE workspace_id=$4 AND id=$5
+       AND ($3::boolean=FALSE OR signature IS NOT NULL)
+     RETURNING id, public_id, published_at, revoked_at`,
+    [input.published === true, now.toISOString(), input.revoke === true, workspaceId, receiptId]
+  );
+  if (!rows[0]) throw httpError("Outcome receipt not found", 404, "ASSURANCE_NOT_FOUND");
+  await logAudit({
+    workspaceId,
+    userId: actorId,
+    action: input.revoke === true ? "assurance.receipt.revoke" : "assurance.receipt.publication",
+    entityType: "assurance_receipt",
+    entityId: receiptId,
+    newValue: { published: Boolean(rows[0].published_at), revokedAt: rows[0].revoked_at },
+  });
+  return {
+    ...rows[0],
+    verificationUrl: rows[0].published_at ? `${getBackendPublicUrl()}/public/receipts/${rows[0].public_id}` : null,
   };
 }
 
@@ -1017,6 +1097,7 @@ export default {
   getDecisionOutcomeIntelligence,
   getDecisionOutcomeRecord,
   getOutcomeReceipt,
+  updateOutcomeReceiptPublication,
   listAdaptivePolicyProposals,
   refreshAdaptivePolicyProposals,
   reviewAdaptivePolicyProposal,

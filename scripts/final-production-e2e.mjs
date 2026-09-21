@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import pg from "pg";
+import { getPoolConfigFromConnectionString } from "../backup/databaseTarget.js";
 
 const { Pool } = pg;
 
@@ -22,8 +23,7 @@ const token = jwt.sign(
   { expiresIn: "45m" }
 );
 const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ...getPoolConfigFromConnectionString(DATABASE_URL),
   max: 2,
 });
 

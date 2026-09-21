@@ -1,6 +1,7 @@
 import pg from "pg";
 import { readFileSync } from "fs";
 import { assertDatabaseScriptSafety } from "./utils/databaseSafety.js";
+import { getPoolConfigFromConnectionString } from "./backup/databaseTarget.js";
 
 assertDatabaseScriptSafety({ operation: "RLS migration" });
 
@@ -10,8 +11,7 @@ if (!connectionString) {
 }
 
 const pool = new pg.Pool({
-  connectionString,
-  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : undefined,
+  ...getPoolConfigFromConnectionString(connectionString),
 });
 
 const sql = readFileSync("./migrations/20260430_enable_rls_all_tables.sql", "utf8");

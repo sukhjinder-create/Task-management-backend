@@ -9,6 +9,8 @@
 // Every outbound call for custom providers goes through here.
 
 import dns from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -136,6 +138,64 @@ function buildAuth({ authType, authConfig = {} }, headers, url) {
   }
 }
 
+function pinnedRequest(url, { address, family }, { method, headers, body, signal, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const transport = url.protocol === "https:" ? https : http;
+    const request = transport.request(url, {
+      method,
+      headers,
+      servername: url.hostname,
+      lookup: (_hostname, options, callback) => {
+        if (options?.all) return callback(null, [{ address, family }]);
+        return callback(null, address, family);
+      },
+    }, (response) => {
+      const chunks = [];
+      let size = 0;
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > MAX_RESPONSE_BYTES) {
+          request.destroy(new Error(`Response from ${url.hostname} is too large (over 5 MB).`));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("end", () => resolve({
+        status: response.statusCode || 0,
+        headers: new Headers(response.headers),
+        body: Buffer.concat(chunks),
+      }));
+    });
+    request.setTimeout(Math.min(Math.max(timeoutMs, 1000), 30_000), () => request.destroy(Object.assign(new Error("Request timed out"), { name: "AbortError" })));
+    request.on("error", reject);
+    if (signal) {
+      if (signal.aborted) request.destroy(Object.assign(new Error("Request aborted"), { name: "AbortError" }));
+      else signal.addEventListener("abort", () => request.destroy(Object.assign(new Error("Request aborted"), { name: "AbortError" })), { once: true });
+    }
+    if (body != null) request.write(body);
+    request.end();
+  });
+}
+
+export async function safeFetch(rawUrl, options = {}) {
+  const { url, address, family } = await assertSafeUrl(rawUrl instanceof Request ? rawUrl.url : rawUrl);
+  const source = rawUrl instanceof Request ? rawUrl : null;
+  const method = String(options.method || source?.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || source?.headers || {});
+  let body = options.body ?? null;
+  if (body != null && typeof body !== "string" && !Buffer.isBuffer(body) && !(body instanceof Uint8Array)) {
+    body = await new Response(body).arrayBuffer().then(Buffer.from);
+  }
+  const response = await pinnedRequest(url, { address, family }, {
+    method,
+    headers: Object.fromEntries(headers.entries()),
+    body,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS,
+  });
+  return new Response(response.body, { status: response.status, headers: response.headers });
+}
+
 /**
  * Perform a guarded outbound request on behalf of a custom provider.
  *
@@ -166,7 +226,7 @@ export async function safeFetchJson(rawUrl, {
 
   let response;
   try {
-    response = await fetch(url.toString(), {
+    response = await safeFetch(url.toString(), {
       method,
       headers,
       body: body == null ? undefined : (typeof body === "string" ? body : JSON.stringify(body)),
@@ -188,8 +248,19 @@ export async function safeFetchJson(rawUrl, {
     if (!location) throw new Error(`${url.hostname} returned a redirect with no destination.`);
     if (redirectsRemaining <= 0) throw new UnsafeUrlError("Too many redirects.");
     // Re-validated on the next call — this is the DNS-rebinding / redirect bypass guard.
-    return safeFetchJson(new URL(location, url).toString(), {
-      method, authType, authConfig, headers: extraHeaders, body, timeoutMs,
+    const target = new URL(location, url);
+    const sameOrigin = target.origin === url.origin;
+    const nextMethod = response.status === 303 || ([301, 302].includes(response.status) && String(method).toUpperCase() === "POST") ? "GET" : method;
+    const nextHeaders = sameOrigin ? extraHeaders : Object.fromEntries(
+      Object.entries(extraHeaders).filter(([key]) => !/^(authorization|cookie|proxy-authorization|x-(?:asystence|taskmanagement)-)/i.test(key))
+    );
+    return safeFetchJson(target.toString(), {
+      method: nextMethod,
+      authType: sameOrigin ? authType : "none",
+      authConfig: sameOrigin ? authConfig : {},
+      headers: nextHeaders,
+      body: nextMethod === "GET" ? null : body,
+      timeoutMs,
       redirectsRemaining: redirectsRemaining - 1,
     });
   }

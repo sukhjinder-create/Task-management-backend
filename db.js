@@ -28,7 +28,15 @@ function databaseUrlIsLocal(url) {
 const DB_SSL_ENABLED = DB_SSL_IS_EXPLICIT
   ? ["true", "1", "require"].includes(DB_SSL_VALUE)
   : Boolean(DATABASE_URL && !databaseUrlIsLocal(DATABASE_URL));
-const sslOptions = DB_SSL_ENABLED ? { ssl: { rejectUnauthorized: false } } : {};
+const DB_SSL_REJECT_UNAUTHORIZED = !["false", "0", "no"].includes(
+  String(process.env.DB_SSL_REJECT_UNAUTHORIZED ?? "true").trim().toLowerCase()
+);
+const sslOptions = DB_SSL_ENABLED ? {
+  ssl: {
+    rejectUnauthorized: DB_SSL_REJECT_UNAUTHORIZED,
+    ...(process.env.DB_SSL_CA ? { ca: process.env.DB_SSL_CA.replace(/\\n/g, "\n") } : {}),
+  },
+} : {};
 
 // Prevent node-postgres from converting DATE columns to JS Date objects.
 // Without this, "2026-03-26" becomes "2026-03-25T18:30:00.000Z" in IST (UTC+5:30),

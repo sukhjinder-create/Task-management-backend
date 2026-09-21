@@ -27,7 +27,7 @@ async function hasPolicyTables() {
 /**
  * @returns {Promise<{allowed: boolean, reason?: string}>}
  */
-export async function checkPolicies({ workspaceId, providerKey /*, capabilityKey */ }) {
+export async function checkPolicies({ workspaceId, providerKey, capabilityKey }) {
   try {
     if (!(await hasPolicyTables())) return { allowed: true };
 
@@ -38,7 +38,9 @@ export async function checkPolicies({ workspaceId, providerKey /*, capabilityKey
       [workspaceId ?? null]
     ).catch(() => ({ rows: [] }));
 
-    for (const p of policies) {
+    const safety = {};
+    const orderedPolicies = [...policies].sort((a, b) => Number(a.scope === "workspace") - Number(b.scope === "workspace"));
+    for (const p of orderedPolicies) {
       const val = p.value_json || {};
       if (p.key === "blocked_providers" && Array.isArray(val.providers) && val.providers.includes(providerKey)) {
         return { allowed: false, reason: `Provider "${providerKey}" is blocked by policy` };
@@ -46,13 +48,22 @@ export async function checkPolicies({ workspaceId, providerKey /*, capabilityKey
       if (p.key === "allowed_providers" && Array.isArray(val.providers) && val.providers.length && !val.providers.includes(providerKey)) {
         return { allowed: false, reason: `Provider "${providerKey}" is not in the approved provider list` };
       }
+      if (p.key === "safety") {
+        if (["off", "variables", "strict"].includes(val.enforcementMode)) safety.safetyMode = val.enforcementMode;
+        if (["off", "input", "output", "both"].includes(val.piiRedaction)) safety.piiRedaction = val.piiRedaction;
+        if (["advisory", "enforce"].includes(val.outputSchemaMode)) safety.outputSchemaMode = val.outputSchemaMode;
+      }
+      if (String(p.key).startsWith("output_schema") && (!val.capability || val.capability === capabilityKey) && val.schema) {
+        safety.outputSchema = val.schema;
+        if (["advisory", "enforce"].includes(val.mode)) safety.outputSchemaMode = val.mode;
+      }
     }
 
     // Hard budget check — only blocks if a hard_limit budget is configured and exceeded.
     const allowedBudget = await checkHardBudget(workspaceId);
     if (!allowedBudget.allowed) return allowedBudget;
 
-    return { allowed: true };
+    return { allowed: true, ...safety };
   } catch (err) {
     // Fail OPEN in Phase 1 so a policy bug can never take AI down. Later phases
     // can make selected policies fail-closed via configuration.

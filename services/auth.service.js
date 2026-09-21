@@ -44,6 +44,7 @@ import {
   requestEmailVerification,
 } from "./emailVerification.service.js";
 import pool from "../db.js";
+import { getSessionPolicy } from "./workspaceSecurity.service.js";
 import { getJwtSecret } from "../config/secrets.js";
 import {
   getFrontendBaseUrl,
@@ -145,6 +146,31 @@ export async function loginWithEmail(email, password) {
 
   const match = await bcrypt.compare(password, user.password_hash);
   if (!match) throw new Error("Invalid email or password");
+  if (user.disabled_at) throw new Error("Account is disabled");
+  const loginPolicy = await pool.query(
+    `SELECT policy.enforce_sso, policy.require_mfa,
+            sso.enabled AS sso_enabled, sso.provider
+       FROM workspaces workspace
+       LEFT JOIN workspace_security_policies policy ON policy.workspace_id = workspace.id
+       LEFT JOIN workspace_sso_configs sso ON sso.workspace_id = workspace.id
+      WHERE workspace.id = $1`,
+    [user.workspace_id]
+  ).catch((error) => {
+    if (["42P01", "42703"].includes(error.code)) return { rows: [] };
+    throw error;
+  });
+  const policy = loginPolicy.rows[0];
+  if (policy?.enforce_sso && policy?.sso_enabled) {
+    const error = new Error("Use your organization's single sign-on to continue");
+    error.code = "SSO_REQUIRED";
+    error.provider = policy.provider;
+    throw error;
+  }
+  if (policy?.require_mfa && !user.mfa_enabled) {
+    const error = new Error("Multi-factor authentication enrollment is required");
+    error.code = "MFA_ENROLLMENT_REQUIRED";
+    throw error;
+  }
   assertEmailVerified(user);
 
   // If MFA enabled, issue a short-lived session token (5 min) instead of full JWT
@@ -363,14 +389,30 @@ function hashToken(plaintext) {
 export async function createSession(userId, workspaceId, ipAddress, userAgent) {
   const refreshToken = crypto.randomBytes(40).toString("hex"); // 80-char hex
   const tokenHash    = hashToken(refreshToken);
-  const expiresAt    = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_DAYS * 86_400_000);
+  const policy = await getSessionPolicy(workspaceId).catch((error) => {
+    if (["42P01", "42703"].includes(error.code)) return null;
+    throw error;
+  });
+  const maxAgeMs = (policy?.maxAgeMinutes || REFRESH_TOKEN_EXPIRES_DAYS * 1440) * 60_000;
+  const idleMs = (policy?.idleMinutes || REFRESH_TOKEN_EXPIRES_DAYS * 1440) * 60_000;
+  const absoluteExpiresAt = new Date(Date.now() + maxAgeMs);
+  const expiresAt = new Date(Math.min(absoluteExpiresAt.getTime(), Date.now() + idleMs));
 
   await pool.query(
     `INSERT INTO user_sessions
-       (user_id, workspace_id, refresh_token_hash, ip_address, user_agent, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [userId, workspaceId || "GLOBAL", tokenHash, ipAddress || null, userAgent || null, expiresAt]
-  );
+       (user_id, workspace_id, refresh_token_hash, ip_address, user_agent,
+        expires_at, absolute_expires_at, last_seen_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+    [userId, workspaceId || "GLOBAL", tokenHash, ipAddress || null, userAgent || null, expiresAt, absoluteExpiresAt]
+  ).catch(async (error) => {
+    if (error.code !== "42703") throw error;
+    await pool.query(
+      `INSERT INTO user_sessions
+         (user_id, workspace_id, refresh_token_hash, ip_address, user_agent, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [userId, workspaceId || "GLOBAL", tokenHash, ipAddress || null, userAgent || null, expiresAt]
+    );
+  });
 
   return refreshToken;
 }
@@ -399,6 +441,10 @@ export async function refreshSession(refreshToken, ipAddress, userAgent) {
 
   const user = await getUserById(session.user_id);
   if (!user) throw new Error("User not found");
+  if (user.disabled_at) {
+    await pool.query("DELETE FROM user_sessions WHERE user_id = $1", [session.user_id]);
+    throw new Error("Account is disabled");
+  }
   if (!user.email_verified_at || user.email_verification_method === "legacy") {
     await pool.query("DELETE FROM user_sessions WHERE id = $1", [session.id]);
     throw new Error("Verify your email before signing in.");
@@ -412,12 +458,22 @@ export async function refreshSession(refreshToken, ipAddress, userAgent) {
 
   const newRefreshToken = crypto.randomBytes(40).toString("hex");
   const newTokenHash    = hashToken(newRefreshToken);
-  const expiresAt       = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_DAYS * 86_400_000);
+  const policy = await getSessionPolicy(session.workspace_id).catch((error) => {
+    if (["42P01", "42703"].includes(error.code)) return null;
+    throw error;
+  });
+  const idleMs = (policy?.idleMinutes || REFRESH_TOKEN_EXPIRES_DAYS * 1440) * 60_000;
+  const absoluteExpiresAt = session.absolute_expires_at
+    ? new Date(session.absolute_expires_at)
+    : new Date(session.expires_at);
+  if (absoluteExpiresAt <= new Date()) throw new Error("Session expired or invalid. Please log in again.");
+  const expiresAt = new Date(Math.min(absoluteExpiresAt.getTime(), Date.now() + idleMs));
 
   await pool.query(
     `INSERT INTO user_sessions
-       (user_id, workspace_id, refresh_token_hash, ip_address, user_agent, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
+       (user_id, workspace_id, refresh_token_hash, ip_address, user_agent,
+        expires_at, family_id, absolute_expires_at, last_seen_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
     [
       session.user_id,
       session.workspace_id,
@@ -425,8 +481,19 @@ export async function refreshSession(refreshToken, ipAddress, userAgent) {
       ipAddress || session.ip_address,
       userAgent || session.user_agent,
       expiresAt,
+      session.family_id || crypto.randomUUID(),
+      absoluteExpiresAt,
     ]
-  );
+  ).catch(async (error) => {
+    if (error.code !== "42703") throw error;
+    await pool.query(
+      `INSERT INTO user_sessions
+         (user_id, workspace_id, refresh_token_hash, ip_address, user_agent, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [session.user_id, session.workspace_id, newTokenHash,
+       ipAddress || session.ip_address, userAgent || session.user_agent, expiresAt]
+    );
+  });
 
   return { token: newJwt, refreshToken: newRefreshToken, user: safeUser };
 }

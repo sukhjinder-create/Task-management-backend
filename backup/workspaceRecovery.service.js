@@ -6,6 +6,7 @@ import { createGunzip } from "zlib";
 import path from "path";
 import { fileURLToPath } from "url";
 import pool from "../db.js";
+import { createBackupDecryptTransform, getBackupEncryptionKey } from "./backup.service.js";
 import {
   buildDatabaseUrl as buildPrimaryDatabaseUrl,
   createConfiguredPool,
@@ -33,7 +34,10 @@ const BACKUP_DIR = process.env.BACKUP_LOCAL_DIR
 export const TABLE_PLAN = [
   { table: "workspaces", where: "id = $1" },
   { table: "users", where: "workspace_id = $1" },
+  { table: "enterprise_roles", where: "workspace_id = $1" },
   { table: "workspace_users", where: "workspace_id = $1" },
+  { table: "workspace_security_policies", where: "workspace_id = $1" },
+  { table: "workspace_domains", where: "workspace_id = $1" },
   { table: "system_users", where: "workspace_id = $1" },
   { table: "notification_preferences", where: "workspace_id = $1" },
   { table: "projects", where: "workspace_id = $1" },
@@ -82,7 +86,26 @@ export const TABLE_PLAN = [
   { table: "okr_key_results", where: "objective_id IN (SELECT id FROM okr_objectives WHERE workspace_id = $1)" },
   { table: "okr_sprint_links", where: "objective_id IN (SELECT id FROM okr_objectives WHERE workspace_id = $1)" },
   { table: "goal_assurance_evidence", where: "workspace_id = $1" },
+  { table: "assurance_workspace_policies", where: "workspace_id = $1" },
+  { table: "assurance_portfolios", where: "workspace_id = $1" },
+  { table: "assurance_portfolio_goals", where: "workspace_id = $1" },
+  { table: "assurance_goal_dependencies", where: "workspace_id = $1" },
+  { table: "assurance_approval_requests", where: "workspace_id = $1" },
+  { table: "assurance_state_snapshots", where: "workspace_id = $1" },
+  { table: "assurance_outcome_observations", where: "workspace_id = $1" },
+  { table: "assurance_memory_patterns", where: "workspace_id = $1" },
+  { table: "assurance_export_manifests", where: "workspace_id = $1" },
+  { table: "assurance_decisions", where: "workspace_id = $1" },
+  { table: "assurance_decision_reviews", where: "workspace_id = $1" },
+  { table: "assurance_experiments", where: "workspace_id = $1" },
+  { table: "assurance_scenario_analyses", where: "workspace_id = $1" },
+  { table: "assurance_policy_proposals", where: "workspace_id = $1" },
+  { table: "outcome_signing_keys", where: "workspace_id = $1" },
+  { table: "assurance_outcome_receipts", where: "workspace_id = $1" },
   { table: "assurance_client_reviews", where: "workspace_id = $1" },
+  { table: "assurance_client_review_approvers", where: "workspace_id = $1" },
+  { table: "assurance_obligations", where: "workspace_id = $1" },
+  { table: "assurance_obligation_evidence", where: "workspace_id = $1" },
   { table: "review_cycles", where: "workspace_id = $1" },
   { table: "performance_reviews", where: "cycle_id IN (SELECT id FROM review_cycles WHERE workspace_id = $1)" },
   { table: "leave_types", where: "workspace_id = $1" },
@@ -174,11 +197,17 @@ export const TABLE_PLAN = [
   { table: "user_activation_payments", where: "workspace_id = $1" },
   { table: "workspace_sso_configs", where: "workspace_id = $1" },
   { table: "api_keys", where: "workspace_id = $1" },
+  { table: "oauth_service_accounts", where: "workspace_id = $1" },
+  { table: "scim_tokens", where: "workspace_id = $1" },
+  { table: "scim_external_identities", where: "workspace_id = $1" },
+  { table: "scim_groups", where: "workspace_id = $1" },
+  { table: "scim_group_members", where: "workspace_id = $1" },
   { table: "webhooks", where: "workspace_id = $1" },
   { table: "webhook_deliveries", where: "webhook_id IN (SELECT id FROM webhooks WHERE workspace_id = $1)" },
   { table: "workspace_work_schedule", where: "workspace_id = $1" },
   { table: "workspace_holidays", where: "workspace_id = $1" },
   { table: "gdpr_erasure_requests", where: "workspace_id = $1" },
+  { table: "privacy_legal_holds", where: "workspace_id = $1" },
   { table: "trial_ip_log", where: "workspace_id = $1" },
   { table: "migration_imports", where: "workspace_id = $1" },
   { table: "gdpr_consents", where: "user_id IN (SELECT id FROM users WHERE workspace_id = $1)" },
@@ -243,7 +272,7 @@ function buildManagedSnapshotDbName() {
   return name.slice(0, 63);
 }
 
-function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null }) {
+function restoreGzipSqlToDatabase({ gzipFilePath, database, encrypted = false, onProgress = null }) {
   return new Promise((resolve, reject) => {
     const env = getLibpqEnv(database);
     const psql = spawn(
@@ -258,6 +287,7 @@ function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null })
     let stderrOut = "";
     let done = false;
     let input = null;
+    let decrypt = null;
     let gunzip = null;
     let compatFilter = null;
     let processedBytes = 0;
@@ -278,9 +308,12 @@ function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null })
     };
     const cleanup = () => {
       try { if (input && gunzip) input.unpipe(gunzip); } catch {}
+      try { if (input && decrypt) input.unpipe(decrypt); } catch {}
+      try { if (decrypt && gunzip) decrypt.unpipe(gunzip); } catch {}
       try { if (gunzip && compatFilter) gunzip.unpipe(compatFilter); } catch {}
       try { if (compatFilter) compatFilter.unpipe(psql.stdin); } catch {}
       try { if (input) input.destroy(); } catch {}
+      try { if (decrypt) decrypt.destroy(); } catch {}
       try { if (gunzip) gunzip.destroy(); } catch {}
       try { if (compatFilter) compatFilter.destroy(); } catch {}
       try { psql.stdin.end(); } catch {}
@@ -299,6 +332,7 @@ function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null })
     });
 
     input = createReadStream(gzipFilePath);
+    decrypt = encrypted ? createBackupDecryptTransform(getBackupEncryptionKey()) : null;
     gunzip = createGunzip();
     compatFilter = createSqlCompatibilityFilter();
 
@@ -308,6 +342,7 @@ function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null })
     });
 
     input.on("error", (err) => fail(new Error(`Failed to read backup file: ${err.message}`)));
+    if (decrypt) decrypt.on("error", (err) => fail(new Error(`Failed to decrypt backup file: ${err.message}`)));
     gunzip.on("error", (err) => fail(new Error(`Failed to decompress backup file: ${err.message}`)));
     psql.stdin.on("error", (err) => {
       // psql may terminate early on SQL errors; writes after that raise EPIPE.
@@ -325,7 +360,7 @@ function restoreGzipSqlToDatabase({ gzipFilePath, database, onProgress = null })
       reject(new Error(`psql restore failed with code ${code}: ${stderrOut || "unknown error"}`));
     });
 
-    input.pipe(gunzip).pipe(compatFilter).pipe(psql.stdin);
+    (decrypt ? input.pipe(decrypt) : input).pipe(gunzip).pipe(compatFilter).pipe(psql.stdin);
   });
 }
 
@@ -414,6 +449,7 @@ async function buildManagedSnapshotSource({ onStatus }) {
   await send({ message: "Restoring latest backup into managed snapshot database..." });
   await restoreGzipSqlToDatabase({
     gzipFilePath: localBackupPath,
+    encrypted: latestBackup.encrypted === true,
     database: snapshotDb,
     onProgress: ({ processedBytes, totalBytes }) => {
       const processedMb = (processedBytes / 1024 / 1024).toFixed(1);

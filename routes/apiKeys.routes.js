@@ -5,8 +5,14 @@ import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import db from "../db.js";
 import { logAudit } from "../services/audit.service.js";
+import {
+  SUPPORTED_API_KEY_SCOPES,
+  validateApiKeyScopes,
+} from "../services/apiKey.service.js";
 
 const router = express.Router();
+
+router.get("/scopes", (_req, res) => res.json(SUPPORTED_API_KEY_SCOPES));
 
 /** GET /api-keys — list keys for workspace */
 router.get("/", async (req, res) => {
@@ -32,15 +38,29 @@ router.post("/", async (req, res) => {
     if (!["admin", "owner"].includes(req.user.role)) return res.status(403).json({ error: "Admin required" });
     const { name, scopes = ["read:tasks"], expires_at } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
+    const validatedScopes = validateApiKeyScopes(scopes);
+    if (expires_at && Number.isNaN(Date.parse(expires_at))) {
+      return res.status(400).json({ error: "expires_at must be a valid date" });
+    }
+    const policy = await db.query(
+      "SELECT api_key_max_age_days FROM workspace_security_policies WHERE workspace_id=$1",
+      [req.workspaceId]
+    );
+    const maxAgeDays = Number(policy.rows[0]?.api_key_max_age_days || 365);
+    const maximumExpiry = Date.now() + maxAgeDays * 86_400_000;
+    const expiresAt = expires_at ? new Date(expires_at) : new Date(maximumExpiry);
+    if (expiresAt.getTime() <= Date.now() || expiresAt.getTime() > maximumExpiry + 60_000) {
+      return res.status(400).json({ error: `expires_at must be within ${maxAgeDays} days` });
+    }
 
-    const rawKey = "tm_" + crypto.randomBytes(24).toString("hex");
+    const rawKey = "asy_" + crypto.randomBytes(32).toString("hex");
     const keyHash = await bcrypt.hash(rawKey, 10);
-    const keyPrefix = rawKey.slice(0, 8);
+    const keyPrefix = rawKey.slice(0, 12);
 
     const row = await db.query(
       `INSERT INTO api_keys (workspace_id, user_id, name, key_hash, key_prefix, scopes, expires_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, name, key_prefix, scopes, expires_at, created_at`,
-      [req.workspaceId, req.user.id, name, keyHash, keyPrefix, scopes, expires_at || null]
+      [req.workspaceId, req.user.id, String(name).trim(), keyHash, keyPrefix, validatedScopes, expiresAt.toISOString()]
     );
 
     await logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "api_key.create", entityType: "api_key", entityId: row.rows[0].id, newValue: { name } });
@@ -48,7 +68,7 @@ router.post("/", async (req, res) => {
     // Return raw key ONCE — never stored again
     res.status(201).json({ ...row.rows[0], key: rawKey, warning: "Save this key — it will not be shown again." });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(err.message?.startsWith("Unsupported") || err.message?.includes("scope") ? 400 : 500).json({ error: err.message });
   }
 });
 

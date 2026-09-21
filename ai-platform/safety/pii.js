@@ -28,3 +28,17 @@ export function detectPii(text) {
   }
   return { found: types.length > 0, types, count };
 }
+
+export function redactPii(text) {
+  let value = String(text ?? "");
+  const redactions = [];
+  for (const pattern of PII_PATTERNS) {
+    let count = 0;
+    value = value.replace(pattern.re, () => {
+      count += 1;
+      return `[REDACTED_${pattern.type.toUpperCase()}]`;
+    });
+    if (count) redactions.push({ type: pattern.type, count });
+  }
+  return { text: value, redactions };
+}

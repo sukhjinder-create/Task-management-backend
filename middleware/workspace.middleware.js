@@ -22,6 +22,13 @@ import {
   describeTrialLifecycle,
   reconcileExpiredWorkspaceTrial,
 } from "../services/trialLifecycle.service.js";
+import {
+  getWorkspaceSecurityContext,
+  hasWorkspacePermission,
+  isRequestIpAllowed,
+  requiredWorkspacePermission,
+} from "../services/workspaceSecurity.service.js";
+import { getClientIp } from "../utils/requestContext.util.js";
 
 // All feature keys — granted in full during a free trial or complimentary access
 const ALL_FEATURE_KEYS = [
@@ -105,6 +112,42 @@ export async function requireWorkspaceForUser(req, res, next) {
 
   // 🔐 Attach full workspace for downstream use
   req.workspace = workspace;
+
+  // Existing memberships have no enterprise role and therefore keep their
+  // exact current behavior. Only explicitly assigned custom roles are subject
+  // to the additional least-privilege permission map.
+  try {
+    const security = await getWorkspaceSecurityContext(workspaceId, req.user.id);
+    if (security?.billing_status === "pending") {
+      return res.status(403).json({ error: "Workspace membership is inactive" });
+    }
+    if (security?.require_mfa && !security.mfa_enabled) {
+      return res.status(403).json({ error: "Multi-factor authentication is required", code: "MFA_ENROLLMENT_REQUIRED" });
+    }
+    if (!(await isRequestIpAllowed(getClientIp(req), security?.allowed_ip_cidrs))) {
+      return res.status(403).json({ error: "Access is not allowed from this network" });
+    }
+    if (security?.enterprise_role_id) {
+      const required = requiredWorkspacePermission(req);
+      if (!hasWorkspacePermission(security.permissions, required)) {
+        return res.status(403).json({ error: "Permission denied", required_permission: required });
+      }
+      req.user.role = security.base_role;
+      req.user.permissions = security.permissions;
+      req.user.enterpriseRoleId = security.enterprise_role_id;
+    }
+    req.securityPolicy = security || {};
+  } catch (err) {
+    // Rolling-deploy compatibility: old application instances and the additive
+    // migration may briefly overlap. Missing new tables/columns means legacy
+    // behavior until the migration lands; every other database failure closes.
+    if (["42P01", "42703"].includes(err.code)) {
+      req.securityPolicy = {};
+    } else {
+    console.error("Workspace security policy check failed:", err.message);
+    return res.status(503).json({ error: "Unable to verify workspace security policy" });
+    }
+  }
 
   // Check if workspace is on an active free trial or has a lifetime exemption
   const trialState = describeTrialLifecycle(workspace);

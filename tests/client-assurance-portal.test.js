@@ -8,6 +8,7 @@ import {
   normalizeClientAssignmentInput,
   normalizeClientDecision,
   normalizeClientEmail,
+  normalizeReviewApprovers,
 } from "../services/clientPortal.service.js";
 import { buildAssuranceAttention, calculateAssuranceState } from "../services/executionAssurance.service.js";
 
@@ -67,6 +68,16 @@ test("client identities and decisions are normalized at the trust boundary", () 
   assert.equal(normalizeClientDecision({ decision: "accepted" }).decision, "accepted");
   assert.throws(() => normalizeClientDecision({ decision: "changes_requested" }), /Change request is required/);
   assert.throws(() => normalizeClientDecision({ decision: "maybe" }), /Choose accept/);
+  const approvers = normalizeReviewApprovers({ contactIds: [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+  ], requiredApprovals: 2 }, "11111111-1111-4111-8111-111111111111");
+  assert.equal(approvers.contactIds.length, 2);
+  assert.equal(approvers.requiredApprovals, 2);
+  assert.throws(
+    () => normalizeReviewApprovers({ requiredApprovals: 2 }, "11111111-1111-4111-8111-111111111111"),
+    /between 1 and 1/
+  );
 });
 
 test("portal credentials are deterministic digests but never the raw token", () => {

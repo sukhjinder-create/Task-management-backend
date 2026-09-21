@@ -1,65 +1,41 @@
-name: AI Platform CI
-
-# P0 deliverable: a CI gate that runs the AI Platform test harness and BLOCKS on
-# failure. Scoped intentionally to the hermetic AI Platform harness (no database,
-# no provider keys) so it is reliably green and meaningful. Broadening CI to the
-# full backend suite requires test-DB provisioning and is out of P0 scope.
+name: Enterprise regression gate
 
 on:
   pull_request:
-    paths:
-      - "ai-platform/**"
-      - "tests/ai-platform-harness.test.js"
-      - "tests/ai-platform-contract.test.js"
-      - "services/llm.js"
-      - ".github/workflows/ai-platform-ci.yml"
-      # Any migration can create a table, and a table born without RLS is
-      # readable through Supabase's public REST API.
-      - "migrations/**"
-      - "tests/migrations-rls-guard.test.js"
   push:
-    branches: [ main ]
-    paths:
-      - "ai-platform/**"
-      - "tests/ai-platform-harness.test.js"
-      - "tests/ai-platform-contract.test.js"
-      - "services/llm.js"
-      - "migrations/**"
-      - "tests/migrations-rls-guard.test.js"
+    branches: [main]
+
+concurrency:
+  group: enterprise-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  ai-platform-harness:
+  backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Block committed credentials
+        run: npm run security:secrets
+      - name: Syntax check
+        run: find . -path './node_modules' -prune -o -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Full backend regression suite
+        run: npm test
+      - name: Block high and critical production vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Syntax-check AI Platform modules
-        run: |
-          set -e
-          find ai-platform -name '*.js' -print0 | xargs -0 -n1 node --check
-          node --check services/llm.js
-
-      - name: Run AI Platform self-tests (blocks on failure)
-        run: node --test tests/ai-platform-*.test.js
-
-      # Every table must have Row Level Security. Supabase publishes a REST
-      # endpoint for each table, and RLS is the only thing that stops an anon
-      # key reading it directly, bypassing the backend's permission checks.
-      #
-      # 20260430_enable_rls_all_tables.sql enabled RLS by listing tables BY NAME,
-      # which protected that day's tables and nothing since -- 85 tables had
-      # silently drifted out of protection by 2026-08-05, including meeting
-      # transcripts and billing. Nothing detected it because nothing checked.
-      # This check is static (no database, no credentials), so it can block the
-      # pull request that introduces the table rather than being noticed months
-      # later.
-      - name: Every migrated table has RLS (blocks on failure)
-        run: node --test tests/migrations-rls-guard.test.js
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --tag asystence-api:${{ github.sha }} .

@@ -1,89 +1,202 @@
-// services/webhook.service.js
-// Outbound webhook delivery to external URLs
-import crypto from "crypto";
-import axios from "axios";
+import crypto from "node:crypto";
 import db from "../db.js";
+import { safeFetchJson } from "../integrations/core/safeFetch.js";
+import { decryptSecret } from "../config/dataEncryption.js";
 
-/**
- * Fire all matching webhooks for an event in a workspace.
- * Non-blocking — runs in the background.
- */
-export function fireWebhooks(workspaceId, event, payload) {
-  // Run async without blocking caller
-  _deliver(workspaceId, event, payload).catch(err =>
-    console.warn("[webhooks] delivery error:", err.message)
-  );
+const MAX_ATTEMPTS = 6;
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 8 * 60 * 60_000];
+let workerTimer = null;
+
+function deliveryEnvelope(delivery) {
+  return JSON.stringify({
+    event: delivery.event,
+    payload: delivery.payload,
+    timestamp: new Date(delivery.created_at).toISOString(),
+  });
 }
 
-async function _deliver(workspaceId, event, payload) {
-  const rows = await db.query(
-    "SELECT * FROM webhooks WHERE workspace_id = $1 AND is_active = true AND $2 = ANY(events)",
-    [workspaceId, event]
-  );
-
-  for (const hook of rows.rows) {
-    const start = Date.now();
-    let responseStatus = null;
-    let responseBody = null;
-    let success = false;
-
-    try {
-      const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
-      const headers = {
-        "Content-Type": "application/json",
-        "X-TaskManagement-Event": event,
-        "X-TaskManagement-Delivery": crypto.randomUUID(),
-      };
-
-      // Add HMAC signature when secret configured
-      if (hook.secret) {
-        headers["X-TaskManagement-Signature"] = "sha256=" +
-          crypto.createHmac("sha256", hook.secret).update(body).digest("hex");
-      }
-
-      const response = await axios.post(hook.url, body, {
-        headers,
-        timeout: 10000,
-        validateStatus: () => true, // don't throw on 4xx/5xx
-      });
-
-      responseStatus = response.status;
-      responseBody   = typeof response.data === "string" ? response.data.slice(0, 1000) : JSON.stringify(response.data).slice(0, 1000);
-      success        = response.status >= 200 && response.status < 300;
-    } catch (err) {
-      responseBody = err.message;
-    }
-
-    const duration = Date.now() - start;
-
-    // Log delivery
-    await db.query(
-      `INSERT INTO webhook_deliveries (webhook_id, event, payload, response_status, response_body, duration_ms, success)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [hook.id, event, JSON.stringify(payload), responseStatus, responseBody, duration, success]
-    ).catch(() => {});
-
-    // Update failure count and last_fired_at
-    await db.query(
-      `UPDATE webhooks SET
-         last_fired_at = NOW(),
-         failure_count = CASE WHEN $1 THEN 0 ELSE failure_count + 1 END,
-         is_active     = CASE WHEN failure_count >= 9 AND NOT $1 THEN false ELSE is_active END
-       WHERE id = $2`,
-      [success, hook.id]
-    ).catch(() => {});
+async function sendClaimedDelivery(delivery, database = db) {
+  const startedAt = Date.now();
+  const body = deliveryEnvelope(delivery);
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Asystence-Event": delivery.event,
+    "X-Asystence-Delivery": delivery.delivery_id,
+    // Keep the previous headers while consumers migrate to the product name.
+    "X-TaskManagement-Event": delivery.event,
+    "X-TaskManagement-Delivery": delivery.delivery_id,
+  };
+  if (delivery.secret) {
+    const signature = `sha256=${crypto.createHmac("sha256", decryptSecret(delivery.secret)).update(body).digest("hex")}`;
+    headers["X-Asystence-Signature"] = signature;
+    headers["X-TaskManagement-Signature"] = signature;
   }
+
+  let statusCode = null;
+  let responseBody = null;
+  let errorMessage = null;
+  let success = false;
+  try {
+    const response = await safeFetchJson(delivery.url, {
+      method: "POST",
+      headers,
+      body,
+      timeoutMs: 10_000,
+    });
+    statusCode = response.status;
+    responseBody = response.rawPreview?.slice(0, 1000) || null;
+    success = response.ok;
+    if (!success) errorMessage = `HTTP ${response.status}`;
+  } catch (error) {
+    errorMessage = error.message;
+    responseBody = error.message.slice(0, 1000);
+  }
+
+  const attempts = Number(delivery.attempt_count || 1);
+  const terminal = !success && attempts >= MAX_ATTEMPTS;
+  const retryDelay = RETRY_DELAYS_MS[Math.min(Math.max(attempts - 1, 0), RETRY_DELAYS_MS.length - 1)];
+  await database.query(
+    `UPDATE webhook_deliveries
+        SET response_status = $2,
+            response_body = $3,
+            duration_ms = $4,
+            success = $5,
+            status = $6,
+            last_error = $7,
+            completed_at = CASE WHEN $5 OR $6 = 'dead' THEN now() ELSE NULL END,
+            next_attempt_at = CASE WHEN $6 = 'pending' THEN now() + ($8 * interval '1 millisecond') ELSE next_attempt_at END,
+            locked_at = NULL
+      WHERE id = $1`,
+    [
+      delivery.id,
+      statusCode,
+      responseBody,
+      Date.now() - startedAt,
+      success,
+      success ? "delivered" : terminal ? "dead" : "pending",
+      errorMessage,
+      retryDelay,
+    ]
+  );
+
+  await database.query(
+    `UPDATE webhooks
+        SET last_fired_at = now(),
+            failure_count = CASE WHEN $1 THEN 0 ELSE failure_count + 1 END
+      WHERE id = $2 AND workspace_id = $3`,
+    [success, delivery.webhook_id, delivery.workspace_id]
+  );
+
+  return { sent: true, success, status: statusCode, deliveryId: delivery.delivery_id };
 }
 
-/**
- * Test a webhook by sending a ping event.
- */
-export async function testWebhook(webhookId, workspaceId) {
-  const row = await db.query(
-    "SELECT * FROM webhooks WHERE id = $1 AND workspace_id = $2",
-    [webhookId, workspaceId]
+async function claimDeliveries({ limit = 25, deliveryId = null, database = db } = {}) {
+  const result = await database.query(
+    `WITH candidates AS (
+       SELECT delivery.id
+         FROM webhook_deliveries delivery
+         JOIN webhooks webhook
+           ON webhook.id = delivery.webhook_id
+          AND webhook.workspace_id = delivery.workspace_id
+        WHERE webhook.is_active = true
+          AND ($2::uuid IS NULL OR delivery.id = $2::uuid)
+          AND (
+            (delivery.status = 'pending' AND delivery.next_attempt_at <= now())
+            OR (delivery.status = 'processing' AND delivery.locked_at < now() - interval '5 minutes')
+          )
+        ORDER BY delivery.next_attempt_at, delivery.created_at
+        LIMIT $1
+        FOR UPDATE OF delivery SKIP LOCKED
+     ), claimed AS (
+       UPDATE webhook_deliveries delivery
+          SET status = 'processing', locked_at = now(), attempt_count = attempt_count + 1
+         FROM candidates
+        WHERE delivery.id = candidates.id
+        RETURNING delivery.*
+     )
+     SELECT claimed.*, webhook.url, webhook.secret
+       FROM claimed
+       JOIN webhooks webhook
+         ON webhook.id = claimed.webhook_id
+        AND webhook.workspace_id = claimed.workspace_id`,
+    [Math.min(Math.max(Number(limit) || 25, 1), 100), deliveryId]
   );
-  if (!row.rows[0]) throw new Error("Webhook not found");
-  await _deliver(workspaceId, "ping", { message: "Test delivery from TaskManagement" });
-  return { sent: true };
+  return result.rows;
 }
+
+export async function processWebhookQueue(options = {}) {
+  const deliveries = await claimDeliveries(options);
+  const results = [];
+  for (const delivery of deliveries) {
+    results.push(await sendClaimedDelivery(delivery, options.database || db));
+  }
+  return results;
+}
+
+export async function enqueueWebhookDeliveries(workspaceId, event, payload, database = db) {
+  const result = await database.query(
+    `INSERT INTO webhook_deliveries (workspace_id, webhook_id, event, payload)
+     SELECT workspace_id, id, $2, $3::jsonb
+       FROM webhooks
+      WHERE workspace_id = $1 AND is_active = true AND $2 = ANY(events)
+     RETURNING id, delivery_id`,
+    [workspaceId, event, JSON.stringify(payload ?? {})]
+  );
+  return result.rows;
+}
+
+/** Queue first, then attempt immediately. Callers may await the returned promise. */
+export function fireWebhooks(workspaceId, event, payload) {
+  return enqueueWebhookDeliveries(workspaceId, event, payload)
+    .then(() => processWebhookQueue())
+    .catch((error) => console.warn("[webhooks] enqueue/delivery error:", error.message));
+}
+
+export async function testWebhook(webhookId, workspaceId, database = db) {
+  const inserted = await database.query(
+    `INSERT INTO webhook_deliveries (workspace_id, webhook_id, event, payload)
+     SELECT workspace_id, id, 'ping', $3::jsonb
+       FROM webhooks
+      WHERE id = $1 AND workspace_id = $2 AND is_active = true
+     RETURNING id`,
+    [webhookId, workspaceId, JSON.stringify({ message: "Test delivery from Asystence" })]
+  );
+  if (!inserted.rows[0]) throw new Error("Webhook not found or inactive");
+  const [result] = await processWebhookQueue({ deliveryId: inserted.rows[0].id, database });
+  return result || { sent: false };
+}
+
+export async function replayWebhookDelivery(deliveryId, workspaceId, database = db) {
+  const reset = await database.query(
+    `UPDATE webhook_deliveries delivery
+        SET status = 'pending', attempt_count = 0, next_attempt_at = now(),
+            locked_at = NULL, completed_at = NULL, last_error = NULL,
+            response_status = NULL, response_body = NULL, success = false
+       FROM webhooks webhook
+      WHERE delivery.id = $1
+        AND delivery.webhook_id = webhook.id
+        AND delivery.workspace_id = webhook.workspace_id
+        AND delivery.workspace_id = $2
+      RETURNING delivery.id`,
+    [deliveryId, workspaceId]
+  );
+  if (!reset.rows[0]) throw new Error("Webhook delivery not found");
+  const [result] = await processWebhookQueue({ deliveryId: reset.rows[0].id, database });
+  return result || { sent: false };
+}
+
+export function startWebhookDeliveryWorker({ intervalMs = 15_000 } = {}) {
+  if (workerTimer) return workerTimer;
+  workerTimer = setInterval(() => {
+    processWebhookQueue().catch((error) => console.warn("[webhooks] worker error:", error.message));
+  }, Math.max(intervalMs, 5_000));
+  workerTimer.unref?.();
+  return workerTimer;
+}
+
+export function stopWebhookDeliveryWorker() {
+  if (workerTimer) clearInterval(workerTimer);
+  workerTimer = null;
+}
+
+export const __testables = { deliveryEnvelope, claimDeliveries, sendClaimedDelivery, MAX_ATTEMPTS };

@@ -22,6 +22,7 @@ import {
   getAssurancePortfolio,
   getExecutiveAssuranceReport,
   requestAssuranceApproval,
+  recordAssurancePortfolioReview,
   setPortfolioCommitment,
   updateAssurancePolicy,
   updateAssurancePortfolio,
@@ -40,6 +41,7 @@ import {
   reviewAdaptivePolicyProposal,
   reviewAssuranceDecision,
   updateAssuranceExperiment,
+  updateOutcomeReceiptPublication,
 } from "../services/decisionOutcome.service.js";
 import {
   cancelClientReview,
@@ -47,6 +49,12 @@ import {
   requestClientReview,
   setClientContactStatus,
 } from "../services/clientPortal.service.js";
+import {
+  createAssuranceObligation,
+  linkAssuranceObligationEvidence,
+  listAssuranceObligations,
+  updateAssuranceObligation,
+} from "../services/assuranceObligation.service.js";
 
 const router = express.Router();
 
@@ -537,6 +545,108 @@ router.get("/receipts/:id", allowRoles("manager", "admin"), async (req, res) => 
     res.send(result.content);
   } catch (error) {
     sendError(res, error, "Failed to download the outcome receipt");
+  }
+});
+
+router.post("/portfolios/:id/review", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const portfolio = await recordAssurancePortfolioReview({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+    });
+    res.json({ portfolio });
+  } catch (error) {
+    sendError(res, error, "Failed to record the portfolio review");
+  }
+});
+
+router.post("/commitments/:id/evidence-pack", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const receipt = await generateOutcomeReceipt({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ evidencePack: receipt });
+  } catch (error) {
+    sendError(res, error, "Failed to generate the evidence pack");
+  }
+});
+
+router.get("/commitments/:id/obligations", async (req, res) => {
+  try {
+    const obligations = await listAssuranceObligations({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+    });
+    res.json({ obligations });
+  } catch (error) {
+    sendError(res, error, "Failed to load outcome obligations");
+  }
+});
+
+router.post("/commitments/:id/obligations", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const obligation = await createAssuranceObligation({
+      workspaceId: req.workspaceId,
+      goalId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.status(201).json({ obligation });
+  } catch (error) {
+    sendError(res, error, "Failed to create the obligation");
+  }
+});
+
+router.patch("/obligations/:id", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const obligation = await updateAssuranceObligation({
+      workspaceId: req.workspaceId,
+      obligationId: req.params.id,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.json({ obligation });
+  } catch (error) {
+    sendError(res, error, "Failed to update the obligation");
+  }
+});
+
+router.post("/obligations/:id/evidence/:evidenceId", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    res.status(201).json(await linkAssuranceObligationEvidence({
+      workspaceId: req.workspaceId,
+      obligationId: req.params.id,
+      evidenceId: req.params.evidenceId,
+      actorId: req.user.id,
+      role: req.user.role,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to link obligation evidence");
+  }
+});
+
+router.patch("/receipts/:id/publication", allowRoles("manager", "admin"), async (req, res) => {
+  try {
+    const receipt = await updateOutcomeReceiptPublication({
+      id: req.params.id,
+      workspaceId: req.workspaceId,
+      actorId: req.user.id,
+      role: req.user.role,
+      input: req.body || {},
+    });
+    res.json({ receipt });
+  } catch (error) {
+    sendError(res, error, "Failed to update receipt sharing");
   }
 });
 

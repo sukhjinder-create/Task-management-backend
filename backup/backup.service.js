@@ -26,10 +26,12 @@
 import { spawn } from "child_process";
 import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { createGzip } from "zlib";
+import { Transform, Writable } from "stream";
 import { pipeline } from "stream/promises";
 import path from "path";
 import { fileURLToPath } from "url";
-import { randomUUID } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "crypto";
+import { isProductionRuntime } from "../config/environment.js";
 import pool from "../db.js";
 import { describePrimaryDatabaseTarget, getLibpqEnv } from "./databaseTarget.js";
 import {
@@ -66,6 +68,10 @@ async function ensureBackupLogsTable() {
         created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
+    await pool.query(`ALTER TABLE backup_logs
+      ADD COLUMN IF NOT EXISTS sha256 CHAR(64),
+      ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS encryption_key_id TEXT;`);
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_backup_logs_started_at
       ON backup_logs(started_at DESC);
@@ -95,6 +101,68 @@ const S3_ENDPOINT     = process.env.BACKUP_S3_ENDPOINT
   || (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : null);
 const S3_ACCESS_KEY   = process.env.BACKUP_S3_ACCESS_KEY || process.env.AWS_ACCESS_KEY_ID || null;
 const S3_SECRET_KEY   = process.env.BACKUP_S3_SECRET_KEY || process.env.AWS_SECRET_ACCESS_KEY || null;
+const BACKUP_KEY_ID   = String(process.env.BACKUP_ENCRYPTION_KEY_ID || "primary").trim();
+const BACKUP_OBJECT_LOCK_DAYS = Math.max(0, Number(process.env.BACKUP_OBJECT_LOCK_DAYS || 0));
+const ENCRYPTED_MAGIC = Buffer.from("ASYBACKUP1", "ascii");
+
+export function getBackupEncryptionKey() {
+  const encoded = String(process.env.BACKUP_ENCRYPTION_KEY || process.env.DATA_ENCRYPTION_KEY || "").trim();
+  if (!encoded) {
+    if (isProductionRuntime()) throw new Error("BACKUP_ENCRYPTION_KEY or DATA_ENCRYPTION_KEY is required in production");
+    return null;
+  }
+  const key = Buffer.from(encoded, "base64");
+  if (key.length !== 32) throw new Error("Backup encryption key must be a base64-encoded 32-byte key");
+  return key;
+}
+
+export function createBackupEncryptTransform(key, iv = randomBytes(12)) {
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  let started = false;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      if (!started) { this.push(Buffer.concat([ENCRYPTED_MAGIC, iv])); started = true; }
+      this.push(cipher.update(chunk));
+      callback();
+    },
+    flush(callback) {
+      if (!started) this.push(Buffer.concat([ENCRYPTED_MAGIC, iv]));
+      this.push(cipher.final());
+      this.push(cipher.getAuthTag());
+      callback();
+    },
+  });
+}
+
+export function createBackupDecryptTransform(key) {
+  let buffer = Buffer.alloc(0);
+  let decipher = null;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      try {
+        buffer = Buffer.concat([buffer, chunk]);
+        if (!decipher && buffer.length >= ENCRYPTED_MAGIC.length + 12) {
+          if (!buffer.subarray(0, ENCRYPTED_MAGIC.length).equals(ENCRYPTED_MAGIC)) throw new Error("Backup encryption header is invalid");
+          decipher = createDecipheriv("aes-256-gcm", key, buffer.subarray(ENCRYPTED_MAGIC.length, ENCRYPTED_MAGIC.length + 12));
+          buffer = buffer.subarray(ENCRYPTED_MAGIC.length + 12);
+        }
+        if (decipher && buffer.length > 16) {
+          this.push(decipher.update(buffer.subarray(0, buffer.length - 16)));
+          buffer = buffer.subarray(buffer.length - 16);
+        }
+        callback();
+      } catch (error) { callback(error); }
+    },
+    flush(callback) {
+      try {
+        if (!decipher || buffer.length !== 16) throw new Error("Encrypted backup is truncated");
+        decipher.setAuthTag(buffer);
+        this.push(decipher.final());
+        callback();
+      } catch (error) { callback(error); }
+    },
+  });
+}
 
 
 // ── S3 client (only created if credentials provided) ─────────────────────────
@@ -176,7 +244,7 @@ export async function getActiveRunningBackup() {
 }
 
 // ── Core: run pg_dump and write compressed file ───────────────────────────────
-function runPgDump(outputPath) {
+function runPgDump(outputPath, encryptionKey = null) {
   return new Promise((resolve, reject) => {
     const env = getLibpqEnv();
 
@@ -202,24 +270,33 @@ function runPgDump(outputPath) {
       });
     });
 
+    const streams = encryptionKey ? [pg.stdout, gzip, createBackupEncryptTransform(encryptionKey), output] : [pg.stdout, gzip, output];
     Promise.all([
-      pipeline(pg.stdout, gzip, output),
+      pipeline(...streams),
       processDone,
     ]).then(resolve).catch(reject);
   });
 }
 
 // ── Core: upload to S3-compatible storage ────────────────────────────────────
-async function uploadToS3(localPath, s3Key) {
+async function uploadToS3(localPath, s3Key, checksumBase64, encrypted) {
   const s3 = getS3Client();
   if (!s3) throw new Error("S3 not configured");
 
   const stream = createReadStream(localPath);
+  const objectLock = BACKUP_OBJECT_LOCK_DAYS > 0 ? {
+    ObjectLockMode: "COMPLIANCE",
+    ObjectLockRetainUntilDate: new Date(Date.now() + BACKUP_OBJECT_LOCK_DAYS * 86_400_000),
+  } : {};
   await s3.send(new PutObjectCommand({
     Bucket:      S3_BUCKET,
     Key:         s3Key,
     Body:        stream,
-    ContentType: "application/gzip",
+    ContentType: encrypted ? "application/octet-stream" : "application/gzip",
+    ChecksumSHA256: checksumBase64,
+    ServerSideEncryption: "AES256",
+    Metadata: { encrypted: String(encrypted), "encryption-key-id": encrypted ? BACKUP_KEY_ID : "none" },
+    ...objectLock,
   }));
 
   return `s3://${S3_BUCKET}/${s3Key}`;
@@ -229,7 +306,7 @@ async function uploadToS3(localPath, s3Key) {
 function pruneOldBackups() {
   try {
     const cutoff = Date.now() - RETENTION_DAYS * 86_400_000;
-    const files  = readdirSync(BACKUP_DIR).filter((f) => f.endsWith(".sql.gz"));
+    const files  = readdirSync(BACKUP_DIR).filter((f) => f.endsWith(".sql.gz") || f.endsWith(".sql.gz.enc"));
     for (const file of files) {
       const full = path.join(BACKUP_DIR, file);
       if (statSync(full).mtimeMs < cutoff) {
@@ -256,7 +333,9 @@ export async function runBackup(triggeredBy = "cron") {
   }
 
   const startedAt = new Date();
-  const fileName  = `asystence_backup_${timestamp()}.sql.gz`;
+    const encryptionKey = getBackupEncryptionKey();
+  const encrypted = Boolean(encryptionKey);
+  const fileName  = `asystence_backup_${timestamp()}.sql.gz${encrypted ? ".enc" : ""}`;
   const localPath = path.join(BACKUP_DIR, fileName);
 
   // Ensure backup dir exists
@@ -280,8 +359,14 @@ export async function runBackup(triggeredBy = "cron") {
 
   try {
     // 1. Run pg_dump
-    await runPgDump(localPath);
+    await runPgDump(localPath, encryptionKey);
     const fileSizeBytes = getFileSizeBytes(localPath);
+    const digest = createHash("sha256");
+    await pipeline(createReadStream(localPath), new Writable({
+      write(chunk, _encoding, callback) { digest.update(chunk); callback(); },
+    }));
+    const sha256 = digest.digest("hex");
+    const checksumBase64 = Buffer.from(sha256, "hex").toString("base64");
 
     // 2. Optionally upload to S3
     let storageType = "local";
@@ -290,7 +375,7 @@ export async function runBackup(triggeredBy = "cron") {
     const s3 = getS3Client();
     if (s3) {
       const s3Key = `backups/${fileName}`;
-      storagePath = await uploadToS3(localPath, s3Key);
+      storagePath = await uploadToS3(localPath, s3Key, checksumBase64, encrypted);
       storageType = "s3";
       console.log(`[backup] Uploaded to S3: ${storagePath}`);
     }
@@ -303,9 +388,10 @@ export async function runBackup(triggeredBy = "cron") {
       await pool.query(
         `UPDATE backup_logs
          SET status = 'success', file_size_bytes = $1, storage_type = $2,
-             storage_path = $3, completed_at = $4
-         WHERE id = $5`,
-        [fileSizeBytes, storageType, storagePath, completedAt, logId]
+             storage_path = $3, completed_at = $4, sha256=$5,
+             encrypted=$6, encryption_key_id=$7
+         WHERE id = $8`,
+        [fileSizeBytes, storageType, storagePath, completedAt, sha256, encrypted, encrypted ? BACKUP_KEY_ID : null, logId]
       );
     }
 
@@ -314,7 +400,7 @@ export async function runBackup(triggeredBy = "cron") {
     // 4. Prune old local files
     pruneOldBackups();
 
-    return { success: true, fileName, fileSizeBytes, storageType, storagePath, duration };
+    return { success: true, fileName, fileSizeBytes, storageType, storagePath, duration, sha256, encrypted, encryptionKeyId: encrypted ? BACKUP_KEY_ID : null };
   } catch (err) {
     console.error("[backup] ❌ Backup failed:", err.message);
     try { unlinkSync(localPath); } catch {}

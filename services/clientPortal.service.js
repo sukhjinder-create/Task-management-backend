@@ -266,11 +266,40 @@ export async function setClientContactStatus({
           "UPDATE client_portal_sessions SET revoked_at=COALESCE(revoked_at,NOW()) WHERE workspace_id=$1 AND contact_id=$2 AND revoked_at IS NULL",
           [workspaceId, validatedContactId]
         ),
-        client.query(
-          "UPDATE assurance_client_reviews SET status='cancelled', updated_at=NOW() WHERE workspace_id=$1 AND contact_id=$2 AND status='pending'",
-          [workspaceId, validatedContactId]
-        ),
       ]);
+      const affected = await client.query(
+        `UPDATE assurance_client_review_approvers SET status='cancelled'
+         WHERE workspace_id=$1 AND contact_id=$2 AND status='pending'
+         RETURNING review_id`,
+        [workspaceId, validatedContactId]
+      );
+      const reviewIds = [...new Set(affected.rows.map((item) => item.review_id))];
+      if (reviewIds.length) {
+        await client.query(
+          `WITH stats AS (
+             SELECT review_id,
+                    COUNT(*) FILTER (WHERE status='accepted')::int AS approvals,
+                    COUNT(*) FILTER (WHERE status='changes_requested')::int AS changes,
+                    COUNT(*) FILTER (WHERE status IN ('accepted','pending'))::int AS available
+             FROM assurance_client_review_approvers
+             WHERE workspace_id=$1 AND review_id=ANY($2::uuid[])
+             GROUP BY review_id
+           )
+           UPDATE assurance_client_reviews review SET
+             approval_count=stats.approvals,
+             change_request_count=stats.changes,
+             status=CASE
+               WHEN stats.changes>0 THEN 'changes_requested'
+               WHEN stats.approvals>=review.required_approvals THEN 'accepted'
+               WHEN stats.available<review.required_approvals THEN 'cancelled'
+               ELSE 'pending'
+             END,
+             updated_at=NOW()
+           FROM stats
+           WHERE review.workspace_id=$1 AND review.id=stats.review_id AND review.status='pending'`,
+          [workspaceId, reviewIds]
+        );
+      }
     }
     return updated.rows[0];
   });
@@ -311,6 +340,21 @@ async function issueMagicLink({ workspaceId, contactId, reviewId = null, databas
   return { token, expiresAt };
 }
 
+export function normalizeReviewApprovers(input = {}, primaryContactId) {
+  const requested = input.contactIds ?? input.contact_ids;
+  const values = requested === undefined ? [primaryContactId] : requested;
+  if (!Array.isArray(values) || values.length < 1 || values.length > 20) {
+    throw httpError("Choose between 1 and 20 client approvers");
+  }
+  const contactIds = [...new Set([primaryContactId, ...values].filter(Boolean).map((value) => uuidValue(value, "Client approver")))];
+  const rawRequired = input.requiredApprovals ?? input.required_approvals ?? contactIds.length;
+  const requiredApprovals = Number(rawRequired);
+  if (!Number.isInteger(requiredApprovals) || requiredApprovals < 1 || requiredApprovals > contactIds.length) {
+    throw httpError(`Required approvals must be between 1 and ${contactIds.length}`);
+  }
+  return { contactIds, requiredApprovals };
+}
+
 export async function requestClientReview({
   workspaceId,
   actorId,
@@ -324,6 +368,7 @@ export async function requestClientReview({
   }
   const requestedResultSummary = cleanText(input.resultSummary, 500, { label: "Client result summary" });
   const message = cleanText(input.message, 2000, { label: "Client message" });
+  const requestedApprovers = normalizeReviewApprovers(input, commitment.client_approver_contact_id);
 
   const issued = await transaction(database, async (client) => {
     const context = await client.query(
@@ -379,7 +424,9 @@ export async function requestClientReview({
     }
 
     let review = latestReview?.status === "pending" ? latestReview : null;
+    let createdReview = false;
     if (!review) {
+      createdReview = true;
       const resultSummary = cleanText(
         requestedResultSummary ?? current.latest_result_evidence_label,
         500,
@@ -396,49 +443,81 @@ export async function requestClientReview({
       };
       const inserted = await client.query(
         `INSERT INTO assurance_client_reviews
-           (workspace_id, goal_id, client_id, contact_id, snapshot, requested_by, requested_at)
-         VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
+           (workspace_id, goal_id, client_id, contact_id, snapshot, requested_by, requested_at, required_approvals)
+         VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)
          RETURNING *`,
-        [workspaceId, commitment.id, current.client_id, current.client_approver_contact_id, JSON.stringify(snapshot), actorId, now.toISOString()]
+        [workspaceId, commitment.id, current.client_id, current.client_approver_contact_id, JSON.stringify(snapshot), actorId, now.toISOString(), requestedApprovers.requiredApprovals]
       );
       review = inserted.rows[0];
+      await client.query(
+        `INSERT INTO assurance_client_review_approvers
+           (workspace_id, review_id, client_id, contact_id)
+         SELECT $1,$2,$3,contact.id
+         FROM assurance_client_contacts contact
+         WHERE contact.workspace_id=$1 AND contact.client_id=$3
+           AND contact.id=ANY($4::uuid[]) AND contact.status='active'`,
+        [workspaceId, review.id, current.client_id, requestedApprovers.contactIds]
+      );
     }
 
-    const recentLink = await client.query(
-      `SELECT 1 FROM client_portal_magic_links
-       WHERE workspace_id=$1 AND review_id=$2
-         AND created_at>$3::timestamptz - interval '60 seconds'
-       LIMIT 1`,
-      [workspaceId, review.id, now.toISOString()]
+    const approvers = await client.query(
+      `SELECT approver.contact_id, contact.name AS contact_name, contact.email AS contact_email,
+              approver.status
+       FROM assurance_client_review_approvers approver
+       JOIN assurance_client_contacts contact
+         ON contact.workspace_id=approver.workspace_id AND contact.client_id=approver.client_id
+        AND contact.id=approver.contact_id AND contact.status='active'
+       WHERE approver.workspace_id=$1 AND approver.review_id=$2
+       ORDER BY contact.name`,
+      [workspaceId, review.id]
     );
-    if (recentLink.rows[0]) {
+    if (
+      (createdReview && approvers.rows.length !== requestedApprovers.contactIds.length)
+      || approvers.rows.length < Number(review.required_approvals || 1)
+    ) {
+      throw httpError("Not enough active client approvers are available", 409, "CLIENT_APPROVER_UNAVAILABLE");
+    }
+    const pendingApprovers = approvers.rows.filter((item) => item.status === "pending");
+    const recentLinks = await client.query(
+      `SELECT contact_id FROM client_portal_magic_links
+       WHERE workspace_id=$1 AND review_id=$2 AND contact_id=ANY($3::uuid[])
+         AND created_at>$4::timestamptz - interval '60 seconds'`,
+      [workspaceId, review.id, pendingApprovers.map((item) => item.contact_id), now.toISOString()]
+    );
+    const recentContactIds = new Set(recentLinks.rows.map((item) => String(item.contact_id)));
+    const recipients = pendingApprovers.filter((item) => !recentContactIds.has(String(item.contact_id)));
+    if (!recipients.length) {
       throw httpError("A secure link was sent recently. Wait one minute before sending another.", 429, "CLIENT_REVIEW_RATE_LIMITED");
     }
 
-    await client.query(
-      `UPDATE client_portal_magic_links
-       SET revoked_at=COALESCE(revoked_at,$3)
-       WHERE workspace_id=$1 AND review_id=$2 AND used_at IS NULL AND revoked_at IS NULL`,
-      [workspaceId, review.id, now.toISOString()]
-    );
-    const link = await issueMagicLink({
-      workspaceId,
-      contactId: current.client_approver_contact_id,
-      reviewId: review.id,
-      database: client,
-      now,
-    });
-    return { review, context: current, ...link };
+    const issuedLinks = [];
+    for (const recipient of recipients) {
+      await client.query(
+        `UPDATE client_portal_magic_links SET revoked_at=COALESCE(revoked_at,$4)
+         WHERE workspace_id=$1 AND review_id=$2 AND contact_id=$3
+           AND used_at IS NULL AND revoked_at IS NULL`,
+        [workspaceId, review.id, recipient.contact_id, now.toISOString()]
+      );
+      issuedLinks.push({
+        ...recipient,
+        ...await issueMagicLink({ workspaceId, contactId: recipient.contact_id, reviewId: review.id, database: client, now }),
+      });
+    }
+    return { review, context: current, recipients: issuedLinks, approverCount: approvers.rows.length };
   });
 
-  const delivered = await sendClientPortalAccessEmail({
-    to: issued.context.contact_email,
-    contactName: issued.context.contact_name,
-    clientName: issued.context.client_name,
-    workspaceName: issued.context.workspace_name,
-    accessUrl: buildAccessUrl(issued.token),
-    outcomeTitle: issued.review.snapshot?.title || issued.context.title,
-  });
+  const deliveries = await Promise.all(issued.recipients.map(async (recipient) => ({
+    contactId: recipient.contact_id,
+    delivered: await sendClientPortalAccessEmail({
+      to: recipient.contact_email,
+      contactName: recipient.contact_name,
+      clientName: issued.context.client_name,
+      workspaceName: issued.context.workspace_name,
+      accessUrl: buildAccessUrl(recipient.token),
+      outcomeTitle: issued.review.snapshot?.title || issued.context.title,
+    }),
+  })));
+  const delivered = deliveries.every((item) => item.delivered);
   const deliveryError = delivered ? null : "Email delivery failed. Verify SMTP configuration and retry.";
   const updated = await database.query(
     `UPDATE assurance_client_reviews SET
@@ -456,9 +535,15 @@ export async function requestClientReview({
     action: "assurance.client_review.request",
     entityType: "goal",
     entityId: commitment.id,
-    newValue: { reviewId: issued.review.id, contactId: issued.context.client_approver_contact_id, delivered },
+    newValue: {
+      reviewId: issued.review.id,
+      contactIds: issued.recipients.map((item) => item.contact_id),
+      requiredApprovals: issued.review.required_approvals,
+      approverCount: issued.approverCount,
+      delivered,
+    },
   });
-  return updated.rows[0];
+  return { ...updated.rows[0], deliveries };
 }
 
 export async function cancelClientReview({
@@ -480,6 +565,11 @@ export async function cancelClientReview({
       `UPDATE client_portal_magic_links SET revoked_at=COALESCE(revoked_at,$3)
        WHERE workspace_id=$1 AND review_id=$2 AND used_at IS NULL AND revoked_at IS NULL`,
       [workspaceId, updated.rows[0].id, now.toISOString()]
+    );
+    await client.query(
+      `UPDATE assurance_client_review_approvers SET status='cancelled'
+       WHERE workspace_id=$1 AND review_id=$2 AND status='pending'`,
+      [workspaceId, updated.rows[0].id]
     );
     return updated.rows[0];
   });
@@ -667,11 +757,17 @@ export async function listPortalCommitments({ session, database = pool }) {
             o.status AS outcome_status, o.progress,
             review.id AS review_id, review.status AS review_status,
             review.contact_id AS review_contact_id, review.snapshot,
-            review.decision_note, review.requested_at, review.decided_at
+            review.decision_note, review.requested_at, review.decided_at,
+            review.required_approvals, review.approval_count, review.change_request_count,
+            review.approver_statuses
      FROM okr_objectives o
      LEFT JOIN projects p ON p.workspace_id=o.workspace_id AND p.id=o.primary_project_id
      LEFT JOIN LATERAL (
-       SELECT r.id, r.status, r.contact_id, r.snapshot, r.decision_note, r.requested_at, r.decided_at
+       SELECT r.id, r.status, r.contact_id, r.snapshot, r.decision_note, r.requested_at, r.decided_at,
+              r.required_approvals, r.approval_count, r.change_request_count,
+              (SELECT jsonb_object_agg(approver.contact_id::text, approver.status)
+               FROM assurance_client_review_approvers approver
+               WHERE approver.workspace_id=r.workspace_id AND approver.review_id=r.id) AS approver_statuses
        FROM assurance_client_reviews r
        WHERE r.workspace_id=o.workspace_id AND r.goal_id=o.id AND r.status<>'cancelled'
        ORDER BY r.requested_at DESC LIMIT 1
@@ -690,12 +786,14 @@ export async function listPortalCommitments({ session, database = pool }) {
     },
     commitments: rows.map((row) => {
       const completed = row.outcome_status === "done" || Number(row.progress) >= 100;
+      const approverStatus = row.approver_statuses?.[String(session.contact_id)]
+        || (String(row.review_contact_id) === String(session.contact_id) ? row.review_status : null);
       const state = row.review_status === "accepted"
         ? "accepted"
         : row.review_status === "changes_requested"
           ? "changes_requested"
           : row.review_status === "pending"
-            ? String(row.review_contact_id) === String(session.contact_id)
+            ? approverStatus === "pending"
               ? "awaiting_your_review"
               : "awaiting_client_review"
             : completed ? "completed" : "in_progress";
@@ -714,7 +812,11 @@ export async function listPortalCommitments({ session, database = pool }) {
           decisionNote: row.decision_note || null,
           requestedAt: row.requested_at,
           decidedAt: row.decided_at,
-          canDecide: row.review_status === "pending" && String(row.review_contact_id) === String(session.contact_id),
+          requiredApprovals: Number(row.required_approvals || 1),
+          approvalCount: Number(row.approval_count || 0),
+          changeRequestCount: Number(row.change_request_count || 0),
+          yourDecision: approverStatus,
+          canDecide: row.review_status === "pending" && approverStatus === "pending",
         } : null,
       };
     }),
@@ -742,14 +844,39 @@ export async function decideClientReview({
   const id = uuidValue(reviewId, "Review");
   const value = normalizeClientDecision(input);
   const result = await transaction(database, async (client) => {
+    const selected = await client.query(
+      `SELECT * FROM assurance_client_reviews
+       WHERE workspace_id=$1 AND client_id=$2 AND id=$3 AND status='pending'
+       FOR UPDATE`,
+      [session.workspace_id, session.client_id, id]
+    );
+    if (!selected.rows[0]) throw httpError("This review is no longer available", 409, "CLIENT_REVIEW_CLOSED");
+    const approver = await client.query(
+      `UPDATE assurance_client_review_approvers SET status=$1, decision_note=$2, decided_at=$3
+       WHERE workspace_id=$4 AND review_id=$5 AND client_id=$6 AND contact_id=$7 AND status='pending'
+       RETURNING contact_id`,
+      [value.decision, value.note, now.toISOString(), session.workspace_id, id, session.client_id, session.contact_id]
+    );
+    if (!approver.rows[0]) throw httpError("This review is not assigned to you or was already decided", 409, "CLIENT_REVIEW_CLOSED");
+    const counts = await client.query(
+      `SELECT COUNT(*) FILTER (WHERE status='accepted')::int AS approvals,
+              COUNT(*) FILTER (WHERE status='changes_requested')::int AS changes
+       FROM assurance_client_review_approvers WHERE workspace_id=$1 AND review_id=$2`,
+      [session.workspace_id, id]
+    );
+    const approvalCount = Number(counts.rows[0]?.approvals || 0);
+    const changeCount = Number(counts.rows[0]?.changes || 0);
+    const finalStatus = changeCount > 0
+      ? "changes_requested"
+      : approvalCount >= Number(selected.rows[0].required_approvals || 1) ? "accepted" : "pending";
     const updated = await client.query(
       `UPDATE assurance_client_reviews SET
-         status=$1, decision_note=$2, decided_at=$3, updated_at=$3
-       WHERE workspace_id=$4 AND client_id=$5 AND contact_id=$6 AND id=$7 AND status='pending'
-       RETURNING *`,
-      [value.decision, value.note, now.toISOString(), session.workspace_id, session.client_id, session.contact_id, id]
+         status=$1, decision_note=CASE WHEN $1='pending' THEN decision_note ELSE $2 END,
+         approval_count=$3, change_request_count=$4,
+         decided_at=CASE WHEN $1='pending' THEN NULL ELSE $5 END, updated_at=$5
+       WHERE workspace_id=$6 AND id=$7 RETURNING *`,
+      [finalStatus, value.note, approvalCount, changeCount, now.toISOString(), session.workspace_id, id]
     );
-    if (!updated.rows[0]) throw httpError("This review is no longer available", 409, "CLIENT_REVIEW_CLOSED");
     const outcome = await client.query(
       `SELECT o.id, o.title, o.owner_id, r.requested_by
        FROM assurance_client_reviews r
@@ -767,7 +894,7 @@ export async function decideClientReview({
     entityId: result.outcome.id,
     ipAddress,
     userAgent,
-    newValue: { reviewId: id, decision: value.decision, note: value.note },
+    newValue: { reviewId: id, decision: value.decision, note: value.note, reviewStatus: result.review.status },
     metadata: { actorType: "client_contact", contactId: session.contact_id, clientId: session.client_id },
   });
 
@@ -777,7 +904,9 @@ export async function decideClientReview({
     user_id: userId,
     workspaceId: session.workspace_id,
     type: "assurance_decision",
-    title: value.decision === "accepted" ? "Client accepted the outcome" : "Client requested changes",
+    title: result.review.status === "accepted"
+      ? "Client accepted the outcome"
+      : value.decision === "changes_requested" ? "Client requested changes" : "Client approval recorded",
     message: `${session.client_name}: ${result.outcome.title}`,
     action_url: `/outcomes#outcome-${result.outcome.id}`,
     source_key: `client-review:${id}:${value.decision}`,

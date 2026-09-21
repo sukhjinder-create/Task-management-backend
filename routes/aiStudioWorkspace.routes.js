@@ -20,6 +20,8 @@ import { listProvidersMerged, listModelsMerged, listProfilesMerged } from "../ai
 import { listPrompts } from "../ai-platform/studio/promptRegistry.service.js";
 import * as telemetry from "../ai-platform/studio/telemetry.service.js";
 import { runPlayground } from "../ai-platform/studio/playground.service.js";
+import pool from "../db.js";
+import { logAudit } from "../services/audit.service.js";
 
 const router = express.Router();
 const wsRole = (req) => (req.user?.role === "admin" ? "workspace_admin" : "workspace_viewer");
@@ -74,5 +76,66 @@ router.put("/capabilities/:key/override", wrap(async (req, res) => {
 router.get("/usage", wrap(async (req, res) => res.json(await telemetry.getUsage({ workspaceId: req.workspaceId, period: req.query.period }))));
 router.get("/cost", wrap(async (req, res) => res.json(await telemetry.getCost({ workspaceId: req.workspaceId, period: req.query.period }))));
 router.post("/playground", wrap(async (req, res) => res.json(await runPlayground({ capability: req.body?.capability, prompt: req.body?.prompt, workspaceId: req.workspaceId, overrides: req.body?.overrides || {} }))));
+
+const safetyDefaults = { enforcementMode: "off", piiRedaction: "off", outputSchemaMode: "advisory" };
+
+router.get("/safety", wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT value_json FROM ai_policies
+     WHERE scope='workspace' AND workspace_id=$1 AND key='safety' AND enabled=TRUE
+     ORDER BY created_at DESC LIMIT 1`,
+    [req.workspaceId]
+  );
+  res.json({ ...safetyDefaults, ...(rows[0]?.value_json || {}) });
+}));
+
+router.put("/safety", wrap(async (req, res) => {
+  const value = {
+    enforcementMode: String(req.body?.enforcementMode || "off"),
+    piiRedaction: String(req.body?.piiRedaction || "off"),
+    outputSchemaMode: String(req.body?.outputSchemaMode || "advisory"),
+  };
+  if (!["off", "variables", "strict"].includes(value.enforcementMode)) return res.status(400).json({ error: "Invalid enforcementMode" });
+  if (!["off", "input", "output", "both"].includes(value.piiRedaction)) return res.status(400).json({ error: "Invalid piiRedaction" });
+  if (!["advisory", "enforce"].includes(value.outputSchemaMode)) return res.status(400).json({ error: "Invalid outputSchemaMode" });
+  const updated = await pool.query(
+    `UPDATE ai_policies SET value_json=$1::jsonb, enabled=TRUE, created_by=$2
+     WHERE scope='workspace' AND workspace_id=$3 AND key='safety' RETURNING id`,
+    [JSON.stringify(value), req.user.id, req.workspaceId]
+  );
+  if (!updated.rowCount) {
+    await pool.query(
+      `INSERT INTO ai_policies (scope, workspace_id, key, value_json, enabled, created_by)
+       VALUES ('workspace',$1,'safety',$2::jsonb,TRUE,$3)`,
+      [req.workspaceId, JSON.stringify(value), req.user.id]
+    );
+  }
+  await logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "ai.safety_policy.update", entityType: "workspace", entityId: req.workspaceId, newValue: value });
+  res.json(value);
+}));
+
+router.put("/capabilities/:key/output-schema", wrap(async (req, res) => {
+  const schema = req.body?.schema;
+  const mode = String(req.body?.mode || "advisory");
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return res.status(400).json({ error: "schema must be a JSON object" });
+  if (!["advisory", "enforce"].includes(mode)) return res.status(400).json({ error: "mode must be advisory or enforce" });
+  if (Buffer.byteLength(JSON.stringify(schema)) > 50_000) return res.status(400).json({ error: "schema is too large" });
+  const value = { capability: req.params.key, schema, mode };
+  const key = `output_schema:${req.params.key}`;
+  const updated = await pool.query(
+    `UPDATE ai_policies SET value_json=$1::jsonb, enabled=TRUE, created_by=$2
+     WHERE scope='workspace' AND workspace_id=$3 AND key=$4 RETURNING id`,
+    [JSON.stringify(value), req.user.id, req.workspaceId, key]
+  );
+  if (!updated.rowCount) {
+    await pool.query(
+      `INSERT INTO ai_policies (scope, workspace_id, key, value_json, enabled, created_by)
+       VALUES ('workspace',$1,$2,$3::jsonb,TRUE,$4)`,
+      [req.workspaceId, key, JSON.stringify(value), req.user.id]
+    );
+  }
+  await logAudit({ workspaceId: req.workspaceId, userId: req.user.id, action: "ai.output_schema.update", entityType: "ai_capability", entityId: req.params.key, newValue: { mode } });
+  res.json(value);
+}));
 
 export default router;

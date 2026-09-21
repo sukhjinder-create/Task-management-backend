@@ -51,24 +51,36 @@ function databaseNameFromUrl(parsed) {
 function explicitDbSslMode() {
   const raw = safeTrim(process.env.DB_SSL).toLowerCase();
   if (!raw) return null;
-  if (["true", "1", "require"].includes(raw)) return "require";
+  if (["true", "1", "require"].includes(raw)) return "verify-full";
   if (["false", "0", "disable"].includes(raw)) return "disable";
   return raw;
 }
 
 function sslModeForParsedUrl(parsed) {
   const urlMode = safeTrim(parsed?.searchParams?.get("sslmode")).toLowerCase();
-  if (urlMode) return urlMode;
+  if (urlMode) return urlMode === "require" ? "verify-full" : urlMode;
 
   const explicit = explicitDbSslMode();
   if (explicit) return explicit;
 
-  return parsed && !isLocalHost(parsed.hostname) ? "require" : null;
+  return parsed && !isLocalHost(parsed.hostname) ? "verify-full" : null;
+}
+
+export function getDatabaseSslOptions(enabled = true) {
+  if (!enabled) return {};
+  const rejectUnauthorized = !["false", "0", "no"].includes(
+    safeTrim(process.env.DB_SSL_REJECT_UNAUTHORIZED || "true").toLowerCase()
+  );
+  return {
+    ssl: {
+      rejectUnauthorized,
+      ...(process.env.DB_SSL_CA ? { ca: process.env.DB_SSL_CA.replace(/\\n/g, "\n") } : {}),
+    },
+  };
 }
 
 function sslOptionsForMode(sslMode) {
-  if (!sslMode || sslMode === "disable") return {};
-  return { ssl: { rejectUnauthorized: false } };
+  return getDatabaseSslOptions(Boolean(sslMode && sslMode !== "disable"));
 }
 
 function normalizeUrlDatabase(rawUrl, database) {
