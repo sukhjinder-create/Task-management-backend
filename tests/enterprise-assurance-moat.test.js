@@ -198,10 +198,10 @@ test("manager portfolio, approval, and reporting queries remain inside visible o
   assert.match(service, /ar\.action_type='recovery' AND \$3::boolean/);
 });
 
-test("production deploy applies and verifies the moat migration before image pull", () => {
+test("production deploy applies and verifies the moat migration before image cutover", () => {
   const workflow = read(".github/workflows/deploy-selfhosted.yml");
   const migration = workflow.indexOf("20260813c_enterprise_assurance_moat.sql");
   const verification = workflow.indexOf("enterprise assurance moat migration verified");
-  const imagePull = workflow.indexOf('echo "pulling $IMAGE_REF');
-  assert.ok(migration >= 0 && verification > migration && imagePull > verification);
+  const imageStart = workflow.indexOf("docker compose -f docker-compose.prod.yml up");
+  assert.ok(migration >= 0 && verification > migration && imageStart > verification);
 });

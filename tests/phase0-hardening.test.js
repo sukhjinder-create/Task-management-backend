@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
-import { getPoolConfigFromConnectionString } from "../backup/databaseTarget.js";
+import { getLibpqEnv, getPoolConfigFromConnectionString } from "../backup/databaseTarget.js";
 
 const read = (path) => fs.readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -31,7 +32,10 @@ test("webhook signing secrets use authenticated encryption with legacy read comp
 
 test("database helpers verify remote TLS and leave local development plaintext", () => {
   const previous = process.env.DB_SSL_REJECT_UNAUTHORIZED;
+  const previousBackupUrl = process.env.BACKUP_DATABASE_URL;
+  const previousRootCert = process.env.PGSSLROOTCERT;
   delete process.env.DB_SSL_REJECT_UNAUTHORIZED;
+  delete process.env.PGSSLROOTCERT;
   try {
     assert.equal(
       getPoolConfigFromConnectionString("postgresql://user:pass@db.example.com/app").ssl.rejectUnauthorized,
@@ -41,9 +45,15 @@ test("database helpers verify remote TLS and leave local development plaintext",
       getPoolConfigFromConnectionString("postgresql://user:pass@localhost/app").ssl,
       undefined
     );
+    process.env.BACKUP_DATABASE_URL = "postgresql://user:pass@pooler.supabase.com/app";
+    assert.equal(getLibpqEnv().PGSSLROOTCERT, "/app/certs/supabase-prod-ca-2021.crt");
   } finally {
     if (previous === undefined) delete process.env.DB_SSL_REJECT_UNAUTHORIZED;
     else process.env.DB_SSL_REJECT_UNAUTHORIZED = previous;
+    if (previousBackupUrl === undefined) delete process.env.BACKUP_DATABASE_URL;
+    else process.env.BACKUP_DATABASE_URL = previousBackupUrl;
+    if (previousRootCert === undefined) delete process.env.PGSSLROOTCERT;
+    else process.env.PGSSLROOTCERT = previousRootCert;
   }
 });
 
@@ -55,4 +65,14 @@ test("production workflows preserve certificate verification and encryption keys
   assert.doesNotMatch(workflows, /rejectUnauthorized:\s*false/);
   assert.match(workflows, /ensure_encryption_key DATA_ENCRYPTION_KEY/);
   assert.match(workflows, /ensure_encryption_key BACKUP_ENCRYPTION_KEY/);
+});
+
+test("the production image adds the pinned Supabase database root", () => {
+  const certificate = new X509Certificate(read("certs/supabase-prod-ca-2021.crt"));
+  assert.equal(certificate.ca, true);
+  assert.equal(
+    certificate.fingerprint256,
+    "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA"
+  );
+  assert.match(read("Dockerfile"), /NODE_EXTRA_CA_CERTS=\/app\/certs\/supabase-prod-ca-2021\.crt/);
 });

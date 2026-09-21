@@ -220,10 +220,10 @@ test("outcome work scope is precise and legacy goals cannot mutate assurance out
 test("production deploy applies and verifies the additive schema before image cutover", () => {
   const workflow = read(".github/workflows/deploy-selfhosted.yml");
   const migrationPosition = workflow.indexOf('ASSURANCE_MIGRATION="migrations/20260813b_execution_assurance.sql"');
-  const imageCutoverPosition = workflow.indexOf('echo "pulling $IMAGE_REF ..."');
+  const imageCutoverPosition = workflow.indexOf("docker compose -f docker-compose.prod.yml up");
 
   assert.ok(migrationPosition >= 0, "production workflow must apply the assurance migration");
-  assert.ok(imageCutoverPosition > migrationPosition, "schema must be ready before the new image is pulled");
+  assert.ok(imageCutoverPosition > migrationPosition, "schema must be ready before the new image starts");
   assert.match(workflow, /execution assurance migration verified/);
   assert.match(workflow, /migration failed; current image remains active/);
 });

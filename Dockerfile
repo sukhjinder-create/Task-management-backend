@@ -46,6 +46,9 @@ RUN mkdir -p /tmp/uploads
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# Supabase signs database endpoints with its public Root 2021 CA. Adding it to
+# Node's normal trust store keeps certificate and hostname verification enabled.
+ENV NODE_EXTRA_CA_CERTS=/app/certs/supabase-prod-ca-2021.crt
 
 EXPOSE 3000
 

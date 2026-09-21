@@ -206,6 +206,6 @@ test("production deploy verifies the decision-to-outcome migration before image 
   const workflow = read(".github/workflows/deploy-selfhosted.yml");
   const migration = workflow.indexOf("20260814_verified_decision_outcome_os.sql");
   const verification = workflow.indexOf("verified decision-to-outcome migration verified");
-  const imagePull = workflow.indexOf('echo "pulling $IMAGE_REF');
-  assert.ok(migration >= 0 && verification > migration && imagePull > verification);
+  const imageStart = workflow.indexOf("docker compose -f docker-compose.prod.yml up");
+  assert.ok(migration >= 0 && verification > migration && imageStart > verification);
 });

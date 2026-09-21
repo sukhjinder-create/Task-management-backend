@@ -179,6 +179,9 @@ export function getLibpqEnv(databaseOverride = null) {
 
   if (target.sslMode) {
     env.PGSSLMODE = target.sslMode;
+    if (!env.PGSSLROOTCERT && target.host.toLowerCase().endsWith(".supabase.com")) {
+      env.PGSSLROOTCERT = "/app/certs/supabase-prod-ca-2021.crt";
+    }
   } else {
     delete env.PGSSLMODE;
   }

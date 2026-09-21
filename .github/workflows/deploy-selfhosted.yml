@@ -418,12 +418,18 @@ jobs:
               });
           ' || { echo "email configuration check failed; current image remains active"; exit 1; }
 
+          # Pulling does not change the running service. Migrations run in this
+          # exact release image so they use its pinned database CA and tooling;
+          # the old healthy container remains live until every check passes.
+          echo "pulling $IMAGE_REF ..."
+          sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
+
           # Install the trusted workspace-level billing exemption before code
           # reads it. The column is additive and defaults off for every tenant.
           COMPLIMENTARY_MIGRATION="migrations/20260915_complimentary_workspace_access.sql"
           [ -f "$COMPLIMENTARY_MIGRATION" ] || { echo "missing migration: $COMPLIMENTARY_MIGRATION"; exit 1; }
           echo "applying $COMPLIMENTARY_MIGRATION ..."
-          sudo docker exec -i "$CONTAINER" node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -456,7 +462,7 @@ jobs:
           IDENTITY_MIGRATION="migrations/20260824_signup_identity_assurance.sql"
           [ -f "$IDENTITY_MIGRATION" ] || { echo "missing migration: $IDENTITY_MIGRATION"; exit 1; }
           echo "applying $IDENTITY_MIGRATION ..."
-          sudo docker exec -i "$CONTAINER" node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -507,7 +513,7 @@ jobs:
           TRIAL_MIGRATION="migrations/20260813_no_card_trial_lifecycle.sql"
           [ -f "$TRIAL_MIGRATION" ] || { echo "missing migration: $TRIAL_MIGRATION"; exit 1; }
           echo "applying $TRIAL_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -539,7 +545,7 @@ jobs:
           CHAT_TENANT_MIGRATION="migrations/20260813_chat_tenant_isolation.sql"
           [ -f "$CHAT_TENANT_MIGRATION" ] || { echo "missing migration: $CHAT_TENANT_MIGRATION"; exit 1; }
           echo "applying $CHAT_TENANT_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -581,7 +587,7 @@ jobs:
           ASSURANCE_MIGRATION="migrations/20260813b_execution_assurance.sql"
           [ -f "$ASSURANCE_MIGRATION" ] || { echo "missing migration: $ASSURANCE_MIGRATION"; exit 1; }
           echo "applying $ASSURANCE_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -639,7 +645,7 @@ jobs:
           ASSURANCE_MOAT_MIGRATION="migrations/20260813c_enterprise_assurance_moat.sql"
           [ -f "$ASSURANCE_MOAT_MIGRATION" ] || { echo "missing migration: $ASSURANCE_MOAT_MIGRATION"; exit 1; }
           echo "applying $ASSURANCE_MOAT_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -698,7 +704,7 @@ jobs:
           DECISION_OUTCOME_MIGRATION="migrations/20260814_verified_decision_outcome_os.sql"
           [ -f "$DECISION_OUTCOME_MIGRATION" ] || { echo "missing migration: $DECISION_OUTCOME_MIGRATION"; exit 1; }
           echo "applying $DECISION_OUTCOME_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -754,7 +760,7 @@ jobs:
           CLIENT_PORTAL_MIGRATION="migrations/20260902_client_assurance_portal.sql"
           [ -f "$CLIENT_PORTAL_MIGRATION" ] || { echo "missing migration: $CLIENT_PORTAL_MIGRATION"; exit 1; }
           echo "applying $CLIENT_PORTAL_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -804,7 +810,7 @@ jobs:
           ENTERPRISE_MIGRATION="migrations/20260921_enterprise_completion.sql"
           [ -f "$ENTERPRISE_MIGRATION" ] || { echo "missing migration: $ENTERPRISE_MIGRATION"; exit 1; }
           echo "applying $ENTERPRISE_MIGRATION ..."
-          sudo docker exec -i app-app-1 node -e '
+          sudo docker run --rm -i --env-file .env --entrypoint node "$IMAGE_REF" -e '
             const { Pool } = require("pg");
             let sql = "";
             process.stdin.setEncoding("utf8");
@@ -823,9 +829,6 @@ jobs:
               } finally { await pool.end(); }
             });
           ' < "$ENTERPRISE_MIGRATION" || { echo "migration failed; current image remains active"; exit 1; }
-
-          echo "pulling $IMAGE_REF ..."
-          sudo docker pull "$IMAGE_REF" || { echo "image pull failed"; exit 1; }
 
           # A changed .env must reach the process. Compose does not reliably
           # recreate a container for an env_file edit when the image tag is
