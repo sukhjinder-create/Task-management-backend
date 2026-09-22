@@ -55,7 +55,8 @@ test("Asana browser OAuth uses authenticated session and signed expiring state",
     "utf8"
   );
 
-  assert.match(source, /authMiddleware\(req, res, next\)/);
+  assert.match(source, /router\.get\("\/connect", authMiddleware/);
+  assert.doesNotMatch(source, /req\.query\.token/);
   assert.match(source, /audience: "asana-oauth"/);
   assert.match(source, /expiresIn: "10m"/);
   assert.match(source, /jwt\.verify\(state/);

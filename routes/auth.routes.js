@@ -431,11 +431,9 @@ router.get("/signup/workspace/complete/redirect", async (req, res) => {
       metadata: { method: "stripe_checkout", refundId: data.refundId || null },
     });
 
+    setBrowserSession(res, { token: data.token, refreshToken });
     return res.redirect(
-      buildFrontendRedirect("/auth/callback", {
-        token: data.token,
-        refreshToken,
-      })
+      buildFrontendRedirect("/auth/callback", { flow: "signup", session: "cookie" })
     );
   } catch (err) {
     console.error("Trial signup redirect completion error:", err);

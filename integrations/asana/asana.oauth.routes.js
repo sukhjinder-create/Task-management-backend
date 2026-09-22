@@ -21,16 +21,7 @@ const ASANA_OAUTH_SCOPE =
 /**
  * Redirect user to Asana consent
  */
-function authenticateConnect(req, res, next) {
-  // Temporary compatibility for already-loaded browser bundles. Removed after
-  // the cookie-auth frontend is live; new clients never put credentials in URLs.
-  if (!req.headers.authorization && req.query.token) {
-    req.headers.authorization = `Bearer ${req.query.token}`;
-  }
-  return authMiddleware(req, res, next);
-}
-
-router.get("/connect", authenticateConnect, async (req, res) => {
+router.get("/connect", authMiddleware, async (req, res) => {
   const workspaceId = req.workspaceId;
   if (req.user.role !== "admin") {
     return res.status(403).send("Only workspace admins can connect Asana");
