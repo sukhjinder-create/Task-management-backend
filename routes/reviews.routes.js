@@ -235,6 +235,8 @@ router.get("/my-team-progress", async (req, res) => {
        JOIN users u ON u.id = wu.user_id
        WHERE wu.workspace_id = $1
          AND wu.manager_id = $2
+         AND COALESCE(u.is_system, false) = false
+         AND u.role != 'system'
        ORDER BY u.username`,
       [req.workspaceId, req.user.id]
     );
@@ -726,6 +728,8 @@ router.get("/team", async (req, res) => {
        JOIN users u ON u.id = wu.user_id
        LEFT JOIN users m ON m.id = wu.manager_id
        WHERE wu.workspace_id = $1
+         AND COALESCE(u.is_system, false) = false
+         AND u.role != 'system'
        ORDER BY u.username`,
       [req.workspaceId]
     );

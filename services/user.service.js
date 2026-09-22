@@ -73,7 +73,10 @@ async function determineBillingStatus(workspaceId, role) {
        COUNT(*) FILTER (WHERE u.role NOT IN ('admin', 'manager'))     AS user_count
      FROM workspace_users wu
      JOIN users u ON u.id = wu.user_id
-     WHERE wu.workspace_id = $1 AND wu.billing_status = 'trial'`,
+     WHERE wu.workspace_id = $1
+       AND wu.billing_status = 'trial'
+       AND COALESCE(u.is_system, false) = false
+       AND u.role != 'system'`,
     [workspaceId]
   );
   const { admin_count, manager_count, user_count } = countsRes.rows[0];

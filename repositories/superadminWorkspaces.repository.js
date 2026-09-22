@@ -189,7 +189,10 @@ export async function listWorkspaces() {
       u.id     AS owner_id,
       u.email_verified_at AS owner_email_verified_at,
       u.email_verification_method AS owner_email_verification_method,
-      (SELECT COUNT(*)::int FROM users WHERE workspace_id = w.id) AS user_count,
+      (SELECT COUNT(*)::int FROM users
+        WHERE workspace_id = w.id
+          AND COALESCE(is_system, false) = false
+          AND role != 'system') AS user_count,
       (SELECT COUNT(*)::int FROM projects WHERE workspace_id = w.id) AS project_count
     FROM workspaces w
     LEFT JOIN LATERAL (

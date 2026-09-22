@@ -193,7 +193,7 @@ router.post("/parse-task", async (req, res) => {
     if (!text) return res.status(400).json({ error: "text is required" });
 
     const members = await db.query(
-      "SELECT u.id, u.username FROM users u JOIN workspace_users wu ON wu.user_id = u.id WHERE wu.workspace_id = $1 AND wu.billing_status != 'pending'",
+      "SELECT u.id, u.username FROM users u JOIN workspace_users wu ON wu.user_id = u.id WHERE wu.workspace_id = $1 AND wu.billing_status != 'pending' AND COALESCE(u.is_system, false) = false AND u.role != 'system'",
       [req.workspaceId]
     );
     const projects = await db.query(

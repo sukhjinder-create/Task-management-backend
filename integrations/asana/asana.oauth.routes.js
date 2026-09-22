@@ -2,12 +2,14 @@ import express from "express";
 import axios from "axios";
 import pool from "../../db.js";
 import qs from "qs";   // add at top of file
+import jwt from "jsonwebtoken";
 import {
   resolveIntegrationWebhookBaseUrl,
   setupAsanaWebhooks,
 } from "../webhooks/integration.webhook.service.js";
 import { getJwtSecret } from "../../config/secrets.js";
 import { getFrontendBaseUrl } from "../../config/environment.js";
+import { authMiddleware } from "../../middleware/auth.middleware.js";
 
 const router = express.Router();
 
@@ -19,32 +21,26 @@ const ASANA_OAUTH_SCOPE =
 /**
  * Redirect user to Asana consent
  */
-router.get("/connect", async (req, res) => {
-  const token = req.query.token;
-
-  if (!token) {
-    return res.status(401).send("No token provided");
+function authenticateConnect(req, res, next) {
+  // Temporary compatibility for already-loaded browser bundles. Removed after
+  // the cookie-auth frontend is live; new clients never put credentials in URLs.
+  if (!req.headers.authorization && req.query.token) {
+    req.headers.authorization = `Bearer ${req.query.token}`;
   }
+  return authMiddleware(req, res, next);
+}
 
-  const jwt = (await import("jsonwebtoken")).default;
-
-  let decoded;
-  try {
-    decoded = jwt.verify(token, getJwtSecret());
-  } catch {
-    return res.status(401).send("Invalid token");
-  }
-
-  const workspaceId =
-    decoded.workspaceId || decoded.workspace_id;
-
-  if (!workspaceId) {
-    return res.status(400).send("Workspace missing");
-  }
-
-  if (decoded.role !== "admin") {
+router.get("/connect", authenticateConnect, async (req, res) => {
+  const workspaceId = req.workspaceId;
+  if (req.user.role !== "admin") {
     return res.status(403).send("Only workspace admins can connect Asana");
   }
+
+  const state = jwt.sign(
+    { workspaceId, userId: req.user.id, purpose: "asana_connect" },
+    getJwtSecret(),
+    { expiresIn: "10m", audience: "asana-oauth", issuer: "asystence-api" }
+  );
 
   const redirectUrl =
     "https://app.asana.com/-/oauth_authorize?" +
@@ -52,7 +48,7 @@ router.get("/connect", async (req, res) => {
       client_id: process.env.ASANA_CLIENT_ID,
       redirect_uri: process.env.ASANA_REDIRECT_URI,
       response_type: "code",
-      state: workspaceId,
+      state,
       scope: ASANA_OAUTH_SCOPE,
     });
 
@@ -65,15 +61,25 @@ router.get("/connect", async (req, res) => {
 router.get("/callback", async (req, res) => {
   console.log("🔥 ASANA CALLBACK HIT", req.query);
   try {
-    const { code, state: workspaceId } = req.query;
+    const { code, state } = req.query;
 
     if (!code) {
       return res.status(400).send("Missing OAuth code");
     }
 
-    if (!workspaceId) {
-      return res.status(400).send("Workspace missing");
+    let oauthState;
+    try {
+      oauthState = jwt.verify(state, getJwtSecret(), {
+        audience: "asana-oauth",
+        issuer: "asystence-api",
+      });
+    } catch {
+      return res.status(400).send("Invalid or expired OAuth state");
     }
+    if (oauthState?.purpose !== "asana_connect" || !oauthState.workspaceId) {
+      return res.status(400).send("Invalid OAuth state");
+    }
+    const workspaceId = oauthState.workspaceId;
 
     // -----------------------------
     // ONLY FIRST TIME REACHES HERE

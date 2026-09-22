@@ -48,6 +48,7 @@ import {
 import workspaceService from "../services/workspace.service.js";
 import { describeTrialLifecycle } from "../services/trialLifecycle.service.js";
 import { getPlanBySlug } from "../repositories/billingPlans.repository.js";
+import { accessTokenFromCookie } from "../services/browserSession.service.js";
 import { registerAiSocket } from "./ai.socket.js";  // import AI socket handler
 import { getWorkspaceHealthScore } from "../services/workspaceHealth.service.js";
 import { captureGrowthEvent } from "../growth/growthCollector.js";
@@ -1033,7 +1034,7 @@ export function initSocket(server, frontendUrl) {
      AUTH MIDDLEWARE
   ----------------------------------------------------- */
   io.use(async (socket, next) => {
-    const token = socket.handshake.auth?.token;
+    const token = socket.handshake.auth?.token || accessTokenFromCookie(socket.handshake);
     if (!token) return next(new Error("Unauthorized: no token"));
 
     try {

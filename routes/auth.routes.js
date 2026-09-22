@@ -18,6 +18,7 @@ import {
   changePassword,
   resendEmailVerification,
   verifyEmailAddress,
+  generateToken,
 } from "../services/auth.service.js";
 import {
   completeRazorpayTrialSignupCheckoutSession,
@@ -38,11 +39,24 @@ import {
 import { detectCountry } from "../services/currency.service.js";
 import { verifyTurnstile } from "../services/turnstile.service.js";
 import {
+  browserSafeAuthPayload,
+  clearBrowserSession,
+  isBrowserSessionRequest,
+  mfaTokenFromCookie,
+  refreshTokenFromCookie,
+  setBrowserSession,
+} from "../services/browserSession.service.js";
+import {
   emailVerificationLimiter,
   signupLimiter,
 } from "../middleware/rateLimit.middleware.js";
 
 const router = express.Router();
+
+router.use((_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
 const FRONTEND_URL = getFrontendBaseUrl();
 const MOBILE_APP_AUTH_CALLBACK = getMobileAuthCallbackUrl();
@@ -286,7 +300,7 @@ router.post("/email-verification/confirm", async (req, res) => {
       userAgent: req.headers["user-agent"],
       metadata: { method: "email_link" },
     });
-    return res.json(data);
+    return res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     return res.status(err.statusCode || 400).json({ error: err.message });
   }
@@ -325,7 +339,7 @@ router.get("/signup/workspace/complete", async (req, res) => {
       metadata: { method: "stripe_checkout", refundId: data.refundId || null },
     });
 
-    return res.json(data);
+    return res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     console.error("Trial signup completion error:", err);
     return res.status(err.statusCode || 400).json({ error: err.message });
@@ -380,7 +394,7 @@ router.post("/signup/workspace/complete/razorpay", async (req, res) => {
       metadata: { method: "razorpay_checkout", refundId: data.refundId || null },
     });
 
-    return res.json(data);
+    return res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     console.error("Razorpay trial signup completion error:", err);
     return res.status(err.statusCode || 400).json({ error: err.message });
@@ -470,7 +484,7 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    res.json(data);
+    res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     captureAuthGrowth(req, "product.login_attempt", {}, {
       feature_name: "Authentication",
@@ -525,7 +539,7 @@ router.post("/dev-login", async (req, res) => {
       metadata: { method: "developer" },
     });
 
-    res.json(data);
+    res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     const status = err.statusCode || 500;
     if (status >= 500) console.error("Developer login error:", err);
@@ -535,7 +549,8 @@ router.post("/dev-login", async (req, res) => {
 
 router.post("/mfa/verify", async (req, res) => {
   try {
-    const { mfa_session_token, code } = req.body;
+    const { code } = req.body;
+    const mfa_session_token = req.body?.mfa_session_token || mfaTokenFromCookie(req);
     if (!mfa_session_token || !code) {
       return res.status(400).json({ error: "mfa_session_token and code are required" });
     }
@@ -567,7 +582,7 @@ router.post("/mfa/verify", async (req, res) => {
       });
     }
 
-    res.json(data);
+    res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     res.status(401).json({ error: err.message });
   }
@@ -577,7 +592,7 @@ router.post("/mfa/verify", async (req, res) => {
 // Revokes the refresh token (session) and creates an audit log entry.
 router.post("/logout", authMiddleware, async (req, res) => {
   // Revoke the refresh token so it can't be used to silently re-auth
-  const { refreshToken } = req.body;
+  const refreshToken = req.body?.refreshToken || refreshTokenFromCookie(req);
   if (refreshToken) {
     revokeSession(refreshToken).catch(() => {}); // fire-and-forget
   }
@@ -592,6 +607,7 @@ router.post("/logout", authMiddleware, async (req, res) => {
     userAgent: req.headers["user-agent"],
     metadata: {},
   });
+  clearBrowserSession(res);
   res.json({ success: true });
 });
 
@@ -601,12 +617,12 @@ router.post("/logout", authMiddleware, async (req, res) => {
 // No authMiddleware — the expired JWT cannot be used here, only the refresh token.
 router.post("/refresh", async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    const refreshToken = req.body?.refreshToken || refreshTokenFromCookie(req);
     if (!refreshToken) {
       return res.status(400).json({ error: "refreshToken is required" });
     }
     const data = await refreshSession(refreshToken, req.ip, req.headers["user-agent"]);
-    res.json(data); // { token, refreshToken, user }
+    res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     // Return 401 so the frontend interceptor knows to log out
     res.status(401).json({ error: err.message });
@@ -688,7 +704,7 @@ router.get("/magic", async (req, res) => {
       );
     }
 
-    res.json(data);
+    res.json(browserSafeAuthPayload(req, res, data));
   } catch (err) {
     res.status(401).json({ error: err.message });
   }
@@ -704,6 +720,7 @@ router.get("/google", async (req, res) => {
   const client = String(req.query.client || "").trim().toLowerCase();
   const isSignup = ["signup", "register", "trial"].includes(mode);
   const isMobileClient = client === "mobile";
+  const browserCookieMode = !isMobileClient && req.query.authMode === "cookie";
   const workspaceName = String(req.query.workspaceName || "").trim();
   let selectedPlan = null;
 
@@ -735,10 +752,11 @@ router.get("/google", async (req, res) => {
     prompt:        "select_account",
   });
 
-  if (isSignup || isMobileClient) {
+  if (isSignup || isMobileClient || browserCookieMode) {
     params.set("state", signGoogleState({
       mode: isSignup ? "signup" : "login",
       client: isMobileClient ? "mobile" : "web",
+      authMode: browserCookieMode ? "cookie" : "token",
       ...(isSignup ? {
         workspaceName,
         planId: selectedPlan.id,
@@ -767,6 +785,7 @@ router.get("/google/callback", async (req, res) => {
 
   const isSignup = googleState?.mode === "signup";
   const isMobileClient = googleState?.client === "mobile";
+  const browserCookieMode = !isMobileClient && googleState?.authMode === "cookie";
   const errorPath = isSignup ? "/signup" : "/login";
 
   if (error || !code) {
@@ -840,11 +859,10 @@ router.get("/google/callback", async (req, res) => {
       },
     });
 
-    const redirectParams = {
-      token: data.token,
-      refreshToken,
-      flow: isSignup ? "signup" : "login",
-    };
+    const redirectParams = browserCookieMode
+      ? { flow: isSignup ? "signup" : "login", session: "cookie" }
+      : { token: data.token, refreshToken, flow: isSignup ? "signup" : "login" };
+    if (browserCookieMode) setBrowserSession(res, { token: data.token, refreshToken });
     res.redirect(
       isMobileClient
         ? buildMobileAuthRedirect(redirectParams)
@@ -861,6 +879,28 @@ router.get("/google/callback", async (req, res) => {
 });
 
 // ─── AUTH CHECK ───────────────────────────────────────────────────────────────
+// One-time bridge for browser sessions created before HttpOnly cookies shipped.
+router.post("/browser-session", authMiddleware, async (req, res) => {
+  if (!isBrowserSessionRequest(req)) {
+    return res.status(400).json({ error: "Browser cookie mode is required" });
+  }
+
+  try {
+    const user = await getCurrentUser(req.user.id);
+    const token = generateToken(user);
+    const refreshToken = await createSession(
+      user.id,
+      user.workspaceId || user.workspace_id,
+      req.ip,
+      req.headers["user-agent"]
+    );
+    setBrowserSession(res, { token, refreshToken });
+    return res.json({ user });
+  } catch (err) {
+    return res.status(401).json({ error: err.message });
+  }
+});
+
 router.get("/me", authMiddleware, async (req, res) => {
   try {
     const user = await getCurrentUser(req.user.id);
@@ -909,7 +949,7 @@ router.post("/handoff/exchange", async (req, res) => {
       ip: req.headers["cf-connecting-ip"] || req.ip || null,
       userAgent: req.headers["user-agent"] || null,
     });
-    return res.json({ user, token, refreshToken });
+    return res.json(browserSafeAuthPayload(req, res, { user, token, refreshToken }));
   } catch (err) {
     // Deliberately uniform: a caller must not be able to tell an unknown code
     // from an expired or already-spent one.

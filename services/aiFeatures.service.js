@@ -126,7 +126,7 @@ Return ONLY a JSON array. Example:
 
   // Resolve assignee hints to user IDs (exclude pending/unlicensed users)
   const members = await db.query(
-    "SELECT u.id, u.username FROM users u JOIN workspace_users wu ON wu.user_id = u.id WHERE wu.workspace_id = $1 AND wu.billing_status != 'pending'",
+    "SELECT u.id, u.username FROM users u JOIN workspace_users wu ON wu.user_id = u.id WHERE wu.workspace_id = $1 AND wu.billing_status != 'pending' AND COALESCE(u.is_system, false) = false AND u.role != 'system'",
     [workspaceId]
   );
 

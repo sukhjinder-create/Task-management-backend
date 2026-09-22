@@ -299,7 +299,9 @@ export async function getResignationRadar(workspaceId) {
     `SELECT u.id, u.username, u.email, u.avatar_url, wu.role
      FROM users u
      JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
-     WHERE wu.billing_status != 'pending'`,
+     WHERE wu.billing_status != 'pending'
+       AND COALESCE(u.is_system, false) = false
+       AND u.role != 'system'`,
     [workspaceId]
   );
   if (!users.length) return { users: [], highRisk: [], aiInsights: null, summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0 } };
@@ -468,7 +470,9 @@ export async function getGhostWorkDetection(workspaceId) {
     `SELECT u.id, u.username, u.email, u.avatar_url, wu.role
      FROM users u
      JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
-     WHERE wu.billing_status != 'pending'`,
+     WHERE wu.billing_status != 'pending'
+       AND COALESCE(u.is_system, false) = false
+       AND u.role != 'system'`,
     [workspaceId]
   );
   if (!users.length) return { users: [], flagged: [], aiInsights: null, summary: { total: 0, critical: 0, high: 0, medium: 0, clean: 0 }, workspaceBenchmarks: {} };
@@ -658,7 +662,9 @@ export async function getOrgTruthMap(workspaceId) {
     `SELECT u.id, u.username, u.email, u.avatar_url, wu.role
      FROM users u
      JOIN workspace_users wu ON wu.user_id = u.id AND wu.workspace_id = $1
-     WHERE wu.billing_status != 'pending'`,
+     WHERE wu.billing_status != 'pending'
+       AND COALESCE(u.is_system, false) = false
+       AND u.role != 'system'`,
     [workspaceId]
   );
   if (!users.length) return { users: [], archetypeBreakdown: {}, keyRisks: {}, aiInsights: null };

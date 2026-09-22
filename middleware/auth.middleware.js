@@ -8,6 +8,8 @@ import {
   requiredScopeForRequest,
 } from "../services/apiKey.service.js";
 import { authenticateServiceAccountToken } from "../services/serviceAccount.service.js";
+import { accessTokenFromCookie } from "../services/browserSession.service.js";
+import { isAllowedCorsOrigin } from "../config/environment.js";
 
 const JWT_SECRET = getJwtSecret();
 const WORKSPACE_GLOBAL = "GLOBAL";
@@ -17,12 +19,21 @@ export async function authMiddleware(req, res, next) {
     return next();
   }
   const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const cookieToken = accessTokenFromCookie(req);
+  const token = bearerToken || cookieToken;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (!token) {
     return res.status(401).json({ error: "No token provided" });
   }
 
-  const token = authHeader.split(" ")[1];
+  if (
+    !bearerToken &&
+    !["GET", "HEAD"].includes(req.method) &&
+    (!req.headers.origin || !isAllowedCorsOrigin(req.headers.origin))
+  ) {
+    return res.status(403).json({ error: "Untrusted session origin" });
+  }
 
   try {
     if (/^(?:asy_|tm_)/i.test(token)) {
@@ -141,6 +152,7 @@ if (!workspaceId || workspaceId === WORKSPACE_GLOBAL) {
 
     // Canonical workspace source
     req.workspaceId = workspaceId;
+    req.authType = bearerToken ? "bearer" : "browser_cookie";
 
     attachOperationalEventCapture(req, res);
 

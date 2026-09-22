@@ -193,6 +193,7 @@ app.use(
     allowedHeaders: [
       "Content-Type",
       "Authorization",
+      "X-Auth-Mode",
       "x-workspace-id",
       "x-growth-anonymous-id",
       "x-growth-session-id",

@@ -442,6 +442,8 @@ router.get("/:id/members", requireWorkspaceForUser, ensureWorkspaceMember(), asy
       FROM workspace_users wu
       LEFT JOIN users u ON u.id = wu.user_id
       WHERE wu.workspace_id = $1
+        AND COALESCE(u.is_system, false) = false
+        AND u.role != 'system'
       ORDER BY wu.created_at ASC
     `;
     const { rows } = await pool.query(q, [workspaceId]);
