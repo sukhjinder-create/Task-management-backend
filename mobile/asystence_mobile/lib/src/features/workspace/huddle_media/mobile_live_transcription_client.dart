@@ -189,6 +189,18 @@ class MobileLiveTranscriptionClient {
     if (authToken == null || authToken.isEmpty) {
       throw StateError('transcription_auth_token_missing');
     }
+    final policyResponse = await _httpClient.get(
+      Uri.parse('$baseUrl/huddle/transcription/sessions/$sessionId/policy'),
+      headers: {'Authorization': 'Bearer $authToken'},
+    );
+    final policyPayload = _decodePayload(policyResponse.body);
+    if (policyResponse.statusCode < 200 || policyResponse.statusCode >= 300) {
+      throw StateError(_readString(policyPayload, ['reason']) ?? 'transcription_policy_failed');
+    }
+    if (policyPayload['policy'] is! Map ||
+        (policyPayload['policy'] as Map)['enabled'] != true) {
+      throw StateError('huddle_transcription_disabled');
+    }
     final response = await _httpClient.post(
       Uri.parse('$baseUrl/huddle/transcription/sessions/$sessionId/grant'),
       headers: {

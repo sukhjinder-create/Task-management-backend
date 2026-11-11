@@ -412,8 +412,7 @@ function isLiveKitCanaryWorkspaceAllowed(workspaceId, env = process.env) {
   const allowlist = splitHuddleCsv(env.HUDDLE_LIVEKIT_CANARY_WORKSPACES);
   return (
     isHuddleEnvEnabled(env.HUDDLE_LIVEKIT_CANARY_ENABLED) &&
-    (allowlist.includes("*") ||
-      (Boolean(resolvedWorkspaceId) && allowlist.includes(resolvedWorkspaceId)))
+    Boolean(resolvedWorkspaceId) && allowlist.includes(resolvedWorkspaceId)
   );
 }
 
@@ -497,7 +496,7 @@ async function getWorkspaceHuddleContext(socket) {
   const features = normalizeFeatures(plan?.features);
   const canaryLiveKitEntitled = isLiveKitCanaryWorkspaceAllowed(workspaceId);
   const liveKitEntitled =
-    hasFeature(features, "video_huddle") || canaryLiveKitEntitled;
+    hasFeature(features, "video_huddle") || hasFeature(features, "huddle") || canaryLiveKitEntitled;
 
   if (hasFeature(features, "video_huddle") || hasFeature(features, "huddle")) {
     return {
@@ -3012,9 +3011,9 @@ emitToScopedChannel(
  * Called immediately when the AI starts processing a message so the sender
  * sees "AI is typing..." while waiting for the LLM response.
  */
-export function emitAiTyping(channelKey, workspaceId) {
+export function emitAiTyping(channelKey, workspaceId, active = true) {
   if (!io || !channelKey || !workspaceId) return;
-  const payload = { channelId: channelKey, workspaceId };
+  const payload = { channelId: channelKey, workspaceId, active };
   emitToScopedChannel(io, channelKey, workspaceId, "chat:ai-typing", payload);
 }
 

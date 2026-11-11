@@ -329,7 +329,7 @@ export async function getEffectiveTranscriptionPolicy({
     [workspaceId, sessionId]
   );
   const row = rows[0];
-  if (row) return serializePolicy(row);
+  if (row) return { ...serializePolicy(row), enabled: config.enabled && row.enabled };
   return {
     id: null,
     workspaceId,

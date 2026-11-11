@@ -60,11 +60,14 @@ function isUuid(value) {
   );
 }
 
-function hasVideoHuddleEntitlement(req) {
+export function hasVideoHuddleEntitlement(req) {
   const features = Array.isArray(req.workspace?.planFeatures)
     ? req.workspace.planFeatures
     : [];
-  return Boolean(req.workspace?.onTrial) || features.includes("video_huddle");
+  const plan = String(req.workspace?.billing_plan || req.workspace?.plan || "").toLowerCase();
+  return Boolean(req.workspace?.onTrial) ||
+    features.includes("video_huddle") || features.includes("huddle") ||
+    ["basic", "pro", "enterprise"].includes(plan);
 }
 
 function isEnabled(value) {
@@ -90,13 +93,12 @@ function splitCsv(value) {
     .filter(Boolean);
 }
 
-function isLiveKitCanaryWorkspaceAllowed(workspaceId, env = process.env) {
+export function isLiveKitCanaryWorkspaceAllowed(workspaceId, env = process.env) {
   const resolvedWorkspaceId = safeString(workspaceId);
   const allowlist = splitCsv(env.HUDDLE_LIVEKIT_CANARY_WORKSPACES);
   return (
     isEnabled(env.HUDDLE_LIVEKIT_CANARY_ENABLED) &&
-    (allowlist.includes("*") ||
-      (Boolean(resolvedWorkspaceId) && allowlist.includes(resolvedWorkspaceId)))
+    Boolean(resolvedWorkspaceId) && allowlist.includes(resolvedWorkspaceId)
   );
 }
 

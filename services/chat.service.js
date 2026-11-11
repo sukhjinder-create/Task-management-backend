@@ -609,18 +609,10 @@ if (!aiServiceSecret) {
   throw new Error("AI_SERVICE_SECRET is not defined in backend environment");
 }
 
-  console.log('🔥 Emitting event to AI:', event);  // Add log to confirm event is being emitted
-
-  try {
-    const response = await axios.post(aiServiceUrl, event, {
-      headers: {
-        Authorization: `Bearer ${aiServiceSecret}`,
-      },
-    });
-    console.log('🔥 Event sent to AI:', response.status);
-  } catch (error) {
-    console.error('🔥 Failed to send event to AI:', error.message);
-  }
+  await axios.post(aiServiceUrl, event, {
+    headers: { Authorization: `Bearer ${aiServiceSecret}` },
+    timeout: 10000,
+  });
 }
 
 /* -------------------------------------------------------
@@ -761,12 +753,6 @@ const safeAttachments = Array.isArray(attachments) ? attachments : [];
 
     const savedMessage = mapMessageRow(res.rows[0]);
 
-    console.log("🧪 AI TEXT CHECK", {
-  fallback: savedMessage.fallback_text,
-  encrypted: savedMessage.encrypted_json,
-  extracted: extractAIPlainText(savedMessage),
-});
-
     const socketMessage = {
       id: savedMessage.id,
       tempId,
@@ -872,18 +858,10 @@ try {
         if (aiAllowed) {
           await ensureWorkspaceAIUser(client, workspaceId);
           postCommit = async () => {
-            console.log("🚀 EMITTING TO AI (postCommit)", {
-              workspaceId,
-              channelKey,
-              messageId: savedMessage.id,
-              isDm,
-              recipientId,
-            });
-
             // Signal to the sender that AI is processing — shows typing indicator
             emitAiTyping(channelKey, workspaceId);
-
-            await emitToAI({
+            try {
+              await emitToAI({
               workspace_id: workspaceId,
               type: "chat:new-message",
               payload: {
@@ -904,7 +882,16 @@ try {
                 text_html: savedMessage.text_html,
                 created_at: savedMessage.created_at,
               },
-            });
+              });
+            } catch (error) {
+              emitAiTyping(channelKey, workspaceId, false);
+              console.error("[chat:ai:delivery_failed]", {
+                workspaceId,
+                messageId: savedMessage.id,
+                status: error?.response?.status || null,
+                reason: error?.message,
+              });
+            }
           };
         }
       }
@@ -933,6 +920,7 @@ export async function createAIChatMessage({
   workspaceId,
   textHtml,
   parentId = null,
+  tempId = null,
 }) {
   if (!channelKey) throw new Error("channelKey required");
   if (!workspaceId) throw new Error("workspaceId required");
@@ -958,7 +946,8 @@ if (!aiUser?.userId) {
   encrypted_json,
   workspace_id,
   created_at,
-  parent_id
+  parent_id,
+  temp_id
 )
 
       VALUES (
@@ -970,8 +959,11 @@ if (!aiUser?.userId) {
     $5,
     $6::uuid,
     now(),
-    $7
+    $7,
+    $8
       )
+      ON CONFLICT (workspace_id, temp_id) WHERE temp_id IS NOT NULL
+      DO UPDATE SET temp_id = EXCLUDED.temp_id
       RETURNING *
       `,
       [
@@ -983,6 +975,7 @@ if (!aiUser?.userId) {
       __from_ai: true }), // ✅ encrypted_json placeholder
   workspaceId,
   parentId,
+  tempId,
 ]);
 
     const savedMessage = mapMessageRow(res.rows[0]);

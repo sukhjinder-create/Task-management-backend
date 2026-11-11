@@ -928,6 +928,7 @@ router.post("/ai/reply", async (req, res) => {
       workspaceId,
       textHtml,
       parentId = null,
+      tempId = null,
     } = req.body || {};
 
     if (!channelKey || !workspaceId || !textHtml) {
@@ -935,12 +936,16 @@ router.post("/ai/reply", async (req, res) => {
         error: "channelKey, workspaceId, textHtml are required",
       });
     }
+    if (tempId !== null && (typeof tempId !== "string" || !tempId.trim() || tempId.length > 100)) {
+      return res.status(400).json({ error: "Invalid AI reply id" });
+    }
 
     const msg = await createAIChatMessage({
       channelKey,
       workspaceId,
       textHtml,
       parentId,
+      tempId,
     });
 
     return res.json({
